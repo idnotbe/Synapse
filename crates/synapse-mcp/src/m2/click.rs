@@ -1,9 +1,11 @@
-use std::time::Instant;
+use std::{sync::Arc, time::Instant};
 
 use rmcp::ErrorData;
 use rmcp::schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use synapse_action::{ActionError, ActionHandle};
+use synapse_action::{
+    ActionBackend, ActionError, ActionHandle, EmitState, RecordedInput, RecordingBackend,
+};
 use synapse_core::{
     Action, AimCurve, AimNaturalParams, Backend, ButtonAction, ElementId, MouseButton, MouseTarget,
     Point, error_codes,
@@ -87,37 +89,120 @@ pub struct ActClickResponse {
 
 pub async fn act_click_with_handle(
     handle: ActionHandle,
+    recording: Option<Arc<RecordingBackend>>,
     params: ActClickParams,
 ) -> Result<ActClickResponse, ErrorData> {
     validate_click_params(&params)?;
     let started = Instant::now();
     let target = mouse_target(&params)?;
-    handle
-        .execute(Action::MouseMove {
-            to: target,
-            curve: params.curve.to_aim_curve(),
-            duration_ms: params.duration_ms,
-            backend: params.backend,
-        })
-        .await
-        .map_err(|error| action_error_to_mcp(&error))?;
+    let mut actions = Vec::with_capacity(usize::from(params.clicks) + 1);
+    actions.push(Action::MouseMove {
+        to: target,
+        curve: params.curve.to_aim_curve(),
+        duration_ms: params.duration_ms,
+        backend: params.backend,
+    });
     for _ in 0..params.clicks {
-        handle
-            .execute(Action::MouseButton {
-                button: params.button,
-                action: ButtonAction::Press,
-                hold_ms: 0,
-                backend: params.backend,
-            })
-            .await
-            .map_err(|error| action_error_to_mcp(&error))?;
+        actions.push(Action::MouseButton {
+            button: params.button,
+            action: ButtonAction::Press,
+            hold_ms: 0,
+            backend: params.backend,
+        });
     }
+
+    if let Some(recording) = recording {
+        execute_recording(&recording, &actions)?;
+    } else {
+        for action in actions {
+            handle
+                .execute(action)
+                .await
+                .map_err(|error| action_error_to_mcp(&error))?;
+        }
+    }
+
     Ok(ActClickResponse {
         ok: true,
         used_invoke_pattern: false,
         backend_used: backend_used_name(params.backend).to_owned(),
         elapsed_ms: u32::try_from(started.elapsed().as_millis()).unwrap_or(u32::MAX),
     })
+}
+
+fn execute_recording(recording: &RecordingBackend, actions: &[Action]) -> Result<(), ErrorData> {
+    let before_events = recording.events();
+    let before_event_count = before_events.len();
+    let mut emit_state = EmitState::new();
+    for action in actions {
+        recording
+            .execute(action, &mut emit_state)
+            .map_err(|error| action_error_to_mcp(&error))?;
+    }
+    let after_events = recording.events();
+    let new_events = &after_events[before_event_count..];
+    let event_sequence = event_sequence(new_events);
+    tracing::info!(
+        code = "M2_ACT_CLICK_RECORDING_READBACK",
+        kind = "act_click",
+        before_event_count,
+        after_event_count = after_events.len(),
+        new_event_count = new_events.len(),
+        event_sequence,
+        ?new_events,
+        "source_of_truth=recording_backend tool=act_click after_events_readback"
+    );
+    Ok(())
+}
+
+fn event_sequence(events: &[RecordedInput]) -> String {
+    events.iter().map(event_label).collect::<Vec<_>>().join(">")
+}
+
+fn event_label(event: &RecordedInput) -> String {
+    match event {
+        RecordedInput::MouseMove {
+            to,
+            curve,
+            duration_ms,
+        } => format!(
+            "mouse_move:{}:{}:{}",
+            mouse_target_label(to),
+            curve_label(curve),
+            duration_ms
+        ),
+        RecordedInput::MouseButtonDown { button } => format!("down:{}", button_label(*button)),
+        RecordedInput::MouseButtonUp { button } => format!("up:{}", button_label(*button)),
+        RecordedInput::DelayMs { ms } => format!("delay:{ms}"),
+        other => format!("{other:?}"),
+    }
+}
+
+fn mouse_target_label(target: &MouseTarget) -> String {
+    match target {
+        MouseTarget::Screen { point } => format!("screen({},{})", point.x, point.y),
+        MouseTarget::Element { element_id } => format!("element({element_id})"),
+    }
+}
+
+const fn curve_label(curve: &AimCurve) -> &'static str {
+    match curve {
+        AimCurve::Natural { .. } => "natural_fast",
+        AimCurve::Instant => "instant",
+        AimCurve::Linear => "linear",
+        AimCurve::EaseInOut => "ease_in_out",
+        AimCurve::Bezier { .. } => "bezier",
+    }
+}
+
+const fn button_label(button: MouseButton) -> &'static str {
+    match button {
+        MouseButton::Left => "left",
+        MouseButton::Right => "right",
+        MouseButton::Middle => "middle",
+        MouseButton::X1 => "x1",
+        MouseButton::X2 => "x2",
+    }
 }
 
 impl ClickCurve {
@@ -233,6 +318,7 @@ mod tests {
         );
         let response = match act_click_with_handle(
             handle,
+            None,
             ActClickParams {
                 target: ActClickTarget::Point(ActClickPointTarget { x: 12, y: 34 }),
                 button: default_click_button(),

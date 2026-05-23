@@ -84,18 +84,6 @@ impl SynapseService {
         }
     }
 
-    fn m2_action_handle(&self) -> Result<synapse_action::ActionHandle, ErrorData> {
-        self.m2_state
-            .lock()
-            .map(|state| state.emitter_handle.clone())
-            .map_err(|_err| {
-                mcp_error(
-                    synapse_core::error_codes::OBSERVE_INTERNAL,
-                    "M2 service state lock poisoned",
-                )
-            })
-    }
-
     fn m2_action_context(
         &self,
     ) -> Result<(synapse_action::ActionHandle, Option<Arc<RecordingBackend>>), ErrorData> {
@@ -229,8 +217,10 @@ impl SynapseService {
             kind = "act_click",
             "tool.invocation kind=act_click"
         );
-        let handle = self.m2_action_handle()?;
-        act_click_with_handle(handle, params.0).await.map(Json)
+        let (handle, recording) = self.m2_action_context()?;
+        act_click_with_handle(handle, recording, params.0)
+            .await
+            .map(Json)
     }
 
     #[tool(description = "Type text through the active keyboard backend")]

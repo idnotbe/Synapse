@@ -219,6 +219,13 @@ The 500 LoC cap is hard. If a file would exceed it, split by concern (e.g.,
 `emitter.rs` may grow `emit_keyboard.rs` + `emit_mouse.rs` + `emit_pad.rs`).
 The 30 LoC function cap and cyclomatic ≤ 10 still apply.
 
+`SYNAPSE_MCP_RECORDING_BACKEND=1` is the M2 test switch for MCP daemon runs.
+When set through `StdioMcpClient::launch_and_init_with_env`, every action tool
+that emits through a backend uses `RecordingBackend` instead of touching real
+keyboard, mouse, or gamepad state; tests read the resulting event sequence from
+the `SYNAPSE_LOG_DIR` JSONL side-channel. When unset, `M2State::from_env()`
+keeps the normal emitter path and real backend resolution.
+
 ### 3.2 New `synapse-core` types (added to `crates/synapse-core/src/types.rs`; re-exported from `lib.rs`)
 
 Every type below derives `Clone, Debug, Eq` or `PartialEq` as appropriate,

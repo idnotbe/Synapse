@@ -3,10 +3,16 @@ use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use synapse_core::error_codes;
 use synapse_test_utils::stdio_mcp_client::StdioMcpClient;
+use tempfile::TempDir;
 
 #[tokio::test]
 async fn act_click_schema_defaults_and_edges_fsv() -> anyhow::Result<()> {
-    let mut client = StdioMcpClient::launch_and_init().await?;
+    let log_dir = TempDir::new()?;
+    let mut client = StdioMcpClient::launch_and_init_with_env(
+        Some(log_dir.path()),
+        &[("SYNAPSE_MCP_RECORDING_BACKEND", "1")],
+    )
+    .await?;
     let resp = client.tools_list().await?;
     let tools = resp
         .get("tools")
@@ -97,6 +103,32 @@ async fn act_click_schema_defaults_and_edges_fsv() -> anyhow::Result<()> {
     );
 
     assert!(client.shutdown().await?.success());
+    let logs = read_logs(log_dir.path())?;
+    assert_recording_log_readbacks(&logs)?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn act_click_default_unset_uses_actor_path_without_recording_log_fsv() -> anyhow::Result<()> {
+    let log_dir = TempDir::new()?;
+    let mut client = StdioMcpClient::launch_and_init_with_log_dir(Some(log_dir.path())).await?;
+
+    println!("source_of_truth=mcp_act_click edge=env_unset before=recording_env:absent");
+    let response = client
+        .tools_call("act_click", json!({"target": {"x": 3, "y": 4}}))
+        .await?;
+    let response: ActClickWireResponse = structured(&response)?;
+    assert!(response.ok);
+    assert_eq!(response.backend_used, "software");
+
+    assert!(client.shutdown().await?.success());
+    let logs = read_logs(log_dir.path())?;
+    let readbacks = recording_readbacks(&logs)?;
+    println!(
+        "source_of_truth=recording_log tool=act_click edge=env_unset after_readback_count={}",
+        readbacks.len()
+    );
+    assert!(readbacks.is_empty());
     Ok(())
 }
 
@@ -129,4 +161,70 @@ fn schema_root(value: Option<&Value>) -> Value {
         "required": value.get("required"),
         "additionalProperties": value.get("additionalProperties"),
     })
+}
+
+fn assert_recording_log_readbacks(logs: &str) -> anyhow::Result<()> {
+    let readbacks = recording_readbacks(logs)?;
+    let readback = readbacks
+        .iter()
+        .find(|readback| {
+            readback.event_sequence
+                == "mouse_move:screen(12,34):natural_fast:50>down:left>delay:0>up:left"
+                && readback.new_event_count == 4
+        })
+        .context("happy-path act_click recording readback missing expected sequence")?;
+    let mut events = readback.event_sequence.split('>');
+    let first = events.next().unwrap_or("<missing>");
+    let last = readback
+        .event_sequence
+        .rsplit('>')
+        .next()
+        .unwrap_or("<missing>");
+    println!(
+        "source_of_truth=recording_log tool=act_click edge=happy after_event_count={} first={} last={} sequence={}",
+        readback.new_event_count, first, last, readback.event_sequence
+    );
+    Ok(())
+}
+
+#[derive(Debug)]
+struct RecordingReadback {
+    event_sequence: String,
+    new_event_count: u64,
+}
+
+fn read_logs(path: &std::path::Path) -> anyhow::Result<String> {
+    let mut logs = String::new();
+    for entry in std::fs::read_dir(path)? {
+        let entry = entry?;
+        if entry.metadata()?.is_file() {
+            logs.push_str(&std::fs::read_to_string(entry.path())?);
+        }
+    }
+    Ok(logs)
+}
+
+fn recording_readbacks(logs: &str) -> anyhow::Result<Vec<RecordingReadback>> {
+    let mut readbacks = Vec::new();
+    for line in logs.lines().filter(|line| !line.trim().is_empty()) {
+        let value: Value = serde_json::from_str(line)?;
+        let fields = &value["fields"];
+        if fields.get("code").and_then(Value::as_str) != Some("M2_ACT_CLICK_RECORDING_READBACK") {
+            continue;
+        }
+        let event_sequence = fields
+            .get("event_sequence")
+            .and_then(Value::as_str)
+            .context("recording readback missing event_sequence")?
+            .to_owned();
+        let new_event_count = fields
+            .get("new_event_count")
+            .and_then(Value::as_u64)
+            .context("recording readback missing new_event_count")?;
+        readbacks.push(RecordingReadback {
+            event_sequence,
+            new_event_count,
+        });
+    }
+    Ok(readbacks)
 }
