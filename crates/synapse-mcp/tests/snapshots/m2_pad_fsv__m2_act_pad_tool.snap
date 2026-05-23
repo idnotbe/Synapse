@@ -1,5 +1,6 @@
 ---
 source: crates/synapse-mcp/tests/m2_pad_fsv.rs
+assertion_line: 60
 expression: projection
 ---
 {
@@ -22,6 +23,13 @@ expression: projection
           "down",
           "left",
           "right"
+        ],
+        "type": "string"
+      },
+      "ActPadController": {
+        "enum": [
+          "x360",
+          "ds4"
         ],
         "type": "string"
       },
@@ -109,6 +117,10 @@ expression: projection
         "$ref": "#/$defs/PadBackend",
         "default": "vigem"
       },
+      "controller": {
+        "$ref": "#/$defs/ActPadController",
+        "default": "x360"
+      },
       "hold_ms": {
         "format": "uint32",
         "minimum": 0,
@@ -140,6 +152,7 @@ expression: projection
     "required": [
       "ok",
       "pad_id",
+      "controller",
       "buttons",
       "backend_used",
       "returned_to_neutral",

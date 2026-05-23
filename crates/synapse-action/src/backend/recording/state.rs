@@ -391,13 +391,7 @@ fn trim_neutral_emit_pad(state: &mut EmitState, pad: PadId) {
 }
 
 const fn neutral_gamepad_report() -> GamepadReport {
-    GamepadReport {
-        buttons: Vec::new(),
-        thumb_l: (0.0, 0.0),
-        thumb_r: (0.0, 0.0),
-        lt: 0.0,
-        rt: 0.0,
-    }
+    GamepadReport::neutral(synapse_core::GamepadController::X360)
 }
 
 const fn is_reversible_key_character(ch: char) -> bool {

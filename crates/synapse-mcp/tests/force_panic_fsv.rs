@@ -16,22 +16,45 @@ async fn force_panic_during_act_press_fires_release_all_log() -> anyhow::Result<
         &[("SYNAPSE_MCP_FORCE_PANIC_DURING_ACT", "1")],
     )
     .await?;
-    let pad = client
-        .tools_call(
-            "act_pad",
-            json!({
-                "pad_id": 6,
-                "report": {
-                    "buttons": ["a"],
-                    "rt": 0.5
-                }
-            }),
-        )
-        .await?;
+    let held_pad_ids = if cfg!(windows) {
+        let pad = client
+            .tools_call(
+                "act_pad",
+                json!({
+                    "pad_id": 6,
+                    "report": {
+                        "buttons": ["a"],
+                        "rt": 0.5
+                    }
+                }),
+            )
+            .await?;
+        println!("source_of_truth=mcp_act_pad edge=force_panic_prime after={pad}");
+        "[6]"
+    } else {
+        let error = client
+            .tools_call_error(
+                "act_pad",
+                json!({
+                    "pad_id": 6,
+                    "report": {
+                        "buttons": ["a"],
+                        "rt": 0.5
+                    }
+                }),
+            )
+            .await?;
+        println!("source_of_truth=mcp_act_pad edge=force_panic_prime after={error}");
+        assert_eq!(
+            error["data"]["code"],
+            error_codes::ACTION_BACKEND_UNAVAILABLE
+        );
+        "[]"
+    };
     let before_logs = read_logs(dir.path())?;
     println!(
-        "source_of_truth=daemon_log edge=force_panic before_panic_count:{} held_pad_id:6 pad_response={pad}",
-        safety_reason_lines(&before_logs, "panic").len()
+        "source_of_truth=daemon_log edge=force_panic before_panic_count:{} expected_held_pad_ids:{held_pad_ids}",
+        safety_reason_lines(&before_logs, "panic").len(),
     );
 
     let forced = tokio::time::timeout(
@@ -45,37 +68,33 @@ async fn force_panic_during_act_press_fires_release_all_log() -> anyhow::Result<
         "forced panic must not return a successful act_press response"
     );
 
-    let (release_line, panic_line) = wait_for_release_and_panic_lines(dir.path()).await?;
+    let (release_line, panic_line) =
+        wait_for_release_and_panic_lines(dir.path(), held_pad_ids).await?;
     println!("source_of_truth=daemon_log edge=force_panic after_release_line={release_line}");
     println!("source_of_truth=daemon_log edge=force_panic after_panic_line={panic_line}");
     assert!(release_line.contains("\"reason\":\"tool_invocation\""));
-    assert!(release_line.contains("\"held_pad_ids\":\"[6]\""));
-    assert!(release_line.contains("\"released_pads\":1"));
+    assert!(release_line.contains(&format!("\"held_pad_ids\":\"{held_pad_ids}\"")));
+    if cfg!(windows) {
+        assert!(release_line.contains("\"released_pads\":1"));
+    } else {
+        assert!(release_line.contains("\"released_pads\":0"));
+    }
     assert!(panic_line.contains("\"reason\":\"panic\""));
     assert!(panic_line.contains("\"timeout_ms\":10"));
-    // On Windows the panic-hook release_all reaches the live SoftwareBackend
-    // and emits SendInput KeyUp/MouseUp for every held key/button, returning
-    // `result=ok`. On non-Windows hosts the SoftwareBackend stub fails-closed
-    // with ACTION_BACKEND_UNAVAILABLE — the panic hook still logs the attempt
-    // but tags `result=error` so the failure is observable rather than silent.
-    if cfg!(windows) {
-        assert!(panic_line.contains("\"result\":\"ok\""));
-    } else {
-        assert!(panic_line.contains("\"result\":\"error\""));
-        assert!(panic_line.contains(error_codes::ACTION_BACKEND_UNAVAILABLE));
-    }
+    assert!(panic_line.contains("\"result\":\"ok\""));
     drop(client);
     Ok(())
 }
 
 async fn wait_for_release_and_panic_lines(
     path: &std::path::Path,
+    held_pad_ids: &str,
 ) -> anyhow::Result<(String, String)> {
     for _ in 0..30 {
         let logs = read_logs(path)?;
         let release_line = safety_reason_lines(&logs, "tool_invocation")
             .into_iter()
-            .find(|line| line.contains("\"held_pad_ids\":\"[6]\""));
+            .find(|line| line.contains(&format!("\"held_pad_ids\":\"{held_pad_ids}\"")));
         let panic_line = safety_reason_lines(&logs, "panic").into_iter().last();
         if let (Some(release_line), Some(panic_line)) = (release_line, panic_line) {
             return Ok((release_line, panic_line));

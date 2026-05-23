@@ -1,5 +1,6 @@
 ---
 source: crates/synapse-core/tests/action_snapshots.rs
+assertion_line: 11
 expression: canonical_actions()
 ---
 {
@@ -177,6 +178,7 @@ expression: canonical_actions()
     "kind": "pad_report",
     "pad": 0,
     "report": {
+      "controller": "x360",
       "buttons": [
         "a",
         "start"

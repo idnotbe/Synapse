@@ -495,6 +495,7 @@ fn pad_report_case() -> RecordingCase {
         thumb_r: (0.0, 0.5),
         lt: 0.25,
         rt: 0.0,
+        ..GamepadReport::default()
     };
     RecordingCase {
         edge: "pad_report",
@@ -609,11 +610,5 @@ fn named_code(value: &str) -> KeyCode {
 }
 
 const fn neutral_report() -> GamepadReport {
-    GamepadReport {
-        buttons: Vec::new(),
-        thumb_l: (0.0, 0.0),
-        thumb_r: (0.0, 0.0),
-        lt: 0.0,
-        rt: 0.0,
-    }
+    GamepadReport::neutral(synapse_core::GamepadController::X360)
 }

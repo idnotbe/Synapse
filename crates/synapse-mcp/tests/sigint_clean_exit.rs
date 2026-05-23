@@ -44,8 +44,8 @@ async fn synthetic_sigint_results_in_exit_0_and_flushed_log() -> anyhow::Result<
 async fn stdio_connection_closed_emits_release_all_log() -> anyhow::Result<()> {
     let dir = TempDir::new()?;
     let mut client = StdioMcpClient::launch_and_init_with_log_dir(Some(dir.path())).await?;
-    let pad = client
-        .tools_call(
+    let pad_error = client
+        .tools_call_error(
             "act_pad",
             json!({
                 "pad_id": 4,
@@ -56,8 +56,12 @@ async fn stdio_connection_closed_emits_release_all_log() -> anyhow::Result<()> {
             }),
         )
         .await?;
+    assert_eq!(
+        pad_error["data"]["code"],
+        error_codes::ACTION_BACKEND_UNAVAILABLE
+    );
     println!(
-        "source_of_truth=daemon_log edge=connection_closed before=safety_count:0 held_pad_id:4 pad_response={pad}"
+        "source_of_truth=daemon_log edge=connection_closed before=safety_count:0 expected_held_pad_ids:[] pad_error={pad_error}"
     );
 
     let status = client.shutdown().await?;
@@ -76,8 +80,8 @@ async fn stdio_connection_closed_emits_release_all_log() -> anyhow::Result<()> {
         safety_count >= 1,
         "expected connection_closed release_all safety log, got logs: {logs}"
     );
-    assert!(safety_line.contains("\"held_pad_ids\":\"[4]\""));
-    assert!(safety_line.contains("\"released_pads\":1"));
+    assert!(safety_line.contains("\"held_pad_ids\":\"[]\""));
+    assert!(safety_line.contains("\"released_pads\":0"));
     Ok(())
 }
 

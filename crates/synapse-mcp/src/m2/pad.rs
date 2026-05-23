@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use synapse_action::{
     ActionBackend, ActionError, ActionHandle, EmitState, RecordedInput, RecordingBackend,
 };
-use synapse_core::{Action, GamepadReport, PadButton, PadId, error_codes};
+use synapse_core::{Action, GamepadController, GamepadReport, PadButton, PadId, error_codes};
 
 use crate::m1::mcp_error;
 
@@ -18,6 +18,9 @@ pub struct ActPadParams {
     #[serde(default)]
     #[schemars(default)]
     pub pad_id: PadId,
+    #[serde(default = "default_pad_controller")]
+    #[schemars(default = "default_pad_controller")]
+    pub controller: ActPadController,
     pub report: ActPadReport,
     #[serde(default = "default_pad_backend")]
     #[schemars(default = "default_pad_backend")]
@@ -65,6 +68,13 @@ pub enum ActPadButton {
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
+pub enum ActPadController {
+    X360,
+    Ds4,
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
 pub enum PadBackend {
     Vigem,
     Hardware,
@@ -75,6 +85,7 @@ pub enum PadBackend {
 pub struct ActPadResponse {
     pub ok: bool,
     pub pad_id: PadId,
+    pub controller: ActPadController,
     pub buttons: Vec<ActPadButton>,
     pub backend_used: String,
     pub hold_ms: Option<u32>,
@@ -89,8 +100,8 @@ pub async fn act_pad_with_handle(
 ) -> Result<ActPadResponse, ErrorData> {
     validate_params(&params)?;
     let started = Instant::now();
-    let report = params.report.to_gamepad_report()?;
-    let neutral = neutral_report();
+    let report = params.report.to_gamepad_report(params.controller)?;
+    let neutral = neutral_report(params.controller);
     let report_action = Action::PadReport {
         pad: params.pad_id,
         report,
@@ -119,6 +130,7 @@ pub async fn act_pad_with_handle(
     Ok(ActPadResponse {
         ok: true,
         pad_id: params.pad_id,
+        controller: params.controller,
         buttons: params.report.buttons,
         backend_used: "vigem".to_owned(),
         hold_ms: params.hold_ms,
@@ -128,12 +140,13 @@ pub async fn act_pad_with_handle(
 }
 
 impl ActPadReport {
-    fn to_gamepad_report(&self) -> Result<GamepadReport, ErrorData> {
+    fn to_gamepad_report(&self, controller: ActPadController) -> Result<GamepadReport, ErrorData> {
         validate_axis_pair("thumb_l", self.thumb_l)?;
         validate_axis_pair("thumb_r", self.thumb_r)?;
         validate_trigger("lt", self.lt)?;
         validate_trigger("rt", self.rt)?;
         Ok(GamepadReport {
+            controller: controller.to_gamepad_controller(),
             buttons: self
                 .buttons
                 .iter()
@@ -145,6 +158,15 @@ impl ActPadReport {
             lt: self.lt,
             rt: self.rt,
         })
+    }
+}
+
+impl ActPadController {
+    const fn to_gamepad_controller(self) -> GamepadController {
+        match self {
+            Self::X360 => GamepadController::X360,
+            Self::Ds4 => GamepadController::Ds4,
+        }
     }
 }
 
@@ -273,7 +295,8 @@ fn pad_state_label(pad_state: &HashMap<PadId, GamepadReport>) -> String {
 
 fn report_label(report: &GamepadReport) -> String {
     format!(
-        "buttons={}:thumb_l=({:.3},{:.3}):thumb_r=({:.3},{:.3}):lt={:.3}:rt={:.3}",
+        "controller={}:buttons={}:thumb_l=({:.3},{:.3}):thumb_r=({:.3},{:.3}):lt={:.3}:rt={:.3}",
+        controller_label(report.controller),
         buttons_label(&report.buttons),
         report.thumb_l.0,
         report.thumb_l.1,
@@ -282,6 +305,13 @@ fn report_label(report: &GamepadReport) -> String {
         report.lt,
         report.rt
     )
+}
+
+const fn controller_label(controller: GamepadController) -> &'static str {
+    match controller {
+        GamepadController::X360 => "x360",
+        GamepadController::Ds4 => "ds4",
+    }
 }
 
 fn buttons_label(buttons: &[PadButton]) -> String {
@@ -295,14 +325,8 @@ fn buttons_label(buttons: &[PadButton]) -> String {
         .join("+")
 }
 
-const fn neutral_report() -> GamepadReport {
-    GamepadReport {
-        buttons: Vec::new(),
-        thumb_l: neutral_axis(),
-        thumb_r: neutral_axis(),
-        lt: 0.0,
-        rt: 0.0,
-    }
+const fn neutral_report(controller: ActPadController) -> GamepadReport {
+    GamepadReport::neutral(controller.to_gamepad_controller())
 }
 
 const fn neutral_axis() -> (f32, f32) {
@@ -327,4 +351,8 @@ fn action_error_to_mcp(error: &ActionError) -> ErrorData {
 
 const fn default_pad_backend() -> PadBackend {
     PadBackend::Vigem
+}
+
+const fn default_pad_controller() -> ActPadController {
+    ActPadController::X360
 }

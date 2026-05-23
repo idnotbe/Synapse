@@ -377,6 +377,7 @@ const fn pad_report(
     rt: f32,
 ) -> GamepadReport {
     GamepadReport {
+        controller: synapse_core::GamepadController::X360,
         buttons,
         thumb_l,
         thumb_r,

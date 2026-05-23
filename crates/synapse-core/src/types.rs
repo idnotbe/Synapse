@@ -228,6 +228,17 @@ pub type PadId = u8;
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
+pub enum GamepadController {
+    X360,
+    Ds4,
+}
+
+const fn default_gamepad_controller() -> GamepadController {
+    GamepadController::X360
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
 pub enum PadButton {
     A,
     B,
@@ -263,6 +274,9 @@ pub enum Trigger {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct GamepadReport {
+    #[serde(default = "default_gamepad_controller")]
+    #[schemars(default = "default_gamepad_controller")]
+    pub controller: GamepadController,
     #[serde(default)]
     pub buttons: Vec<PadButton>,
     #[schemars(schema_with = "normalized_axis_pair_schema")]
@@ -273,6 +287,26 @@ pub struct GamepadReport {
     pub lt: f32,
     #[schemars(range(min = 0.0, max = 1.0))]
     pub rt: f32,
+}
+
+impl GamepadReport {
+    #[must_use]
+    pub const fn neutral(controller: GamepadController) -> Self {
+        Self {
+            controller,
+            buttons: Vec::new(),
+            thumb_l: (0.0, 0.0),
+            thumb_r: (0.0, 0.0),
+            lt: 0.0,
+            rt: 0.0,
+        }
+    }
+}
+
+impl Default for GamepadReport {
+    fn default() -> Self {
+        Self::neutral(GamepadController::X360)
+    }
 }
 
 fn normalized_axis_pair_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {

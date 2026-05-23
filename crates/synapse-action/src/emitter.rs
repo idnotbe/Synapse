@@ -14,7 +14,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     ACTION_QUEUE_CAPACITY, ActionBackend, ActionError, ActionHandle, ActionMessage, ActionResult,
-    HardwareUnavailableBackend, ResolvedBackend, TokenBucket, VigemStateOnlyBackend,
+    HardwareUnavailableBackend, ResolvedBackend, TokenBucket, VigemBackend,
     backend::software::SoftwareBackend, rate_limit::retry_after_ms_for_snapshot, resolve_backend,
 };
 
@@ -193,7 +193,7 @@ impl Backends {
     pub fn production() -> Self {
         Self {
             software: Arc::new(SoftwareBackend::new()),
-            vigem: Arc::new(VigemStateOnlyBackend::new()),
+            vigem: Arc::new(VigemBackend::new()),
             hardware: Arc::new(HardwareUnavailableBackend::new()),
         }
     }
@@ -213,6 +213,13 @@ impl Backends {
             ResolvedBackend::Vigem => Arc::clone(&self.vigem),
             ResolvedBackend::Hardware => Arc::clone(&self.hardware),
         }
+    }
+
+    fn pick_vigem_if_distinct_from(
+        &self,
+        backend: &Arc<dyn ActionBackend>,
+    ) -> Option<Arc<dyn ActionBackend>> {
+        (!Arc::ptr_eq(backend, &self.vigem)).then(|| Arc::clone(&self.vigem))
     }
 }
 
@@ -639,7 +646,24 @@ impl ActionEmitter {
 
         let resolved = resolved_backend_for_action(&Action::ReleaseAll)?;
         let backend = self.backends.pick(resolved);
-        let result = self.dispatch_via_backend(backend, Action::ReleaseAll).await;
+        let result = self
+            .dispatch_via_backend(Arc::clone(&backend), Action::ReleaseAll)
+            .await;
+        let result = if released_pads == 0 {
+            result
+        } else if let Some(vigem_backend) = self.backends.pick_vigem_if_distinct_from(&backend) {
+            match (
+                result,
+                self.dispatch_via_backend(vigem_backend, Action::ReleaseAll)
+                    .await,
+            ) {
+                (Ok(()), vigem_result) => vigem_result,
+                (software_result @ Err(_), Ok(())) => software_result,
+                (software_result @ Err(_), Err(_vigem_error)) => software_result,
+            }
+        } else {
+            result
+        };
 
         tracing::warn!(
             code = error_codes::SAFETY_RELEASE_ALL_FIRED,
@@ -1444,6 +1468,7 @@ mod tests {
             thumb_r: (0.0, 0.0),
             lt: 0.0,
             rt: 0.0,
+            ..GamepadReport::default()
         }
     }
 }

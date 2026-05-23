@@ -18,7 +18,7 @@ pub use backend::{
     recording::{RecordedInput, RecordingBackend},
     resolve_backend,
     unavailable::HardwareUnavailableBackend,
-    vigem::VigemStateOnlyBackend,
+    vigem::VigemBackend,
 };
 pub use click_timing::{
     DoubleClickTiming, cached_double_click_timing, initialize_double_click_timing_cache,

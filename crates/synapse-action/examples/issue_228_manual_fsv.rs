@@ -278,6 +278,7 @@ async fn happy_path_pad_path(
         thumb_r: (0.0, 0.0),
         lt: 0.0,
         rt: 0.5,
+        ..GamepadReport::default()
     };
     handle
         .execute(Action::PadReport {

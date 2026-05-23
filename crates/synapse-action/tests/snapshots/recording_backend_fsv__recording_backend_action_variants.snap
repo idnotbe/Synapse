@@ -1,5 +1,6 @@
 ---
 source: crates/synapse-action/tests/recording_backend_fsv.rs
+assertion_line: 63
 expression: snapshot
 ---
 {
@@ -258,6 +259,7 @@ expression: snapshot
       "kind": "pad_report",
       "pad": 1,
       "report": {
+        "controller": "x360",
         "buttons": [
           "a",
           "start"

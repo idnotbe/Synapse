@@ -106,7 +106,8 @@ mod tests {
 
     use synapse_action::{ActionBackend, ActionEmitter, RecordingBackend};
     use synapse_core::{
-        Backend, ButtonAction, GamepadReport, Key, KeyCode, MouseButton, PadButton,
+        Backend, ButtonAction, GamepadController, GamepadReport, Key, KeyCode, MouseButton,
+        PadButton,
     };
 
     use super::{ReleaseAllParams, release_all_with_handles};
@@ -137,6 +138,7 @@ mod tests {
             .await
             .unwrap_or_else(|error| panic!("prime mouse button should succeed: {error}"));
         let report = GamepadReport {
+            controller: GamepadController::X360,
             buttons: vec![PadButton::A],
             thumb_l: (0.5, -0.5),
             thumb_r: (0.0, 0.0),

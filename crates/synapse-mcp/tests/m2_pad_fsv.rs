@@ -38,13 +38,15 @@ fn assert_act_pad_schema(tools: &[Value]) -> anyhow::Result<()> {
         tools.len()
     );
     println!(
-        "source_of_truth=tools_list tool=act_pad edge=defaults after=pad_id:{} backend:{} additionalProperties:{}",
+        "source_of_truth=tools_list tool=act_pad edge=defaults after=pad_id:{} controller:{} backend:{} additionalProperties:{}",
         schema["properties"]["pad_id"]["default"],
+        schema["properties"]["controller"]["default"],
         schema["properties"]["backend"]["default"],
         schema["additionalProperties"]
     );
     assert_eq!(schema["additionalProperties"], false);
     assert_eq!(schema["properties"]["pad_id"]["default"], 0);
+    assert_eq!(schema["properties"]["controller"]["default"], "x360");
     assert_eq!(schema["properties"]["backend"]["default"], "vigem");
     assert_eq!(schema["required"], json!(["report"]));
     assert_report_schema(schema);
@@ -70,6 +72,8 @@ fn assert_report_schema(schema: &Value) {
     assert!(schema_text.contains("\"minimum\":0.0"));
     assert!(schema_text.contains("\"vigem\""));
     assert!(schema_text.contains("\"hardware\""));
+    assert!(schema_text.contains("\"x360\""));
+    assert!(schema_text.contains("\"ds4\""));
     assert!(!schema_text.contains("\"guide\""));
 }
 
@@ -91,9 +95,10 @@ async fn call_act_pad_happy_and_edges(client: &mut StdioMcpClient) -> anyhow::Re
         .await?;
     let response: ActPadWireResponse = structured(&report)?;
     println!(
-        "source_of_truth=mcp_act_pad edge=report after=ok:{} pad_id:{} buttons:{:?} backend_used:{} hold_ms:{:?} returned_to_neutral:{} elapsed_ms:{} expected_sequence:pad_report:pad=0:buttons=a+start:thumb_l=(0.500,-0.500):thumb_r=(0.000,0.000):lt=0.250:rt=0.000",
+        "source_of_truth=mcp_act_pad edge=report after=ok:{} pad_id:{} controller:{} buttons:{:?} backend_used:{} hold_ms:{:?} returned_to_neutral:{} elapsed_ms:{} expected_sequence:pad_report:pad=0:controller=x360:buttons=a+start:thumb_l=(0.500,-0.500):thumb_r=(0.000,0.000):lt=0.250:rt=0.000",
         response.ok,
         response.pad_id,
+        response.controller,
         response.buttons,
         response.backend_used,
         response.hold_ms,
@@ -102,6 +107,7 @@ async fn call_act_pad_happy_and_edges(client: &mut StdioMcpClient) -> anyhow::Re
     );
     assert!(response.ok);
     assert_eq!(response.pad_id, 0);
+    assert_eq!(response.controller, "x360");
     assert_eq!(response.buttons, ["a", "start"]);
     assert_eq!(response.backend_used, "vigem");
     assert_eq!(response.hold_ms, None);
@@ -120,9 +126,10 @@ async fn call_act_pad_happy_and_edges(client: &mut StdioMcpClient) -> anyhow::Re
         .await?;
     let response: ActPadWireResponse = structured(&hold)?;
     println!(
-        "source_of_truth=mcp_act_pad edge=hold_neutral after=ok:{} pad_id:{} buttons:{:?} backend_used:{} hold_ms:{:?} returned_to_neutral:{} elapsed_ms:{} expected_sequence:pad_report:pad=2:buttons=b:...>pad_report:pad=2:buttons=none:...",
+        "source_of_truth=mcp_act_pad edge=hold_neutral after=ok:{} pad_id:{} controller:{} buttons:{:?} backend_used:{} hold_ms:{:?} returned_to_neutral:{} elapsed_ms:{} expected_sequence:pad_report:pad=2:controller=x360:buttons=b:...>pad_report:pad=2:controller=x360:buttons=none:...",
         response.ok,
         response.pad_id,
+        response.controller,
         response.buttons,
         response.backend_used,
         response.hold_ms,
@@ -131,11 +138,53 @@ async fn call_act_pad_happy_and_edges(client: &mut StdioMcpClient) -> anyhow::Re
     );
     assert!(response.ok);
     assert_eq!(response.pad_id, 2);
+    assert_eq!(response.controller, "x360");
     assert_eq!(response.buttons, ["b"]);
     assert_eq!(response.hold_ms, Some(1));
     assert!(response.returned_to_neutral);
 
+    call_act_pad_ds4_happy(client).await?;
     call_act_pad_error_edges(client).await
+}
+
+async fn call_act_pad_ds4_happy(client: &mut StdioMcpClient) -> anyhow::Result<()> {
+    println!(
+        "source_of_truth=mcp_act_pad edge=ds4_report before=pad_id:3 controller:ds4 buttons:[x,y] thumb_r:[-1,1] rt:1"
+    );
+    let ds4 = client
+        .tools_call(
+            "act_pad",
+            json!({
+                "pad_id": 3,
+                "controller": "ds4",
+                "report": {
+                    "buttons": ["x", "y"],
+                    "thumb_r": [-1.0, 1.0],
+                    "rt": 1.0
+                }
+            }),
+        )
+        .await?;
+    let response: ActPadWireResponse = structured(&ds4)?;
+    println!(
+        "source_of_truth=mcp_act_pad edge=ds4_report after=ok:{} pad_id:{} controller:{} buttons:{:?} backend_used:{} hold_ms:{:?} returned_to_neutral:{} elapsed_ms:{} expected_sequence:pad_report:pad=3:controller=ds4:buttons=x+y:thumb_l=(0.000,0.000):thumb_r=(-1.000,1.000):lt=0.000:rt=1.000",
+        response.ok,
+        response.pad_id,
+        response.controller,
+        response.buttons,
+        response.backend_used,
+        response.hold_ms,
+        response.returned_to_neutral,
+        response.elapsed_ms
+    );
+    assert!(response.ok);
+    assert_eq!(response.pad_id, 3);
+    assert_eq!(response.controller, "ds4");
+    assert_eq!(response.buttons, ["x", "y"]);
+    assert_eq!(response.backend_used, "vigem");
+    assert_eq!(response.hold_ms, None);
+    assert!(!response.returned_to_neutral);
+    Ok(())
 }
 
 async fn call_act_pad_error_edges(client: &mut StdioMcpClient) -> anyhow::Result<()> {
@@ -152,6 +201,14 @@ async fn call_act_pad_error_edges(client: &mut StdioMcpClient) -> anyhow::Result
         "trigger_out_of_range",
         "lt:2.0",
         json!({"report": {"lt": 2.0}}),
+        error_codes::TOOL_PARAMS_INVALID,
+    )
+    .await?;
+    assert_error_code(
+        client,
+        "controller_invalid",
+        "controller:dualshock",
+        json!({"controller": "dualshock", "report": {"buttons": ["a"]}}),
         error_codes::TOOL_PARAMS_INVALID,
     )
     .await?;
@@ -208,22 +265,29 @@ fn assert_recording_log_readbacks(logs: &str) -> anyhow::Result<()> {
     assert_readback(
         &readbacks,
         "report",
-        "pad_report:pad=0:buttons=a+start:thumb_l=(0.500,-0.500):thumb_r=(0.000,0.000):lt=0.250:rt=0.000",
+        "pad_report:pad=0:controller=x360:buttons=a+start:thumb_l=(0.500,-0.500):thumb_r=(0.000,0.000):lt=0.250:rt=0.000",
         1,
-        "0:buttons=a+start:thumb_l=(0.500,-0.500):thumb_r=(0.000,0.000):lt=0.250:rt=0.000",
+        "0:controller=x360:buttons=a+start:thumb_l=(0.500,-0.500):thumb_r=(0.000,0.000):lt=0.250:rt=0.000",
     )?;
     assert_readback(
         &readbacks,
         "hold_neutral",
-        "pad_report:pad=2:buttons=b:thumb_l=(0.000,0.000):thumb_r=(0.000,0.000):lt=0.000:rt=0.000>pad_report:pad=2:buttons=none:thumb_l=(0.000,0.000):thumb_r=(0.000,0.000):lt=0.000:rt=0.000",
+        "pad_report:pad=2:controller=x360:buttons=b:thumb_l=(0.000,0.000):thumb_r=(0.000,0.000):lt=0.000:rt=0.000>pad_report:pad=2:controller=x360:buttons=none:thumb_l=(0.000,0.000):thumb_r=(0.000,0.000):lt=0.000:rt=0.000",
         2,
-        "0:buttons=a+start:thumb_l=(0.500,-0.500):thumb_r=(0.000,0.000):lt=0.250:rt=0.000",
+        "0:controller=x360:buttons=a+start:thumb_l=(0.500,-0.500):thumb_r=(0.000,0.000):lt=0.250:rt=0.000",
+    )?;
+    assert_readback(
+        &readbacks,
+        "ds4_report",
+        "pad_report:pad=3:controller=ds4:buttons=x+y:thumb_l=(0.000,0.000):thumb_r=(-1.000,1.000):lt=0.000:rt=1.000",
+        1,
+        "0:controller=x360:buttons=a+start:thumb_l=(0.500,-0.500):thumb_r=(0.000,0.000):lt=0.250:rt=0.000|3:controller=ds4:buttons=x+y:thumb_l=(0.000,0.000):thumb_r=(-1.000,1.000):lt=0.000:rt=1.000",
     )?;
     println!(
-        "source_of_truth=recording_log tool=act_pad edge=failed_edges after_readback_count={} expected_successful_readbacks=2",
+        "source_of_truth=recording_log tool=act_pad edge=failed_edges after_readback_count={} expected_successful_readbacks=3",
         readbacks.len()
     );
-    assert_eq!(readbacks.len(), 2);
+    assert_eq!(readbacks.len(), 3);
     Ok(())
 }
 
@@ -253,6 +317,7 @@ fn assert_readback(
 struct ActPadWireResponse {
     ok: bool,
     pad_id: u8,
+    controller: String,
     buttons: Vec<String>,
     backend_used: String,
     hold_ms: Option<u32>,

@@ -329,6 +329,7 @@ fn key(value: &str) -> Key {
 
 const fn pad_report(buttons: Vec<PadButton>) -> GamepadReport {
     GamepadReport {
+        controller: synapse_core::GamepadController::X360,
         buttons,
         thumb_l: (0.5, -0.5),
         thumb_r: (0.0, 0.0),

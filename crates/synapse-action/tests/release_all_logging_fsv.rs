@@ -232,6 +232,7 @@ fn non_neutral_report() -> GamepadReport {
         thumb_r: (0.0, 0.0),
         lt: 0.0,
         rt: 0.75,
+        ..GamepadReport::default()
     }
 }
 

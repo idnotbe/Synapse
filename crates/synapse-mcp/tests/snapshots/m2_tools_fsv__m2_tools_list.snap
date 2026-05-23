@@ -1,5 +1,6 @@
 ---
 source: crates/synapse-mcp/tests/m2_tools_fsv.rs
+assertion_line: 123
 expression: schemas
 ---
 [
@@ -644,6 +645,13 @@ expression: schemas
           ],
           "type": "string"
         },
+        "ActPadController": {
+          "enum": [
+            "x360",
+            "ds4"
+          ],
+          "type": "string"
+        },
         "ActPadReport": {
           "additionalProperties": false,
           "properties": {
@@ -728,6 +736,10 @@ expression: schemas
           "$ref": "#/$defs/PadBackend",
           "default": "vigem"
         },
+        "controller": {
+          "$ref": "#/$defs/ActPadController",
+          "default": "x360"
+        },
         "hold_ms": {
           "format": "uint32",
           "minimum": 0,
@@ -774,6 +786,13 @@ expression: schemas
             "right"
           ],
           "type": "string"
+        },
+        "ActPadController": {
+          "enum": [
+            "x360",
+            "ds4"
+          ],
+          "type": "string"
         }
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -787,6 +806,9 @@ expression: schemas
             "$ref": "#/$defs/ActPadButton"
           },
           "type": "array"
+        },
+        "controller": {
+          "$ref": "#/$defs/ActPadController"
         },
         "elapsed_ms": {
           "format": "uint32",
@@ -817,6 +839,7 @@ expression: schemas
       "required": [
         "ok",
         "pad_id",
+        "controller",
         "buttons",
         "backend_used",
         "returned_to_neutral",

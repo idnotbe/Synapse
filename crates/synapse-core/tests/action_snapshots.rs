@@ -180,6 +180,7 @@ fn pad_actions() -> BTreeMap<&'static str, Action> {
                     thumb_r: (0.0, 0.0),
                     lt: 0.0,
                     rt: 1.0,
+                    ..GamepadReport::default()
                 },
             },
         ),

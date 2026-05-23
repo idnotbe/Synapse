@@ -19,6 +19,7 @@ tracing.workspace = true
 enigo.workspace = true
 synapse-a11y = { version = "0.1.0", path = "../synapse-a11y" }
 synapse-capture = { version = "0.1.0", path = "../synapse-capture" }
+vigem-client = { workspace = true, features = ["unstable_ds4"] }
 windows.workspace = true
 
 [dev-dependencies]

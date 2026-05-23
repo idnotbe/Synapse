@@ -482,6 +482,7 @@ fn gamepad_report_strategy() -> impl Strategy<Value = GamepadReport> {
                 thumb_r: (thumb_r_x, thumb_r_y),
                 lt,
                 rt,
+                ..GamepadReport::default()
             },
         )
 }

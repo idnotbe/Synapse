@@ -79,7 +79,7 @@ async fn m2_tools_list_contains_exact_sorted_surface_fsv() -> anyhow::Result<()>
     );
 
     let default_rows = default_rows();
-    assert_eq!(default_rows.len(), 23);
+    assert_eq!(default_rows.len(), 24);
     for (tool_name, field, expected) in &default_rows {
         let actual = schema_default(tools, tool_name, field)?;
         println!(
@@ -149,6 +149,7 @@ fn default_rows() -> Vec<(&'static str, &'static str, Value)> {
         ("act_scroll", "dx", json!(0)),
         ("act_scroll", "smooth", json!(false)),
         ("act_pad", "pad_id", json!(0)),
+        ("act_pad", "controller", json!("x360")),
         ("act_pad", "backend", json!("vigem")),
         ("act_clipboard", "format", json!("unicode")),
     ]
