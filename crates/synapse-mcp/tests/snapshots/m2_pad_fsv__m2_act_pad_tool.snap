@@ -1,0 +1,151 @@
+---
+source: crates/synapse-mcp/tests/m2_pad_fsv.rs
+expression: projection
+---
+{
+  "description": "Apply a virtual gamepad report and optionally return it to neutral",
+  "inputSchema": {
+    "$defs": {
+      "ActPadButton": {
+        "enum": [
+          "a",
+          "b",
+          "x",
+          "y",
+          "lb",
+          "rb",
+          "ls",
+          "rs",
+          "back",
+          "start",
+          "up",
+          "down",
+          "left",
+          "right"
+        ],
+        "type": "string"
+      },
+      "ActPadReport": {
+        "additionalProperties": false,
+        "properties": {
+          "buttons": {
+            "default": [],
+            "items": {
+              "$ref": "#/$defs/ActPadButton"
+            },
+            "type": "array"
+          },
+          "lt": {
+            "default": 0.0,
+            "format": "float",
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "type": "number"
+          },
+          "rt": {
+            "default": 0.0,
+            "format": "float",
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "type": "number"
+          },
+          "thumb_l": {
+            "default": [
+              0.0,
+              0.0
+            ],
+            "maxItems": 2,
+            "minItems": 2,
+            "prefixItems": [
+              {
+                "maximum": 1.0,
+                "minimum": -1.0,
+                "type": "number"
+              },
+              {
+                "maximum": 1.0,
+                "minimum": -1.0,
+                "type": "number"
+              }
+            ],
+            "type": "array"
+          },
+          "thumb_r": {
+            "default": [
+              0.0,
+              0.0
+            ],
+            "maxItems": 2,
+            "minItems": 2,
+            "prefixItems": [
+              {
+                "maximum": 1.0,
+                "minimum": -1.0,
+                "type": "number"
+              },
+              {
+                "maximum": 1.0,
+                "minimum": -1.0,
+                "type": "number"
+              }
+            ],
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
+      "PadBackend": {
+        "enum": [
+          "vigem",
+          "hardware"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "backend": {
+        "$ref": "#/$defs/PadBackend",
+        "default": "vigem"
+      },
+      "hold_ms": {
+        "format": "uint32",
+        "minimum": 0,
+        "type": [
+          "integer",
+          "null"
+        ]
+      },
+      "pad_id": {
+        "default": 0,
+        "format": "uint8",
+        "maximum": 255,
+        "minimum": 0,
+        "type": "integer"
+      },
+      "report": {
+        "$ref": "#/$defs/ActPadReport"
+      }
+    },
+    "required": [
+      "report"
+    ],
+    "title": "ActPadParams",
+    "type": "object"
+  },
+  "name": "act_pad",
+  "outputSchemaRoot": {
+    "additionalProperties": false,
+    "required": [
+      "ok",
+      "pad_id",
+      "buttons",
+      "backend_used",
+      "returned_to_neutral",
+      "elapsed_ms"
+    ],
+    "title": "ActPadResponse",
+    "type": "object"
+  }
+}

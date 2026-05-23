@@ -25,9 +25,10 @@ use crate::{
     },
     m2::{
         ActAimParams, ActAimResponse, ActClickParams, ActClickResponse, ActDragParams,
-        ActDragResponse, ActPressParams, ActPressResponse, ActScrollParams, ActScrollResponse,
-        ActTypeParams, ActTypeResponse, SharedM2State, act_aim_with_handle, act_click_with_handle,
-        act_drag_with_handle, act_press_with_handle, act_scroll_with_handle, act_type_with_handle,
+        ActDragResponse, ActPadParams, ActPadResponse, ActPressParams, ActPressResponse,
+        ActScrollParams, ActScrollResponse, ActTypeParams, ActTypeResponse, SharedM2State,
+        act_aim_with_handle, act_click_with_handle, act_drag_with_handle, act_pad_with_handle,
+        act_press_with_handle, act_scroll_with_handle, act_type_with_handle,
         shared_m2_state_from_env,
     },
 };
@@ -289,6 +290,22 @@ impl SynapseService {
         );
         let (handle, recording) = self.m2_action_context()?;
         act_scroll_with_handle(handle, recording, params.0)
+            .await
+            .map(Json)
+    }
+
+    #[tool(description = "Apply a virtual gamepad report and optionally return it to neutral")]
+    pub async fn act_pad(
+        &self,
+        params: Parameters<ActPadParams>,
+    ) -> Result<Json<ActPadResponse>, ErrorData> {
+        tracing::info!(
+            code = "MCP_TOOL_INVOCATION",
+            kind = "act_pad",
+            "tool.invocation kind=act_pad"
+        );
+        let (handle, recording) = self.m2_action_context()?;
+        act_pad_with_handle(handle, recording, params.0)
             .await
             .map(Json)
     }
