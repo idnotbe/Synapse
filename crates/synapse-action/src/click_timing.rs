@@ -32,7 +32,7 @@ pub fn inter_click_delay_ms_for_window(window_ms: u32) -> u32 {
 
 #[cfg(windows)]
 fn query_double_click_timing() -> DoubleClickTiming {
-    use windows::Win32::UI::WindowsAndMessaging::GetDoubleClickTime;
+    use windows::Win32::UI::Input::KeyboardAndMouse::GetDoubleClickTime;
 
     let queried_window_ms = unsafe {
         // SAFETY: `GetDoubleClickTime` takes no pointers or handles and only
