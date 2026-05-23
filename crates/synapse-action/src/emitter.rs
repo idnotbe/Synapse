@@ -2,8 +2,8 @@ use std::collections::HashMap;
 
 use bit_set::BitSet;
 use synapse_core::{
-    Action, ButtonAction, ComboInput, GamepadReport, Key, MouseButton, PadButton, PadId, Stick,
-    Trigger, error_codes,
+    Action, Backend, ButtonAction, ComboInput, GamepadReport, Key, MouseButton, PadButton, PadId,
+    Stick, Trigger, error_codes,
 };
 use tokio::{
     sync::{mpsc, oneshot},
@@ -11,7 +11,13 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
-use crate::{ACTION_QUEUE_CAPACITY, ActionHandle, ActionMessage, ActionResult};
+use crate::{
+    ACTION_QUEUE_CAPACITY, ActionError, ActionHandle, ActionMessage, ActionResult, ResolvedBackend,
+    TokenBucket, rate_limit::retry_after_ms_for_snapshot, resolve_backend,
+};
+
+#[cfg(test)]
+use crate::TokenBucketSnapshot;
 
 pub type ActionSnapshotMessage = oneshot::Sender<ActionStateSnapshot>;
 
@@ -170,6 +176,61 @@ pub struct ActionEmitter {
     rx: mpsc::Receiver<ActionMessage>,
     snapshot_rx: mpsc::Receiver<ActionSnapshotMessage>,
     state: EmitState,
+    rate_limits: BackendRateLimits,
+}
+
+#[cfg(test)]
+#[derive(Debug)]
+struct BackendRateLimitSnapshot {
+    software: TokenBucketSnapshot,
+    vigem: TokenBucketSnapshot,
+    hardware: TokenBucketSnapshot,
+}
+
+struct BackendRateLimits {
+    software: TokenBucket,
+    vigem: TokenBucket,
+    hardware: TokenBucket,
+}
+
+impl BackendRateLimits {
+    fn new() -> Self {
+        Self {
+            software: TokenBucket::for_backend(ResolvedBackend::Software),
+            vigem: TokenBucket::for_backend(ResolvedBackend::Vigem),
+            hardware: TokenBucket::for_backend(ResolvedBackend::Hardware),
+        }
+    }
+
+    #[cfg(test)]
+    const fn with_buckets(
+        software: TokenBucket,
+        vigem: TokenBucket,
+        hardware: TokenBucket,
+    ) -> Self {
+        Self {
+            software,
+            vigem,
+            hardware,
+        }
+    }
+
+    const fn bucket(&self, backend: ResolvedBackend) -> &TokenBucket {
+        match backend {
+            ResolvedBackend::Software => &self.software,
+            ResolvedBackend::Vigem => &self.vigem,
+            ResolvedBackend::Hardware => &self.hardware,
+        }
+    }
+
+    #[cfg(test)]
+    fn snapshot(&self) -> BackendRateLimitSnapshot {
+        BackendRateLimitSnapshot {
+            software: self.software.snapshot(),
+            vigem: self.vigem.snapshot(),
+            hardware: self.hardware.snapshot(),
+        }
+    }
 }
 
 impl ActionEmitter {
@@ -183,7 +244,35 @@ impl ActionEmitter {
             rx,
             snapshot_rx,
             state: EmitState::new(),
+            rate_limits: BackendRateLimits::new(),
         }
+    }
+
+    #[cfg(test)]
+    fn with_rate_limits(
+        rx: mpsc::Receiver<ActionMessage>,
+        snapshot_rx: mpsc::Receiver<ActionSnapshotMessage>,
+        rate_limits: BackendRateLimits,
+    ) -> Self {
+        Self {
+            rx,
+            snapshot_rx,
+            state: EmitState::new(),
+            rate_limits,
+        }
+    }
+
+    #[cfg(test)]
+    fn channel_with_rate_limits(
+        rate_limits: BackendRateLimits,
+    ) -> (ActionHandle, ActionEmitterSnapshotHandle, Self) {
+        let (handle, rx) = ActionHandle::channel();
+        let (snapshot_tx, snapshot_rx) = mpsc::channel(ACTION_QUEUE_CAPACITY);
+        (
+            handle,
+            ActionEmitterSnapshotHandle::new(snapshot_tx),
+            Self::with_rate_limits(rx, snapshot_rx, rate_limits),
+        )
     }
 
     #[must_use]
@@ -253,6 +342,11 @@ impl ActionEmitter {
 
     #[tracing::instrument(skip_all, fields(action_kind = %action_kind(&action)))]
     async fn execute(&mut self, action: Action) -> ActionResult<()> {
+        if !matches!(action, Action::ReleaseAll) {
+            let backend = resolved_backend_for_action(&action)?;
+            self.consume_rate_limit(backend)?;
+        }
+
         match action {
             Action::KeyPress { key, .. } => {
                 self.state.hold_key(&key);
@@ -287,6 +381,26 @@ impl ActionEmitter {
             Action::ReleaseAll => self.release_all().await,
         }
         Ok(())
+    }
+
+    fn consume_rate_limit(&self, backend: ResolvedBackend) -> ActionResult<()> {
+        let bucket = self.rate_limits.bucket(backend);
+        if bucket.try_consume(1) {
+            return Ok(());
+        }
+
+        let snapshot = bucket.snapshot();
+        let retry_after_ms = retry_after_ms_for_snapshot(snapshot, 1);
+        Err(ActionError::RateLimited {
+            detail: format!(
+                "backend={} retry_after_ms={} requested_tokens=1 available_tokens={} refill_rate_per_s={}",
+                backend.as_str(),
+                retry_after_ms,
+                snapshot.tokens,
+                snapshot.refill_rate_per_s
+            ),
+            retry_after_ms,
+        })
     }
 
     #[tracing::instrument(skip_all, fields(action_kind = "release_all"))]
@@ -392,6 +506,32 @@ impl ActionEmitter {
     }
 }
 
+fn resolved_backend_for_action(action: &Action) -> ActionResult<ResolvedBackend> {
+    resolve_backend(requested_backend(action), action)
+}
+
+const fn requested_backend(action: &Action) -> Backend {
+    match action {
+        Action::KeyPress { backend, .. }
+        | Action::KeyDown { backend, .. }
+        | Action::KeyUp { backend, .. }
+        | Action::KeyChord { backend, .. }
+        | Action::TypeText { backend, .. }
+        | Action::MouseMove { backend, .. }
+        | Action::MouseMoveRelative { backend, .. }
+        | Action::MouseButton { backend, .. }
+        | Action::MouseDrag { backend, .. }
+        | Action::MouseScroll { backend, .. }
+        | Action::AimAt { backend, .. }
+        | Action::Combo { backend, .. } => *backend,
+        Action::PadButton { .. }
+        | Action::PadStick { .. }
+        | Action::PadTrigger { .. }
+        | Action::PadReport { .. }
+        | Action::ReleaseAll => Backend::Auto,
+    }
+}
+
 const fn action_kind(action: &Action) -> &'static str {
     match action {
         Action::KeyPress { .. } => "key_press",
@@ -456,5 +596,179 @@ fn is_neutral_report(report: &GamepadReport) -> bool {
 fn push_unique(buttons: &mut Vec<PadButton>, button: PadButton) {
     if !buttons.contains(&button) {
         buttons.push(button);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use synapse_core::KeyCode;
+
+    use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn rate_limited_error_carries_code_and_retry_after_ms_without_state_mutation() {
+        let (_handle, _snapshot_handle, mut emitter) =
+            ActionEmitter::channel_with_rate_limits(one_token_limits());
+        let first_key = key_named("first");
+        let second_key = key_named("second");
+        let before_state = emitter.snapshot();
+        let before_limits = emitter.rate_limits.snapshot();
+
+        let first_result = emitter
+            .execute(Action::KeyDown {
+                key: first_key.clone(),
+                backend: Backend::Software,
+            })
+            .await;
+        assert!(
+            first_result.is_ok(),
+            "first token should be available: {first_result:?}"
+        );
+        let after_first_state = emitter.snapshot();
+        let after_first_limits = emitter.rate_limits.snapshot();
+        let after = emitter
+            .execute(Action::KeyDown {
+                key: second_key,
+                backend: Backend::Software,
+            })
+            .await;
+        let after_limited_state = emitter.snapshot();
+        let after_limited_limits = emitter.rate_limits.snapshot();
+
+        let Err(error) = after else {
+            panic!("second software action should be rate limited");
+        };
+        assert_eq!(error.code(), error_codes::ACTION_RATE_LIMITED);
+        assert_eq!(error.retry_after_ms(), Some(1));
+        assert!(error.detail().contains("retry_after_ms=1"));
+        assert_eq!(before_limits.hardware.tokens, 1);
+        assert_eq!(after_first_state.held_keys, vec![first_key.clone()]);
+        assert_eq!(after_limited_state.held_keys, vec![first_key]);
+        assert_eq!(after_first_limits.software.tokens, 0);
+        assert_eq!(after_limited_limits.software.tokens, 0);
+        println!(
+            "source_of_truth=action_emitter_rate_limit edge=software_over_cap before_state={before_state:?} before_limits={before_limits:?} after_first_state={after_first_state:?} after_first_limits={after_first_limits:?} after_limited_state={after_limited_state:?} after_limited_limits={after_limited_limits:?} data.code={} data.retry_after_ms={:?} detail={}",
+            error.code(),
+            error.retry_after_ms(),
+            error.detail()
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn software_rate_limit_does_not_consume_vigem_bucket() {
+        let (_handle, _snapshot_handle, mut emitter) =
+            ActionEmitter::channel_with_rate_limits(one_token_limits());
+        let before = emitter.rate_limits.snapshot();
+
+        let software_result = emitter
+            .execute(Action::KeyPress {
+                key: key_named("software"),
+                hold_ms: 0,
+                backend: Backend::Software,
+            })
+            .await;
+        assert!(
+            software_result.is_ok(),
+            "software token should be available: {software_result:?}"
+        );
+        let after_software = emitter.rate_limits.snapshot();
+        let report = gamepad_report(PadButton::A);
+        let vigem_result = emitter
+            .execute(Action::PadReport {
+                pad: 1,
+                report: report.clone(),
+            })
+            .await;
+        assert!(
+            vigem_result.is_ok(),
+            "vigem token should be independent from software: {vigem_result:?}"
+        );
+        let after_vigem = emitter.rate_limits.snapshot();
+        let after_vigem_state = emitter.snapshot();
+        let after = emitter
+            .execute(Action::PadReport {
+                pad: 1,
+                report: gamepad_report(PadButton::B),
+            })
+            .await;
+        let after_limited_state = emitter.snapshot();
+
+        let Err(error) = after else {
+            panic!("second vigem action should be rate limited");
+        };
+        assert_eq!(error.code(), error_codes::ACTION_RATE_LIMITED);
+        assert_eq!(error.retry_after_ms(), Some(1));
+        assert_eq!(after_software.software.tokens, 0);
+        assert_eq!(after_software.vigem.tokens, 1);
+        assert_eq!(after_software.hardware.tokens, 1);
+        assert_eq!(after_vigem.vigem.tokens, 0);
+        assert_eq!(after_vigem_state.pad_state.get(&1), Some(&report));
+        assert_eq!(after_limited_state.pad_state.get(&1), Some(&report));
+        println!(
+            "source_of_truth=action_emitter_rate_limit edge=backend_separation before={before:?} after_software={after_software:?} after_vigem={after_vigem:?} after_vigem_state={after_vigem_state:?} after_limited_state={after_limited_state:?} data.code={} data.retry_after_ms={:?}",
+            error.code(),
+            error.retry_after_ms()
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn release_all_bypasses_empty_buckets_and_drains_state() {
+        let (_handle, _snapshot_handle, mut emitter) =
+            ActionEmitter::channel_with_rate_limits(empty_limits());
+        let key = key_named("stuck");
+        emitter.state.hold_key(&key);
+        let before_state = emitter.snapshot();
+        let before_limits = emitter.rate_limits.snapshot();
+
+        let release_result = emitter.execute(Action::ReleaseAll).await;
+        assert!(
+            release_result.is_ok(),
+            "ReleaseAll must not be rate limited: {release_result:?}"
+        );
+        let after_state = emitter.snapshot();
+        let after_limits = emitter.rate_limits.snapshot();
+
+        assert_eq!(before_state.held_keys, vec![key]);
+        assert!(after_state.held_keys.is_empty());
+        assert_eq!(before_limits.software.tokens, 0);
+        assert_eq!(after_limits.software.tokens, 0);
+        println!(
+            "source_of_truth=action_emitter_rate_limit edge=release_all_bypass before_state={before_state:?} before_limits={before_limits:?} after_state={after_state:?} after_limits={after_limits:?}"
+        );
+    }
+
+    fn one_token_limits() -> BackendRateLimits {
+        BackendRateLimits::with_buckets(
+            TokenBucket::new(1, 5_000),
+            TokenBucket::new(1, 1_000),
+            TokenBucket::new(1, 5_000),
+        )
+    }
+
+    fn empty_limits() -> BackendRateLimits {
+        BackendRateLimits::with_buckets(
+            TokenBucket::new(0, 0),
+            TokenBucket::new(0, 0),
+            TokenBucket::new(0, 0),
+        )
+    }
+
+    fn key_named(name: &str) -> Key {
+        Key {
+            code: KeyCode::Named {
+                value: name.to_owned(),
+            },
+            use_scancode: false,
+        }
+    }
+
+    fn gamepad_report(button: PadButton) -> GamepadReport {
+        GamepadReport {
+            buttons: vec![button],
+            thumb_l: (0.0, 0.0),
+            thumb_r: (0.0, 0.0),
+            lt: 0.0,
+            rt: 0.0,
+        }
     }
 }

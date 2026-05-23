@@ -7,7 +7,7 @@ pub enum ActionError {
     #[error("action queue full: {detail}")]
     QueueFull { detail: String },
     #[error("action rate limited: {detail}")]
-    RateLimited { detail: String },
+    RateLimited { detail: String, retry_after_ms: u64 },
     #[error("action backend unavailable: {detail}")]
     BackendUnavailable { detail: String },
     #[error("action target invalid: {detail}")]
@@ -64,7 +64,7 @@ impl ActionError {
     pub fn detail(&self) -> &str {
         match self {
             Self::QueueFull { detail }
-            | Self::RateLimited { detail }
+            | Self::RateLimited { detail, .. }
             | Self::BackendUnavailable { detail }
             | Self::TargetInvalid { detail }
             | Self::HoldExceededMax { detail }
@@ -78,6 +78,27 @@ impl ActionError {
             | Self::StuckKeyAutoReleased { detail }
             | Self::SafetyReleaseAllFired { detail }
             | Self::SafetyOperatorHotkeyFired { detail } => detail,
+        }
+    }
+
+    #[must_use]
+    pub const fn retry_after_ms(&self) -> Option<u64> {
+        match self {
+            Self::RateLimited { retry_after_ms, .. } => Some(*retry_after_ms),
+            Self::QueueFull { .. }
+            | Self::BackendUnavailable { .. }
+            | Self::TargetInvalid { .. }
+            | Self::HoldExceededMax { .. }
+            | Self::HidPortDisconnected { .. }
+            | Self::VigemNotInstalled { .. }
+            | Self::VigemPluginFailed { .. }
+            | Self::ElementNotResolved { .. }
+            | Self::ForegroundLost { .. }
+            | Self::UnsupportedKey { .. }
+            | Self::DragDistanceExceedsLimit { .. }
+            | Self::StuckKeyAutoReleased { .. }
+            | Self::SafetyReleaseAllFired { .. }
+            | Self::SafetyOperatorHotkeyFired { .. } => None,
         }
     }
 }

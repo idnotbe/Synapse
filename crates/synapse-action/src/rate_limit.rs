@@ -11,6 +11,7 @@ pub const SOFTWARE_RATE_LIMIT_PER_S: u32 = 5_000;
 pub const VIGEM_RATE_LIMIT_PER_S: u32 = 1_000;
 
 const NANOS_PER_SECOND: u128 = 1_000_000_000;
+const NANOS_PER_MILLISECOND: u128 = 1_000_000;
 
 static PROCESS_START: OnceLock<Instant> = OnceLock::new();
 
@@ -58,6 +59,13 @@ impl TokenBucket {
 
     pub fn refill(&self) {
         self.refill_at_ns(monotonic_now_ns());
+    }
+
+    #[must_use]
+    pub fn retry_after_ms(&self, requested: u32) -> u64 {
+        self.refill();
+        let snapshot = self.snapshot();
+        retry_after_ms_for_snapshot(snapshot, requested)
     }
 
     #[must_use]
@@ -138,6 +146,21 @@ impl TokenBucket {
 }
 
 #[must_use]
+pub fn retry_after_ms_for_snapshot(snapshot: TokenBucketSnapshot, requested: u32) -> u64 {
+    if requested == 0 || snapshot.tokens >= requested {
+        return 0;
+    }
+    if snapshot.refill_rate_per_s == 0 {
+        return u64::MAX;
+    }
+
+    let missing = u128::from(requested - snapshot.tokens);
+    let delay_nanos = (missing * NANOS_PER_SECOND).div_ceil(u128::from(snapshot.refill_rate_per_s));
+    let retry_millis = delay_nanos.div_ceil(NANOS_PER_MILLISECOND);
+    u64::try_from(retry_millis.max(1)).unwrap_or(u64::MAX)
+}
+
+#[must_use]
 pub const fn rate_limit_per_s(backend: ResolvedBackend) -> u32 {
     match backend {
         ResolvedBackend::Software | ResolvedBackend::Hardware => SOFTWARE_RATE_LIMIT_PER_S,
@@ -157,7 +180,10 @@ mod tests {
 
     use tokio::time;
 
-    use super::{SOFTWARE_RATE_LIMIT_PER_S, TokenBucket, VIGEM_RATE_LIMIT_PER_S, rate_limit_per_s};
+    use super::{
+        SOFTWARE_RATE_LIMIT_PER_S, TokenBucket, VIGEM_RATE_LIMIT_PER_S, rate_limit_per_s,
+        retry_after_ms_for_snapshot,
+    };
     use crate::ResolvedBackend;
 
     #[test]
@@ -306,5 +332,20 @@ mod tests {
                 backend.as_str()
             );
         }
+    }
+
+    #[test]
+    fn retry_after_hint_rounds_up_to_one_millisecond() {
+        let bucket =
+            TokenBucket::new_at_ns(SOFTWARE_RATE_LIMIT_PER_S, SOFTWARE_RATE_LIMIT_PER_S, 0);
+        assert!(bucket.try_consume_at_ns(SOFTWARE_RATE_LIMIT_PER_S, 0));
+        let before = bucket.snapshot();
+
+        let after = retry_after_ms_for_snapshot(before, 1);
+
+        assert_eq!(after, 1);
+        println!(
+            "source_of_truth=token_bucket edge=retry_after_hint before={before:?} after_retry_after_ms={after}"
+        );
     }
 }

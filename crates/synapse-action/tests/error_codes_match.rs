@@ -4,6 +4,16 @@ use synapse_core::error_codes;
 const DETAIL: &str = "synthetic detail";
 
 macro_rules! case {
+    ($edge:literal, RateLimited, $code:ident) => {
+        (
+            $edge,
+            ActionError::RateLimited {
+                detail: DETAIL.to_owned(),
+                retry_after_ms: 1,
+            },
+            error_codes::$code,
+        )
+    };
     ($edge:literal, $variant:ident, $code:ident) => {
         (
             $edge,
