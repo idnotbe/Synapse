@@ -8,6 +8,7 @@ use synapse_core::{
 use tokio::{
     sync::{mpsc, oneshot},
     task::JoinHandle,
+    time::{self, Duration, Instant},
 };
 use tokio_util::sync::CancellationToken;
 
@@ -21,10 +22,14 @@ use crate::TokenBucketSnapshot;
 
 pub type ActionSnapshotMessage = oneshot::Sender<ActionStateSnapshot>;
 
+pub const HELD_KEY_MAX_DURATION_MS: u64 = 30_000;
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct ActionStateSnapshot {
     pub held_keys: Vec<Key>,
     pub held_key_bits: Vec<usize>,
+    pub held_key_timer_keys: Vec<Key>,
+    pub held_key_timer_count: usize,
     pub held_buttons: Vec<MouseButton>,
     pub held_button_bits: Vec<usize>,
     pub pad_state: HashMap<PadId, GamepadReport>,
@@ -58,6 +63,8 @@ impl EmitState {
         ActionStateSnapshot {
             held_keys: self.held_keys(),
             held_key_bits: self.held_keys.iter().collect(),
+            held_key_timer_keys: Vec::new(),
+            held_key_timer_count: 0,
             held_buttons: self.held_buttons(),
             held_button_bits: self.held_buttons.iter().collect(),
             pad_state: self.pad_state.clone(),
@@ -99,13 +106,10 @@ impl EmitState {
         }
     }
 
-    pub(crate) fn apply_key_chord(&mut self, keys: &[Key]) {
-        for key in keys {
-            self.hold_key(key);
-        }
-        for key in keys {
-            self.release_key(key);
-        }
+    pub(crate) fn is_key_held(&self, key: &Key) -> bool {
+        self.key_indices
+            .get(key)
+            .is_some_and(|index| self.held_keys.contains(*index))
     }
 
     pub(crate) fn apply_mouse_button(&mut self, button: MouseButton, action: ButtonAction) {
@@ -175,8 +179,19 @@ impl ActionEmitterSnapshotHandle {
 pub struct ActionEmitter {
     rx: mpsc::Receiver<ActionMessage>,
     snapshot_rx: mpsc::Receiver<ActionSnapshotMessage>,
+    auto_release_tx: mpsc::Sender<HeldKeyAutoRelease>,
+    auto_release_rx: mpsc::Receiver<HeldKeyAutoRelease>,
     state: EmitState,
     rate_limits: BackendRateLimits,
+    held_key_timers: HashMap<Key, JoinHandle<()>>,
+    held_key_timer_ids: HashMap<Key, u64>,
+    next_held_key_timer_id: u64,
+}
+
+#[derive(Debug)]
+struct HeldKeyAutoRelease {
+    key: Key,
+    timer_id: u64,
 }
 
 #[cfg(test)]
@@ -240,11 +255,17 @@ impl ActionEmitter {
         rx: mpsc::Receiver<ActionMessage>,
         snapshot_rx: mpsc::Receiver<ActionSnapshotMessage>,
     ) -> Self {
+        let (auto_release_tx, auto_release_rx) = mpsc::channel(ACTION_QUEUE_CAPACITY);
         Self {
             rx,
             snapshot_rx,
+            auto_release_tx,
+            auto_release_rx,
             state: EmitState::new(),
             rate_limits: BackendRateLimits::new(),
+            held_key_timers: HashMap::new(),
+            held_key_timer_ids: HashMap::new(),
+            next_held_key_timer_id: 0,
         }
     }
 
@@ -254,11 +275,17 @@ impl ActionEmitter {
         snapshot_rx: mpsc::Receiver<ActionSnapshotMessage>,
         rate_limits: BackendRateLimits,
     ) -> Self {
+        let (auto_release_tx, auto_release_rx) = mpsc::channel(ACTION_QUEUE_CAPACITY);
         Self {
             rx,
             snapshot_rx,
+            auto_release_tx,
+            auto_release_rx,
             state: EmitState::new(),
             rate_limits,
+            held_key_timers: HashMap::new(),
+            held_key_timer_ids: HashMap::new(),
+            next_held_key_timer_id: 0,
         }
     }
 
@@ -322,6 +349,9 @@ impl ActionEmitter {
                 Some(snapshot_ack) = self.snapshot_rx.recv() => {
                     let _send_result = snapshot_ack.send(self.snapshot());
                 },
+                Some(auto_release) = self.auto_release_rx.recv() => {
+                    self.auto_release_held_key(&auto_release);
+                },
                 () = cancel.cancelled() => {
                     self.release_all().await;
                     return self.snapshot();
@@ -337,12 +367,15 @@ impl ActionEmitter {
     #[must_use]
     #[tracing::instrument(skip_all, fields(action_kind = "snapshot_state"))]
     pub fn snapshot(&self) -> ActionStateSnapshot {
-        self.state.snapshot()
+        let mut snapshot = self.state.snapshot();
+        snapshot.held_key_timer_keys = self.held_key_timer_keys();
+        snapshot.held_key_timer_count = self.held_key_timers.len();
+        snapshot
     }
 
     #[tracing::instrument(skip_all, fields(action_kind = %action_kind(&action)))]
     async fn execute(&mut self, action: Action) -> ActionResult<()> {
-        if !matches!(action, Action::ReleaseAll) {
+        if action_consumes_rate_limit(&action) {
             let backend = resolved_backend_for_action(&action)?;
             self.consume_rate_limit(backend)?;
         }
@@ -350,11 +383,18 @@ impl ActionEmitter {
         match action {
             Action::KeyPress { key, .. } => {
                 self.state.hold_key(&key);
+                self.cancel_held_key_timer(&key);
                 self.state.release_key(&key);
             }
-            Action::KeyDown { key, .. } => self.state.hold_key(&key),
-            Action::KeyUp { key, .. } => self.state.release_key(&key),
-            Action::KeyChord { keys, .. } => self.state.apply_key_chord(&keys),
+            Action::KeyDown { key, .. } => {
+                self.state.hold_key(&key);
+                self.schedule_held_key_auto_release(key);
+            }
+            Action::KeyUp { key, .. } => {
+                self.cancel_held_key_timer(&key);
+                self.state.release_key(&key);
+            }
+            Action::KeyChord { keys, .. } => self.apply_key_chord(&keys),
             Action::TypeText { .. }
             | Action::MouseMove { .. }
             | Action::MouseMoveRelative { .. }
@@ -405,21 +445,106 @@ impl ActionEmitter {
 
     #[tracing::instrument(skip_all, fields(action_kind = "release_all"))]
     async fn release_all(&mut self) {
+        let cancelled_key_timers = self.abort_all_held_key_timers();
         let (released_keys, released_buttons, released_pads) = self.state.release_all();
         tracing::warn!(
             code = error_codes::SAFETY_RELEASE_ALL_FIRED,
             released_keys,
             released_buttons,
             released_pads,
+            cancelled_key_timers,
             "release_all drained action emitter held state"
         );
+    }
+
+    fn schedule_held_key_auto_release(&mut self, key: Key) {
+        self.cancel_held_key_timer(&key);
+
+        let timer_id = self.next_held_key_timer_id;
+        self.next_held_key_timer_id = self.next_held_key_timer_id.wrapping_add(1);
+        let deadline = Instant::now() + Duration::from_millis(HELD_KEY_MAX_DURATION_MS);
+        let tx = self.auto_release_tx.clone();
+        let timer_key = key.clone();
+        let handle = tokio::spawn(async move {
+            time::sleep_until(deadline).await;
+            let _send_result = tx
+                .send(HeldKeyAutoRelease {
+                    key: timer_key,
+                    timer_id,
+                })
+                .await;
+        });
+
+        self.held_key_timer_ids.insert(key.clone(), timer_id);
+        self.held_key_timers.insert(key, handle);
+    }
+
+    fn cancel_held_key_timer(&mut self, key: &Key) -> bool {
+        self.held_key_timer_ids.remove(key);
+        self.held_key_timers.remove(key).is_some_and(|handle| {
+            handle.abort();
+            true
+        })
+    }
+
+    fn abort_all_held_key_timers(&mut self) -> usize {
+        let cancelled = self.held_key_timers.len();
+        for (_key, handle) in self.held_key_timers.drain() {
+            handle.abort();
+        }
+        self.held_key_timer_ids.clear();
+        cancelled
+    }
+
+    fn auto_release_held_key(&mut self, auto_release: &HeldKeyAutoRelease) {
+        if self
+            .held_key_timer_ids
+            .get(&auto_release.key)
+            .is_none_or(|timer_id| *timer_id != auto_release.timer_id)
+        {
+            return;
+        }
+
+        self.held_key_timer_ids.remove(&auto_release.key);
+        self.held_key_timers.remove(&auto_release.key);
+        if !self.state.is_key_held(&auto_release.key) {
+            return;
+        }
+
+        self.state.release_key(&auto_release.key);
+        tracing::warn!(
+            code = error_codes::STUCK_KEY_AUTO_RELEASED,
+            held_ms = HELD_KEY_MAX_DURATION_MS,
+            key = ?auto_release.key,
+            "stuck key auto-released"
+        );
+    }
+
+    fn held_key_timer_keys(&self) -> Vec<Key> {
+        let mut keys: Vec<_> = self.held_key_timers.keys().cloned().collect();
+        keys.sort_by_key(|key| format!("{key:?}"));
+        keys
+    }
+
+    fn apply_key_chord(&mut self, keys: &[Key]) {
+        for key in keys {
+            self.state.hold_key(key);
+        }
+        for key in keys {
+            self.cancel_held_key_timer(key);
+            self.state.release_key(key);
+        }
     }
 
     fn apply_combo(&mut self, steps: Vec<synapse_core::ComboStep>) {
         for step in steps {
             match step.input {
-                ComboInput::KeyDown { key } => self.state.hold_key(&key),
+                ComboInput::KeyDown { key } => {
+                    self.state.hold_key(&key);
+                    self.schedule_held_key_auto_release(key);
+                }
                 ComboInput::KeyUp { key } | ComboInput::KeyPress { key, .. } => {
+                    self.cancel_held_key_timer(&key);
                     self.state.release_key(&key);
                 }
                 ComboInput::MouseButton { button, action } => {
@@ -506,8 +631,18 @@ impl ActionEmitter {
     }
 }
 
+impl Drop for ActionEmitter {
+    fn drop(&mut self) {
+        self.abort_all_held_key_timers();
+    }
+}
+
 fn resolved_backend_for_action(action: &Action) -> ActionResult<ResolvedBackend> {
     resolve_backend(requested_backend(action), action)
+}
+
+const fn action_consumes_rate_limit(action: &Action) -> bool {
+    !matches!(action, Action::ReleaseAll | Action::KeyUp { .. })
 }
 
 const fn requested_backend(action: &Action) -> Backend {
@@ -737,6 +872,219 @@ mod tests {
         );
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn key_down_timer_auto_releases_held_key_and_clears_hashmap() {
+        let (_handle, _snapshot_handle, mut emitter) =
+            ActionEmitter::channel_with_rate_limits(generous_limits());
+        let key = key_named("auto-release-happy");
+        let before = emitter.snapshot();
+
+        let key_down_result = emitter
+            .execute(Action::KeyDown {
+                key: key.clone(),
+                backend: Backend::Software,
+            })
+            .await;
+        assert!(
+            key_down_result.is_ok(),
+            "KeyDown should consume available token: {key_down_result:?}"
+        );
+        let after_key_down = emitter.snapshot();
+
+        tokio::task::yield_now().await;
+        time::advance(Duration::from_millis(HELD_KEY_MAX_DURATION_MS)).await;
+        tokio::task::yield_now().await;
+        let auto_release = read_pending_auto_release(&mut emitter);
+        emitter.auto_release_held_key(&auto_release);
+        let after_auto_release = emitter.snapshot();
+
+        assert!(before.held_keys.is_empty());
+        assert_eq!(after_key_down.held_keys, vec![key.clone()]);
+        assert_eq!(after_key_down.held_key_timer_keys, vec![key]);
+        assert_eq!(after_key_down.held_key_timer_count, 1);
+        assert!(after_auto_release.held_keys.is_empty());
+        assert!(after_auto_release.held_key_timer_keys.is_empty());
+        assert_eq!(after_auto_release.held_key_timer_count, 0);
+        println!(
+            "source_of_truth=held_keys_bitset_and_timer_hashmap edge=happy_auto_release before={before:?} after_key_down={after_key_down:?} after_auto_release={after_auto_release:?} data.code={}",
+            error_codes::STUCK_KEY_AUTO_RELEASED
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn actor_loop_processes_auto_release_timer_message() {
+        let (handle, snapshot_handle, emitter) =
+            ActionEmitter::channel_with_rate_limits(generous_limits());
+        let cancel = CancellationToken::new();
+        let join = tokio::spawn(emitter.run(cancel.clone()));
+        let key = key_named("actor-auto-release");
+        let before = snapshot_or_panic(&snapshot_handle).await;
+
+        let key_down_result = handle
+            .execute(Action::KeyDown {
+                key: key.clone(),
+                backend: Backend::Software,
+            })
+            .await;
+        assert!(
+            key_down_result.is_ok(),
+            "actor KeyDown should be accepted: {key_down_result:?}"
+        );
+        let after_key_down = snapshot_or_panic(&snapshot_handle).await;
+
+        tokio::task::yield_now().await;
+        time::advance(Duration::from_millis(HELD_KEY_MAX_DURATION_MS)).await;
+        tokio::task::yield_now().await;
+        let after_auto_release = snapshot_until_empty(&snapshot_handle).await;
+
+        cancel.cancel();
+        let after_cancel = join_actor_or_panic(join).await;
+
+        assert!(before.held_keys.is_empty());
+        assert_eq!(after_key_down.held_keys, vec![key]);
+        assert_eq!(after_key_down.held_key_timer_count, 1);
+        assert!(after_auto_release.held_keys.is_empty());
+        assert_eq!(after_auto_release.held_key_timer_count, 0);
+        assert!(after_cancel.held_keys.is_empty());
+        assert_eq!(after_cancel.held_key_timer_count, 0);
+        println!(
+            "source_of_truth=actor_snapshot_held_keys_bitset_and_timer_hashmap edge=actor_loop_auto_release before={before:?} after_key_down={after_key_down:?} after_auto_release={after_auto_release:?} after_cancel={after_cancel:?}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn key_up_cancels_timer_before_releasing_even_when_buckets_are_empty() {
+        let (_handle, _snapshot_handle, mut emitter) =
+            ActionEmitter::channel_with_rate_limits(empty_limits());
+        let key = key_named("manual-key-up-cancel");
+        emitter.state.hold_key(&key);
+        emitter.schedule_held_key_auto_release(key.clone());
+        let before = emitter.snapshot();
+        let before_limits = emitter.rate_limits.snapshot();
+
+        let key_up_result = emitter
+            .execute(Action::KeyUp {
+                key: key.clone(),
+                backend: Backend::Software,
+            })
+            .await;
+        assert!(
+            key_up_result.is_ok(),
+            "KeyUp must bypass rate limits to cancel the safety timer: {key_up_result:?}"
+        );
+        let after = emitter.snapshot();
+        let after_limits = emitter.rate_limits.snapshot();
+
+        time::advance(Duration::from_millis(HELD_KEY_MAX_DURATION_MS + 1)).await;
+        tokio::task::yield_now().await;
+        assert_no_pending_auto_release(&mut emitter);
+
+        assert_eq!(before.held_keys, vec![key]);
+        assert_eq!(before.held_key_timer_count, 1);
+        assert!(after.held_keys.is_empty());
+        assert_eq!(after.held_key_timer_count, 0);
+        assert_eq!(before_limits.software.tokens, 0);
+        assert_eq!(after_limits.software.tokens, 0);
+        println!(
+            "source_of_truth=held_keys_bitset_and_timer_hashmap edge=keyup_cancel_empty_bucket before={before:?} before_limits={before_limits:?} after={after:?} after_limits={after_limits:?}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn repeated_key_down_replaces_timer_without_old_timer_release() {
+        let (_handle, _snapshot_handle, mut emitter) =
+            ActionEmitter::channel_with_rate_limits(generous_limits());
+        let key = key_named("repeat-reset");
+        let before = emitter.snapshot();
+
+        let first_result = emitter
+            .execute(Action::KeyDown {
+                key: key.clone(),
+                backend: Backend::Software,
+            })
+            .await;
+        assert!(
+            first_result.is_ok(),
+            "first KeyDown should be accepted: {first_result:?}"
+        );
+        let after_first = emitter.snapshot();
+        let first_timer_id = current_timer_id(&emitter, &key);
+
+        tokio::task::yield_now().await;
+        time::advance(Duration::from_millis(HELD_KEY_MAX_DURATION_MS - 1_000)).await;
+        let second_result = emitter
+            .execute(Action::KeyDown {
+                key: key.clone(),
+                backend: Backend::Software,
+            })
+            .await;
+        assert!(
+            second_result.is_ok(),
+            "second KeyDown should reset the timer: {second_result:?}"
+        );
+        let after_second = emitter.snapshot();
+        let second_timer_id = current_timer_id(&emitter, &key);
+
+        time::advance(Duration::from_secs(2)).await;
+        tokio::task::yield_now().await;
+        let after_old_deadline = emitter.snapshot();
+        assert_no_pending_auto_release(&mut emitter);
+
+        time::advance(Duration::from_millis(HELD_KEY_MAX_DURATION_MS - 2_000)).await;
+        tokio::task::yield_now().await;
+        let auto_release = read_pending_auto_release(&mut emitter);
+        emitter.auto_release_held_key(&auto_release);
+        let after_new_deadline = emitter.snapshot();
+
+        assert_ne!(first_timer_id, second_timer_id);
+        assert_eq!(after_first.held_key_timer_count, 1);
+        assert_eq!(after_second.held_key_timer_count, 1);
+        assert_eq!(after_old_deadline.held_keys, vec![key]);
+        assert_eq!(after_old_deadline.held_key_timer_count, 1);
+        assert!(after_new_deadline.held_keys.is_empty());
+        assert_eq!(after_new_deadline.held_key_timer_count, 0);
+        println!(
+            "source_of_truth=held_keys_bitset_and_timer_hashmap edge=repeated_keydown_reset before={before:?} after_first={after_first:?} first_timer_id={first_timer_id} after_second={after_second:?} second_timer_id={second_timer_id} after_old_deadline={after_old_deadline:?} after_new_deadline={after_new_deadline:?}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn release_all_aborts_held_key_timer_hashmap() {
+        let (_handle, _snapshot_handle, mut emitter) =
+            ActionEmitter::channel_with_rate_limits(generous_limits());
+        let key = key_named("release-all-abort");
+        let key_down_result = emitter
+            .execute(Action::KeyDown {
+                key: key.clone(),
+                backend: Backend::Software,
+            })
+            .await;
+        assert!(
+            key_down_result.is_ok(),
+            "KeyDown should set up the timer: {key_down_result:?}"
+        );
+        let before_release_all = emitter.snapshot();
+
+        let release_result = emitter.execute(Action::ReleaseAll).await;
+        assert!(
+            release_result.is_ok(),
+            "ReleaseAll must abort timers without rate limiting: {release_result:?}"
+        );
+        let after_release_all = emitter.snapshot();
+
+        time::advance(Duration::from_millis(HELD_KEY_MAX_DURATION_MS + 1)).await;
+        tokio::task::yield_now().await;
+        assert_no_pending_auto_release(&mut emitter);
+
+        assert_eq!(before_release_all.held_keys, vec![key]);
+        assert_eq!(before_release_all.held_key_timer_count, 1);
+        assert!(after_release_all.held_keys.is_empty());
+        assert_eq!(after_release_all.held_key_timer_count, 0);
+        println!(
+            "source_of_truth=held_keys_bitset_and_timer_hashmap edge=release_all_abort before={before_release_all:?} after={after_release_all:?}"
+        );
+    }
+
     fn one_token_limits() -> BackendRateLimits {
         BackendRateLimits::with_buckets(
             TokenBucket::new(1, 5_000),
@@ -751,6 +1099,65 @@ mod tests {
             TokenBucket::new(0, 0),
             TokenBucket::new(0, 0),
         )
+    }
+
+    fn generous_limits() -> BackendRateLimits {
+        BackendRateLimits::with_buckets(
+            TokenBucket::new(10, 5_000),
+            TokenBucket::new(10, 1_000),
+            TokenBucket::new(10, 5_000),
+        )
+    }
+
+    fn read_pending_auto_release(emitter: &mut ActionEmitter) -> HeldKeyAutoRelease {
+        match emitter.auto_release_rx.try_recv() {
+            Ok(auto_release) => auto_release,
+            Err(error) => panic!("expected fired auto-release timer message, got {error:?}"),
+        }
+    }
+
+    fn assert_no_pending_auto_release(emitter: &mut ActionEmitter) {
+        match emitter.auto_release_rx.try_recv() {
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {}
+            other => panic!("expected no auto-release timer message, got {other:?}"),
+        }
+    }
+
+    fn current_timer_id(emitter: &ActionEmitter, key: &Key) -> u64 {
+        emitter.held_key_timer_ids.get(key).map_or_else(
+            || panic!("expected held key timer id for {key:?}"),
+            |timer_id| *timer_id,
+        )
+    }
+
+    async fn snapshot_until_empty(
+        snapshot_handle: &ActionEmitterSnapshotHandle,
+    ) -> ActionStateSnapshot {
+        let mut last_snapshot = snapshot_or_panic(snapshot_handle).await;
+        for _attempt in 0..8 {
+            if last_snapshot.held_keys.is_empty() && last_snapshot.held_key_timer_count == 0 {
+                return last_snapshot;
+            }
+            tokio::task::yield_now().await;
+            last_snapshot = snapshot_or_panic(snapshot_handle).await;
+        }
+        panic!("expected actor auto-release to drain held key state, last={last_snapshot:?}");
+    }
+
+    async fn snapshot_or_panic(
+        snapshot_handle: &ActionEmitterSnapshotHandle,
+    ) -> ActionStateSnapshot {
+        match snapshot_handle.snapshot().await {
+            Ok(snapshot) => snapshot,
+            Err(error) => panic!("snapshot should succeed: {error:?}"),
+        }
+    }
+
+    async fn join_actor_or_panic(join: JoinHandle<ActionStateSnapshot>) -> ActionStateSnapshot {
+        match join.await {
+            Ok(snapshot) => snapshot,
+            Err(error) => panic!("actor join should succeed: {error:?}"),
+        }
     }
 
     fn key_named(name: &str) -> Key {
