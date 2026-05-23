@@ -157,7 +157,7 @@ Per `compressionprompt.md` doctrine (universal):
 |---|---|
 | Numbers, paths, error codes verbatim | manual review + grep gate for known dupe forms |
 | Markdown headings + tables + code fences as primary structure | review pattern |
-| Cross-doc references by file path, not restated content | `scripts/check_docs.ps1` resolves all `[text](path.md)` links |
+| Cross-doc references by file path, not restated content | `scripts/check_docs.ps1` resolves all relative Markdown links |
 | Defined terms once at top of each doc, used densely below | review pattern |
 | One instruction per sentence in normative rules | review pattern (ASD-STE100 §4.12) |
 | No emojis unless user-requested | CI grep |

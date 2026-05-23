@@ -17,8 +17,9 @@ async fn synthetic_sigint_results_in_exit_0_and_flushed_log() -> anyhow::Result<
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()?;
+    let _stdin = child.stdin.take().context("child stdin missing")?;
 
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    wait_for_log(dir.path(), "MCP_STDIO_STARTED").await?;
     let pid = child.id().context("child pid missing")?;
     let kill_status = Command::new("kill")
         .args(["-INT", &pid.to_string()])
@@ -34,6 +35,16 @@ async fn synthetic_sigint_results_in_exit_0_and_flushed_log() -> anyhow::Result<
     let logs = read_logs(dir.path())?;
     assert!(logs.contains("MCP_SHUTDOWN_GRACEFUL"));
     Ok(())
+}
+
+async fn wait_for_log(path: &std::path::Path, needle: &str) -> anyhow::Result<()> {
+    for _ in 0..20 {
+        if read_logs(path)?.contains(needle) {
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    anyhow::bail!("timed out waiting for log line {needle}");
 }
 
 fn read_logs(path: &std::path::Path) -> anyhow::Result<String> {

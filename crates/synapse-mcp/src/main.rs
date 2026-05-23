@@ -96,7 +96,7 @@ async fn run_stdio(telemetry_guard: TelemetryGuard) -> anyhow::Result<ExitCode> 
             token.cancel();
             tracing::info!(code = "MCP_SHUTDOWN_GRACEFUL", "shutdown signal received before init");
             drop(telemetry_guard);
-            return Ok(ExitCode::SUCCESS);
+            std::process::exit(0);
         }
     };
     let shutdown = service.cancellation_token();

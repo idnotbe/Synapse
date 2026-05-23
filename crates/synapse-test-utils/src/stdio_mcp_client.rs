@@ -147,6 +147,11 @@ impl StdioMcpClient {
         &self.raw_rx
     }
 
+    #[must_use]
+    pub fn child_id(&self) -> Option<u32> {
+        self.child.as_ref().and_then(Child::id)
+    }
+
     async fn write_message(&mut self, value: &Value) -> anyhow::Result<()> {
         let line = serde_json::to_string(value)?;
         self.raw_tx.push(line.clone());
@@ -174,6 +179,12 @@ impl Drop for StdioMcpClient {
     fn drop(&mut self) {
         if let Some(child) = &mut self.child {
             let _ = child.start_kill();
+            for _ in 0..20 {
+                if matches!(child.try_wait(), Ok(Some(_))) {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(25));
+            }
         }
     }
 }

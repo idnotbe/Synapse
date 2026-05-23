@@ -33,10 +33,10 @@ synapse-core = { version = "0.1.0", path = "../synapse-core" }
 
 [lints]
 workspace = true
-"@ | Set-Content -Path (Join-Path $CrateDir 'Cargo.toml') -NoNewline
+"@ | Set-Content -Path (Join-Path $CrateDir 'Cargo.toml')
 
 $ShortName = $Name -replace '^synapse-', ''
-"// $ShortName - TODO`n" | Set-Content -Path (Join-Path $CrateDir 'src/lib.rs') -NoNewline
+"// $ShortName - TODO" | Set-Content -Path (Join-Path $CrateDir 'src/lib.rs')
 
 $RelativeMember = "    `"crates/$Name`","
 $ManifestLines = Get-Content $Manifest

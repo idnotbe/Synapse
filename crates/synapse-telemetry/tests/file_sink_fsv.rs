@@ -40,10 +40,15 @@ fn synthetic_emit_lands_in_jsonl_file() -> Result<(), Box<dyn std::error::Error>
 }
 
 #[test]
-fn synthetic_unwritable_log_dir_returns_error() {
-    let cfg = TelemetryConfig::default_with_log_dir("/proc/cant_write_here".into());
+fn synthetic_file_path_log_dir_returns_error() -> Result<(), Box<dyn std::error::Error>> {
+    let dir = TempDir::new()?;
+    let file_path = dir.path().join("not-a-directory");
+    std::fs::write(&file_path, b"not a directory")?;
+
+    let cfg = TelemetryConfig::default_with_log_dir(file_path);
     let res = init_tracing(cfg);
     assert!(matches!(res, Err(TelemetryError::LogDirNotWritable(_))));
+    Ok(())
 }
 
 fn read_log_dir(path: &std::path::Path) -> Result<String, Box<dyn std::error::Error>> {
