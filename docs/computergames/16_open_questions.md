@@ -42,15 +42,19 @@ When resolved, replace entry with "→ decided in ADR-NNN". ADRs live in `docs/a
 
 ---
 
-## OQ-004 — Aim curve default for productivity
+## OQ-004 — Aim curve default for productivity — DECIDED 2026-05-22
 
-**Q.** Default productivity profiles to `Instant` or `EaseInOut`?
+**Decision.** **`Natural` (with `AimNaturalParams::FAST` preset) is the default everywhere — productivity profiles, game profiles, all aim styles. `Instant` is never a default; it stays in the enum solely for explicit caller opt-in (e.g., test harnesses requiring pixel-perfect positioning).** No curve defaults to a discontinuous jump.
 
-**Trade-off.** Instant: ~3 ms per click. EaseInOut: natural, visible to operator, less likely to break flow when watched. Some apps respond differently to instant jumps (drag detection thresholds).
+**Rationale.** A single doctrine — smooth + natural + very fast — is simpler than per-profile branching and protects against ToS/anti-bot ambiguity at zero perf cost when params are tuned `FAST` (50 ms total travel for `Snap`). See `03_action.md` §6 (`AimNaturalParams::FAST` preset).
 
-**Default.** `EaseInOut` with 80 ms travel.
+**Consequence.**
 
-**Target.** M5 feedback. Switch productivity profiles to `Instant` if operators report "feels slow."
+- All bundled profiles set `mouse_curve_default = "natural"` and `keyboard_dynamics_default = "natural"`
+- `act_click` default `duration_ms = 50` (was 80); `act_aim` `Snap` 50 ms; `Flick` 35 ms
+- `KeystrokeDynamics::Burst` retained in enum; never a default
+- Per-tool perf targets in `10_performance_budget.md` §12 unchanged — `Natural::FAST` fits within budgets
+- Impplan `docs/impplan/03_m2_action_mvp.md` ships `Natural::FAST` defaults at first introduction (no later flip)
 
 ---
 

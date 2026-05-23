@@ -36,6 +36,8 @@ Notepad open → agent: `reflex_register(on_event, when={kind:"element-appeared"
 
 ### Bundled profiles (`profiles/`)
 
+All profiles set `mouse_curve_default = "natural"` and `keyboard_dynamics_default = "natural"` per OQ-004 DECIDED. No bundled profile selects `Instant` or `Burst` as a default.
+
 | Profile | Mode | Highlights |
 |---|---|---|
 | `notepad.toml` | `a11y_only` | smoke-test app, no HUD, no detection |
@@ -114,7 +116,7 @@ AUDIO_STT_MODEL_NOT_LOADED
 |---|---|---|
 | 13 | `feat(profiles): TOML loader → Profile struct + version compat check` | every bundled profile parses; PROFILE_VERSION_INCOMPATIBLE on major mismatch |
 | 14 | `feat(profiles): notify watcher hot-reload + match resolver` | edit `profiles/vscode.toml` → in-memory profile replaced on next event tick |
-| 15 | `feat(profiles): bundled notepad / vscode / chrome / terminal` | E2E: launch each, `profile_list` shows active match correct |
+| 15 | `feat(profiles): bundled notepad / vscode / chrome / terminal w/ Natural defaults` | E2E: launch each, `profile_list` shows active match correct; profile validation asserts `mouse_curve_default == "natural"` + `keyboard_dynamics_default == "natural"` on every bundled profile |
 
 ### Block D — audio (work-items 16-18)
 

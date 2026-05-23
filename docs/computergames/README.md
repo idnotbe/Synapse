@@ -244,10 +244,10 @@ See `15_roadmap_and_milestones.md`.
 - Files ≤ 500 lines, functions ≤ 30 lines, cyclomatic ≤ 10.
 - `#![forbid(unsafe_code)]` everywhere except `synapse-capture` (DirectX FFI) and `synapse-hid-host` (serial / OS handle).
 - All errors carry `SCREAMING_SNAKE_CASE` codes via `thiserror`. No `anyhow` in library crates.
-- Public APIs and CF names are `pub const`s — no magic strings.
+- Public APIs and CF names are `pub const` — no magic strings.
 - `tracing` for everything. `println!` is a code-review rejection.
-- No silent successes. If a tool didn't do the work, return an error code.
-- No mocks in tests that gate completion. Real captures, real input, real RocksDB.
+- No silent successes. Tool that didn't do the work returns an error code.
+- No mocks in tests that gate completion. Real captures, input, RocksDB.
 - Pre-production: schema changes = wipe-and-rebuild, no migration shims.
 
 ---

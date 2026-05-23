@@ -98,6 +98,7 @@ Per `07 §8.2` (full example included there). Key fields:
 - `[keymap]` `attack=lmb`, `place=rmb`, `inventory=e`, `forward=w`, etc.
 - `[[event_extensions]]` `creeper_nearby` (filter: kind=entity-appeared AND class=creeper AND bbox.w>80 ⇒ emit `creeper-imminent`)
 - `tier = "tier0_no_ac"`
+- `mouse_curve_default = "natural"` + `keyboard_dynamics_default = "natural"` per OQ-004 DECIDED. Aim style `Snap` (50 ms) for menu clicks; combat aim uses reflex `aim_track` w/ Natural per-tick deltas (gain tuned, EMA smoothing α=0.7 per OQ-013); no `Instant` curves in any keymap or HUD action
 
 ### HUD asset bundle (`profiles/assets/minecraft.java/`)
 

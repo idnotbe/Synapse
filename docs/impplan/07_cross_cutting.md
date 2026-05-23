@@ -221,7 +221,40 @@ PR cannot merge without "every PR" jobs green. Nightly/weekly failures block the
 
 ---
 
-## 12. The single-line invariant
+## 12. Natural-only motion invariant (OQ-004 DECIDED 2026-05-22)
+
+> Smooth + natural + very fast. `Natural` curves and `Natural` keystroke dynamics are the default everywhere. No `Instant` jumps, no `Burst` typing as defaults — anywhere.
+
+Authority: `03_action.md` §6 (`AimNaturalParams::FAST` preset) + §7 (`KeystrokeDynamics::Natural::FAST` preset). Resolution: `16_open_questions.md` OQ-004.
+
+Per-PR enforcement:
+
+```
+✓ No new bundled profile sets mouse_curve_default ≠ "natural" without ADR
+✓ No new bundled profile sets keyboard_dynamics_default ≠ "natural" without ADR
+✓ No MCP tool schema default field selects "instant" or "burst" for curve/dynamics
+✓ Default-resolution test in synapse-action covers every Action variant — asserts default curve = Natural::FAST, default dynamics = Natural::FAST
+✓ Aim-style compilation: Snap→50ms Natural, Flick→35ms Natural, Natural→100-200ms Natural, Track→reflex per-tick (no curve flag accepts Instant as the resolved default)
+```
+
+`Instant` and `Burst` remain in their respective enums — usable via explicit caller opt-in (e.g., test harness pixel-asserts, paste of machine tokens). They are never the resolved default of any tool, profile, or reflex parameter.
+
+Travel-time targets (default-resolution paths):
+
+| Path | Default ms | Comes from |
+|---|---|---|
+| `act_click` cursor travel | 50 | `Natural::FAST` Snap |
+| `act_aim style="snap"` | 50 | same |
+| `act_aim style="flick"` | 35 | `Natural::FAST` Flick |
+| `act_aim style="natural"` (explicit slower mode) | 100-200 | longer travel preset |
+| `act_type` per char | ~32 ± 10 (bigram-biased ↓25%) | `Natural::FAST` |
+| `act_press` single-key hold | 33 | unchanged (no curve involved) |
+| Combo step intra-step | scheduled per `at_ms` | reflex scheduler; no curve |
+| Reflex `aim_track` per-tick | 1 ms tick, ≤ 5 px/tick clamp | `Natural`-style sub-pixel tremor optional |
+
+---
+
+## 13. The single-line invariant
 
 > The model is the brain. Synapse is the body. (`00_vision_and_scope.md` §12)
 

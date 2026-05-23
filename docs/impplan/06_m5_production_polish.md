@@ -84,6 +84,8 @@ Synapse-mcp adds system tray (`--no-tray` opt-out):
 
 ### Additional bundled profiles (5+)
 
+All new profiles set `mouse_curve_default = "natural"` + `keyboard_dynamics_default = "natural"` per OQ-004 DECIDED. Profile-validation smoke test asserts every bundled `.toml` carries Natural defaults (no `Instant`/`Burst` defaults shipped).
+
 | Profile | Tier | Notes |
 |---|---|---|
 | `factorio.toml` | tier0 | mod-friendly, no AC |
@@ -219,6 +221,7 @@ STORAGE_DISK_PRESSURE_LEVEL_4
 ✓ MSI installs + uninstalls cleanly on fresh Win11 VM
 ✓ MSI signed; signtool verify /pa passes
 ✓ At least 10 bundled profiles parse + smoke-test pass
+✓ All bundled profiles + all default tool params resolve to `Natural` curves + `Natural` keystroke dynamics (OQ-004 DECIDED); no `Instant`/`Burst` defaults shipped — verified via schema-defaults snapshot + profile-validation test
 ✓ Grafana dashboards import cleanly + render
 ✓ describe VLM downloads + runs on first call
 ✓ Token cost: M5 demo ≤ 30 K tokens (15 §7 demo criterion)

@@ -4,6 +4,8 @@ Operational map from PRD (`docs/computergames/`) → code. Each phase is a binar
 
 Doctrine: `docs2/compressionprompt.md` §0-13. Keep verbatim: paths, crate names, error codes, thresholds, deps. Cut meta-framing, restatement, motivation prose — PRD already says it.
 
+**Global design invariant (OQ-004 DECIDED 2026-05-22): `Natural` curves + `Natural` keystroke dynamics are the default everywhere, tuned `FAST` (50 ms `Snap` travel, ~190 WPM typing). No `Instant` jumps, no `Burst` typing as defaults. See `07_cross_cutting.md` §12.**
+
 ---
 
 ## Phase index

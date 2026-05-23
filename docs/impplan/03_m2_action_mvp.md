@@ -6,6 +6,8 @@ PRD: `15_roadmap_and_milestones.md` §4. Subsystem detail: `03_action.md`. Schem
 
 `synapse-action` emits keyboard, mouse, gamepad through one serialization actor. Software backend + ViGEm. Aim curves + keystroke dynamics. `ReleaseAll` safety net live.
 
+**Defaults (per OQ-004 DECIDED 2026-05-22):** `Natural` mouse curve + `Natural` keystroke dynamics everywhere, tuned `FAST`. No `Instant` jumps, no `Burst` typing as defaults. See `03_action.md` §6 + §7 for `AimNaturalParams::FAST` + `KeystrokeDynamics::Natural::FAST` presets.
+
 ## Demo gate
 
 Notepad open → agent: `act_click(element_id=<editor>)` → `act_type(text="Hello world.\nThis is Synapse.")` → `act_press(keys=["ctrl","s"])` → `observe()` returns the "Save As" dialog. ≤ 8 tool calls end-to-end.
@@ -26,7 +28,7 @@ Notepad open → agent: `act_click(element_id=<editor>)` → `act_type(text="Hel
 
 | Crate | M2 contents |
 |---|---|
-| `synapse-action` | `ActionEmitter` mpsc actor; `SoftwareBackend` via `enigo` + direct `windows-rs` for batched `SendInput`; `VigemBackend` via `vigem-client`; held-key/button BitSet tracking; per-action timeout 30 s; aim curves `Instant`/`Linear`/`EaseInOut`/`Bezier`/`Natural`; keystroke dynamics `Burst`/`Linear`/`Natural`; UIA `InvokePattern` semantic click |
+| `synapse-action` | `ActionEmitter` mpsc actor; `SoftwareBackend` via `enigo` + direct `windows-rs` for batched `SendInput`; `VigemBackend` via `vigem-client`; held-key/button BitSet tracking; per-action timeout 30 s; aim curves `Instant`/`Linear`/`EaseInOut`/`Bezier`/`Natural` — **default `Natural` w/ `AimNaturalParams::FAST` preset**; keystroke dynamics `Burst`/`Linear`/`Natural` — **default `Natural` w/ `FAST` preset**; UIA `InvokePattern` semantic click (no cursor motion when Invoke available — agent still benefits from natural cursor when motion is needed); `Instant` curve only via explicit caller opt-in |
 | `synapse-core` (extensions) | `Action` enum (all variants from `06 §4`); `AimCurve`, `AimNaturalParams`, `AimStyle`, `KeystrokeDynamics`, `MouseButton`, `ButtonAction`, `Key`, `KeyCode`, `PadId`, `PadButton`, `Stick`, `Trigger`, `GamepadReport`, `ComboStep`, `ComboInput`, `MouseTarget`, `AimTarget` |
 | `synapse-mcp` (add tools) | `act_click`, `act_type`, `act_press`, `act_aim`, `act_drag`, `act_scroll`, `act_pad`, `act_clipboard`, `release_all` per `05 §3.11-3.19, §3.26` |
 
@@ -64,15 +66,15 @@ SAFETY_RELEASE_ALL_FIRED
 | 1 | `feat(core): Action enum + all sub-types from 06 §4` | round-trip serde JSON + bincode; insta snapshot of every variant |
 | 2 | `feat(action): ActionEmitter mpsc actor + held-state tracking` | proptest: random Action stream + final ReleaseAll ⇒ empty `held_keys`/`held_buttons` (13 §5) |
 | 3 | `feat(action): SoftwareBackend via enigo + windows-rs SendInput batches` | bench `action_software_press` ≤ 1 ms p99 (13 §7 / 10 §2) |
-| 4 | `feat(action): aim curves Instant / Linear / EaseInOut / Bezier / Natural` | proptest: curve step sequence start[0]=start, end[N-1]=end, total_ms within tolerance; bench `aim_curve_step_calc_natural` ≤ 1 µs/step |
-| 5 | `feat(action): keystroke dynamics Burst / Linear / Natural` | proptest: chars round-trip via RecordingBackend; modifier-state consistent |
+| 4 | `feat(action): aim curves Instant / Linear / EaseInOut / Bezier / Natural + AimNaturalParams::FAST default preset` | proptest: curve step sequence start[0]=start, end[N-1]=end, total_ms within tolerance; bench `aim_curve_step_calc_natural` ≤ 1 µs/step; default-resolution test: any tool call without explicit `curve` resolves to `Natural` w/ `FAST` params |
+| 5 | `feat(action): keystroke dynamics Burst / Linear / Natural + Natural::FAST default preset (mean_iki_ms=32, stddev=10, bigram_bias=true)` | proptest: chars round-trip via RecordingBackend; modifier-state consistent; default-resolution test: `act_type` w/o explicit `dynamics` resolves to `Natural::FAST` |
 | 6 | `feat(action): UIA InvokePattern path when element_id+Invoke supported` | semantic click on Notepad menu item ≤ 25 ms p99 (10 §2) |
 | 7 | `feat(action): VigemBackend (X360 + DS4) via vigem-client` | pad plug-in lazy on first call; `wait_for_ready`; gamepad report applied; bench send 1000 reports/s without drop |
 | 8 | `feat(action): rate limiter per backend` | overshooting cap surfaces `ACTION_RATE_LIMITED` + re-queue with backoff |
 | 9 | `feat(action): held-key auto-release timeout + STUCK_KEY_AUTO_RELEASED event` | KeyDown without paired KeyUp within 30s emits auto-release + event |
 | 10 | `feat(action): ReleaseAll on shutdown + SIGINT + panic hook` | integration: hold keys, kill daemon, assert all keys released via RecordingBackend or external HID monitor |
 | 11 | `feat(action): MouseDrag, MouseScroll, double/triple-click via GetDoubleClickTime` | drag = down + curve + up; scroll uses `MOUSEEVENTF_WHEEL`/`HWHEEL`; double/triple uses OS double-click time |
-| 12 | `feat(mcp): act_click, act_type, act_press, act_aim, act_drag, act_scroll, act_pad, act_clipboard, release_all` | schemas match `05 §3.11-3.19, §3.26`; `additionalProperties: false` |
+| 12 | `feat(mcp): act_click, act_type, act_press, act_aim, act_drag, act_scroll, act_pad, act_clipboard, release_all w/ Natural-by-default schema defaults` | schemas match `05 §3.11-3.19, §3.26`; `additionalProperties: false`; `act_click.curve` default `"natural"`, `act_click.duration_ms` default `50`; `act_aim.style` default `"snap"` (compiles to Natural 50ms); `act_type.dynamics` default `"natural"`; insta snapshot verifies defaults |
 | 13 | `test(e2e): notepad_type_save` | `13 §8` scenario: open Notepad, type, save, verify file content |
 | 14 | `bench: action latencies per backend per kind` | `criterion` set committed; weekly regression CI active |
 
@@ -84,7 +86,9 @@ SAFETY_RELEASE_ALL_FIRED
 ✓ Notepad type-save demo passes via stdio MCP
 ✓ act_press p99 ≤ 3 ms software (10 §12)
 ✓ act_click(element_id) semantic invoke p99 ≤ 25 ms (10 §12)
-✓ act_click(x,y) EaseInOut 80ms p99 ≤ 60 ms (10 §12)
+✓ act_click(x,y) Natural::FAST 50ms p99 ≤ 60 ms (10 §12)
+✓ act_type("Hello world.") Natural::FAST ≤ 400 ms total wall (12 chars × ~32 ms ± stddev)
+✓ Default-resolution test: no Action variant defaults to `Instant` or `Burst` — verified via reflection-style test over the Action enum + tool schemas
 ✓ ReleaseAll fires within 10 ms on Ctrl+C / SIGINT / panic
 ✓ proptest no_stuck_keys passes 1000+ cases
 ✓ No mocks gate completion — real SendInput on real Notepad in E2E
@@ -99,7 +103,8 @@ SAFETY_RELEASE_ALL_FIRED
 | Risk | Mitigation |
 |---|---|
 | ViGEm install friction | Setup wizard offers `winget install Nefarius.ViGEmBus`; runtime detects, surfaces `ACTION_VIGEM_NOT_INSTALLED`; ViGEm-backed features skip silently w/ warn log if absent |
-| `Natural` curve feel iteration | Default `EaseInOut` for productivity profiles; `Natural` parameters tuned at M5 with real gameplay data |
+| `Natural` curve feel iteration | `AimNaturalParams::FAST` preset ships at M2 (50ms travel, sub-pixel tremor, 25% overshoot, 1-step micro-correct) — tuned against published human-aim datasets, refined at M5 from real telemetry without changing the default-class |
+| Caller expects `Instant` semantics (e.g., test harness asserts pixel-perfect endpoint) | Curve `Instant` retained in enum; explicit opt-in via `curve: "instant"` per call; default-resolution path never picks it |
 | `enigo` limitations on raw scan codes | Profile flag `keyboard.use_scancodes` for games that read raw input; direct `windows-rs` `SendInput` w/ `KEYEVENTF_SCANCODE` |
 | Unicode typing into games that ignore `KEYEVENTF_UNICODE` | per-game profile flag falls back to per-char scancode |
 | `held_key_max_duration_ms` collisions with reflex `hold_move` (M3) | M3 raises cap or registers reflex-owned holds; M2 alone enforces 30 s |
