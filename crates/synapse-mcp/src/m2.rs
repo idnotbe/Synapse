@@ -123,10 +123,11 @@ impl M2State {
         let recording =
             recording_backend_enabled(recording_backend).then(|| Arc::new(RecordingBackend::new()));
         let build_emitter = || {
-            actor_backend.as_ref().map_or_else(
-                ActionEmitter::channel,
-                |backend| ActionEmitter::channel_with_backend(Arc::clone(backend)),
-            )
+            actor_backend
+                .as_ref()
+                .map_or_else(ActionEmitter::channel, |backend| {
+                    ActionEmitter::channel_with_backend(Arc::clone(backend))
+                })
         };
         if tokio::runtime::Handle::try_current().is_ok() {
             let (emitter_handle, snapshot_handle, emitter) = build_emitter();

@@ -741,7 +741,6 @@ impl ActionEmitter {
         keys.sort_by_key(|key| format!("{key:?}"));
         keys
     }
-
 }
 
 impl Drop for ActionEmitter {

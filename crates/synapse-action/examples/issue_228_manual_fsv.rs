@@ -38,9 +38,7 @@ fn divider(label: &str) {
 
 #[tokio::main]
 async fn main() {
-    println!(
-        "ISSUE 228 MANUAL FSV — actor must dispatch to backend, RecordingBackend is the SoT"
-    );
+    println!("ISSUE 228 MANUAL FSV — actor must dispatch to backend, RecordingBackend is the SoT");
 
     let recording: Arc<RecordingBackend> = Arc::new(RecordingBackend::new());
     let backend: Arc<dyn ActionBackend> = recording.clone();
@@ -54,7 +52,10 @@ async fn main() {
         .await
         .expect("starting snapshot succeeds");
     println!("SoT=actor_snapshot before_any_action: {start_state:?}");
-    println!("SoT=recording_events before_any_action: {:?}", recording.events());
+    println!(
+        "SoT=recording_events before_any_action: {:?}",
+        recording.events()
+    );
     assert!(start_state.held_keys.is_empty());
     assert!(recording.events().is_empty());
 
@@ -117,7 +118,10 @@ async fn happy_path_key_press(
         ],
         "actor must have dispatched the KeyPress to the backend"
     );
-    assert!(after_state.held_keys.is_empty(), "KeyPress nets to no held key");
+    assert!(
+        after_state.held_keys.is_empty(),
+        "KeyPress nets to no held key"
+    );
 }
 
 async fn happy_path_key_down_holds_then_release(
@@ -310,7 +314,10 @@ async fn happy_path_pad_path(
     let new_events = &recording.events()[before..].to_vec();
     let after_state = snapshot_handle.snapshot().await.expect("snapshot");
     println!("SoT=after recording_new_events={new_events:?}");
-    println!("SoT=after actor_snapshot.pad_state={:?}", after_state.pad_state);
+    println!(
+        "SoT=after actor_snapshot.pad_state={:?}",
+        after_state.pad_state
+    );
     assert_eq!(new_events.len(), 4, "expected 4 pad recording events");
     assert!(after_state.pad_state.contains_key(&1), "pad state present");
 }
@@ -349,8 +356,14 @@ async fn happy_path_combo_path(
     let new_events = &recording.events()[before..].to_vec();
     let after_state = snapshot_handle.snapshot().await.expect("snapshot");
     println!("SoT=after recording_new_events={new_events:?}");
-    println!("SoT=after actor_snapshot.held_keys={:?}", after_state.held_keys);
-    assert!(after_state.held_keys.is_empty(), "Combo nets to clean state");
+    println!(
+        "SoT=after actor_snapshot.held_keys={:?}",
+        after_state.held_keys
+    );
+    assert!(
+        after_state.held_keys.is_empty(),
+        "Combo nets to clean state"
+    );
     assert_eq!(after_state.held_key_timer_count, 0, "no leaked timers");
 }
 
@@ -418,7 +431,10 @@ async fn happy_path_release_all_drains_state(
         drained_events.last(),
         Some(RecordedInput::ReleaseAll { .. })
     );
-    assert!(recorded, "ReleaseAll must produce RecordedInput::ReleaseAll");
+    assert!(
+        recorded,
+        "ReleaseAll must produce RecordedInput::ReleaseAll"
+    );
 }
 
 async fn edge_empty_release_all_is_noop(
@@ -468,7 +484,9 @@ async fn edge_press_with_hold_runs_blocking(
     // spawn_blocking dispatch should keep elapsed time roughly aligned with
     // hold_ms (we tolerate some slack for scheduling).
     assert!(
-        new_events.iter().any(|e| matches!(e, RecordedInput::DelayMs { ms } if *ms == 25)),
+        new_events
+            .iter()
+            .any(|e| matches!(e, RecordedInput::DelayMs { ms } if *ms == 25)),
         "RecordingBackend must observe the 25ms hold"
     );
     assert!(after.held_keys.is_empty());
