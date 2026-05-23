@@ -35,6 +35,10 @@ name = "action_curve_step_calc_natural"
 harness = false
 
 [[bench]]
+name = "action_software_press"
+harness = false
+
+[[bench]]
 name = "action_recording_round_trip"
 harness = false
 
