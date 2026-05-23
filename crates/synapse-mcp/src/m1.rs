@@ -368,7 +368,11 @@ pub fn set_perception_mode_in_state(
 
 pub fn mcp_error(code: &'static str, message: impl Into<String>) -> ErrorData {
     let message = message.into();
-    ErrorData::internal_error(message, Some(json!({ "code": code })))
+    ErrorData::new(
+        rmcp::model::ErrorCode(-32099),
+        message,
+        Some(json!({ "code": code })),
+    )
 }
 
 fn capture_target_from_param(param: CaptureTargetParam) -> Result<CaptureTarget, ErrorData> {

@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use anyhow::Context;
 use serde_json::Value;
-use synapse_core::Health;
+use synapse_core::{Health, error_codes};
 use synapse_test_utils::stdio_mcp_client::StdioMcpClient;
 use tempfile::TempDir;
 
@@ -37,11 +37,7 @@ async fn synthetic_health_call_returns_expected_shape() -> anyhow::Result<()> {
         .err()
         .context("unknown tool unexpectedly succeeded")?;
     let error_text = err.to_string();
-    assert!(
-        error_text.contains("Tool not found")
-            || error_text.contains("not found")
-            || error_text.contains("TOOL_NOT_FOUND")
-    );
+    assert!(error_text.contains(error_codes::TOOL_NOT_FOUND));
 
     let status = client.shutdown().await?;
     assert!(status.success());
@@ -79,6 +75,18 @@ fn read_logs(path: &std::path::Path) -> anyhow::Result<String> {
         }
     }
     Ok(logs)
+}
+
+#[tokio::test]
+async fn unknown_tool_returns_stable_error_code() -> anyhow::Result<()> {
+    let mut client = StdioMcpClient::launch_and_init().await?;
+    let err = client
+        .tools_call_error("healt_typo", serde_json::json!({}))
+        .await?;
+    assert_eq!(err["code"], -32099);
+    assert_eq!(err["data"]["code"], error_codes::TOOL_NOT_FOUND);
+    assert!(client.shutdown().await?.success());
+    Ok(())
 }
 
 #[test]

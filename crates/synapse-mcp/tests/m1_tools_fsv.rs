@@ -163,6 +163,20 @@ async fn capture_target_and_perception_mode_fsv() -> anyhow::Result<()> {
         error_code(&invalid_mode),
         Some(error_codes::PERCEPTION_MODE_INVALID)
     );
+
+    println!("source_of_truth=mcp_perception_mode edge=invalid_params before=extra:junk");
+    let invalid_params = client
+        .tools_call_error(
+            "set_perception_mode",
+            json!({"mode": "hybrid", "junk": "x"}),
+        )
+        .await?;
+    println!("source_of_truth=mcp_perception_mode edge=invalid_params after={invalid_params}");
+    assert_eq!(invalid_params["code"], -32099);
+    assert_eq!(
+        error_code(&invalid_params),
+        Some(error_codes::TOOL_PARAMS_INVALID)
+    );
     assert!(client.shutdown().await?.success());
     Ok(())
 }
