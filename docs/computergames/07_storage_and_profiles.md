@@ -81,7 +81,7 @@ soft_cap_mb = 50
 hard_cap_mb = 100
 ```
 
-Defaults are research-friendly. Lower for small disks; raise for forensic debugging. `pub const`s for CF names live in `synapse-core::cf`; a test asserts match with on-disk strings — drift fails CI.
+Defaults are research-friendly. Lower for small disks; raise for forensic debugging. `pub const`s for CF names live in `synapse-storage::cf`; a test asserts match with on-disk strings — drift fails the local docs gate.
 
 ### 4.1 Key encoding rules
 

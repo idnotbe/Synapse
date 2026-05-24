@@ -1,0 +1,22 @@
+/// Replay event log.
+pub const CF_EVENTS: &str = "CF_EVENTS";
+/// Observation snapshots retained for replay and debugging.
+pub const CF_OBSERVATIONS: &str = "CF_OBSERVATIONS";
+/// Cached profile loads; on-disk TOML remains the source of truth.
+pub const CF_PROFILES: &str = "CF_PROFILES";
+/// Downloaded ONNX model cache.
+pub const CF_MODEL_CACHE: &str = "CF_MODEL_CACHE";
+/// MCP session continuity records.
+pub const CF_SESSIONS: &str = "CF_SESSIONS";
+/// Per-reflex audit trail.
+pub const CF_REFLEX_AUDIT: &str = "CF_REFLEX_AUDIT";
+/// OCR memoization cache for stable regions.
+pub const CF_OCR_CACHE: &str = "CF_OCR_CACHE";
+/// Local metric ring buffer.
+pub const CF_TELEMETRY: &str = "CF_TELEMETRY";
+/// Emitted action log.
+pub const CF_ACTION_LOG: &str = "CF_ACTION_LOG";
+/// Process start/exit history.
+pub const CF_PROCESS_HISTORY: &str = "CF_PROCESS_HISTORY";
+/// Generic bounded key-value extension.
+pub const CF_KV: &str = "CF_KV";
