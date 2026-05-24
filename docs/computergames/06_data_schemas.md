@@ -568,46 +568,97 @@ Profile keymap aliases extend this set per-app (e.g., Minecraft profile maps `at
 ```rust
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ReflexRegistration {
+    pub id: ReflexId,
     pub kind: ReflexKind,
-    pub params: serde_json::Value,    // per-kind schema
     pub priority: u32,
     pub lifetime: ReflexLifetime,
     pub exclusive: bool,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ReflexKind {
+    AimTrack {
+        target: AimTarget,
+        axis: ReflexAimAxis,
+        gain: f32,
+        deadzone_px: f32,
+        max_speed_px_per_ms: f32,
+        curve_per_step: AimCurve,
+        backend: Backend,
+    },
+    HoldMove {
+        keys: Vec<Key>,
+        backend: Backend,
+        re_assert: bool,
+    },
+    HoldButton {
+        button: ReflexButtonTarget,
+        backend: Backend,
+    },
+    Combo {
+        steps: Vec<ComboStep>,
+        backend: Backend,
+    },
+    OnEvent {
+        when: EventFilter,
+        then: ReflexThen,
+        debounce_ms: u32,
+    },
+}
+
 #[derive(Copy, Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ReflexKind { AimTrack, HoldMove, HoldButton, Combo, OnEvent }
+pub enum ReflexAimAxis { Xy, XOnly, YOnly }
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ReflexButtonTarget {
+    Mouse { button: MouseButton },
+    Pad { pad: PadId, button: PadButton },
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ReflexThen {
+    Action { action: Action },
+    Actions { actions: Vec<Action> },
+    Combo { steps: Vec<ComboStep>, backend: Backend },
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ReflexLifetime {
-    OneShot,
     UntilCancelled,
-    UntilEvent { filter: EventFilter },
+    OneShot,
     Duration { ms: u32 },
+    UntilEvent { filter: EventFilter },
+    UntilDeadline { ms: u32 },
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct ReflexState {
-    pub reflex_id: ReflexId,
-    pub kind: ReflexKind,
-    pub registered_at: chrono::DateTime<chrono::Utc>,
-    pub priority: u32,
-    pub fired_count: u64,
-    pub last_fired_at: Option<chrono::DateTime<chrono::Utc>>,
-    pub status: ReflexStatus,
-    pub params: serde_json::Value,
-    pub lifetime: ReflexLifetime,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Copy, Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ReflexStatus {
+pub enum ReflexState {
     Active,
+    Paused,
+    Cancelled,
+    Expired,
+    Disabled,
     Starved,
-    AwaitingCondition,
-    Terminated { reason: String, at: chrono::DateTime<chrono::Utc> },
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ReflexStatus {
+    pub id: ReflexId,
+    pub kind_summary: String,
+    pub state: ReflexState,
+    pub registered_at: chrono::DateTime<chrono::Utc>,
+    pub last_fired_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub fire_count: u64,
+    pub priority: u32,
+    pub lifetime: ReflexLifetime,
+    pub exclusive: bool,
+    pub last_error_code: Option<String>,
 }
 ```
 
