@@ -21,9 +21,9 @@ const PRESS_KEY_NAME: &str = "shift";
 const RECORDING_ITERATIONS: usize = 2_000;
 #[cfg(windows)]
 const WINDOWS_ITERATIONS: usize = 200;
-const WINDOWS_TARGET_P99_NS: u128 = 3_000_000;
+const WINDOWS_TARGET_P99_NS: u64 = 3_000_000;
 #[cfg(windows)]
-const WINDOWS_KEY_STATE_TIMEOUT: Duration = Duration::from_nanos(WINDOWS_TARGET_P99_NS as u64);
+const WINDOWS_KEY_STATE_TIMEOUT: Duration = Duration::from_nanos(WINDOWS_TARGET_P99_NS);
 #[cfg(windows)]
 const PRESS_KEY_LABEL: &str = "Shift";
 #[cfg(windows)]
@@ -59,7 +59,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 .p99_keydown_ns
                 .ok_or("windows target report missing p99")?;
             assert!(
-                p99 <= WINDOWS_TARGET_P99_NS,
+                p99 <= u128::from(WINDOWS_TARGET_P99_NS),
                 "action_software_press windows p99 {p99} ns exceeded {WINDOWS_TARGET_P99_NS} ns"
             );
         }
@@ -258,7 +258,7 @@ fn measure_windows_sendinput() -> Result<BenchReport, Box<dyn Error>> {
             && observed_down_count == WINDOWS_ITERATIONS
             && after_up_down_count == 0
             && actor_empty_count == WINDOWS_ITERATIONS
-            && p99 <= WINDOWS_TARGET_P99_NS,
+            && p99 <= u128::from(WINDOWS_TARGET_P99_NS),
         enforces_windows_target: true,
     })
 }
@@ -310,13 +310,12 @@ impl PressHarness {
     }
 
     fn press_once(&self, key: &Key) -> Result<PressReadback, Box<dyn Error>> {
-        let before_event_count = self.recording_events().len();
+        let before_event_count = self.recording_event_count();
         let started = Instant::now();
         self.execute(key_down_action(key))?;
         let keydown_ns = started.elapsed().as_nanos();
         self.execute(key_up_action(key))?;
-        let events = self.recording_events();
-        let new_events = events.get(before_event_count..).unwrap_or(&[]);
+        let new_events = self.recording_events_since(before_event_count);
         let snapshot = self.snapshot()?;
 
         Ok(PressReadback {
@@ -360,10 +359,16 @@ impl PressHarness {
         self.runtime.block_on(self.snapshot_handle.snapshot())
     }
 
-    fn recording_events(&self) -> Vec<RecordedInput> {
+    fn recording_event_count(&self) -> usize {
         self.recording
             .as_ref()
-            .map_or_else(Vec::new, |recording| recording.events())
+            .map_or(0, |recording| recording.event_count())
+    }
+
+    fn recording_events_since(&self, event_count: usize) -> Vec<RecordedInput> {
+        self.recording
+            .as_ref()
+            .map_or_else(Vec::new, |recording| recording.events_since(event_count))
     }
 
     fn shutdown(self) -> Result<ActionStateSnapshot, Box<dyn Error>> {
@@ -417,7 +422,7 @@ impl BenchReport {
             display_opt(self.p99_keydown_ns),
             display_opt(self.max_keydown_ns),
             if self.enforces_windows_target {
-                WINDOWS_TARGET_P99_NS.to_string()
+                u128::from(WINDOWS_TARGET_P99_NS).to_string()
             } else {
                 "not_enforced_for_this_mode".to_owned()
             },

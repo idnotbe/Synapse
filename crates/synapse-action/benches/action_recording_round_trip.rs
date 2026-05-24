@@ -1,13 +1,14 @@
 use std::{
     error::Error,
     hint::black_box,
+    sync::Arc,
     time::{Duration, Instant},
 };
 
 use criterion::Criterion;
 use synapse_action::{
     ActionBackend, ActionEmitter, ActionEmitterSnapshotHandle, ActionHandle, ActionStateSnapshot,
-    EmitState, RecordedInput, RecordingBackend,
+    RecordedInput, RecordingBackend,
 };
 use synapse_core::{
     Action, Backend, ButtonAction, GamepadReport, Key, KeyCode, KeystrokeDynamics, MouseButton,
@@ -135,6 +136,7 @@ struct RoundTripHarness {
     handle: ActionHandle,
     snapshot_handle: ActionEmitterSnapshotHandle,
     join: JoinHandle<ActionStateSnapshot>,
+    recording: Arc<RecordingBackend>,
 }
 
 impl RoundTripHarness {
@@ -143,10 +145,12 @@ impl RoundTripHarness {
             .enable_time()
             .build()?;
         let cancel = CancellationToken::new();
+        let recording = Arc::new(RecordingBackend::new());
         let (handle, snapshot_handle, join) = runtime.block_on(async {
-            let (handle, snapshot_handle, emitter) = ActionEmitter::channel();
-            let join = tokio::spawn(emitter.run(cancel.clone()));
-            (handle, snapshot_handle, join)
+            ActionEmitter::spawn_with_backend(
+                cancel.clone(),
+                Arc::<RecordingBackend>::clone(&recording) as Arc<dyn ActionBackend>,
+            )
         });
 
         Ok(Self {
@@ -155,6 +159,7 @@ impl RoundTripHarness {
             handle,
             snapshot_handle,
             join,
+            recording,
         })
     }
 
@@ -163,25 +168,17 @@ impl RoundTripHarness {
         action: &Action,
         setup: &[Action],
     ) -> Result<RoundTripReadback, Box<dyn Error>> {
-        let recording = RecordingBackend::new();
-        let mut recording_state = EmitState::new();
         for setup_action in setup {
             self.runtime
                 .block_on(self.handle.execute(setup_action.clone()))?;
-            recording.execute(setup_action, &mut recording_state)?;
         }
-        let before_event_count = recording.events().len();
+        let before_event_count = self.recording.event_count();
 
         self.runtime.block_on(self.handle.execute(action.clone()))?;
-        recording.execute(action, &mut recording_state)?;
-        let events = recording.events();
+        let events = self.recording.events_since(before_event_count);
         let snapshot = self.runtime.block_on(self.snapshot_handle.snapshot())?;
 
-        Ok(RoundTripReadback::from_events(
-            before_event_count,
-            &events,
-            &snapshot,
-        ))
+        Ok(RoundTripReadback::from_events(&events, &snapshot))
     }
 
     fn shutdown(self) -> Result<ActionStateSnapshot, Box<dyn Error>> {
@@ -199,12 +196,7 @@ struct RoundTripReadback {
 }
 
 impl RoundTripReadback {
-    fn from_events(
-        before_event_count: usize,
-        events: &[RecordedInput],
-        snapshot: &ActionStateSnapshot,
-    ) -> Self {
-        let new_events = events.get(before_event_count..).unwrap_or(&[]);
+    fn from_events(new_events: &[RecordedInput], snapshot: &ActionStateSnapshot) -> Self {
         Self {
             new_event_count: new_events.len(),
             first_event: new_events

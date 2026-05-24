@@ -111,6 +111,19 @@ impl RecordingBackend {
     }
 
     #[must_use]
+    pub fn event_count(&self) -> usize {
+        self.state().events.len()
+    }
+
+    #[must_use]
+    pub fn events_since(&self, event_count: usize) -> Vec<RecordedInput> {
+        self.state()
+            .events
+            .get(event_count..)
+            .map_or_else(Vec::new, <[RecordedInput]>::to_vec)
+    }
+
+    #[must_use]
     pub fn held_keys(&self) -> BTreeSet<KeyCode> {
         self.state().held_keys.clone()
     }

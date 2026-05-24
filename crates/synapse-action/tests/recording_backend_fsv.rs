@@ -169,6 +169,55 @@ fn recording_backend_manual_fsv_edges() {
     println!("source_of_truth=recording_backend edge=mixed_release_all final_value=empty");
 }
 
+#[test]
+fn recording_backend_delta_readback_edges() {
+    let backend = RecordingBackend::new();
+    let mut emit_state = EmitState::new();
+
+    let empty_mark = backend.event_count();
+    println!("source_of_truth=recording_backend_delta edge=empty before_count={empty_mark}");
+    let empty_delta = backend.events_since(empty_mark);
+    println!("source_of_truth=recording_backend_delta edge=empty after_delta={empty_delta:?}");
+    assert_eq!(empty_mark, 0);
+    assert_eq!(empty_delta, Vec::<RecordedInput>::new());
+
+    backend
+        .execute(
+            &Action::KeyDown {
+                key: key("shift"),
+                backend: Backend::Software,
+            },
+            &mut emit_state,
+        )
+        .unwrap_or_else(|err| panic!("synthetic key down should record: {err}"));
+    let after_setup_count = backend.event_count();
+    println!(
+        "source_of_truth=recording_backend_delta edge=single before_count={after_setup_count}"
+    );
+    backend
+        .execute(
+            &Action::KeyUp {
+                key: key("shift"),
+                backend: Backend::Software,
+            },
+            &mut emit_state,
+        )
+        .unwrap_or_else(|err| panic!("synthetic key up should record: {err}"));
+    let single_delta = backend.events_since(after_setup_count);
+    println!("source_of_truth=recording_backend_delta edge=single after_delta={single_delta:?}");
+    assert_eq!(
+        single_delta,
+        vec![RecordedInput::KeyUp { key: key("shift") }]
+    );
+
+    let beyond_end = backend.event_count() + 10;
+    let beyond_delta = backend.events_since(beyond_end);
+    println!(
+        "source_of_truth=recording_backend_delta edge=beyond_end before_count={beyond_end} after_delta={beyond_delta:?}"
+    );
+    assert_eq!(beyond_delta, Vec::<RecordedInput>::new());
+}
+
 #[derive(Debug)]
 struct RecordingCase {
     edge: &'static str,
