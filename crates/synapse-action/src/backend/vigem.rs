@@ -2,7 +2,7 @@
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 #[cfg(not(windows))]
@@ -16,6 +16,13 @@ use synapse_core::{
 };
 
 use crate::{ActionBackend, ActionError, EmitState};
+
+#[cfg(windows)]
+const VIGEM_UPDATE_RETRY_TIMEOUT: Duration = Duration::from_millis(250);
+#[cfg(windows)]
+const VIGEM_UPDATE_RETRY_INTERVAL: Duration = Duration::from_millis(2);
+#[cfg(windows)]
+const ERROR_NO_MORE_ITEMS: u32 = 259;
 
 /// Driver-backed `ViGEm` gamepad backend.
 ///
@@ -160,9 +167,10 @@ impl VigemBackendInner {
             .wait_ready()
             .map_err(|err| map_vigem_error("wait_ready_x360_target", err))?;
         let neutral = neutral_gamepad_report(GamepadController::X360);
-        target
-            .update(&xgamepad_from_snapshot(x360_report_snapshot(&neutral)))
-            .map_err(|err| map_vigem_error("initial_neutral_x360_report", err))?;
+        let neutral_gamepad = xgamepad_from_snapshot(x360_report_snapshot(&neutral));
+        retry_vigem_update("initial_neutral_x360_report", || {
+            target.update(&neutral_gamepad)
+        })?;
         Ok(VigemPad::new_x360(target, neutral))
     }
 
@@ -176,9 +184,10 @@ impl VigemBackendInner {
             .wait_ready()
             .map_err(|err| map_vigem_error("wait_ready_ds4_target", err))?;
         let neutral = neutral_gamepad_report(GamepadController::Ds4);
-        target
-            .update(&ds4_report_snapshot(&neutral).into_vigem_report())
-            .map_err(|err| map_vigem_error("initial_neutral_ds4_report", err))?;
+        let neutral_report = ds4_report_snapshot(&neutral).into_vigem_report();
+        retry_vigem_update("initial_neutral_ds4_report", || {
+            target.update(&neutral_report)
+        })?;
         Ok(VigemPad::new_ds4(target, neutral))
     }
 
@@ -343,9 +352,7 @@ struct VigemX360Pad {
 impl VigemX360Pad {
     fn update(&mut self, report: &GamepadReport) -> Result<(), ActionError> {
         let gamepad = xgamepad_from_snapshot(x360_report_snapshot(report));
-        self.target
-            .update(&gamepad)
-            .map_err(|err| map_vigem_error("update_x360_report", err))?;
+        retry_vigem_update("update_x360_report", || self.target.update(&gamepad))?;
         self.report = report.clone();
         Ok(())
     }
@@ -362,12 +369,51 @@ struct VigemDs4Pad {
 impl VigemDs4Pad {
     fn update(&mut self, report: &GamepadReport) -> Result<(), ActionError> {
         let ds4_report = ds4_report_snapshot(report).into_vigem_report();
-        self.target
-            .update(&ds4_report)
-            .map_err(|err| map_vigem_error("update_ds4_report", err))?;
+        retry_vigem_update("update_ds4_report", || self.target.update(&ds4_report))?;
         self.report = report.clone();
         Ok(())
     }
+}
+
+#[cfg(windows)]
+fn retry_vigem_update<F>(context: &'static str, mut update: F) -> Result<(), ActionError>
+where
+    F: FnMut() -> Result<(), vigem_client::Error>,
+{
+    let started = Instant::now();
+    let mut attempts = 0_u32;
+    loop {
+        attempts = attempts.saturating_add(1);
+        match update() {
+            Ok(()) => {
+                if attempts > 1 {
+                    tracing::debug!(
+                        backend = "vigem",
+                        context,
+                        attempts,
+                        elapsed_ms = started.elapsed().as_millis(),
+                        "ViGEm report update succeeded after retry"
+                    );
+                }
+                return Ok(());
+            }
+            Err(error)
+                if is_transient_vigem_update_error(error)
+                    && started.elapsed() < VIGEM_UPDATE_RETRY_TIMEOUT =>
+            {
+                std::thread::sleep(VIGEM_UPDATE_RETRY_INTERVAL);
+            }
+            Err(error) => return Err(map_vigem_error(context, error)),
+        }
+    }
+}
+
+#[cfg(windows)]
+const fn is_transient_vigem_update_error(error: vigem_client::Error) -> bool {
+    matches!(
+        error,
+        vigem_client::Error::TargetNotReady | vigem_client::Error::WinError(ERROR_NO_MORE_ITEMS)
+    )
 }
 
 #[cfg(windows)]

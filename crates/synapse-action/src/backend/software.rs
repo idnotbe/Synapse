@@ -109,13 +109,14 @@ fn press_key(key: &Key, hold_ms: u32, state: &mut EmitState) -> Result<(), Actio
 
 #[tracing::instrument(skip_all, fields(action_kind = "software_key_state"))]
 fn set_key(key: &Key, direction: Direction, state: &mut EmitState) -> Result<(), ActionError> {
-    let mut enigo = enigo()?;
     match direction {
         Direction::Press => {
+            let mut enigo = enigo_preserving_held_keys()?;
             state.hold_key(key);
             emit_key(&mut enigo, key, Direction::Press)
         }
         Direction::Release => {
+            let mut enigo = enigo()?;
             emit_key(&mut enigo, key, Direction::Release)?;
             state.release_key(key);
             Ok(())
@@ -542,6 +543,16 @@ fn send_input_batch(inputs: &[INPUT], detail: &'static str) -> Result<(), Action
 
 fn enigo() -> Result<Enigo, ActionError> {
     Enigo::new(&Settings::default()).map_err(|err| ActionError::BackendUnavailable {
+        detail: format!("failed to initialize enigo: {err}"),
+    })
+}
+
+fn enigo_preserving_held_keys() -> Result<Enigo, ActionError> {
+    Enigo::new(&Settings {
+        release_keys_when_dropped: false,
+        ..Settings::default()
+    })
+    .map_err(|err| ActionError::BackendUnavailable {
         detail: format!("failed to initialize enigo: {err}"),
     })
 }

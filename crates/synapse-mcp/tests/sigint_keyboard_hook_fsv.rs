@@ -487,11 +487,29 @@ public static class KeyboardHookRecorder
 
 public static class ConsoleCtrl
 {
+    private delegate bool HandlerRoutine(uint dwCtrlType);
+    private static readonly HandlerRoutine IgnoreHandler = IgnoreCtrlSignal;
+
     [DllImport("kernel32.dll", SetLastError=true)]
     public static extern bool GenerateConsoleCtrlEvent(uint dwCtrlEvent, uint dwProcessGroupId);
 
     [DllImport("kernel32.dll", SetLastError=true)]
-    public static extern bool SetConsoleCtrlHandler(IntPtr handlerRoutine, bool add);
+    private static extern bool SetConsoleCtrlHandler(HandlerRoutine handlerRoutine, bool add);
+
+    public static bool InstallIgnoreHandler()
+    {
+        return SetConsoleCtrlHandler(IgnoreHandler, true);
+    }
+
+    public static bool RemoveIgnoreHandler()
+    {
+        return SetConsoleCtrlHandler(IgnoreHandler, false);
+    }
+
+    private static bool IgnoreCtrlSignal(uint dwCtrlType)
+    {
+        return dwCtrlType == 0 || dwCtrlType == 1;
+    }
 }
 '@
 
@@ -581,13 +599,13 @@ try {
   Wait-ForHookEvent { param($event) $event.IsAKeyDown() } 2000
   Write-Output "source_of_truth=keyboard_hook_timeline edge=sigint before_sigint=$([KeyboardHookRecorder]::FormatTimeline())"
 
-  if (-not [ConsoleCtrl]::SetConsoleCtrlHandler([IntPtr]::Zero, $true)) {
-    throw 'SetConsoleCtrlHandler(NULL, TRUE) failed'
+  if (-not [ConsoleCtrl]::InstallIgnoreHandler()) {
+    throw 'SetConsoleCtrlHandler custom ignore handler failed'
   }
   $ignoreCtrlC = $true
   $sigintAtMs = [KeyboardHookRecorder]::ElapsedMs()
-  if (-not [ConsoleCtrl]::GenerateConsoleCtrlEvent(0, 0)) {
-    throw 'GenerateConsoleCtrlEvent(CTRL_C_EVENT, 0) failed'
+  if (-not [ConsoleCtrl]::GenerateConsoleCtrlEvent(1, 0)) {
+    throw 'GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, 0) failed'
   }
   Wait-ForHookEvent { param($event) $event.IsAKeyUp() -and $event.ElapsedMs -ge $sigintAtMs } 2000
   $latency = Get-KeyupLatencyAfterSigint $sigintAtMs
@@ -605,7 +623,7 @@ try {
   }
   $exitCode = $proc.ExitCode
   if ($ignoreCtrlC) {
-    [ConsoleCtrl]::SetConsoleCtrlHandler([IntPtr]::Zero, $false) | Out-Null
+    [ConsoleCtrl]::RemoveIgnoreHandler() | Out-Null
     $ignoreCtrlC = $false
   }
 
@@ -627,7 +645,7 @@ try {
   exit 1
 } finally {
   if ($ignoreCtrlC) {
-    [ConsoleCtrl]::SetConsoleCtrlHandler([IntPtr]::Zero, $false) | Out-Null
+    [ConsoleCtrl]::RemoveIgnoreHandler() | Out-Null
   }
   if ($null -ne $proc -and -not $proc.HasExited) {
     try { $proc.Kill() } catch { }

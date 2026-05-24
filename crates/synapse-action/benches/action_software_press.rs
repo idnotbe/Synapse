@@ -17,11 +17,17 @@ use tokio::{runtime::Runtime, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
 
 const BENCH_NAME: &str = "action_software_press";
-const PRESS_KEY_NAME: &str = "f12";
+const PRESS_KEY_NAME: &str = "shift";
 const RECORDING_ITERATIONS: usize = 2_000;
 #[cfg(windows)]
 const WINDOWS_ITERATIONS: usize = 200;
 const WINDOWS_TARGET_P99_NS: u128 = 3_000_000;
+#[cfg(windows)]
+const WINDOWS_KEY_STATE_TIMEOUT: Duration = Duration::from_nanos(WINDOWS_TARGET_P99_NS as u64);
+#[cfg(windows)]
+const PRESS_KEY_LABEL: &str = "Shift";
+#[cfg(windows)]
+const PRESS_KEY_VK: i32 = 0x10;
 #[cfg(windows)]
 const REAL_SENDINPUT_ENV: &str = "SYNAPSE_ACTION_SOFTWARE_PRESS_REAL";
 
@@ -205,9 +211,12 @@ fn measure_non_windows_fail_closed() -> Result<BenchReport, Box<dyn Error>> {
 fn measure_windows_sendinput() -> Result<BenchReport, Box<dyn Error>> {
     let harness = PressHarness::production()?;
     let key = bench_key();
-    let before_down = f12_is_down();
+    let before_down = press_key_is_down();
     if before_down {
-        return Err("F12 is already down before action_software_press bench".into());
+        return Err(format!(
+            "{PRESS_KEY_LABEL} is already down before action_software_press bench"
+        )
+        .into());
     }
 
     let mut elapsed = Vec::with_capacity(WINDOWS_ITERATIONS);
@@ -215,7 +224,7 @@ fn measure_windows_sendinput() -> Result<BenchReport, Box<dyn Error>> {
     let mut after_up_down_count = 0_usize;
     let mut actor_empty_count = 0_usize;
     for _ in 0..WINDOWS_ITERATIONS {
-        let readback = harness.press_once_observing_f12(&key)?;
+        let readback = harness.press_once_observing_key(&key)?;
         elapsed.push(readback.keydown_ns);
         if readback.observed_down {
             observed_down_count = observed_down_count.saturating_add(1);
@@ -228,18 +237,18 @@ fn measure_windows_sendinput() -> Result<BenchReport, Box<dyn Error>> {
         }
     }
 
-    let after_down = f12_is_down();
+    let after_down = press_key_is_down();
     let final_snapshot = harness.shutdown()?;
     elapsed.sort_unstable();
     let p99 = percentile(&elapsed, 99);
 
     Ok(BenchReport {
         mode: "windows_sendinput",
-        edge: "f12_keydown_ack",
+        edge: "shift_keydown_ack",
         iterations: WINDOWS_ITERATIONS,
-        before: format!("GetAsyncKeyState(F12).down:{before_down}"),
+        before: format!("GetAsyncKeyState({PRESS_KEY_LABEL}).down:{before_down}"),
         after: format!(
-            "observed_down_count:{observed_down_count} after_up_down_count:{after_up_down_count} actor_empty_count:{actor_empty_count} GetAsyncKeyState(F12).down:{after_down} final_snapshot:{final_snapshot:?}"
+            "observed_down_count:{observed_down_count} after_up_down_count:{after_up_down_count} actor_empty_count:{actor_empty_count} GetAsyncKeyState({PRESS_KEY_LABEL}).down:{after_down} final_snapshot:{final_snapshot:?}"
         ),
         p50_keydown_ns: Some(percentile(&elapsed, 50)),
         p99_keydown_ns: Some(p99),
@@ -324,13 +333,15 @@ impl PressHarness {
     }
 
     #[cfg(windows)]
-    fn press_once_observing_f12(&self, key: &Key) -> Result<WindowsPressReadback, Box<dyn Error>> {
+    fn press_once_observing_key(&self, key: &Key) -> Result<WindowsPressReadback, Box<dyn Error>> {
         let started = Instant::now();
         self.execute(key_down_action(key))?;
+        let observed_down = wait_for_press_key_state(true, started, WINDOWS_KEY_STATE_TIMEOUT);
         let keydown_ns = started.elapsed().as_nanos();
-        let observed_down = f12_is_down();
         self.execute(key_up_action(key))?;
-        let after_up_down = f12_is_down();
+        let keyup_started = Instant::now();
+        let observed_up = wait_for_press_key_state(false, keyup_started, WINDOWS_KEY_STATE_TIMEOUT);
+        let after_up_down = !observed_up && press_key_is_down();
         let snapshot = self.snapshot()?;
 
         Ok(WindowsPressReadback {
@@ -473,10 +484,22 @@ fn real_sendinput_enabled() -> bool {
 }
 
 #[cfg(windows)]
-fn f12_is_down() -> bool {
+fn press_key_is_down() -> bool {
     use windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
 
-    const VK_F12: i32 = 0x7b;
-    let state = unsafe { GetAsyncKeyState(VK_F12) };
+    let state = unsafe { GetAsyncKeyState(PRESS_KEY_VK) };
     (u16::from_ne_bytes(state.to_ne_bytes()) & 0x8000) != 0
+}
+
+#[cfg(windows)]
+fn wait_for_press_key_state(expected_down: bool, started: Instant, timeout: Duration) -> bool {
+    loop {
+        if press_key_is_down() == expected_down {
+            return true;
+        }
+        if started.elapsed() >= timeout {
+            return press_key_is_down() == expected_down;
+        }
+        std::thread::yield_now();
+    }
 }

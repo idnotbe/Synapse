@@ -109,8 +109,8 @@ async fn run_stdio(telemetry_guard: TelemetryGuard) -> anyhow::Result<ExitCode> 
             }
             Err(err) => return Err(err).context("start rmcp stdio service"),
         },
-        signal = tokio::signal::ctrl_c() => {
-            signal.context("wait for ctrl-c during startup")?;
+        signal = wait_for_shutdown_signal("during startup") => {
+            signal?;
             rmcp_token.cancel();
             emitter_shutdown_token.cancel();
             tracing::info!(code = "MCP_SHUTDOWN_GRACEFUL", "shutdown signal received before init");
@@ -128,26 +128,44 @@ async fn run_stdio(telemetry_guard: TelemetryGuard) -> anyhow::Result<ExitCode> 
             wait_for_m2_emitter_done(m2_emitter_done).await;
             ExitCode::SUCCESS
         }
-        signal = tokio::signal::ctrl_c() => {
-            signal.context("wait for ctrl-c")?;
+        signal = wait_for_shutdown_signal("after init") => {
+            signal?;
             tracing::info!(code = "MCP_SHUTDOWN_GRACEFUL", "shutdown signal received");
             emitter_shutdown_token.cancel();
             shutdown.cancel();
-            if let Ok(wait) = tokio::time::timeout(Duration::from_secs(5), &mut wait_task).await {
-                wait.context("join rmcp service after shutdown")??;
-                wait_for_m2_emitter_done(m2_emitter_done).await;
-                drop(telemetry_guard);
-                std::process::exit(0);
-            } else {
-                tracing::error!(code = "MCP_SHUTDOWN_TIMEOUT", "shutdown timeout");
-                drop(telemetry_guard);
-                std::process::exit(124);
-            }
+            wait_for_m2_emitter_done(m2_emitter_done).await;
+            wait_task.abort();
+            drop(telemetry_guard);
+            std::process::exit(0);
         }
     };
 
     drop(telemetry_guard);
     Ok(code)
+}
+
+#[cfg(windows)]
+async fn wait_for_shutdown_signal(phase: &'static str) -> anyhow::Result<()> {
+    let mut ctrl_break = tokio::signal::windows::ctrl_break()
+        .with_context(|| format!("register ctrl-break handler {phase}"))?;
+    tokio::select! {
+        signal = tokio::signal::ctrl_c() => {
+            signal.with_context(|| format!("wait for ctrl-c {phase}"))?;
+        }
+        received = ctrl_break.recv() => {
+            if received.is_none() {
+                anyhow::bail!("ctrl-break stream ended while waiting for shutdown signal {phase}");
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+async fn wait_for_shutdown_signal(phase: &'static str) -> anyhow::Result<()> {
+    tokio::signal::ctrl_c()
+        .await
+        .with_context(|| format!("wait for ctrl-c {phase}"))
 }
 
 async fn wait_for_m2_emitter_done(
