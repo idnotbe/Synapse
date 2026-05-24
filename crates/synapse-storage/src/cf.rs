@@ -20,3 +20,18 @@ pub const CF_ACTION_LOG: &str = "CF_ACTION_LOG";
 pub const CF_PROCESS_HISTORY: &str = "CF_PROCESS_HISTORY";
 /// Generic bounded key-value extension.
 pub const CF_KV: &str = "CF_KV";
+
+/// PRD §4 column family names, excluding `RocksDB`'s implicit `default` CF.
+pub const ALL_COLUMN_FAMILIES: [&str; 11] = [
+    CF_EVENTS,
+    CF_OBSERVATIONS,
+    CF_PROFILES,
+    CF_MODEL_CACHE,
+    CF_SESSIONS,
+    CF_REFLEX_AUDIT,
+    CF_OCR_CACHE,
+    CF_TELEMETRY,
+    CF_ACTION_LOG,
+    CF_PROCESS_HISTORY,
+    CF_KV,
+];

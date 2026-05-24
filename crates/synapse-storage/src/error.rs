@@ -1,4 +1,4 @@
-use std::{io, path::PathBuf};
+use std::path::PathBuf;
 
 use synapse_core::error_codes;
 use thiserror::Error;
@@ -8,12 +8,8 @@ pub type StorageResult<T> = Result<T, StorageError>;
 /// Storage failures with stable Synapse error codes.
 #[derive(Debug, Error)]
 pub enum StorageError {
-    #[error("storage open failed for {path:?}: {source}")]
-    OpenFailed {
-        path: PathBuf,
-        #[source]
-        source: io::Error,
-    },
+    #[error("storage open failed for {path:?}: {detail}")]
+    OpenFailed { path: PathBuf, detail: String },
     #[error("storage write failed while encoding {type_name}: {source}")]
     EncodeJson {
         type_name: &'static str,

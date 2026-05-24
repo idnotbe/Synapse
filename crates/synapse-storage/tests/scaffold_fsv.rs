@@ -32,6 +32,7 @@ fn db_open_creates_directory_with_fsv() -> Result<(), Box<dyn Error>> {
     );
     assert!(db.path.is_dir());
     assert_eq!(db.schema_version, 7);
+    drop(db);
     fs::remove_dir_all(path)?;
     Ok(())
 }
