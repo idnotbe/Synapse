@@ -10,7 +10,7 @@ use serde::{Serialize, de::DeserializeOwned};
 use synapse_core::{OcrResult, OcrWord, Rect};
 
 #[test]
-fn ocr_type_edge_round_trips_with_fsv() -> Result<(), Box<dyn std::error::Error>> {
+fn ocr_type_edge_round_trips_with_readback() -> Result<(), Box<dyn std::error::Error>> {
     round_trip("OcrResult", "empty", empty_ocr_result())?;
     round_trip("OcrResult", "single_word", single_word_ocr_result())?;
     round_trip("OcrResult", "fully_populated", full_ocr_result())?;
@@ -59,11 +59,11 @@ where
     T: Clone + Debug + PartialEq + Serialize + DeserializeOwned + 'static,
 {
     let before = serde_json::to_value(value.clone())?;
-    println!("source_of_truth=json_ocr_type type={type_name} edge={edge} before={before}");
+    println!("readback=json_ocr_type type={type_name} edge={edge} before={before}");
     let parsed = serde_json::from_value::<T>(before)?;
     let after = serde_json::to_value(&parsed)?;
     println!(
-        "source_of_truth=json_ocr_type type={type_name} edge={edge} after={after} final_value={after}"
+        "readback=json_ocr_type type={type_name} edge={edge} after={after} result_value={after}"
     );
     assert_eq!(parsed, value);
     Ok(parsed)
@@ -74,7 +74,7 @@ where
     T: Clone + Debug + PartialEq + Serialize + DeserializeOwned + 'static,
 {
     let mut json = serde_json::to_value(value)?;
-    println!("source_of_truth=json_ocr_type_unknown type={type_name} before={json}");
+    println!("readback=json_ocr_type_unknown type={type_name} before={json}");
     let serde_json::Value::Object(ref mut map) = json else {
         panic!("{type_name} should serialize to an object");
     };
@@ -82,7 +82,7 @@ where
     let Err(err) = serde_json::from_value::<T>(json.clone()) else {
         panic!("unknown field should reject");
     };
-    println!("source_of_truth=json_ocr_type_unknown type={type_name} after={err}");
+    println!("readback=json_ocr_type_unknown type={type_name} after={err}");
     Ok(())
 }
 
@@ -102,7 +102,7 @@ where
     let algorithm = config.rng_algorithm;
     let mut runner = TestRunner::new_with_rng(config, TestRng::deterministic_rng(algorithm));
 
-    println!("source_of_truth=json_ocr_type_proptest type={type_name} before=cases:1000");
+    println!("readback=json_ocr_type_proptest type={type_name} before=cases:1000");
     runner.run(&strategy, |value| {
         let json = serde_json::to_value(value.clone())?;
         let parsed = serde_json::from_value::<T>(json)?;
@@ -110,7 +110,7 @@ where
         Ok(())
     })?;
     println!(
-        "source_of_truth=json_ocr_type_proptest type={type_name} after=cases:1000 final_value=all_round_tripped"
+        "readback=json_ocr_type_proptest type={type_name} after=cases:1000 result_value=all_round_tripped"
     );
     Ok(())
 }

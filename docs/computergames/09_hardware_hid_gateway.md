@@ -362,7 +362,7 @@ Status LED:
 | Stress | Send 10,000 mouse-move-rel commands at full rate; assert no drops, all acked. |
 | Re-enumeration | Trigger `RESET_TO_BOOTLOADER`, observe device drops, mass storage appears, reflash, reconnect. |
 
-CI runs protocol roundtrip tests on Linux (no hardware required). Firmware-loopback runs weekly on a self-hosted CI machine with a Pico attached.
+Local protocol roundtrip checks run without hardware. Firmware-loopback is a configured-host hardware check with a Pico attached; it is supporting evidence, not FSV.
 
 ---
 

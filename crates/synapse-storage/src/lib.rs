@@ -150,10 +150,9 @@ impl Db {
         gc::run_once(&self.inner, &gc::GcConfig::from_retention_defaults())
     }
 
-    /// Runs one row-count-scaled GC pass for local FSV integration tests.
+    /// Runs one row-count-scaled GC pass for deterministic regression tests.
     ///
-    /// This keeps FSV deterministic without writing gigabytes to hit production
-    /// byte caps.
+    /// This avoids writing gigabytes to hit production byte caps.
     ///
     /// # Errors
     ///
@@ -161,7 +160,7 @@ impl Db {
     /// or compactions fail.
     #[doc(hidden)]
     #[tracing::instrument(skip_all)]
-    pub fn run_gc_once_for_fsv(
+    pub fn run_gc_once_with_row_caps(
         &self,
         cf_name: &'static str,
         soft_cap_rows: u64,
@@ -169,7 +168,7 @@ impl Db {
     ) -> StorageResult<GcReport> {
         gc::run_once(
             &self.inner,
-            &gc::GcConfig::rows_for_fsv(
+            &gc::GcConfig::for_row_caps(
                 Duration::from_mins(5),
                 cf_name,
                 soft_cap_rows,
@@ -213,7 +212,7 @@ impl Db {
         )
     }
 
-    /// Applies one synthetic free-byte sample for local FSV integration tests.
+    /// Applies one synthetic free-byte sample for deterministic regression tests.
     ///
     /// This uses the production thresholds and responder actions while avoiding
     /// host-volume manipulation.
@@ -223,7 +222,7 @@ impl Db {
     /// Returns a storage error when pressure-triggered compaction fails.
     #[doc(hidden)]
     #[tracing::instrument(skip_all)]
-    pub fn run_pressure_check_with_free_bytes_for_fsv(
+    pub fn run_pressure_check_with_free_bytes_sample(
         &self,
         free_bytes: u64,
     ) -> StorageResult<PressureReport> {

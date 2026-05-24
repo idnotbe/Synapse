@@ -1,6 +1,7 @@
 pub mod audit;
 pub mod bus;
 pub mod error;
+pub mod kinds;
 pub mod scheduler;
 
 use std::{path::Path, sync::Arc};
@@ -14,6 +15,11 @@ pub use bus::{
     PublishReport, SUBSCRIBER_QUEUE_CAPACITY, SubscriberHandle,
 };
 pub use error::{ReflexError, ReflexResult};
+pub use kinds::aim_track::{
+    AimTrackContext, AimTrackController, AimTrackOutput, AimTrackParams, AimTrackTarget,
+    DEFAULT_EMA_ALPHA, DEFAULT_MAX_SPEED_PX_PER_TICK, REFLEX_TRACK_LOST_KIND, ResolvedElementBox,
+    TRACK_LOST_AFTER,
+};
 pub use scheduler::{
     MAX_SCHEDULED_REFLEXES, REFLEX_TICK_LATE_KIND, ReflexScheduler, ScheduledReflex,
     SchedulerConfig, SchedulerHandle, SchedulerTrigger, TickSample, p99_jitter_us,
@@ -92,7 +98,7 @@ mod tests {
     const TEST_SCHEMA_VERSION: u32 = 7;
 
     #[test]
-    fn spawn_retains_runtime_inputs_and_action_handle_with_fsv() -> Result<(), Box<dyn Error>> {
+    fn spawn_retains_runtime_inputs_and_action_handle() -> Result<(), Box<dyn Error>> {
         let temp = tempdir()?;
         let db = Arc::new(Db::open(&temp.path().join("db"), TEST_SCHEMA_VERSION)?);
         let (action_handle, mut action_rx) = ActionHandle::channel();
@@ -100,21 +106,11 @@ mod tests {
             action_rx.try_recv(),
             Err(mpsc::error::TryRecvError::Empty)
         ));
-        println!(
-            "source_of_truth=reflex_runtime_state before=db_schema:{} action_queue:empty",
-            db.schema_version
-        );
 
         let runtime = ReflexRuntime::spawn(Arc::clone(&db), action_handle, EventBus::default())?;
         runtime.action_handle().try_execute(Action::ReleaseAll)?;
         let (queued_action, _ack) = action_rx.try_recv()?;
 
-        println!(
-            "source_of_truth=reflex_runtime_state after_truth=path:{} schema:{} queued_action:{queued_action:?} bus:{:?} final_value=spawned:true",
-            runtime.storage_path().display(),
-            runtime.schema_version(),
-            runtime.event_bus()
-        );
         assert_eq!(runtime.schema_version(), TEST_SCHEMA_VERSION);
         assert_eq!(queued_action, Action::ReleaseAll);
         Ok(())

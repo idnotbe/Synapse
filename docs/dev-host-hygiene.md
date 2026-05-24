@@ -85,7 +85,7 @@ Be aware that `cargo clean` then nukes the shared cache for every repo using it.
 
 `CARGO_INCREMENTAL=0` is the default for `release`; set it explicitly in install scripts to override stray env vars from CI tooling.
 
-## Ephemeral FSV / operator-run output (#242)
+## Ephemeral Operator-Run Output (#242)
 
 The canonical location for ad-hoc run artifacts (`.log`, `.ndjson`, scratch JSON, debug screenshots) is:
 
@@ -93,13 +93,12 @@ The canonical location for ad-hoc run artifacts (`.log`, `.ndjson`, scratch JSON
 * **OS-cache (Windows):** `%LOCALAPPDATA%\synapse\runs\` — never pollutes git, survives `git clean -fdx`
 * **OS-cache (Linux/macOS):** `$XDG_CACHE_HOME/synapse/runs/` (fallback `~/.cache/synapse/runs/`)
 
-The legacy `fsv-<NNN>/` pattern (e.g. `fsv-218/`) at the repo root is **deprecated** and excluded by `.gitignore`. Existing content can be migrated to `.runs/<id>/` or deleted.
+Legacy repo-root verification directories should be migrated to `.runs/<id>/` or deleted.
 
-`scripts/clean-runs.ps1` prunes `.runs/` subdirs older than 30 days by default. It only touches root `fsv-*` dirs when `-IncludeLegacyFsv` is set.
+`scripts/clean-runs.ps1` prunes `.runs/` subdirs older than 30 days by default.
 
 ```powershell
 .\scripts\clean-runs.ps1
-.\scripts\clean-runs.ps1 -IncludeLegacyFsv -WhatIf
 ```
 
 ## Benchmark baselines (#243 / #260 / #350)
@@ -107,9 +106,9 @@ The legacy `fsv-<NNN>/` pattern (e.g. `fsv-218/`) at the repo root is **deprecat
 Do not commit Criterion baselines or raw benchmark exports. `bench_results/` is gitignored, and benchmark state is stored off-tree:
 
 * Durable release/tag baselines: `%LOCALAPPDATA%\synapse\benchmarks\baselines\`
-* Per-run candidate exports and FSV notes: `.runs\benchmarks\<run-id>\`
+* Per-run candidate exports and manual evidence notes: `.runs\benchmarks\<run-id>\`
 
-Use local Criterion baselines plus [`critcmp`](https://github.com/BurntSushi/critcmp); per #350, do not use GitHub Actions/CI or Bencher as a shipping gate unless a later operator decision explicitly reverses this.
+Use local Criterion baselines plus [`critcmp`](https://github.com/BurntSushi/critcmp); per #351, do not use GitHub Actions/CI or Bencher as a shipping gate unless a later operator decision explicitly reverses this. Benchmark scripts are supporting evidence only, never FSV.
 
 ```powershell
 cargo install critcmp
@@ -123,4 +122,4 @@ critcmp "$env:LOCALAPPDATA\synapse\benchmarks\baselines\main.json" ".runs\benchm
 .\scripts\check-bench-delta.ps1 -BaselineJson "$env:LOCALAPPDATA\synapse\benchmarks\baselines\main.json" -CandidateJson ".runs\benchmarks\candidate.json"
 ```
 
-`scripts/check-bench-delta.ps1` is the local 20% regression gate over exported `critcmp` JSON. It fails when a tracked benchmark is missing from the candidate export or when the candidate mean is more than 20% slower than the baseline. Manual FSV still reads the export JSON and command output directly; the script is a local comparator, not a substitute for source-of-truth inspection.
+`scripts/check-bench-delta.ps1` is the local 20% regression gate over exported `critcmp` JSON. It fails when a tracked benchmark is missing from the candidate export or when the candidate mean is more than 20% slower than the baseline. Manual evidence still reads the export JSON and command output directly; the script is a local comparator, not a substitute for source-of-truth inspection.

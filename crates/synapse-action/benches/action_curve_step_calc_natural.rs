@@ -123,7 +123,7 @@ struct BenchReport {
 impl BenchReport {
     fn print(self) {
         println!(
-            "source_of_truth=action_curve_step_calc_natural edge={} before=iterations:{} duration_ms:{} after=samples_per_call:{} p99_ns_per_step:{} max_ns_per_step:{} target_ns_per_step:{} final_value=pass",
+            "readback=action_curve_step_calc_natural edge={} before=iterations:{} duration_ms:{} after=samples_per_call:{} p99_ns_per_step:{} max_ns_per_step:{} target_ns_per_step:{} result_value=pass",
             self.edge,
             self.iterations,
             self.duration_ms,

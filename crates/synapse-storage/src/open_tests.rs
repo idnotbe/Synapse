@@ -9,13 +9,13 @@ const DURABILITY_KEY: &[u8] = b"restart-durability-key";
 const DURABILITY_VALUE: &[u8] = b"restart-durability-value";
 
 #[test]
-fn open_fresh_db_creates_all_prd_cfs_and_schema_sentinel_with_fsv() -> Result<(), Box<dyn Error>> {
+fn open_fresh_db_creates_all_prd_cfs_and_schema_sentinel() -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
     let path = temp.path().join("db");
     println!(
-        "source_of_truth=db.list_cf edge=fresh before_path={} before={:?}",
+        "regression_state=db.list_cf edge=fresh before_path={} before={:?}",
         path.display(),
-        list_cf_for_fsv(&path)
+        list_cf_for(&path)
     );
 
     let db = Db::open(&path, TEST_SCHEMA_VERSION)?;
@@ -23,7 +23,7 @@ fn open_fresh_db_creates_all_prd_cfs_and_schema_sentinel_with_fsv() -> Result<()
     let sentinel = db.inner.get(SCHEMA_VERSION_KEY)?;
     let expected_schema = TEST_SCHEMA_VERSION.to_be_bytes();
     println!(
-        "source_of_truth=db.list_cf edge=fresh after_handles={handles:?} after_sentinel={:?} final_value=count:{}",
+        "regression_state=db.list_cf edge=fresh after_handles={handles:?} after_sentinel={:?} observed=count:{}",
         sentinel.as_deref(),
         handles.len()
     );
@@ -32,20 +32,20 @@ fn open_fresh_db_creates_all_prd_cfs_and_schema_sentinel_with_fsv() -> Result<()
     drop(db);
 
     let physical = sorted_list_cf(&path)?;
-    println!("source_of_truth=db.list_cf edge=fresh physical_after_drop={physical:?}");
+    println!("regression_state=db.list_cf edge=fresh physical_after_drop={physical:?}");
     assert_eq!(physical, sorted_physical_cfs());
     Ok(())
 }
 
 #[test]
-fn mismatched_schema_errors_then_wipe_retry_succeeds_with_fsv() -> Result<(), Box<dyn Error>> {
+fn mismatched_schema_errors_then_wipe_retry_succeeds() -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
     let path = temp.path().join("db");
     let db = Db::open(&path, 1)?;
     let before = db.inner.get(SCHEMA_VERSION_KEY)?;
     drop(db);
     println!(
-        "source_of_truth=db.schema edge=mismatch before_path={} before_sentinel={before:?}",
+        "regression_state=db.schema edge=mismatch before_path={} before_sentinel={before:?}",
         path.display()
     );
 
@@ -54,7 +54,7 @@ fn mismatched_schema_errors_then_wipe_retry_succeeds_with_fsv() -> Result<(), Bo
         Err(error) => error,
     };
     println!(
-        "source_of_truth=db.schema edge=mismatch after_code={} after_db_exists={}",
+        "regression_state=db.schema edge=mismatch after_code={} after_db_exists={}",
         error.code(),
         path.exists()
     );
@@ -62,14 +62,14 @@ fn mismatched_schema_errors_then_wipe_retry_succeeds_with_fsv() -> Result<(), Bo
 
     fs::remove_dir_all(&path)?;
     println!(
-        "source_of_truth=db.schema edge=mismatch after_wipe_exists={}",
+        "regression_state=db.schema edge=mismatch after_wipe_exists={}",
         path.exists()
     );
     let db = Db::open(&path, TEST_SCHEMA_VERSION)?;
     let after = db.inner.get(SCHEMA_VERSION_KEY)?;
     let expected_schema = TEST_SCHEMA_VERSION.to_be_bytes();
     println!(
-        "source_of_truth=db.schema edge=mismatch retry_sentinel={after:?} final_value=schema_version:{}",
+        "regression_state=db.schema edge=mismatch retry_sentinel={after:?} observed=schema_version:{}",
         db.schema_version
     );
     assert_eq!(after.as_deref(), Some(expected_schema.as_slice()));
@@ -77,7 +77,7 @@ fn mismatched_schema_errors_then_wipe_retry_succeeds_with_fsv() -> Result<(), Bo
 }
 
 #[test]
-fn process_restart_reads_persisted_key_with_fsv() -> Result<(), Box<dyn Error>> {
+fn process_restart_reads_persisted_key() -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
     let path = temp.path().join("db");
     let db = Db::open(&path, TEST_SCHEMA_VERSION)?;
@@ -87,7 +87,7 @@ fn process_restart_reads_persisted_key_with_fsv() -> Result<(), Box<dyn Error>> 
             .cf_handle(cf::CF_KV)
             .ok_or("CF_KV handle missing after open")?;
         println!(
-            "source_of_truth=db.restart edge=durability before_key={:?} before_value={:?}",
+            "regression_state=db.restart edge=durability before_key={:?} before_value={:?}",
             String::from_utf8_lossy(DURABILITY_KEY),
             db.inner.get_cf(&cf, DURABILITY_KEY)?
         );
@@ -103,7 +103,7 @@ fn process_restart_reads_persisted_key_with_fsv() -> Result<(), Box<dyn Error>> 
         .ok_or("CF_KV handle missing after reopen")?;
     let after = db.inner.get_cf(&cf, DURABILITY_KEY)?;
     println!(
-        "source_of_truth=db.restart edge=durability after_value={after:?} final_value={:?}",
+        "regression_state=db.restart edge=durability after_value={after:?} observed={:?}",
         Some(DURABILITY_VALUE)
     );
     assert_eq!(after.as_deref(), Some(DURABILITY_VALUE));
@@ -111,12 +111,12 @@ fn process_restart_reads_persisted_key_with_fsv() -> Result<(), Box<dyn Error>> 
 }
 
 #[test]
-fn file_path_open_fails_with_storage_open_failed_fsv() -> Result<(), Box<dyn Error>> {
+fn file_path_open_fails_with_storage_open_failed() -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
     let path = temp.path().join("db-file");
     fs::write(&path, b"not a directory")?;
     println!(
-        "source_of_truth=db.list_cf edge=file_path before_path={} before_is_file={}",
+        "regression_state=db.list_cf edge=file_path before_path={} before_is_file={}",
         path.display(),
         path.is_file()
     );
@@ -125,7 +125,7 @@ fn file_path_open_fails_with_storage_open_failed_fsv() -> Result<(), Box<dyn Err
         Err(error) => error,
     };
     println!(
-        "source_of_truth=db.list_cf edge=file_path after_code={} after_detail={:?} after_is_file={}",
+        "regression_state=db.list_cf edge=file_path after_code={} after_detail={:?} after_is_file={}",
         error.code(),
         open_error_detail(&error),
         path.is_file()
@@ -136,15 +136,15 @@ fn file_path_open_fails_with_storage_open_failed_fsv() -> Result<(), Box<dyn Err
 
 #[cfg(windows)]
 #[test]
-fn non_writable_path_returns_storage_open_failed_with_fsv() -> Result<(), Box<dyn Error>> {
+fn non_writable_path_returns_storage_open_failed() -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
     let path = temp.path().join("locked-db");
     fs::create_dir_all(&path)?;
     let _guard = deny_current_user_write(&path)?;
     println!(
-        "source_of_truth=db.list_cf edge=permission before_path={} before={:?}",
+        "regression_state=db.list_cf edge=permission before_path={} before={:?}",
         path.display(),
-        list_cf_for_fsv(&path)
+        list_cf_for(&path)
     );
 
     let error = match Db::open(&path, TEST_SCHEMA_VERSION) {
@@ -152,7 +152,7 @@ fn non_writable_path_returns_storage_open_failed_with_fsv() -> Result<(), Box<dy
         Err(error) => error,
     };
     println!(
-        "source_of_truth=db.list_cf edge=permission after_code={} after_detail={:?} after_exists={}",
+        "regression_state=db.list_cf edge=permission after_code={} after_detail={:?} after_exists={}",
         error.code(),
         open_error_detail(&error),
         path.exists()
@@ -193,7 +193,7 @@ fn sorted_list_cf(path: &Path) -> Result<Vec<String>, Box<dyn Error>> {
     Ok(cfs)
 }
 
-fn list_cf_for_fsv(path: &Path) -> Result<Vec<String>, String> {
+fn list_cf_for(path: &Path) -> Result<Vec<String>, String> {
     sorted_list_cf(path).map_err(|error| error.to_string())
 }
 

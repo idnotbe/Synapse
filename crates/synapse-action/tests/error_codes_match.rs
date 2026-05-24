@@ -32,7 +32,7 @@ fn action_error_codes_match_core_literals() {
         let after = error.code();
         assert_eq!(after, expected);
         assert!(!error.detail().is_empty());
-        println!("source_of_truth=error_codes_match edge={variant} before={before} after={after}");
+        println!("readback=error_codes_match edge={variant} before={before} after={after}");
     }
 }
 
@@ -40,7 +40,7 @@ fn action_error_codes_match_core_literals() {
 fn every_action_error_variant_carries_detail() {
     for (variant, error, _expected) in action_error_cases() {
         assert_eq!(error.detail(), DETAIL);
-        println!("source_of_truth=action_error_detail edge={variant} final_value={DETAIL}");
+        println!("readback=action_error_detail edge={variant} result_value={DETAIL}");
     }
 }
 

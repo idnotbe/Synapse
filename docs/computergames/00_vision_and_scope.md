@@ -118,7 +118,7 @@ Synapse v1 is successful when:
 | Failure mode | How we avoid |
 |---|---|
 | Screenshot-loop fallback masquerading as "structured" perception | Hard rule: `observe()` returns structured data; if both a11y and detection fail, return `OBSERVE_NO_PERCEPTION_AVAILABLE` error with diagnostics, never silently include a screenshot |
-| Slow path becoming the only path | Per-tool p99 latency budgets enforced in CI; perf regressions block merge |
+| Slow path becoming the only path | Per-tool p99 latency budgets enforced through local benchmark exports and manual review; perf regressions block merge |
 | Sensitive input paths enabled by accident | Hardware HID, shell, process launch, non-loopback networking, and redaction changes require explicit operator configuration |
 | Tool-bloat (200+ MCP tools, agent confused) | Hard cap: ≤ 30 tools at v1. Anything else is a profile, a parameter, or a sub-command of an existing tool |
 | Token bloat per observation | Hard cap: `observe()` returns ≤ 1500 tokens by default; agent must `expand(slot)` for more |
@@ -156,9 +156,9 @@ Synapse v1 is successful when:
 | A game ignores or mishandles virtual controller input | Medium — some game support narrows | Hardware HID remains an optional physical-input path for accessibility, rigs, and local game profiles |
 | MCP transport spec changes again | Low — minor refactor | Stay on official `rmcp` crate; track spec releases |
 | Vision-model dependency on bundled ONNX files | Medium — install size, licensing | Default-bundle only models with permissive licenses; download larger models on first run with explicit consent |
-| RocksDB on Windows is sometimes finicky | Low | Pin a known-good `rocksdb` crate version; have a `sled` fallback feature flag |
+| RocksDB on Windows is sometimes finicky | Low | Pin a known-good `rocksdb` crate version; M3 uses RocksDB only per ADR-0002 |
 | Hardware HID requires user to solder/buy a $4 board | Low | Make the gateway optional; document the use case clearly; ship pre-built firmware images |
-| Claude/Codex/Cursor change MCP client behavior | Low | Compatibility tests against each client in CI; don't depend on undocumented behavior |
+| Claude/Codex/Cursor change MCP client behavior | Low | Local compatibility checks against each client; don't depend on undocumented behavior |
 
 ## 12. The single line that decides everything
 

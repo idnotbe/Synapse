@@ -22,7 +22,7 @@ async fn recording_backend_readback_orders_chord_and_default_hold() {
         backend: default_press_backend(),
     };
     let before = recording.events();
-    println!("source_of_truth=act_press_recording edge=ordered_chord before={before:?}");
+    println!("readback=act_press_recording edge=ordered_chord before={before:?}");
 
     let response = act_press_with_handle(handle, Some(Arc::clone(&recording)), None, params)
         .await
@@ -30,7 +30,7 @@ async fn recording_backend_readback_orders_chord_and_default_hold() {
     let after = recording.events();
     let sequence = event_sequence(&after);
     println!(
-        "source_of_truth=act_press_recording edge=ordered_chord after={after:?} sequence={sequence} keys_pressed={}",
+        "readback=act_press_recording edge=ordered_chord after={after:?} sequence={sequence} keys_pressed={}",
         response.keys_pressed
     );
 
@@ -51,7 +51,7 @@ async fn live_press_sequence_leaves_actor_available_for_release_all_mid_hold() {
     let keys = vec![key("a")];
     let started_events = recording.events();
     println!(
-        "source_of_truth=act_press_live_sequence edge=mid_hold_release before_events={started_events:?}"
+        "readback=act_press_live_sequence edge=mid_hold_release before_events={started_events:?}"
     );
 
     let press = tokio::spawn(execute_live_press_sequence(
@@ -63,7 +63,7 @@ async fn live_press_sequence_leaves_actor_available_for_release_all_mid_hold() {
     ));
     let before_release = wait_for_held_key(&snapshot_handle, "a").await;
     println!(
-        "source_of_truth=act_press_live_sequence edge=mid_hold_release before_release={before_release:?}"
+        "readback=act_press_live_sequence edge=mid_hold_release before_release={before_release:?}"
     );
 
     handle
@@ -75,7 +75,7 @@ async fn live_press_sequence_leaves_actor_available_for_release_all_mid_hold() {
         .await
         .unwrap_or_else(|error| panic!("snapshot after release_all should succeed: {error}"));
     println!(
-        "source_of_truth=act_press_live_sequence edge=mid_hold_release after_release={after_release:?}"
+        "readback=act_press_live_sequence edge=mid_hold_release after_release={after_release:?}"
     );
     assert!(after_release.held_keys.is_empty());
 
@@ -85,7 +85,7 @@ async fn live_press_sequence_leaves_actor_available_for_release_all_mid_hold() {
         .unwrap_or_else(|error| panic!("press task should tolerate prior release_all: {error}"));
     let final_events = recording.events();
     println!(
-        "source_of_truth=act_press_live_sequence edge=mid_hold_release after_events={final_events:?}"
+        "readback=act_press_live_sequence edge=mid_hold_release after_events={final_events:?}"
     );
     assert!(
         final_events
@@ -109,7 +109,7 @@ fn defaults_are_issue_required_values() {
 #[test]
 fn normalized_keys_are_modifier_ordered() {
     let before = vec!["super".to_owned(), "s".to_owned(), "ctrl".to_owned()];
-    println!("source_of_truth=act_press_keys edge=modifier_order before={before:?}");
+    println!("readback=act_press_keys edge=modifier_order before={before:?}");
     let after =
         normalized_keys(&before).unwrap_or_else(|error| panic!("keys should normalize: {error}"));
     let labels = after
@@ -119,7 +119,7 @@ fn normalized_keys_are_modifier_ordered() {
             _ => "",
         })
         .collect::<Vec<_>>();
-    println!("source_of_truth=act_press_keys edge=modifier_order after={labels:?}");
+    println!("readback=act_press_keys edge=modifier_order after={labels:?}");
     assert_eq!(labels, ["ctrl", "super", "s"]);
 }
 
@@ -131,9 +131,7 @@ fn event_sequence_reads_recording_events() {
         RecordedInput::KeyUp { key: key("ctrl") },
     ];
     let after = event_sequence(&before);
-    println!(
-        "source_of_truth=act_press_recording edge=event_sequence before={before:?} after={after}"
-    );
+    println!("readback=act_press_recording edge=event_sequence before={before:?} after={after}");
     assert_eq!(after, "down:ctrl>delay:33>up:ctrl");
 }
 

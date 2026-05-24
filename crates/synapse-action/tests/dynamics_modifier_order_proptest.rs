@@ -7,12 +7,12 @@ use synapse_action::{ActionBackend, EmitState, RecordedInput, RecordingBackend};
 use synapse_core::{Action, Backend, Key, KeyCode, KeystrokeDynamics};
 
 #[test]
-fn known_mixed_case_records_shift_around_each_required_key_fsv()
+fn known_mixed_case_records_shift_around_each_required_key()
 -> Result<(), Box<dyn std::error::Error>> {
     let text = "aA!";
     let (before_events, events) = record_type_text_with_before(text)?;
     println!(
-        "source_of_truth=dynamics_modifier_order edge=known_mixed input={text:?} before_events={before_events:?} after_events={events:?} after_trace={:?} final_value=events:{}",
+        "readback=dynamics_modifier_order edge=known_mixed input={text:?} before_events={before_events:?} after_events={events:?} after_trace={:?} result_value=events:{}",
         trace_window(&events, 0),
         events.len()
     );
@@ -38,11 +38,11 @@ fn known_mixed_case_records_shift_around_each_required_key_fsv()
 }
 
 #[test]
-fn lowercase_edge_never_holds_shift_fsv() -> Result<(), Box<dyn std::error::Error>> {
+fn lowercase_edge_never_holds_shift() -> Result<(), Box<dyn std::error::Error>> {
     let text = "abc";
     let (before_events, events) = record_type_text_with_before(text)?;
     println!(
-        "source_of_truth=dynamics_modifier_order edge=lowercase input={text:?} before_events={before_events:?} after_events={events:?} after_trace={:?} final_value=events:{}",
+        "readback=dynamics_modifier_order edge=lowercase input={text:?} before_events={before_events:?} after_events={events:?} after_trace={:?} result_value=events:{}",
         trace_window(&events, 0),
         events.len()
     );
@@ -64,12 +64,12 @@ fn lowercase_edge_never_holds_shift_fsv() -> Result<(), Box<dyn std::error::Erro
 }
 
 #[test]
-fn consecutive_uppercase_releases_shift_between_characters_fsv()
+fn consecutive_uppercase_releases_shift_between_characters()
 -> Result<(), Box<dyn std::error::Error>> {
     let text = "AB";
     let (before_events, events) = record_type_text_with_before(text)?;
     println!(
-        "source_of_truth=dynamics_modifier_order edge=consecutive_uppercase input={text:?} before_events={before_events:?} after_events={events:?} after_trace={:?} final_value=events:{}",
+        "readback=dynamics_modifier_order edge=consecutive_uppercase input={text:?} before_events={before_events:?} after_events={events:?} after_trace={:?} result_value=events:{}",
         trace_window(&events, 0),
         events.len()
     );
@@ -116,7 +116,7 @@ fn random_mixed_case_strings_keep_shift_scoped_to_each_character_1000()
     })?;
 
     println!(
-        "source_of_truth=dynamics_modifier_order edge=proptest final_value=ok cases=1000 chars_per_case=50 alphabet=mixed_ascii_case"
+        "readback=dynamics_modifier_order edge=proptest result_value=ok cases=1000 chars_per_case=50 alphabet=mixed_ascii_case"
     );
     Ok(())
 }

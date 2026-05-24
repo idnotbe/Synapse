@@ -6,15 +6,17 @@ When resolved, replace entry with "→ decided in ADR-NNN". ADRs live in `docs/a
 
 ---
 
-## OQ-001 — Sled vs RocksDB as primary
+## OQ-001 — Sled vs RocksDB as primary — DECIDED 2026-05-24
 
-**Q.** RocksDB or sled as default storage backend?
+→ decided in ADR-0002.
 
-**Trade-off.** RocksDB: better compaction, TTL via compaction filters, mature on Linux. Sled: pure Rust, simpler install footprint, slower, historical data-loss bugs.
+**Decision.** RocksDB is the only M3 storage backend. The unused sled escape
+valve was removed because it had no implementation and pulled vulnerable /
+unmaintained transitive crates into `Cargo.lock`.
 
-**Default.** RocksDB primary; sled is `--features sled-backend` opt-in.
-
-**Target.** M3. Flip if RocksDB shows >2 Windows crashes in team testing.
+**Future change.** A fallback backend requires a new issue, implemented adapter,
+maintained dependency graph, and manual source-of-truth verification on the
+configured Windows host.
 
 ---
 

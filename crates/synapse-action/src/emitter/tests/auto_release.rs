@@ -34,7 +34,7 @@ async fn key_down_timer_auto_releases_held_key_and_clears_hashmap() {
     assert!(after_auto_release.held_key_timer_keys.is_empty());
     assert_eq!(after_auto_release.held_key_timer_count, 0);
     println!(
-        "source_of_truth=held_keys_bitset_and_timer_hashmap edge=happy_auto_release before={before:?} after_key_down={after_key_down:?} after_auto_release={after_auto_release:?} data.code={}",
+        "readback=held_keys_bitset_and_timer_hashmap edge=happy_auto_release before={before:?} after_key_down={after_key_down:?} after_auto_release={after_auto_release:?} data.code={}",
         error_codes::STUCK_KEY_AUTO_RELEASED
     );
 }
@@ -104,7 +104,7 @@ async fn stuck_key_auto_release_tracing_event_and_recording_keyup_are_observable
     assert!(log_line.contains("held_ms=30000"));
     assert!(log_line.contains("key=a"));
     println!(
-        "source_of_truth=stuck_key edge=auto_release before=held:{:?} after=held:{:?} log_line={} recording_events={recording_events:?}",
+        "readback=stuck_key edge=auto_release before=held:{:?} after=held:{:?} log_line={} recording_events={recording_events:?}",
         held_key_labels(&before_auto_release),
         held_key_labels(&after_auto_release),
         log_line
@@ -151,7 +151,7 @@ async fn actor_loop_processes_auto_release_timer_message() {
     assert_eq!(
         after_key_down_events,
         vec![RecordedInput::KeyDown { key: key.clone() }],
-        "source_of_truth=RecordingBackend::events after KeyDown"
+        "readback=RecordingBackend::events after KeyDown"
     );
     assert_eq!(
         after_auto_release_events,
@@ -159,12 +159,12 @@ async fn actor_loop_processes_auto_release_timer_message() {
             RecordedInput::KeyDown { key: key.clone() },
             RecordedInput::KeyUp { key: key.clone() },
         ],
-        "source_of_truth=RecordingBackend::events after auto release"
+        "readback=RecordingBackend::events after auto release"
     );
     assert!(after_cancel.held_keys.is_empty());
     assert_eq!(after_cancel.held_key_timer_count, 0);
     println!(
-        "source_of_truth=actor_snapshot_and_recording_backend edge=actor_loop_auto_release before={before:?} after_key_down={after_key_down:?} after_key_down_events={after_key_down_events:?} after_auto_release={after_auto_release:?} after_auto_release_events={after_auto_release_events:?} after_cancel={after_cancel:?}"
+        "readback=actor_snapshot_and_recording_backend edge=actor_loop_auto_release before={before:?} after_key_down={after_key_down:?} after_key_down_events={after_key_down_events:?} after_auto_release={after_auto_release:?} after_auto_release_events={after_auto_release_events:?} after_cancel={after_cancel:?}"
     );
 }
 
@@ -202,7 +202,7 @@ async fn key_up_cancels_timer_before_releasing_even_when_buckets_are_empty() {
     assert_eq!(before_limits.software.tokens, 0);
     assert_eq!(after_limits.software.tokens, 0);
     println!(
-        "source_of_truth=held_keys_bitset_and_timer_hashmap edge=keyup_cancel_empty_bucket before={before:?} before_limits={before_limits:?} after={after:?} after_limits={after_limits:?}"
+        "readback=held_keys_bitset_and_timer_hashmap edge=keyup_cancel_empty_bucket before={before:?} before_limits={before_limits:?} after={after:?} after_limits={after_limits:?}"
     );
 }
 
@@ -261,7 +261,7 @@ async fn repeated_key_down_replaces_timer_without_old_timer_release() {
     assert!(after_new_deadline.held_keys.is_empty());
     assert_eq!(after_new_deadline.held_key_timer_count, 0);
     println!(
-        "source_of_truth=held_keys_bitset_and_timer_hashmap edge=repeated_keydown_reset before={before:?} after_first={after_first:?} first_timer_id={first_timer_id} after_second={after_second:?} second_timer_id={second_timer_id} after_old_deadline={after_old_deadline:?} after_new_deadline={after_new_deadline:?}"
+        "readback=held_keys_bitset_and_timer_hashmap edge=repeated_keydown_reset before={before:?} after_first={after_first:?} first_timer_id={first_timer_id} after_second={after_second:?} second_timer_id={second_timer_id} after_old_deadline={after_old_deadline:?} after_new_deadline={after_new_deadline:?}"
     );
 }
 
@@ -298,6 +298,6 @@ async fn release_all_aborts_held_key_timer_hashmap() {
     assert!(after_release_all.held_keys.is_empty());
     assert_eq!(after_release_all.held_key_timer_count, 0);
     println!(
-        "source_of_truth=held_keys_bitset_and_timer_hashmap edge=release_all_abort before={before_release_all:?} after={after_release_all:?}"
+        "readback=held_keys_bitset_and_timer_hashmap edge=release_all_abort before={before_release_all:?} after={after_release_all:?}"
     );
 }

@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Added the repository agent doctrine: manual FSV must be performed by the
+  agent with direct source-of-truth readback; automated tests, scripts,
+  benchmarks, GitHub Actions, and CI are supporting evidence only.
+
 ## v0.1.0-m2 - 2026-05-24
 
 M2 adds the action MVP for the configured Windows host with manual FSV as the

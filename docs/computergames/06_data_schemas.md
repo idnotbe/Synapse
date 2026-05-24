@@ -2,7 +2,7 @@
 
 Canonical types live in `synapse-core`. JSON serialization via `serde` (`#[serde(rename_all = "snake_case")]` everywhere). RocksDB stored records use JSON; bincode is excluded by ADR-0001 / RUSTSEC-2025-0141.
 
-This doc is the spec; `synapse-core/src/types.rs` is the implementation. Drift between them is a CI failure.
+This doc is the spec; `synapse-core/src/types.rs` is the implementation. Drift between them is a local check failure and release blocker.
 
 ---
 

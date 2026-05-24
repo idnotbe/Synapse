@@ -4,12 +4,12 @@
 GitHub context issue: #86. All M1 sub-issues (#87-#135) are closed.
 
 **Shipped MCP tools (6):** `health` (carried from M0), `observe`, `find`,
-`read_text`, `set_capture_target`, `set_perception_mode`. Schemas frozen via
-`crates/synapse-mcp/tests/snapshots/m1_tools_fsv__m1_tools_list.snap`.
+`read_text`, `set_capture_target`, `set_perception_mode`. Tool-surface readback
+is recorded in #352; retained checks must use neutral non-FSV names.
 
 Manual configured-host FSV is the shipping gate (operator decision 2026-05-24,
-issues #246/#247). CI runs the portable Linux/Windows test subset as a
-regression safety net only; M3+ must keep it green.
+issues #246/#247/#351). Portable Linux/Windows checks are supporting
+regression evidence only; they are not FSV.
 
 **Shipped M1 surface (consume from M2 — do not re-implement):**
 
@@ -19,7 +19,7 @@ regression safety net only; M3+ must keep it green.
 | `Backend`, `PerceptionMode`, `Point`, `Rect`, `Size`, `ElementId` (`<hwnd_hex>:<runtime_id_hex>` composite), `SCHEMA_VERSION = 1` | `crates/synapse-core/src/types.rs` + `defaults.rs` | M2 extends `synapse-core` with `Action` enum + sub-types (`AimCurve`, `AimNaturalParams`, `AimStyle`, `KeystrokeDynamics`, `Key`, `KeyCode`, `MouseButton`, `MouseTarget`, `ButtonAction`, `PadId`, `PadButton`, `Stick`, `Trigger`, `GamepadReport`, `ComboStep`, `ComboInput`, `AimTarget`) per `06 §4` |
 | `ElementId::parts() -> ElementIdParts { hwnd, runtime_id_hex }` | `crates/synapse-core/src/types.rs:103` | M2 uses for InvokePattern resolution and HWND-targeting |
 | `synapse_a11y::re_resolve(&ElementId)` (Windows) | `crates/synapse-a11y/src/lib.rs:329` | M2 calls before every element-targeted click to refresh UIA pointer |
-| `synapse_a11y::focused_window()`, `foreground_context(hwnd)`, `snapshot(root, depth)` | `crates/synapse-a11y/src/lib.rs` | M2 uses to record focused element state for FSV before/after |
+| `synapse_a11y::focused_window()`, `foreground_context(hwnd)`, `snapshot(root, depth)` | `crates/synapse-a11y/src/lib.rs` | M2 uses to record focused element state for manual before/after evidence |
 | `uiautomation = "0.25.0"` re-exported as `synapse_a11y::UIElement` | `crates/synapse-a11y/src/lib.rs:15` | M2 invokes `IUIAutomationInvokePattern::Invoke` via the same crate's pattern API |
 | `synapse_capture::screen_to_window(point, hwnd)` / `window_to_screen(...)` | `crates/synapse-capture/src/lib.rs:449` | M2 uses for element-center coordinate clicks when InvokePattern is unsupported |
 | `synapse_test_utils::stdio_mcp_client::StdioMcpClient::launch_and_init_with_env(log_dir, envs)` | `crates/synapse-test-utils/src/stdio_mcp_client.rs:36` | M2 E2E tests reuse for every tool round-trip |
@@ -141,7 +141,7 @@ CAPTURE_TARGET_INVALID
 |---|---|
 | UIA cross-process COM marshaling slow | `IUIAutomationCacheRequest` batched fetch from work-item 5; fallback to depth-1 if > 25 ms p99 |
 | DirectX texture lifetime bugs | `Drop` impl audited; integration test verifies no leak after 10 min 60fps loop |
-| `ort` + DirectML install paperwork on clean Win | document MSVC redist prereq in README; CI installs runtime in setup |
+| `ort` + DirectML install paperwork on clean Win | document MSVC redist prereq in README; local setup checks the runtime on the configured host |
 | Chromiumoxide debug-port discovery | requires browser launched with `--remote-debugging-port=<N>`; surface `CDP_UNREACHABLE` clearly (`OQ-010`) |
 | `RuntimeId` instability across mutations (`OQ-023`) | composite `ElementId = "<hwnd>:<runtime_id_hex>"`; re-resolve on action call; M2 testing decides whether wrapper layer needed |
 | Multi-monitor (`OQ-012`) | one monitor active target at a time; `set_capture_target(monitor_index=...)` from agent |

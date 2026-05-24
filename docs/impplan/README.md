@@ -10,9 +10,9 @@ Doctrine: `docs2/compressionprompt.md` §0-13. Keep verbatim: paths, crate names
 
 1. **No backwards compatibility (pre-v1).** Schema/API changes break callers. No fallbacks, no compatibility shims, no silent error swallowing. Anything that does not work must fail fast with a structured `synapse_core::error_codes::*` code and a tracing log line containing that code, so the failure is debuggable.
 2. **No mocks gate completion.** Unit fakes are fine for isolation. An OS-bound work-item is **not done** until a real-OS integration test exercises it against the real source of truth (UIA `ValuePattern`, `XInputGetState`, file on disk, RocksDB key, `GetClipboardData`, `GetCursorPos`, low-level keyboard hook, etc.).
-3. **Full-State Verification (FSV) is mandatory** for every test from M2 onward. Identify the source of truth, print `before`, execute, print `after` from a separate read, exercise ≥3 edge cases (empty / boundary / structurally invalid), and emit at least one `final_value=` log line. See `00_methodology.md` §5.
+3. **Full-State Verification (FSV) is mandatory and manual.** The agent identifies the source of truth, reads `before`, executes the trigger, performs a separate read for `after`, exercises ≥3 edge cases (empty / boundary / structurally invalid), and records the actual state. Scripts, tests, benchmarks, harnesses, GitHub Actions, and CI are supporting evidence only; never call them FSV. See `00_methodology.md` §5.
 4. **Natural-only motion (OQ-004 DECIDED 2026-05-22).** `Natural` curves + `Natural` keystroke dynamics tuned `FAST` (50 ms `Snap` travel, ~190 WPM typing with `mean_iki_ms=32, stddev=10, bigram_bias=true`) are the resolved default of every tool, profile, and reflex. No `Instant` jumps, no `Burst` typing as defaults. `Instant`/`Burst` remain in the enums for explicit caller opt-in only. See `07_cross_cutting.md` §12.
-5. **Manual FSV on the configured Windows host is the shipping gate, not CI** (operator decision 2026-05-24, issues #246/#247/#350). Use local checks for supporting evidence. Do not dispatch, wait on, or block a tag on GitHub Actions/CI.
+5. **Manual FSV on the configured Windows host is the shipping gate, not CI** (operator decision 2026-05-24, issues #246/#247/#350/#351). Use local checks for supporting evidence. Do not dispatch, wait on, or block a tag on GitHub Actions/CI. Do not add `*_fsv` tests, FSV harnesses, or FSV scripts.
 
 ---
 
@@ -57,7 +57,7 @@ A work-item is "done" iff:
 - The work-item's specific acceptance bullet passes
 - Tracing instrumented; every error variant carries an `error_codes::*` code
 - No `unwrap()` / `expect()` outside `#[cfg(test)]`, no `unsafe` outside the allowed crates (`synapse-capture`, `synapse-hid-host`, `firmware/pico-hid`)
-- FSV evidence in test stdout: at least one `source_of_truth=<name> ... after_truth=<...>` line and one `final_value=<...>` line per scenario
+- Manual FSV evidence in the issue: SoT name, before read, trigger, after read, happy path, ≥3 edge cases, and actual state values. Test stdout is supporting evidence only.
 
 ---
 
@@ -75,7 +75,7 @@ A work-item is "done" iff:
 ✓ Schema change ⇒ wipe-and-rebuild (pre-v1, no shim)
 ✓ Bench delta ≤ 20% on tracked metrics via local exported `critcmp` JSON (`docs/dev-host-hygiene.md` §Benchmark baselines)
 ✓ Docs cross-refs intact (`scripts/check_docs.ps1`)
-✓ FSV evidence in test stdout (see `00_methodology.md` §5)
+✓ Manual issue evidence captures SoT before/readback-after state (see `00_methodology.md` §5)
 ```
 
 ---
@@ -84,7 +84,7 @@ A work-item is "done" iff:
 
 | Crate | Path | State | Next phase owner |
 |---|---|---|---|
-| `synapse-mcp` | `crates/synapse-mcp` | **15 MCP tools live** (6 M1 + 9 M2) over stdio; `--mode http` returns `NOT_YET_IMPLEMENTED` exit 2; tools listed in `tests/snapshots/m2_tools_fsv__m2_tools_list.snap` | M3 adds `subscribe`, `reflex_*`, `profile_*`, `replay_record`, `audio_*` + HTTP transport |
+| `synapse-mcp` | `crates/synapse-mcp` | **15 MCP tools live** (6 M1 + 9 M2) over stdio; `--mode http` returns `NOT_YET_IMPLEMENTED` exit 2; tool-surface readback recorded in #352 | M3 adds `subscribe`, `reflex_*`, `profile_*`, `replay_record`, `audio_*` + HTTP transport |
 | `synapse-core` | `crates/synapse-core` | full M0-M2 type set + 80 error codes (all `pub const`); `Action` enum + `AimCurve`/`AimNaturalParams::FAST` + `KeystrokeDynamics`/`KeystrokeNaturalParams::FAST` shipped; `ComboStep`/`ComboInput` carried for M3 | extend with `Profile`, `ReflexRegistration`, `Event`, `EventFilter` extensions, `StoredEvent`, etc. |
 | `synapse-capture` | `crates/synapse-capture` | windows-capture 2.0 + DXGI fallback + DPI awareness + `screen_to_window`/`window_to_screen` + capture-target resolver | unchanged at M3 |
 | `synapse-a11y` | `crates/synapse-a11y` | UIA tree walker + cache batch + WinEvent on COM STA + chromiumoxide CDP attach + `re_resolve` + `expand_state_of` + `coalesce_events`/`debounce_value_changes` | M3 consumes for `subscribe` event source |
@@ -117,8 +117,8 @@ These are landed-but-imperfect surfaces from M2. M3 either consumes them as-is o
 | #233 | `software::type_text` ignores `dynamics`, batches into single `SendInput` | Notepad drops chars past queue depth | Re-thread `dynamics` through `text_dispatch.rs` (partial fix landed in `ea70964`) |
 | #231 | held-key auto-release clears actor state but never dispatches backend `KeyUp` | Stuck-key telemetry fires; physical key never released | Auto-release path must call the same backend dispatch as a normal `KeyUp` |
 | #243/#260 | bench_results dir bloat (8 per-commit subdirs committed) | Repo grows | Use local `critcmp` exports under `%LOCALAPPDATA%\synapse\benchmarks\baselines\` / `.runs\benchmarks\`; stop committing per-commit baselines |
-| #242/#261 | `fsv-*/` ephemeral run dirs leak into the worktree | Untracked clutter | Standardize on `.runs/` + `.gitignore` + `scripts/clean-runs.ps1` |
-| #241/#262 | Telemetry log GC runs only at startup | Long-lived daemon exceeds 500 MB cap | Periodic telemetry GC worker + size-cap FSV complete |
+| #242/#261 | Ephemeral verification run dirs leak into the worktree | Untracked clutter | Standardize on `.runs/` + `.gitignore` + `scripts/clean-runs.ps1` |
+| #241/#262 | Telemetry log GC runs only at startup | Long-lived daemon exceeds 500 MB cap | Periodic telemetry GC worker + size-cap manual evidence complete |
 | **M2 LoC overrun** | `emitter.rs` 1474, `vigem.rs` 1131, `invoke.rs` 653, `software.rs` 586, `m2/click.rs` 506, `m2/press.rs` 545 — over the 500 LoC hard cap | Split before M3 builds reflex enqueue path on top, or land an ADR amending the rule with measurable justification | First M3 PR: file-split refactor with no behavior change |
 
 ---

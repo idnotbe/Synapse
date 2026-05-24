@@ -1,0 +1,33 @@
+id = "terminal"
+label = "Windows Terminal"
+schema_version = 1
+use_scope = "productivity"
+mode = "a11y_only"
+mouse_curve_default = "natural"
+keyboard_dynamics_default = "natural"
+
+[[matches]]
+exe = "WindowsTerminal.exe"
+title_regex = ".*(PowerShell|Command Prompt|Windows Terminal).*"
+
+[[matches]]
+exe = "wt.exe"
+
+[capture]
+target = "foreground_window"
+min_update_interval_ms = 50
+cursor_visible = true
+
+[keymap]
+copy = "ctrl+c"
+new_tab = "ctrl+shift+t"
+paste = "ctrl+v"
+split_pane = "alt+shift+d"
+switch_tab_left = "ctrl+shift+tab"
+switch_tab_right = "ctrl+tab"
+
+[backends]
+default = "auto"
+keyboard_default = "auto"
+mouse_default = "auto"
+pad_default = "auto"

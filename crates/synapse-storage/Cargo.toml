@@ -8,15 +8,12 @@ repository.workspace = true
 
 [features]
 default = []
-sled-backend = ["dep:sled"]
 
 [dependencies]
 rocksdb = { workspace = true, features = ["lz4", "zstd", "multi-threaded-cf"] }
 fs2.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-sha2.workspace = true
-sled = { workspace = true, optional = true }
 synapse-core = { version = "0.1.0", path = "../synapse-core" }
 synapse-telemetry = { version = "0.1.0", path = "../synapse-telemetry" }
 thiserror.workspace = true

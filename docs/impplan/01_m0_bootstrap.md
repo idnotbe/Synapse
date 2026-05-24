@@ -8,7 +8,7 @@ GitHub context issue: #1. All 81 M0 sub-issues (#2-#81) are closed.
 `synapse_test_utils::stdio_mcp_client::StdioMcpClient` and reads back the
 rotating JSONL log at the configured `SYNAPSE_LOG_DIR` to confirm the
 `tool.invocation kind=health` line appears (the source-of-truth read).
-CI green on Ubuntu + Windows (`.github/workflows/ci.yml`).
+Local supporting checks green on the configured host; `.github/workflows/ci.yml` is not a shipping gate.
 
 **FSV pattern established here is the M2+ standard:** spawn the daemon,
 exercise the tool, decode the response, then **read the side effect back from
@@ -24,7 +24,7 @@ PRD: `docs/computergames/15_roadmap_and_milestones.md` §2.
 
 ## Goal
 
-Empty repo → `synapse-mcp` binary serving MCP stdio, one tool (`health`) returning hardcoded JSON. CI green.
+Empty repo -> `synapse-mcp` binary serving MCP stdio, one tool (`health`) returning hardcoded JSON. Local checks green.
 
 ## Demo gate
 
@@ -36,7 +36,7 @@ Claude Desktop configured with `synapse-mcp` as MCP server → user asks Claude 
 
 - Fresh repo (or clean branch)
 - Installed stable Rust toolchain (M0 currently verified with rustc/cargo 1.95.0; see `docs/adr/0001-current-rust-and-dependencies.md`)
-- Windows 11 dev box (primary) or Linux (CI-only checks; OS-bound code stubbed)
+- Windows 11 dev box (primary) or Linux for portable supporting checks; OS-bound code stubbed
 - Claude Desktop (or any MCP-stdio client) for demo
 
 ---
@@ -51,9 +51,9 @@ deny.toml                                  (cargo-deny config, 14 §14)
 .gitignore
 LICENSE-MIT, LICENSE-APACHE
 README.md                                  ("Hello Synapse" only at M0)
-.github/workflows/ci.yml                   (fmt, clippy, test, deny, audit)
+.github/workflows/ci.yml                   (supporting automation, not a shipping gate)
 scripts/new-crate.ps1                      (crate template)
-scripts/check_docs.ps1                     (cross-doc CI)
+scripts/check_docs.ps1                     (cross-doc local check)
 ```
 
 ### Crates (skeleton)
@@ -81,14 +81,14 @@ scripts/check_docs.ps1                     (cross-doc CI)
 | # | Title | Acceptance |
 |---|---|---|
 | 1 | `chore: workspace scaffold` | `Cargo.toml` + 15 crate stubs + `cargo build --workspace` green |
-| 2 | `chore: deny + clippy + fmt` | CI matrix passes on a no-op PR using the installed stable toolchain |
+| 2 | `chore: deny + clippy + fmt` | local supporting matrix passes using the installed stable toolchain |
 | 3 | `feat(core): geometry + ids + Backend + PerceptionMode + SCHEMA_VERSION` | `synapse_core::types` snapshot test (`insta`) baseline |
 | 4 | `feat(core): error_codes module stub` | every code from `06 §8` declared as `pub const NAME: &str = "NAME";`; test asserts `NAME == "NAME"` |
 | 5 | `feat(telemetry): tracing JSON + console + rolling appender` | running binary produces `%LOCALAPPDATA%\synapse\logs\synapse.log` JSONL |
 | 6 | `feat(mcp): clap CLI + rmcp stdio bootstrap` | binary launches, accepts JSON-RPC `initialize`, replies with capabilities |
 | 7 | `feat(mcp): health tool registration` | `tools/list` shows `health`; `tools/call health {}` returns the schema |
 | 8 | `feat(test-utils): stdio MCP client harness` | integration test spawns `synapse-mcp`, calls `health`, asserts shape |
-| 9 | `chore(ci): doc cross-ref check via scripts/check_docs.ps1` | broken markdown link fails CI |
+| 9 | `chore(docs): doc cross-ref check via scripts/check_docs.ps1` | broken markdown link fails the local docs check |
 | 10 | `docs(readme): Hello Synapse quick-start` | reader follows instructions, sees `health` reply |
 
 ---
@@ -115,7 +115,7 @@ scripts/check_docs.ps1                     (cross-doc CI)
 |---|---|
 | `rmcp` API churn | Pin `rmcp = "1.7"` exact; do not bump without manual test |
 | Workspace deps version conflicts | All deps in `[workspace.dependencies]`; per-crate uses `dep.workspace = true`; current compatible versions are resolved against the installed stable toolchain |
-| Win11-only paths in stub crates | All OS calls behind `#[cfg(windows)]`; Linux build sets stub functions to `unimplemented!()` (never called on Linux CI which only runs Linux-portable tests) |
+| Win11-only paths in stub crates | All OS calls behind `#[cfg(windows)]`; Linux build sets stub functions to `unimplemented!()` (never called by portable supporting checks) |
 
 ---
 

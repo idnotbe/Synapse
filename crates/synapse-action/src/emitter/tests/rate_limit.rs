@@ -41,7 +41,7 @@ async fn rate_limited_error_carries_code_and_retry_after_ms_without_state_mutati
     assert_eq!(after_first_limits.software.tokens, 0);
     assert_eq!(after_limited_limits.software.tokens, 0);
     println!(
-        "source_of_truth=action_emitter_rate_limit edge=software_over_cap before_state={before_state:?} before_limits={before_limits:?} after_first_state={after_first_state:?} after_first_limits={after_first_limits:?} after_limited_state={after_limited_state:?} after_limited_limits={after_limited_limits:?} data.code={} data.retry_after_ms={:?} detail={}",
+        "readback=action_emitter_rate_limit edge=software_over_cap before_state={before_state:?} before_limits={before_limits:?} after_first_state={after_first_state:?} after_first_limits={after_first_limits:?} after_limited_state={after_limited_state:?} after_limited_limits={after_limited_limits:?} data.code={} data.retry_after_ms={:?} detail={}",
         error.code(),
         error.retry_after_ms(),
         error.detail()
@@ -99,7 +99,7 @@ async fn software_rate_limit_does_not_consume_vigem_bucket() {
     assert_eq!(after_vigem_state.pad_state.get(&1), Some(&report));
     assert_eq!(after_limited_state.pad_state.get(&1), Some(&report));
     println!(
-        "source_of_truth=action_emitter_rate_limit edge=backend_separation before={before:?} after_software={after_software:?} after_vigem={after_vigem:?} after_vigem_state={after_vigem_state:?} after_limited_state={after_limited_state:?} data.code={} data.retry_after_ms={:?}",
+        "readback=action_emitter_rate_limit edge=backend_separation before={before:?} after_software={after_software:?} after_vigem={after_vigem:?} after_vigem_state={after_vigem_state:?} after_limited_state={after_limited_state:?} data.code={} data.retry_after_ms={:?}",
         error.code(),
         error.retry_after_ms()
     );
@@ -127,6 +127,6 @@ async fn release_all_bypasses_empty_buckets_and_drains_state() {
     assert_eq!(before_limits.software.tokens, 0);
     assert_eq!(after_limits.software.tokens, 0);
     println!(
-        "source_of_truth=action_emitter_rate_limit edge=release_all_bypass before_state={before_state:?} before_limits={before_limits:?} after_state={after_state:?} after_limits={after_limits:?}"
+        "readback=action_emitter_rate_limit edge=release_all_bypass before_state={before_state:?} before_limits={before_limits:?} after_state={after_state:?} after_limits={after_limits:?}"
     );
 }

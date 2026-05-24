@@ -22,7 +22,7 @@ fn natural_fast_constants_match_m2_spec() {
     assert!(keys.bigram_bias);
 
     println!(
-        "source_of_truth=types.rs edge=natural_fast_constants final_value=ok aim_tremor={} key_mean={}",
+        "readback=types.rs edge=natural_fast_constants result_value=ok aim_tremor={} key_mean={}",
         aim.tremor_stddev_px, keys.mean_iki_ms
     );
 }
@@ -37,7 +37,7 @@ fn action_json_edges_are_closed_and_tagged() -> Result<(), Box<dyn std::error::E
     let valid_action = serde_json::from_value::<Action>(valid_before.clone())?;
     assert!(matches!(valid_action, Action::KeyDown { .. }));
     println!(
-        "source_of_truth=action_json edge=happy_path before={} after={}",
+        "readback=action_json edge=happy_path before={} after={}",
         valid_before,
         serde_json::to_value(&valid_action)?
     );
@@ -49,13 +49,11 @@ fn action_json_edges_are_closed_and_tagged() -> Result<(), Box<dyn std::error::E
         "extra": true
     });
     assert!(serde_json::from_value::<Action>(unknown_field.clone()).is_err());
-    println!(
-        "source_of_truth=action_json edge=unknown_field before={unknown_field} after=rejected"
-    );
+    println!("readback=action_json edge=unknown_field before={unknown_field} after=rejected");
 
     let invalid_tag = json!({"kind": "run_shell"});
     assert!(serde_json::from_value::<Action>(invalid_tag.clone()).is_err());
-    println!("source_of_truth=action_json edge=invalid_tag before={invalid_tag} after=rejected");
+    println!("readback=action_json edge=invalid_tag before={invalid_tag} after=rejected");
 
     let invalid_element = json!({
         "kind": "mouse_move",
@@ -65,9 +63,7 @@ fn action_json_edges_are_closed_and_tagged() -> Result<(), Box<dyn std::error::E
         "backend": "software"
     });
     assert!(serde_json::from_value::<Action>(invalid_element.clone()).is_err());
-    println!(
-        "source_of_truth=action_json edge=invalid_element before={invalid_element} after=rejected"
-    );
+    println!("readback=action_json edge=invalid_element before={invalid_element} after=rejected");
 
     Ok(())
 }
@@ -90,7 +86,7 @@ fn key_code_json_round_trips_each_variant() -> Result<(), Box<dyn std::error::Er
         let json = serde_json::to_value(&key)?;
         let parsed = serde_json::from_value::<Key>(json.clone())?;
         assert_eq!(parsed, key);
-        println!("source_of_truth=key_code edge=round_trip final_value={json}");
+        println!("readback=key_code edge=round_trip result_value={json}");
     }
 
     Ok(())
@@ -124,7 +120,7 @@ fn gamepad_report_schema_has_closed_object_and_axis_bounds()
         "rt": 0.0
     });
     println!(
-        "source_of_truth=gamepad_schema edge=thumb_l_out_of_range before={before} after=rejected_by_schema_bounds"
+        "readback=gamepad_schema edge=thumb_l_out_of_range before={before} after=rejected_by_schema_bounds"
     );
     Ok(())
 }

@@ -227,7 +227,7 @@ struct BenchReport {
 impl BenchReport {
     fn print(&self) {
         println!(
-            "source_of_truth=action_recording_round_trip edge={} before=iterations:{} expected_new_events:{} after=new_events:{} first_event:{} last_event:{} actor_empty:{} p50_ns:{} p99_ns:{} max_ns:{} final_value=pass",
+            "readback=action_recording_round_trip edge={} before=iterations:{} expected_new_events:{} after=new_events:{} first_event:{} last_event:{} actor_empty:{} p50_ns:{} p99_ns:{} max_ns:{} result_value=pass",
             self.edge,
             self.iterations,
             self.expected_new_event_count,

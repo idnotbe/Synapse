@@ -13,7 +13,7 @@ use tokio::{
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Minimal raw JSON-RPC stdio client for M0 MCP full-state verification.
+/// Minimal raw JSON-RPC stdio client for local MCP regression checks.
 pub struct StdioMcpClient {
     child: Option<Child>,
     stdin: Option<ChildStdin>,

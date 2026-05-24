@@ -56,7 +56,7 @@ pub async fn release_all_with_handles(
         after_held_buttons = ?after.held_buttons,
         after_pad_state_len = after.pad_state.len(),
         elapsed_ms = u32::try_from(started.elapsed().as_millis()).unwrap_or(u32::MAX),
-        "source_of_truth=action_emitter_state tool=release_all after_snapshot_readback"
+        "readback=action_emitter_state tool=release_all after_snapshot_readback"
     );
 
     Ok(response)
@@ -154,9 +154,7 @@ mod tests {
             .snapshot()
             .await
             .unwrap_or_else(|error| panic!("snapshot before release_all should succeed: {error}"));
-        println!(
-            "source_of_truth=action_emitter_state tool=release_all edge=happy before={before:?}"
-        );
+        println!("readback=action_emitter_state tool=release_all edge=happy before={before:?}");
         assert_eq!(before.held_keys.len(), 3);
         assert_eq!(before.held_buttons, vec![MouseButton::Left]);
         assert_eq!(before.pad_state.len(), 1);
@@ -174,7 +172,7 @@ mod tests {
             .await
             .unwrap_or_else(|error| panic!("snapshot after release_all should succeed: {error}"));
         println!(
-            "source_of_truth=action_emitter_state tool=release_all edge=happy after={after:?} response={response:?}"
+            "readback=action_emitter_state tool=release_all edge=happy after={after:?} response={response:?}"
         );
         assert!(after.held_keys.is_empty());
         assert!(after.held_buttons.is_empty());

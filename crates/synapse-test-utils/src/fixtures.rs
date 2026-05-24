@@ -82,7 +82,7 @@ mod platform {
 
     use super::{WindowCandidate, select_new_notepad_window, select_window_title_match};
 
-    pub const NOTEPAD_TITLE_REGEX: &str = r"^Untitled - Notepad$";
+    pub const NOTEPAD_TITLE_REGEX: &str = r"^(?:Untitled - Notepad|Notepad)$";
     pub const NOTEPAD_POLL_INTERVAL: Duration = Duration::from_millis(20);
     pub const NOTEPAD_STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -250,10 +250,10 @@ mod platform {
             bail!("spawned notepad.exe without a process id");
         }
 
-        // On Win11 22H2+ packaged Notepad with session restore, a fresh `notepad.exe`
-        // launch may reopen the last-used document tab and never produce an
-        // `Untitled - Notepad` window. If the initial wait times out, target the
-        // newly observed Notepad HWND, send Ctrl+N once, then retry.
+        // On Win11 22H2+ packaged Notepad with session restore, a fresh
+        // `notepad.exe` launch may reopen the last-used document tab and never
+        // produce a blank Notepad window. If the initial wait times out, target
+        // the newly observed Notepad HWND, send Ctrl+N once, then retry.
         let context = match wait_for_new_window_title_regex(pid, &title_regex, &excluded_hwnds) {
             Ok(context) => context,
             Err(first_err) => match force_untitled_notepad_tab(
@@ -605,7 +605,7 @@ mod platform {
         #[test]
         #[ignore = "requires an interactive Windows desktop with Notepad and UIA"]
         #[allow(clippy::trivial_regex)]
-        fn ctrl_n_retry_converts_new_saved_notepad_window_to_untitled_fsv() -> anyhow::Result<()> {
+        fn ctrl_n_retry_converts_new_saved_notepad_window_to_blank_notepad() -> anyhow::Result<()> {
             let mut file =
                 NamedTempFile::new().context("create temp Notepad restore probe file")?;
             writeln!(file, "synapse issue 238 restore probe")
@@ -618,7 +618,7 @@ mod platform {
             let excluded_exact_hwnds = matching_window_hwnds(&existing_windows, &title_regex);
             let excluded_notepad_hwnds = notepad_window_hwnds(&existing_windows);
             println!(
-                "source_of_truth=notepad_ctrl_n_retry edge=saved_tab before excluded_notepad_hwnds={excluded_notepad_hwnds:?} file={}",
+                "regression_check=notepad_ctrl_n_retry edge=saved_tab before excluded_notepad_hwnds={excluded_notepad_hwnds:?} file={}",
                 file_path.display()
             );
 
@@ -639,7 +639,7 @@ mod platform {
             let saved_context = context_for_window(saved_candidate.hwnd)
                 .context("read saved-tab Notepad context")?;
             println!(
-                "source_of_truth=notepad_ctrl_n_retry edge=saved_tab before_retry hwnd=0x{:x} pid={} title={:?}",
+                "regression_check=notepad_ctrl_n_retry edge=saved_tab before_retry hwnd=0x{:x} pid={} title={:?}",
                 saved_context.hwnd, saved_context.pid, saved_context.window_title
             );
 
@@ -653,14 +653,18 @@ mod platform {
                 wait_for_new_window_title_regex(launcher_pid, &title_regex, &excluded_exact_hwnds)
                     .context("wait for Ctrl+N retry to produce Untitled Notepad")?;
             println!(
-                "source_of_truth=notepad_ctrl_n_retry edge=saved_tab after_retry source_hwnd=0x{:x} source_pid={} hwnd=0x{:x} pid={} title={:?}",
+                "regression_check=notepad_ctrl_n_retry edge=saved_tab after_retry source_hwnd=0x{:x} source_pid={} hwnd=0x{:x} pid={} title={:?}",
                 retry_candidate.hwnd,
                 retry_candidate.pid,
                 untitled_context.hwnd,
                 untitled_context.pid,
                 untitled_context.window_title
             );
-            assert_eq!(untitled_context.window_title, "Untitled - Notepad");
+            assert!(
+                super::super::is_notepad_window_title(&untitled_context.window_title),
+                "expected blank Notepad title, got {:?}",
+                untitled_context.window_title
+            );
 
             synapse_a11y::close_window(untitled_context.hwnd)
                 .context("close Ctrl+N retry Notepad window")?;
@@ -685,7 +689,7 @@ mod platform {
             let child_exited = wait_for_child_exit(&mut child, FORCE_CLOSE_TIMEOUT)
                 .context("wait for saved-tab Notepad launcher after cleanup")?;
             println!(
-                "source_of_truth=notepad_ctrl_n_retry edge=saved_tab after_close hwnd=0x{:x} ui_pid={} launcher_pid={} closed={closed} cleanup_stage={cleanup_stage} child_exited={child_exited}",
+                "regression_check=notepad_ctrl_n_retry edge=saved_tab after_close hwnd=0x{:x} ui_pid={} launcher_pid={} closed={closed} cleanup_stage={cleanup_stage} child_exited={child_exited}",
                 untitled_context.hwnd, untitled_context.pid, launcher_pid
             );
             assert!(closed);
@@ -703,7 +707,7 @@ mod platform {
     use regex::Regex;
     use synapse_core::ForegroundContext;
 
-    pub const NOTEPAD_TITLE_REGEX: &str = r"^Untitled - Notepad$";
+    pub const NOTEPAD_TITLE_REGEX: &str = r"^(?:Untitled - Notepad|Notepad)$";
     pub const NOTEPAD_POLL_INTERVAL: Duration = Duration::from_millis(20);
     pub const NOTEPAD_STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -758,18 +762,21 @@ mod tests {
         NOTEPAD_POLL_INTERVAL, NOTEPAD_STARTUP_TIMEOUT, NOTEPAD_TITLE_REGEX, launch_notepad,
     };
     #[cfg(any(windows, test))]
-    use super::{WindowCandidate, select_new_notepad_window, select_window_title_match};
+    use super::{
+        WindowCandidate, is_notepad_window_title, select_new_notepad_window,
+        select_window_title_match,
+    };
 
     #[test]
     fn notepad_fixture_constants_match_m2_contract() {
         println!(
-            "source_of_truth=fixtures_constants before=expected_poll_ms:20 expected_timeout_s:5 expected_regex:{NOTEPAD_TITLE_REGEX:?}"
+            "readback=fixtures_constants before=expected_poll_ms:20 expected_timeout_s:5 expected_regex:{NOTEPAD_TITLE_REGEX:?}"
         );
         assert_eq!(NOTEPAD_POLL_INTERVAL.as_millis(), 20);
         assert_eq!(NOTEPAD_STARTUP_TIMEOUT.as_secs(), 5);
-        assert_eq!(NOTEPAD_TITLE_REGEX, r"^Untitled - Notepad$");
+        assert_eq!(NOTEPAD_TITLE_REGEX, r"^(?:Untitled - Notepad|Notepad)$");
         println!(
-            "source_of_truth=fixtures_constants after=poll_ms:{} timeout_s:{} regex:{NOTEPAD_TITLE_REGEX:?}",
+            "readback=fixtures_constants after=poll_ms:{} timeout_s:{} regex:{NOTEPAD_TITLE_REGEX:?}",
             NOTEPAD_POLL_INTERVAL.as_millis(),
             NOTEPAD_STARTUP_TIMEOUT.as_secs()
         );
@@ -778,12 +785,12 @@ mod tests {
     #[cfg(not(windows))]
     #[test]
     fn launch_notepad_fails_closed_off_windows() {
-        println!("source_of_truth=launch_notepad_non_windows before=handle_present:false");
+        println!("readback=launch_notepad_non_windows before=handle_present:false");
         let error = match launch_notepad() {
             Ok(_handle) => panic!("launch_notepad unexpectedly succeeded off Windows"),
             Err(error) => error,
         };
-        println!("source_of_truth=launch_notepad_non_windows after=error:{error}");
+        println!("readback=launch_notepad_non_windows after=error:{error}");
         assert!(error.to_string().contains("requires Windows"));
     }
 
@@ -796,7 +803,7 @@ mod tests {
             Err(error) => panic!("failed to compile Notepad title regex: {error}"),
         };
         println!(
-            "source_of_truth=wait_for_window_title_regex_non_windows before=pid:1 regex:{:?}",
+            "readback=wait_for_window_title_regex_non_windows before=pid:1 regex:{:?}",
             regex.as_str()
         );
         let error = match wait_for_window_title_regex(1, &regex) {
@@ -805,13 +812,13 @@ mod tests {
             }
             Err(error) => error,
         };
-        println!("source_of_truth=wait_for_window_title_regex_non_windows after=error:{error}");
+        println!("readback=wait_for_window_title_regex_non_windows after=error:{error}");
         assert!(error.to_string().contains("requires Windows"));
     }
 
     #[allow(clippy::trivial_regex)]
     #[test]
-    fn notepad_window_selection_prefers_launcher_pid_and_skips_preexisting_fsv() {
+    fn notepad_window_selection_prefers_launcher_pid_and_skips_preexisting() {
         let regex = match Regex::new(NOTEPAD_TITLE_REGEX) {
             Ok(regex) => regex,
             Err(error) => panic!("failed to compile Notepad title regex: {error}"),
@@ -837,18 +844,18 @@ mod tests {
         ];
 
         println!(
-            "source_of_truth=notepad_window_selection edge=prefer_launcher before=preferred_pid:123 excluded={excluded:?} candidates={candidates:?}"
+            "regression_check=notepad_window_selection edge=prefer_launcher before=preferred_pid:123 excluded={excluded:?} candidates={candidates:?}"
         );
         let selected = select_window_title_match(&candidates, &excluded, 123, &regex);
         println!(
-            "source_of_truth=notepad_window_selection edge=prefer_launcher after={selected:?} expected_hwnd=11"
+            "regression_check=notepad_window_selection edge=prefer_launcher after={selected:?} expected_hwnd=11"
         );
         assert_eq!(selected.map(|candidate| candidate.hwnd), Some(11));
     }
 
     #[allow(clippy::trivial_regex)]
     #[test]
-    fn notepad_window_selection_accepts_uwp_different_pid_fsv() {
+    fn notepad_window_selection_accepts_packaged_notepad_different_pid() {
         let regex = match Regex::new(NOTEPAD_TITLE_REGEX) {
             Ok(regex) => regex,
             Err(error) => panic!("failed to compile Notepad title regex: {error}"),
@@ -857,22 +864,22 @@ mod tests {
         let candidates = vec![WindowCandidate {
             hwnd: 44,
             pid: 9001,
-            title: "Untitled - Notepad".to_owned(),
+            title: "Notepad".to_owned(),
         }];
 
         println!(
-            "source_of_truth=notepad_window_selection edge=uwp_pid_transfer before=preferred_pid:123 excluded={excluded:?} candidates={candidates:?}"
+            "regression_check=notepad_window_selection edge=packaged_pid_transfer before=preferred_pid:123 excluded={excluded:?} candidates={candidates:?}"
         );
         let selected = select_window_title_match(&candidates, &excluded, 123, &regex);
         println!(
-            "source_of_truth=notepad_window_selection edge=uwp_pid_transfer after={selected:?} expected_hwnd=44"
+            "regression_check=notepad_window_selection edge=packaged_pid_transfer after={selected:?} expected_hwnd=44"
         );
         assert_eq!(selected.map(|candidate| candidate.hwnd), Some(44));
     }
 
     #[allow(clippy::trivial_regex)]
     #[test]
-    fn notepad_window_selection_rejects_excluded_or_wrong_title_fsv() {
+    fn notepad_window_selection_rejects_excluded_or_wrong_title() {
         let regex = match Regex::new(NOTEPAD_TITLE_REGEX) {
             Ok(regex) => regex,
             Err(error) => panic!("failed to compile Notepad title regex: {error}"),
@@ -893,17 +900,17 @@ mod tests {
         ];
 
         println!(
-            "source_of_truth=notepad_window_selection edge=no_match before=preferred_pid:123 excluded={excluded:?} candidates={candidates:?}"
+            "regression_check=notepad_window_selection edge=no_match before=preferred_pid:123 excluded={excluded:?} candidates={candidates:?}"
         );
         let selected = select_window_title_match(&candidates, &excluded, 123, &regex);
         println!(
-            "source_of_truth=notepad_window_selection edge=no_match after={selected:?} expected=None"
+            "regression_check=notepad_window_selection edge=no_match after={selected:?} expected=None"
         );
         assert_eq!(selected, None);
     }
 
     #[test]
-    fn notepad_restore_retry_selects_only_new_notepad_windows_fsv() {
+    fn notepad_restore_retry_selects_only_new_notepad_windows() {
         let mut excluded = std::collections::HashSet::new();
         excluded.insert(70);
         let candidates = vec![
@@ -925,17 +932,17 @@ mod tests {
         ];
 
         println!(
-            "source_of_truth=notepad_restore_retry edge=new_saved_tab before=preferred_pid:6000 excluded={excluded:?} candidates={candidates:?}"
+            "regression_check=notepad_restore_retry edge=new_saved_tab before=preferred_pid:6000 excluded={excluded:?} candidates={candidates:?}"
         );
         let selected = select_new_notepad_window(&candidates, &excluded, 6000);
         println!(
-            "source_of_truth=notepad_restore_retry edge=new_saved_tab after={selected:?} expected_hwnd=71"
+            "regression_check=notepad_restore_retry edge=new_saved_tab after={selected:?} expected_hwnd=71"
         );
         assert_eq!(selected.map(|candidate| candidate.hwnd), Some(71));
     }
 
     #[test]
-    fn notepad_restore_retry_rejects_only_preexisting_notepad_windows_fsv() {
+    fn notepad_restore_retry_rejects_only_preexisting_notepad_windows() {
         let mut excluded = std::collections::HashSet::new();
         excluded.insert(70);
         let candidates = vec![
@@ -952,11 +959,11 @@ mod tests {
         ];
 
         println!(
-            "source_of_truth=notepad_restore_retry edge=preexisting_only before=preferred_pid:6000 excluded={excluded:?} candidates={candidates:?}"
+            "regression_check=notepad_restore_retry edge=preexisting_only before=preferred_pid:6000 excluded={excluded:?} candidates={candidates:?}"
         );
         let selected = select_new_notepad_window(&candidates, &excluded, 6000);
         println!(
-            "source_of_truth=notepad_restore_retry edge=preexisting_only after={selected:?} expected=None"
+            "regression_check=notepad_restore_retry edge=preexisting_only after={selected:?} expected=None"
         );
         assert_eq!(selected, None);
     }
@@ -966,23 +973,27 @@ mod tests {
     #[ignore = "requires an interactive Windows desktop with Notepad and UIA"]
     fn launch_notepad_reaches_expected_window_title_on_windows() -> anyhow::Result<()> {
         println!(
-            "source_of_truth=synapse_a11y::foreground_context(hwnd).window_title before=notepad_absent_or_unobserved"
+            "readback=synapse_a11y::foreground_context(hwnd).window_title before=notepad_absent_or_unobserved"
         );
         let handle = launch_notepad()?;
         let context = handle.current_foreground_context()?;
         println!(
-            "source_of_truth=synapse_a11y::foreground_context hwnd={} pid={} after_title={:?}",
+            "readback=synapse_a11y::foreground_context hwnd={} pid={} after_title={:?}",
             handle.hwnd(),
             handle.pid(),
             context.window_title
         );
         assert_eq!(context.pid, handle.pid());
         assert_eq!(context.hwnd, handle.hwnd());
-        assert_eq!(context.window_title, "Untitled - Notepad");
+        assert!(
+            is_notepad_window_title(&context.window_title),
+            "expected blank Notepad title, got {:?}",
+            context.window_title
+        );
 
         let pid = handle.pid();
         handle.close()?;
-        println!("source_of_truth=NotepadHandle::close after=closed pid={pid}");
+        println!("readback=NotepadHandle::close after=closed pid={pid}");
         Ok(())
     }
 }

@@ -58,7 +58,7 @@ pub(super) async fn execute_recording(
         scheduled_inter_click_total_ms,
         event_sequence,
         ?new_events,
-        "source_of_truth=recording_backend tool=act_click after_events_readback"
+        "readback=recording_backend tool=act_click after_events_readback"
     );
     Ok(())
 }

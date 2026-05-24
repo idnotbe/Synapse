@@ -5,7 +5,7 @@ Discipline applied across M0-M5, not owned by any single phase. Pointers to auth
 **Three operator-level invariants** that override anything below in case of conflict:
 1. No backwards compatibility (pre-v1). Fail fast with `error_codes::*`; no fallbacks/shims.
 2. No mocks gate completion. OS-bound work needs a real-OS integration test with source-of-truth read-back.
-3. Manual configured-host FSV is the shipping gate (issues #246/#247/#350). Use local checks for supporting evidence; do not dispatch or wait on GitHub Actions/CI.
+3. Manual configured-host FSV is the shipping gate (issues #246/#247/#350/#351). Use local checks for supporting evidence; do not dispatch or wait on GitHub Actions/CI. FSV must never be delegated to scripts, automated tests, benchmarks, harnesses, CI jobs, or any other automated substitute.
 
 ---
 
@@ -117,7 +117,7 @@ Per `14 §12`. Applies to every `vX.Y.Z` tag (and the M0-M4 archival `v0.1.0-mN`
 ```
 1. Branch release/x.y.z from main
 2. Tag vx.y.z on the commit
-3. CI release job builds + signs:
+3. Local release build/signing step produces:
    - synapse-mcp.exe (release profile)
    - synapse-overlay.exe
    - SynapseSetup-x.y.z.msi
@@ -165,7 +165,7 @@ Per `compressionprompt.md` doctrine (universal):
 | Cross-doc references by file path, not restated content | `scripts/check_docs.ps1` resolves all relative Markdown links |
 | Defined terms once at top of each doc, used densely below | review pattern |
 | One instruction per sentence in normative rules | review pattern (ASD-STE100 §4.12) |
-| No emojis unless user-requested | CI grep |
+| No emojis unless user-requested | local review / grep |
 
 When PRD §X content moves: leave a one-line `→ see §Y` stub for the link target, don't silently delete.
 
@@ -179,7 +179,7 @@ Closes during the phase that hits the decision:
 |---|---|
 | M1 | OQ-009 (max_elements default; M5 telem feedback expected); OQ-010 (CDP auto-attach); OQ-024 (token budget enforcement); OQ-023 (element_id stability) |
 | M2 | OQ-004 (productivity aim curve default) — partial; final at M5 |
-| M3 | OQ-001 (RocksDB primary or sled flip); OQ-015 (profile match precedence final); OQ-022 (recursion guard); OQ-029 (per-event vs batched notifications); OQ-005 (reflex priority); OQ-012 (multi-monitor) |
+| M3 | OQ-001 (RocksDB primary per ADR-0002); OQ-015 (profile match precedence final); OQ-022 (recursion guard); OQ-029 (per-event vs batched notifications); OQ-005 (reflex priority); OQ-012 (multi-monitor) |
 | M4 | OQ-003 (detection model default — YOLOv10n vs RT-DETR-s); OQ-013 (aim_track EMA smoothing); OQ-016 (action coalescing on hardware) |
 | M5 | OQ-008 (VLM bundling); OQ-014 (Whisper-tiny vs base); OQ-017 (disk pressure thresholds); OQ-019 (telemetry split); OQ-020 (`game_screenshot_once` exposure); OQ-030 (GC cadence final) |
 | v1.x | OQ-006 (per-session permissions); OQ-007 (profile signing); OQ-021 (HRTF audio); OQ-027 (hardware HID 2FA); OQ-028 (migrations vs wipe); OQ-026 (cross-platform start trigger); OQ-018 (replay format final) |
@@ -204,13 +204,13 @@ Per `13_testing_strategy.md` §14. Repeated for forcing function:
 | `cargo audit` | configured host | dependency changes / release candidate |
 | `insta review --check` | configured host | snapshot changes |
 | `scripts/check_docs.ps1` | configured host PowerShell | doc changes |
-| `e2e-real-windows` | configured Windows host | issue-specific FSV / release candidate |
+| `e2e-real-windows` | configured Windows host | issue-specific manual evidence / release candidate |
 | `bench-regression` | configured Windows host | manual/local exported `critcmp` delta gate |
 | `hardware-in-loop` | configured host with Pico | hardware work-items / release candidate |
 | `soak` | configured Windows host | release candidate |
 | `fuzz` | configured host | parser/protocol changes |
 
-Do not use GitHub Actions/CI as a merge or phase-tag gate unless a later operator decision explicitly reverses #350. Local checks plus manual configured-host FSV are the required evidence.
+Do not use GitHub Actions/CI as a merge or phase-tag gate unless a later operator decision explicitly reverses #351. Local checks are supporting evidence only; manual configured-host FSV with source-of-truth readback is the required evidence.
 
 ---
 
@@ -273,12 +273,12 @@ Every PR must preserve this. PRs that add planning, MCTS, GOAP, skill libraries,
 | Lesson | Source | Apply how |
 |---|---|---|
 | 500 LoC cap erodes silently — emitter.rs ended at 1474, vigem.rs 1131, invoke.rs 653 | M2 carry-over | Reviewers enforce at ≤ 450 LoC during code review; M3 work-item A.0 splits the M2 over-cap files **before** building reflex on top |
-| Telemetry log GC at startup only → long-lived daemon exceeds 500 MB cap | #241/#262 | Long-running cleanup tasks need an explicit cadence and FSV proving mid-uptime cleanup; telemetry GC uses the `synapse-telemetry-gc` worker with `SYNAPSE_LOG_GC_INTERVAL_S` |
-| `fsv-*/` ephemeral run dirs leak into the worktree | #242/#261 | Standardize on `.runs/` (gitignored) for any test that writes ad-hoc artifacts; use `scripts/clean-runs.ps1` for pruning; never write into the repo root |
+| Telemetry log GC at startup only -> long-lived daemon exceeds 500 MB cap | #241/#262 | Long-running cleanup tasks need an explicit cadence and manual evidence proving mid-uptime cleanup; telemetry GC uses the `synapse-telemetry-gc` worker with `SYNAPSE_LOG_GC_INTERVAL_S` |
+| Ephemeral verification run dirs leak into the worktree | #242/#261/#351 | Do not create new FSV scripts, harnesses, or run dirs. If a supporting check writes ad-hoc artifacts, use `.runs/` (gitignored) and `scripts/clean-runs.ps1`; never write into the repo root. |
 | `bench_results/<sha>/` was committed per commit (8 dirs removed by #260) | #243/#260 | Use local `critcmp` JSON outside the repo; stop committing per-commit baselines |
 | M2 packaged-Notepad UIA `MenuBar` discovery is silently empty under `ControlView` walker | #244 | M3 work-item A.0c switches to `RawView`; future a11y work must include a UWP-packaged-app smoke test |
 | Coords are physical (DPI-aware) pixels — undocumented; trips DPI-unaware SoT readers | #239 | M3 work-item A.0g patches tool schema descriptions + `03_action.md`; future tools must document coord space explicitly |
 | `SoftwareBackend::mouse_move` reads cursor via Enigo (DPI-unaware) in a DPI-aware host | #234 | M3 work-item A.0d routes through Win32 `GetCursorPos` in DPI-aware mode; future cross-DPI tests must assert byte-equal end position |
-| Backend wiring no-op (#228) went undetected until #219 live FSV | M2 carry-over | every backend integration test must dispatch through the real `ActionEmitter` actor with a real backend, not via direct backend `execute` calls |
+| Backend wiring no-op (#228) went undetected until #219 live manual evidence | M2 carry-over | every backend integration test must dispatch through the real `ActionEmitter` actor with a real backend, not via direct backend `execute` calls |
 | ViGEmBus 1.22.0 installer fails unattended (-536870911 no log) | #229 | M2 explicitly scoped to **operator's configured host** with ViGEmBus pre-installed; do not gate M3+ on unattended driver install |
-| `SYNAPSE_MCP_FORCE_PANIC_DURING_ACT` and `SYNAPSE_MCP_FORCE_*` env flags are the FSV escape hatches for non-reachable code paths | shipped through M1+M2 | M3 adds parallel `SYNAPSE_MCP_FORCE_REFLEX_*` / `SYNAPSE_MCP_FORCE_AUDIO_*` env flags to drive every M3 error path that cannot otherwise be triggered deterministically |
+| `SYNAPSE_MCP_FORCE_PANIC_DURING_ACT` and `SYNAPSE_MCP_FORCE_*` env flags are deterministic trigger hooks for otherwise unreachable code paths | shipped through M1+M2 | M3 adds parallel `SYNAPSE_MCP_FORCE_REFLEX_*` / `SYNAPSE_MCP_FORCE_AUDIO_*` env flags to drive every M3 error path that cannot otherwise be triggered deterministically |

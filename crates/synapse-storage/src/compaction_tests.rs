@@ -9,7 +9,7 @@ const TEST_SCHEMA_VERSION: u32 = 7;
 const NOW_NS: u64 = 1_800_000_000_000_000_000;
 
 #[test]
-fn compaction_ttl_proptest_removes_old_keeps_fresh_with_fsv() -> Result<(), Box<dyn Error>> {
+fn compaction_ttl_proptest_removes_old_keeps_fresh() -> Result<(), Box<dyn Error>> {
     let mut runner = TestRunner::new(ProptestConfig::with_cases(4));
     runner
         .run(&(1usize..6), |records_per_class| {
@@ -21,7 +21,7 @@ fn compaction_ttl_proptest_removes_old_keeps_fresh_with_fsv() -> Result<(), Box<
 }
 
 #[test]
-fn compaction_ttl_edges_per_cf_with_fsv() -> Result<(), Box<dyn Error>> {
+fn compaction_ttl_edges_per_cf() -> Result<(), Box<dyn Error>> {
     for default in DEFAULTS {
         run_zero_record_edge(default.cf)?;
         run_boundary_edges(default.cf)?;
@@ -47,7 +47,7 @@ fn run_ttl_property(records_per_class: usize) -> Result<(), Box<dyn Error>> {
         let old_after = count_label(&after, "old");
         let fresh_after = count_label(&after, "fresh");
         println!(
-            "source_of_truth=cf_scan cf={cf} case=proptest before_count={} after_count={} final_value=old_after:{old_after} fresh_after:{fresh_after} ttl_ns:{ttl:?}",
+            "regression_state=cf_scan cf={cf} case=proptest before_count={} after_count={} observed=old_after:{old_after} fresh_after:{fresh_after} ttl_ns:{ttl:?}",
             before.len(),
             after.len()
         );
@@ -71,7 +71,7 @@ fn run_zero_record_edge(cf: &str) -> Result<(), Box<dyn Error>> {
     db.compact_cf(cf)?;
     let after = db.scan_cf(cf)?;
     println!(
-        "source_of_truth=cf_scan cf={cf} case=zero before_count={} after_count={} final_value={after:?}",
+        "regression_state=cf_scan cf={cf} case=zero before_count={} after_count={} observed={after:?}",
         before.len(),
         after.len()
     );
@@ -102,7 +102,7 @@ fn run_boundary_edges(cf: &str) -> Result<(), Box<dyn Error>> {
     let boundary_after = count_label(&after, "boundary");
     let over_after = count_label(&after, "over");
     println!(
-        "source_of_truth=cf_scan cf={cf} case=boundary before_count={} after_count={} final_value=boundary_after:{boundary_after} over_after:{over_after} ttl_ns:{ttl:?}",
+        "regression_state=cf_scan cf={cf} case=boundary before_count={} after_count={} observed=boundary_after:{boundary_after} over_after:{over_after} ttl_ns:{ttl:?}",
         before.len(),
         after.len()
     );

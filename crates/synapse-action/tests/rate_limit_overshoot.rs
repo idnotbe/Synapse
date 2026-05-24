@@ -23,7 +23,7 @@ async fn software_5100_events_in_one_window_limits_exactly_100() {
     assert_eq!(after_refill.tokens, 5_000);
     assert_all_rate_limited(&limited_errors, 1);
     println!(
-        "source_of_truth=token_bucket edge=overshoot before=tokens:{} after=tokens:{} accepted={} limited={} first_code={} first_retry_after_ms={:?} after_refill=tokens:{}",
+        "readback=token_bucket edge=overshoot before=tokens:{} after=tokens:{} accepted={} limited={} first_code={} first_retry_after_ms={:?} after_refill=tokens:{}",
         before.tokens,
         after_batch.tokens,
         accepted,
@@ -48,7 +48,7 @@ async fn software_exact_capacity_has_no_rate_limited_errors() {
     assert!(limited_errors.is_empty());
     assert_eq!(after.tokens, 0);
     println!(
-        "source_of_truth=token_bucket edge=exact_capacity before=tokens:{} after=tokens:{} accepted={} limited={}",
+        "readback=token_bucket edge=exact_capacity before=tokens:{} after=tokens:{} accepted={} limited={}",
         before.tokens,
         after.tokens,
         accepted,
@@ -73,7 +73,7 @@ async fn empty_software_bucket_refills_after_one_second() {
     assert_eq!(after_empty.tokens, 0);
     assert_eq!(after_refill.tokens, 5_000);
     println!(
-        "source_of_truth=token_bucket edge=one_second_refill before={before:?} after_empty={after_empty:?} after_refill={after_refill:?}"
+        "readback=token_bucket edge=one_second_refill before={before:?} after_empty={after_empty:?} after_refill={after_refill:?}"
     );
 }
 
@@ -92,7 +92,7 @@ async fn vigem_1100_events_limits_exactly_100() {
     assert_eq!(after.tokens, 0);
     assert_all_rate_limited(&limited_errors, 1);
     println!(
-        "source_of_truth=token_bucket edge=vigem_overshoot before=tokens:{} after=tokens:{} accepted={} limited={} first_code={} first_retry_after_ms={:?}",
+        "readback=token_bucket edge=vigem_overshoot before=tokens:{} after=tokens:{} accepted={} limited={} first_code={} first_retry_after_ms={:?}",
         before.tokens,
         after.tokens,
         accepted,

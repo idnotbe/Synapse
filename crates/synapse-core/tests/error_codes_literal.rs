@@ -111,7 +111,7 @@ fn error_codes_match_literal_names() {
 }
 
 #[test]
-fn m3_error_codes_snapshot_with_fsv() {
+fn m3_error_codes_snapshot_with_readback() {
     let codes = [
         (
             "REFLEX_RECURSION_LIMIT",
@@ -163,7 +163,7 @@ fn m3_error_codes_snapshot_with_fsv() {
         ),
     ];
     let expected = codes.iter().map(|(name, _value)| *name).collect::<Vec<_>>();
-    println!("source_of_truth=m3_error_codes before=expected:{expected:?}");
+    println!("readback=m3_error_codes before=expected:{expected:?}");
 
     let actual = codes
         .into_iter()
@@ -173,7 +173,7 @@ fn m3_error_codes_snapshot_with_fsv() {
         })
         .collect::<BTreeMap<_, _>>();
     println!(
-        "source_of_truth=m3_error_codes after=actual:{actual:?} final_count:{}",
+        "readback=m3_error_codes after=actual:{actual:?} final_count:{}",
         actual.len()
     );
     insta::assert_json_snapshot!("m3_error_codes", actual);

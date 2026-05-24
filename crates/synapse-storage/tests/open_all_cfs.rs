@@ -6,11 +6,11 @@ use synapse_storage::{Db, cf};
 const TEST_SCHEMA_VERSION: u32 = 7;
 
 #[test]
-fn open_all_cfs_and_restart_durability_with_fsv() -> Result<(), Box<dyn Error>> {
+fn open_all_cfs_and_restart_durability() -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
     let path = temp.path().join("db");
     println!(
-        "source_of_truth=open_all_cfs before_exists={} after_truth=not_opened final_value=path:{}",
+        "regression_state=open_all_cfs before_exists={} after=not_opened observed=path:{}",
         path.exists(),
         path.display()
     );
@@ -20,7 +20,7 @@ fn open_all_cfs_and_restart_durability_with_fsv() -> Result<(), Box<dyn Error>> 
         let before = db.scan_cf(cf_name)?;
         db.put_batch(cf_name, row(cf_name))?;
         println!(
-            "source_of_truth=open_all_cfs cf={cf_name} before={} after_truth=enqueued final_value=key:{}",
+            "regression_state=open_all_cfs cf={cf_name} before={} after=enqueued observed=key:{}",
             before.len(),
             key(cf_name)
         );
@@ -28,7 +28,7 @@ fn open_all_cfs_and_restart_durability_with_fsv() -> Result<(), Box<dyn Error>> 
     db.flush()?;
     let after_counts = cf_counts(&db)?;
     println!(
-        "source_of_truth=open_all_cfs after_open_counts={after_counts:?} after_truth=all_cfs_writable final_value=count:{}",
+        "regression_state=open_all_cfs after_open_counts={after_counts:?} after=all_cfs_writable observed=count:{}",
         after_counts.len()
     );
     assert!(after_counts.iter().all(|(_cf_name, count)| *count == 1));
@@ -37,7 +37,7 @@ fn open_all_cfs_and_restart_durability_with_fsv() -> Result<(), Box<dyn Error>> 
     let reopened = Db::open(&path, TEST_SCHEMA_VERSION)?;
     let reopened_counts = cf_counts(&reopened)?;
     println!(
-        "source_of_truth=open_all_cfs after_reopen_counts={reopened_counts:?} after_truth=durable final_value=count:{}",
+        "regression_state=open_all_cfs after_reopen_counts={reopened_counts:?} after=durable observed=count:{}",
         reopened_counts.len()
     );
     assert!(reopened_counts.iter().all(|(_cf_name, count)| *count == 1));
@@ -45,7 +45,7 @@ fn open_all_cfs_and_restart_durability_with_fsv() -> Result<(), Box<dyn Error>> 
 }
 
 #[test]
-fn open_rejects_file_path_and_schema_mismatch_with_fsv() -> Result<(), Box<dyn Error>> {
+fn open_rejects_file_path_and_schema_mismatch() -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
     let file_path = temp.path().join("db-file");
     fs::write(&file_path, b"not a directory")?;
@@ -54,7 +54,7 @@ fn open_rejects_file_path_and_schema_mismatch_with_fsv() -> Result<(), Box<dyn E
         Err(error) => error,
     };
     println!(
-        "source_of_truth=open_all_cfs edge=file_path before_is_file=true after_truth=code:{} final_value=still_file:{}",
+        "regression_state=open_all_cfs edge=file_path before_is_file=true after=code:{} observed=still_file:{}",
         file_error.code(),
         file_path.is_file()
     );
@@ -68,7 +68,7 @@ fn open_rejects_file_path_and_schema_mismatch_with_fsv() -> Result<(), Box<dyn E
         Err(error) => error,
     };
     println!(
-        "source_of_truth=open_all_cfs edge=schema_mismatch before_schema=1 after_truth=code:{} final_value=db_exists:{}",
+        "regression_state=open_all_cfs edge=schema_mismatch before_schema=1 after=code:{} observed=db_exists:{}",
         schema_error.code(),
         schema_path.exists()
     );

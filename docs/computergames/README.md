@@ -6,6 +6,11 @@
 **License:** MIT or Apache-2.0 dual.
 **Repo:** fresh, independent. Clean-room, no upstream vendor dependencies.
 
+**Agent doctrine:** repository agents must read `AGENTS.md`. Manual FSV on the
+configured Windows host is the shipping gate. Automated tests, scripts,
+benchmarks, GitHub Actions, and CI are supporting evidence only and must never
+be presented as FSV.
+
 ---
 
 ## What this is
@@ -70,7 +75,7 @@ Two separate products would duplicate ~90% of engineering. **Synapse ships them 
 | 10 | [`10_performance_budget.md`](10_performance_budget.md) | Latency targets, profiling, optimization rules. |
 | 11 | [`11_security_and_safety.md`](11_security_and_safety.md) | Threat model, permissions, redaction, kill switches. |
 | 12 | [`12_observability.md`](12_observability.md) | Logging, tracing, metrics, debug overlay, replay tool. |
-| 13 | [`13_testing_strategy.md`](13_testing_strategy.md) | Unit/integration/E2E, fixtures, CI, perf regression. |
+| 13 | [`13_testing_strategy.md`](13_testing_strategy.md) | Unit/integration/E2E, fixtures, manual FSV, perf regression. |
 | 14 | [`14_build_and_packaging.md`](14_build_and_packaging.md) | Workspace, deps, profiles, installer, signing. |
 | 15 | [`15_roadmap_and_milestones.md`](15_roadmap_and_milestones.md) | M0-M5 phases, scope per milestone, demo criteria. |
 | 16 | [`16_open_questions.md`](16_open_questions.md) | Unresolved decisions, ADRs needed. |
@@ -254,6 +259,8 @@ See `15_roadmap_and_milestones.md`.
 - `tracing` for everything. `println!` is a code-review rejection.
 - No silent successes. Tool that didn't do the work returns an error code.
 - No mocks in tests that gate completion. Real captures, input, RocksDB.
+- Manual FSV is done by the agent with direct source-of-truth readback; tests,
+  scripts, benchmarks, GitHub Actions, and CI are supporting evidence only.
 - Pre-production: schema changes = wipe-and-rebuild, no migration shims.
 
 ---

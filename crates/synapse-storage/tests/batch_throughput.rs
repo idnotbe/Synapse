@@ -7,7 +7,7 @@ const THROUGHPUT_ROWS: usize = 10_000;
 const TARGET_MS: u128 = 200;
 
 #[test]
-fn batch_throughput_edges_and_restart_with_fsv() -> Result<(), Box<dyn Error>> {
+fn batch_throughput_edges_and_restart() -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
     let path = temp.path().join("db");
     let db = Db::open(&path, TEST_SCHEMA_VERSION)?;
@@ -18,7 +18,7 @@ fn batch_throughput_edges_and_restart_with_fsv() -> Result<(), Box<dyn Error>> {
     db.flush()?;
     let after_empty = db.scan_cf(cf::CF_KV)?;
     println!(
-        "source_of_truth=batch_cf_scan edge=empty before={} after_truth={} final_value={after_empty:?}",
+        "regression_state=batch_cf_scan edge=empty before={} after={} observed={after_empty:?}",
         before_empty.len(),
         after_empty.len()
     );
@@ -28,7 +28,7 @@ fn batch_throughput_edges_and_restart_with_fsv() -> Result<(), Box<dyn Error>> {
     db.flush()?;
     let after_single = db.scan_cf(cf::CF_KV)?;
     println!(
-        "source_of_truth=batch_cf_scan edge=single_byte before=0 after_truth={} final_value={:?}",
+        "regression_state=batch_cf_scan edge=single_byte before=0 after={} observed={:?}",
         after_single.len(),
         printable_rows(&after_single)
     );
@@ -42,7 +42,7 @@ fn batch_throughput_edges_and_restart_with_fsv() -> Result<(), Box<dyn Error>> {
     let elapsed_ms = started.elapsed().as_millis();
     let after_events = db.scan_cf(cf::CF_EVENTS)?;
     println!(
-        "source_of_truth=batch_cf_scan edge=throughput before=0 after_truth=count:{} bytes:{} elapsed_ms:{elapsed_ms} final_value=pass:{}",
+        "regression_state=batch_cf_scan edge=throughput before=0 after=count:{} bytes:{} elapsed_ms:{elapsed_ms} observed=pass:{}",
         after_events.len(),
         total_value_bytes(&after_events),
         elapsed_ms <= TARGET_MS
@@ -56,7 +56,7 @@ fn batch_throughput_edges_and_restart_with_fsv() -> Result<(), Box<dyn Error>> {
     let reopened_events = reopened.scan_cf(cf::CF_EVENTS)?;
     let reopened_kv = reopened.scan_cf(cf::CF_KV)?;
     println!(
-        "source_of_truth=batch_cf_scan edge=restart before=dropped after_truth=events:{} kv:{} final_value=durable:{}",
+        "regression_state=batch_cf_scan edge=restart before=dropped after=events:{} kv:{} observed=durable:{}",
         reopened_events.len(),
         reopened_kv.len(),
         reopened_events.len() == THROUGHPUT_ROWS && reopened_kv.len() == 1

@@ -1,0 +1,294 @@
+#![allow(clippy::missing_errors_doc)]
+
+use std::{
+    collections::BTreeMap,
+    fs,
+    path::{Path, PathBuf},
+    sync::{Arc, RwLock, mpsc},
+    thread,
+    time::Duration,
+};
+
+use notify::{RecommendedWatcher, RecursiveMode, Watcher};
+use synapse_core::{Profile, ProfileId, ProfileMatch};
+use tracing::{instrument, warn};
+
+use crate::{
+    error::{ProfileError, ProfileLoadError},
+    parser::{LoadedProfile, ScreenBounds, parse_profile_file_with_bounds},
+    resolver::{ForegroundWindow, ProfileMatchResolution, resolve_active_profile},
+};
+
+const WATCH_DEBOUNCE: Duration = Duration::from_millis(200);
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProfileStatus {
+    pub id: ProfileId,
+    pub label: String,
+    pub active: bool,
+    pub schema_version: u32,
+    pub matches: Vec<ProfileMatch>,
+    pub source_path: PathBuf,
+}
+
+#[derive(Debug, Default)]
+struct ProfileState {
+    profiles: BTreeMap<ProfileId, LoadedProfile>,
+    active_profile_id: Option<ProfileId>,
+    last_errors: Vec<ProfileLoadError>,
+}
+
+#[derive(Debug)]
+pub struct ProfileRuntime {
+    profile_dir: PathBuf,
+    bounds: ScreenBounds,
+    state: Arc<RwLock<ProfileState>>,
+    _watcher: RecommendedWatcher,
+}
+
+impl ProfileRuntime {
+    #[instrument(skip_all, fields(profile_dir = %profile_dir.as_ref().display()))]
+    pub fn spawn(profile_dir: impl AsRef<Path>) -> Result<Self, ProfileError> {
+        Self::spawn_with_screen_bounds(profile_dir, ScreenBounds::default())
+    }
+
+    #[instrument(skip_all, fields(profile_dir = %profile_dir.as_ref().display(), screen_width = bounds.width, screen_height = bounds.height))]
+    pub fn spawn_with_screen_bounds(
+        profile_dir: impl AsRef<Path>,
+        bounds: ScreenBounds,
+    ) -> Result<Self, ProfileError> {
+        let profile_dir = profile_dir.as_ref().to_path_buf();
+        fs::create_dir_all(&profile_dir).map_err(|source| ProfileError::Io {
+            path: profile_dir.clone(),
+            source,
+        })?;
+
+        let state = Arc::new(RwLock::new(ProfileState::default()));
+        refresh_state(&profile_dir, bounds, &state)?;
+
+        let (tx, rx) = mpsc::channel();
+        let mut watcher = notify::recommended_watcher(move |event| {
+            let _ = tx.send(event);
+        })
+        .map_err(|source| ProfileError::Watch {
+            path: profile_dir.clone(),
+            message: source.to_string(),
+        })?;
+        watcher
+            .watch(&profile_dir, RecursiveMode::NonRecursive)
+            .map_err(|source| ProfileError::Watch {
+                path: profile_dir.clone(),
+                message: source.to_string(),
+            })?;
+
+        let runtime = Self {
+            profile_dir: profile_dir.clone(),
+            bounds,
+            state: Arc::clone(&state),
+            _watcher: watcher,
+        };
+
+        thread::Builder::new()
+            .name("synapse-profile-watch".to_owned())
+            .spawn(move || loop {
+                match rx.recv() {
+                    Ok(Ok(_event)) => {
+                        thread::sleep(WATCH_DEBOUNCE);
+                        while rx.try_recv().is_ok() {}
+                        if let Err(error) = refresh_state(&profile_dir, bounds, &state) {
+                            warn!(code = error.code(), error = %error, "profile refresh failed");
+                        }
+                    }
+                    Ok(Err(error)) => {
+                        warn!(
+                            code = synapse_core::error_codes::PROFILE_PARSE_ERROR,
+                            error = %error,
+                            "profile watcher event failed"
+                        );
+                    }
+                    Err(_) => break,
+                }
+            })
+            .map_err(|source| ProfileError::Io {
+                path: runtime.profile_dir.clone(),
+                source,
+            })?;
+
+        Ok(runtime)
+    }
+
+    #[must_use]
+    #[instrument(skip_all)]
+    pub fn profile_dir(&self) -> &Path {
+        &self.profile_dir
+    }
+
+    #[instrument(skip_all, fields(profile_dir = %self.profile_dir.display()))]
+    pub fn refresh(&self) -> Result<(), ProfileError> {
+        refresh_state(&self.profile_dir, self.bounds, &self.state)
+    }
+
+    #[instrument(skip_all, fields(profile_id = profile_id))]
+    pub fn activate(&self, profile_id: &str) -> Result<(), ProfileError> {
+        let mut state = self
+            .state
+            .write()
+            .map_err(|_| ProfileError::StatePoisoned)?;
+        if !state.profiles.contains_key(profile_id) {
+            return Err(ProfileError::NotFound {
+                profile_id: profile_id.to_owned(),
+            });
+        }
+        state.active_profile_id = Some(profile_id.to_owned());
+        drop(state);
+        tracing::info!(code = "PROFILE_ACTIVATED", profile_id, "profile activated");
+        Ok(())
+    }
+
+    #[instrument(skip_all)]
+    pub fn list(&self, include_inactive: bool) -> Result<Vec<ProfileStatus>, ProfileError> {
+        let state = self.state.read().map_err(|_| ProfileError::StatePoisoned)?;
+        Ok(profile_statuses(&state, include_inactive))
+    }
+
+    #[instrument(skip_all, fields(profile_id = profile_id))]
+    pub fn profile(&self, profile_id: &str) -> Result<Option<Profile>, ProfileError> {
+        let state = self.state.read().map_err(|_| ProfileError::StatePoisoned)?;
+        Ok(state
+            .profiles
+            .get(profile_id)
+            .map(|loaded| loaded.profile.clone()))
+    }
+
+    #[instrument(skip_all)]
+    pub fn loaded_profiles(&self) -> Result<Vec<LoadedProfile>, ProfileError> {
+        let state = self.state.read().map_err(|_| ProfileError::StatePoisoned)?;
+        Ok(state.profiles.values().cloned().collect())
+    }
+
+    #[instrument(skip_all)]
+    pub fn active_profile_id(&self) -> Result<Option<ProfileId>, ProfileError> {
+        let state = self.state.read().map_err(|_| ProfileError::StatePoisoned)?;
+        Ok(state.active_profile_id.clone())
+    }
+
+    #[instrument(skip_all)]
+    pub fn last_errors(&self) -> Result<Vec<ProfileLoadError>, ProfileError> {
+        let state = self.state.read().map_err(|_| ProfileError::StatePoisoned)?;
+        Ok(state.last_errors.clone())
+    }
+
+    #[instrument(skip_all)]
+    pub fn resolve_foreground(
+        &self,
+        foreground: &ForegroundWindow,
+    ) -> Result<Option<ProfileMatchResolution>, ProfileError> {
+        let profiles = {
+            let state = self.state.read().map_err(|_| ProfileError::StatePoisoned)?;
+            state.profiles.values().cloned().collect::<Vec<_>>()
+        };
+        Ok(resolve_active_profile(&profiles, foreground))
+    }
+
+    #[instrument(skip_all)]
+    pub fn activate_for_foreground(
+        &self,
+        foreground: &ForegroundWindow,
+    ) -> Result<Option<ProfileMatchResolution>, ProfileError> {
+        let resolution = self.resolve_foreground(foreground)?;
+        if let Some(resolution) = &resolution {
+            self.activate(&resolution.profile_id)?;
+        }
+        Ok(resolution)
+    }
+}
+
+fn profile_statuses(state: &ProfileState, include_inactive: bool) -> Vec<ProfileStatus> {
+    state
+        .profiles
+        .values()
+        .filter_map(|loaded| {
+            let active = state
+                .active_profile_id
+                .as_ref()
+                .is_some_and(|active_id| active_id == &loaded.profile.id);
+            (active || include_inactive).then(|| ProfileStatus {
+                id: loaded.profile.id.clone(),
+                label: loaded.profile.label.clone(),
+                active,
+                schema_version: loaded.schema_version,
+                matches: loaded.profile.matches.clone(),
+                source_path: loaded.source_path.clone(),
+            })
+        })
+        .collect()
+}
+
+fn refresh_state(
+    profile_dir: &Path,
+    bounds: ScreenBounds,
+    state: &Arc<RwLock<ProfileState>>,
+) -> Result<(), ProfileError> {
+    let previous = {
+        let guard = state.read().map_err(|_| ProfileError::StatePoisoned)?;
+        guard.profiles.clone()
+    };
+    let (profiles, errors) = load_dir(profile_dir, bounds, &previous)?;
+    let mut guard = state.write().map_err(|_| ProfileError::StatePoisoned)?;
+    guard.profiles = profiles;
+    if guard
+        .active_profile_id
+        .as_ref()
+        .is_some_and(|active_id| !guard.profiles.contains_key(active_id))
+    {
+        guard.active_profile_id = None;
+    }
+    guard.last_errors = errors;
+    drop(guard);
+    Ok(())
+}
+
+fn load_dir(
+    profile_dir: &Path,
+    bounds: ScreenBounds,
+    previous: &BTreeMap<ProfileId, LoadedProfile>,
+) -> Result<(BTreeMap<ProfileId, LoadedProfile>, Vec<ProfileLoadError>), ProfileError> {
+    let mut profiles = BTreeMap::new();
+    let mut errors = Vec::new();
+    for entry in fs::read_dir(profile_dir).map_err(|source| ProfileError::Io {
+        path: profile_dir.to_path_buf(),
+        source,
+    })? {
+        let entry = entry.map_err(|source| ProfileError::Io {
+            path: profile_dir.to_path_buf(),
+            source,
+        })?;
+        let path = entry.path();
+        if !path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("toml"))
+        {
+            continue;
+        }
+        match parse_profile_file_with_bounds(&path, bounds) {
+            Ok(profile) => {
+                profiles.insert(profile.profile.id.clone(), profile);
+            }
+            Err(error) => {
+                warn!(code = error.code(), error = %error, "profile load failed");
+                errors.push(ProfileLoadError::from_error(&error));
+                for previous_profile in previous.values() {
+                    if previous_profile.source_path == path {
+                        profiles.insert(
+                            previous_profile.profile.id.clone(),
+                            previous_profile.clone(),
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    Ok((profiles, errors))
+}

@@ -266,7 +266,7 @@ fn execute_recording(
         event_sequence,
         pad_state = pad_state_label,
         ?new_events,
-        "source_of_truth=recording_backend tool=act_pad after_events_readback"
+        "readback=recording_backend tool=act_pad after_events_readback"
     );
     Ok(())
 }

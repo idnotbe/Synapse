@@ -90,6 +90,6 @@ fn trace_element_click_outcome(
         outcome,
         fallback_screen_x = fallback_screen_point.map(|point| point.x),
         fallback_screen_y = fallback_screen_point.map(|point| point.y),
-        "source_of_truth=action_backend tool=act_click element_click_after"
+        "readback=action_backend tool=act_click element_click_after"
     );
 }

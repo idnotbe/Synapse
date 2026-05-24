@@ -9,7 +9,7 @@ use synapse_storage::Db;
 const TEST_SCHEMA_VERSION: u32 = 7;
 
 #[test]
-fn compaction_ttl_old_fresh_invalid_and_restart_with_fsv() -> Result<(), Box<dyn Error>> {
+fn compaction_ttl_old_fresh_invalid_and_restart() -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
     let path = temp.path().join("db");
     let db = Db::open(&path, TEST_SCHEMA_VERSION)?;
@@ -34,7 +34,7 @@ fn compaction_ttl_old_fresh_invalid_and_restart_with_fsv() -> Result<(), Box<dyn
         let fresh_after = count_key(&after, "fresh");
         let invalid_after = count_key(&after, "invalid");
         println!(
-            "source_of_truth=ttl_cf_scan cf={cf_name} before={} after_truth=old:{old_after},fresh:{fresh_after},invalid:{invalid_after} final_value=ttl_ns:{ttl_ns:?}",
+            "regression_state=ttl_cf_scan cf={cf_name} before={} after=old:{old_after},fresh:{fresh_after},invalid:{invalid_after} observed=ttl_ns:{ttl_ns:?}",
             before.len()
         );
 
@@ -53,7 +53,7 @@ fn compaction_ttl_old_fresh_invalid_and_restart_with_fsv() -> Result<(), Box<dyn
         let cf_name = default.cf;
         let rows = reopened.scan_cf(cf_name)?;
         println!(
-            "source_of_truth=ttl_cf_scan cf={cf_name} edge=restart before=dropped after_truth=count:{} final_value=durable:true",
+            "regression_state=ttl_cf_scan cf={cf_name} edge=restart before=dropped after=count:{} observed=durable:true",
             rows.len()
         );
         assert!(rows.len() >= 2);

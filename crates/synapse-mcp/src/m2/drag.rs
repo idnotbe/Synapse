@@ -261,7 +261,7 @@ fn execute_recording(recording: &RecordingBackend, action: &Action) -> Result<()
         new_event_count = new_events.len(),
         event_sequence,
         ?new_events,
-        "source_of_truth=recording_backend tool=act_drag after_events_readback"
+        "readback=recording_backend tool=act_drag after_events_readback"
     );
     Ok(())
 }

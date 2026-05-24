@@ -168,7 +168,7 @@ fn execute_recording(recording: &RecordingBackend, action: &Action) -> Result<()
         new_event_count = new_events.len(),
         ?recorded_ikis,
         ?new_events,
-        "source_of_truth=recording_backend tool=act_type after_events_readback"
+        "readback=recording_backend tool=act_type after_events_readback"
     );
     Ok(())
 }
@@ -235,7 +235,7 @@ mod tests {
             backend: default_type_backend(),
         };
         let before = recording.events();
-        println!("source_of_truth=act_type_recording edge=natural_fast before={before:?}");
+        println!("readback=act_type_recording edge=natural_fast before={before:?}");
 
         let response = act_type_with_handle(handle, Some(Arc::clone(&recording)), params)
             .await
@@ -251,7 +251,7 @@ mod tests {
         .filter_map(|event| (event.iki_ms_before > 0).then_some(event.iki_ms_before))
         .collect();
         println!(
-            "source_of_truth=act_type_recording edge=natural_fast after={after:?} expected_ikis={expected_ikis:?} actual_ikis={actual_ikis:?} chars_typed={}",
+            "readback=act_type_recording edge=natural_fast after={after:?} expected_ikis={expected_ikis:?} actual_ikis={actual_ikis:?} chars_typed={}",
             response.chars_typed
         );
 
@@ -282,9 +282,7 @@ mod tests {
             RecordedInput::DelayMs { ms: 0 },
         ];
         let after = recorded_ikis(&before);
-        println!(
-            "source_of_truth=act_type_recording edge=iki_readback before={before:?} after={after:?}"
-        );
+        println!("readback=act_type_recording edge=iki_readback before={before:?} after={after:?}");
         assert_eq!(after, [17, 0]);
     }
 }

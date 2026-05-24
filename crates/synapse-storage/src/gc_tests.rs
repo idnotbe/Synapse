@@ -15,7 +15,7 @@ const TEST_SCHEMA_VERSION: u32 = 7;
 const METRIC_KEY: &str = "cache_evictions_total{cf=CF_EVENTS,reason=soft_cap}";
 
 #[test]
-fn gc_soft_cap_hard_cap_edges_and_metrics_with_fsv() -> Result<(), Box<dyn Error>> {
+fn gc_soft_cap_hard_cap_edges_and_metrics() -> Result<(), Box<dyn Error>> {
     let recorder = TestRecorder::default();
     metrics::with_local_recorder(&recorder, || -> Result<(), Box<dyn Error>> {
         run_gc_case(
@@ -40,18 +40,18 @@ fn gc_soft_cap_hard_cap_edges_and_metrics_with_fsv() -> Result<(), Box<dyn Error
 }
 
 #[tokio::test]
-async fn gc_periodic_task_runs_tick_with_fsv() -> Result<(), Box<dyn Error>> {
+async fn gc_periodic_task_runs_tick() -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
     let db = Db::open(&temp.path().join("db"), TEST_SCHEMA_VERSION)?;
     fill_rows(&db, 12)?;
     db.flush()?;
     let before = db.scan_cf(cf::CF_EVENTS)?;
-    let config = gc::GcConfig::rows_for_fsv(Duration::from_millis(10), cf::CF_EVENTS, 6, 20);
+    let config = gc::GcConfig::for_row_caps(Duration::from_millis(10), cf::CF_EVENTS, 6, 20);
     let task = gc::spawn(Arc::clone(&db.inner), config)?;
     tokio::time::sleep(Duration::from_millis(40)).await;
     let after = db.scan_cf(cf::CF_EVENTS)?;
     println!(
-        "source_of_truth=cf_scan case=periodic_task before_count={} after_count={} final_value=spawned_tick_evicted:{}",
+        "regression_state=cf_scan case=periodic_task before_count={} after_count={} observed=spawned_tick_evicted:{}",
         before.len(),
         after.len(),
         before.len().saturating_sub(after.len())
@@ -102,7 +102,7 @@ fn run_gc_case(recorder: &TestRecorder, case: CaseSpec) -> Result<(), Box<dyn Er
     let before = db.scan_cf(cf::CF_EVENTS)?;
     let before_property = estimated_num_keys(&db)?;
     let before_metric = recorder.counter_value(METRIC_KEY)?;
-    let config = gc::GcConfig::rows_for_fsv(
+    let config = gc::GcConfig::for_row_caps(
         Duration::from_mins(5),
         cf::CF_EVENTS,
         case.soft_cap,
@@ -117,7 +117,7 @@ fn run_gc_case(recorder: &TestRecorder, case: CaseSpec) -> Result<(), Box<dyn Er
     let after_property = estimated_num_keys(&db)?;
     let after_metric = recorder.counter_value(METRIC_KEY)?;
     println!(
-        "source_of_truth=cf_scan case={} before_count={} before_property={before_property:?} after_count={} after_property={after_property:?} evicted={} metric_delta={} hard_cap_code={:?} final_value=rows:{}",
+        "regression_state=cf_scan case={} before_count={} before_property={before_property:?} after_count={} after_property={after_property:?} evicted={} metric_delta={} hard_cap_code={:?} observed=rows:{}",
         case.name,
         before.len(),
         after.len(),

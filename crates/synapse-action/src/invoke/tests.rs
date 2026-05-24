@@ -25,7 +25,7 @@ fn re_resolve_failures_map_to_element_not_resolved() {
     assert_eq!(after.code(), error_codes::ACTION_ELEMENT_NOT_RESOLVED);
     assert_eq!(after.detail(), before);
     println!(
-        "source_of_truth=invoke_error_mapping edge=re_resolve_failure before={before:?} after_code={} after_detail={:?}",
+        "readback=invoke_error_mapping edge=re_resolve_failure before={before:?} after_code={} after_detail={:?}",
         after.code(),
         after.detail()
     );
@@ -40,7 +40,7 @@ fn missing_invoke_pattern_maps_to_target_invalid_for_coordinate_fallback() {
     assert!(after.detail().contains(element_id.as_str()));
     assert!(after.detail().contains("InvokePattern"));
     println!(
-        "source_of_truth=invoke_error_mapping edge=missing_invoke_pattern before={before:?} after_code={} after_detail={:?}",
+        "readback=invoke_error_mapping edge=missing_invoke_pattern before={before:?} after_code={} after_detail={:?}",
         after.code(),
         after.detail()
     );
@@ -55,7 +55,7 @@ fn invoke_failures_map_to_target_invalid_without_cursor_fallback_in_bridge() {
     assert!(after.detail().contains(element_id.as_str()));
     assert!(after.detail().contains("InvokePattern.invoke failed"));
     println!(
-        "source_of_truth=invoke_error_mapping edge=invoke_failure before={before:?} after_code={} after_detail={:?}",
+        "readback=invoke_error_mapping edge=invoke_failure before={before:?} after_code={} after_detail={:?}",
         after.code(),
         after.detail()
     );
@@ -79,7 +79,7 @@ fn non_windows_stub_fails_closed() {
     );
     assert!(detail.contains("requires Windows"));
     println!(
-        "source_of_truth=invoke_non_windows_stub edge=non_windows before={before:?} after_code={} after_detail={detail:?}",
+        "readback=invoke_non_windows_stub edge=non_windows before={before:?} after_code={} after_detail={detail:?}",
         error_codes::ACTION_BACKEND_UNAVAILABLE
     );
 }
@@ -108,7 +108,7 @@ fn non_windows_click_fallback_fails_closed() {
     );
     assert!(backend.events().is_empty());
     println!(
-        "source_of_truth=invoke_coordinate_fallback edge=non_windows before={before:?} after_code={} after_detail={detail:?} after_events={:?}",
+        "readback=invoke_coordinate_fallback edge=non_windows before={before:?} after_code={} after_detail={detail:?} after_events={:?}",
         error_codes::ACTION_BACKEND_UNAVAILABLE,
         backend.events()
     );
@@ -150,7 +150,7 @@ fn coordinate_fallback_emits_move_down_up_at_bbox_center() {
     ];
     assert_eq!(after, expected);
     println!(
-        "source_of_truth=recording_backend edge=coordinate_fallback_sequence before={before:?} after={after:?}"
+        "readback=recording_backend edge=coordinate_fallback_sequence before={before:?} after={after:?}"
     );
 }
 
@@ -195,7 +195,7 @@ fn missing_invoke_pattern_branch_emits_coordinate_fallback() {
         ]
     );
     println!(
-        "source_of_truth=invoke_coordinate_fallback edge=missing_invoke_pattern before={before:?} after_outcome={after:?} after_events={events:?}"
+        "readback=invoke_coordinate_fallback edge=missing_invoke_pattern before={before:?} after_outcome={after:?} after_events={events:?}"
     );
 }
 
@@ -221,7 +221,7 @@ fn successful_invoke_branch_does_not_emit_coordinate_fallback() {
     assert_eq!(after, Ok(ElementClickOutcome::Invoked));
     assert!(backend.events().is_empty());
     println!(
-        "source_of_truth=invoke_coordinate_fallback edge=invoke_success before={before:?} after_outcome={after:?} after_events={:?}",
+        "readback=invoke_coordinate_fallback edge=invoke_success before={before:?} after_outcome={after:?} after_events={:?}",
         backend.events()
     );
 }
@@ -251,7 +251,7 @@ fn failed_invoke_branch_does_not_emit_coordinate_fallback() {
     assert_eq!(after, Err(expected_error));
     assert!(backend.events().is_empty());
     println!(
-        "source_of_truth=invoke_coordinate_fallback edge=invoke_failure before={before:?} after_outcome={after:?} after_events={:?}",
+        "readback=invoke_coordinate_fallback edge=invoke_failure before={before:?} after_outcome={after:?} after_events={:?}",
         backend.events()
     );
 }
@@ -276,7 +276,7 @@ fn bbox_center_rounds_inside_odd_sized_rectangle() {
     assert!(after.y >= rect.top && after.y < rect.bottom);
     assert!(dx.hypot(dy) <= 1.0);
     println!(
-        "source_of_truth=bbox_center edge=odd_sized before={before:?} after={after:?} expected_exact_center={expected_exact_center:?}"
+        "readback=bbox_center edge=odd_sized before={before:?} after={after:?} expected_exact_center={expected_exact_center:?}"
     );
 }
 
@@ -309,7 +309,7 @@ fn bbox_center_rejects_empty_or_inverted_rectangles() {
         };
         assert_eq!(error.code(), error_codes::ACTION_TARGET_INVALID);
         println!(
-            "source_of_truth=bbox_center edge=invalid_rect before={before:?} after_code={} after_detail={:?}",
+            "readback=bbox_center edge=invalid_rect before={before:?} after_code={} after_detail={:?}",
             error.code(),
             error.detail()
         );
@@ -336,9 +336,7 @@ fn bbox_center_handles_large_screen_coordinates_without_overflow() {
             y: i32::MAX - 110,
         }
     );
-    println!(
-        "source_of_truth=bbox_center edge=large_coordinates before={before:?} after={after:?}"
-    );
+    println!("readback=bbox_center edge=large_coordinates before={before:?} after={after:?}");
 }
 
 fn synthetic_element_id() -> ElementId {

@@ -79,7 +79,6 @@ Workspace root: `Cargo.toml`. `default-members = ["crates/synapse-mcp", "crates/
 
 ```
 rocksdb = "0.24.0"  (features: lz4, zstd, multi-threaded-cf)
-sled = "1.0.0-alpha.124"  (opt-in fallback per OQ-001)
 wasapi = "0.23.0"
 notify = "9.0.0-rc.4"
 axum = "0.8.9"
@@ -98,7 +97,7 @@ No new top-level dep additions required at M3 — every crate listed already liv
 
 ### 1.3 Shipped MCP tools (the 15 you must NOT regress)
 
-Per `crates/synapse-mcp/tests/snapshots/m2_tools_fsv__m2_tools_list.snap` (sorted):
+Per the #352 manual tool-surface readback (sorted):
 
 ```
 act_aim, act_click, act_clipboard, act_drag, act_pad, act_press, act_scroll,
@@ -106,7 +105,7 @@ act_type, find, health, observe, read_text, release_all, set_capture_target,
 set_perception_mode
 ```
 
-`tests/m2_tools_fsv.rs` asserts this exact list. M3 adds 10 more → final list at end of M3 is 25 tools (`subscribe`, `subscribe_cancel`, `reflex_register`, `reflex_cancel`, `reflex_list`, `reflex_history`, `profile_list`, `profile_activate`, `replay_record`, `audio_tail`, `audio_transcribe` — that's 11 names but `subscribe`+`subscribe_cancel` are one PR; see §7 work-item 21). Update the snapshot in the work-item that adds each tool.
+Retained supporting checks may assert this exact list under neutral names. M3 adds 10 more -> final list at end of M3 is 25 tools (`subscribe`, `subscribe_cancel`, `reflex_register`, `reflex_cancel`, `reflex_list`, `reflex_history`, `profile_list`, `profile_activate`, `replay_record`, `audio_tail`, `audio_transcribe` - that's 11 names but `subscribe`+`subscribe_cancel` are one PR; see §7 work-item 21). Update the workspace tools snapshot in the work-item that adds each tool.
 
 ### 1.4 Already-wired entry points you will reuse
 
@@ -126,7 +125,7 @@ set_perception_mode
 
 - Production target: configured Windows 11 host (DX11-capable GPU; ViGEmBus working).
 - Dev box: WSL2 on Win11. `rocksdb`/`wasapi` build on Linux + Windows; `windows`-feature deps stay Win-only.
-- **Manual configured-host FSV is the M3 shipping gate** (issues #246/#247/#350). Use local checks for supporting evidence; do not dispatch or wait on GitHub Actions/CI.
+- **Manual configured-host FSV is the M3 shipping gate** (issues #246/#247/#350/#351). Use local checks for supporting evidence; do not dispatch or wait on GitHub Actions/CI. Do not create automated FSV scripts, harnesses, or `*_fsv` tests.
 
 ### 1.6 Things that are NOT done at M3 (deferred ≥ M4)
 
@@ -200,11 +199,11 @@ crates/synapse-reflex/
 └── tests/
     ├── bus_drop_oldest_proptest.rs
     ├── filter_eval_proptest.rs
-    ├── on_event_fsv.rs
-    ├── aim_track_fsv.rs
-    ├── hold_move_fsv.rs
-    ├── combo_fsv.rs
-    └── recursion_guard_fsv.rs
+    ├── on_event_behavior.rs
+    ├── aim_track_controller.rs
+    ├── hold_move_behavior.rs
+    ├── combo_schedule.rs
+    └── recursion_guard.rs
 
 crates/synapse-storage/
 ├── Cargo.toml
@@ -221,8 +220,8 @@ crates/synapse-storage/
     ├── open_all_cfs.rs
     ├── compaction_ttl_proptest.rs
     ├── batch_throughput.rs
-    ├── gc_soft_cap_fsv.rs
-    └── disk_pressure_4_levels_fsv.rs
+    ├── gc_soft_cap.rs
+    └── disk_pressure_4_levels.rs
 
 crates/synapse-profiles/
 ├── Cargo.toml
@@ -239,7 +238,7 @@ crates/synapse-profiles/
 │   └── terminal.toml
 └── tests/
     ├── parse_bundled.rs
-    ├── hot_reload_fsv.rs
+    ├── hot_reload.rs
     └── natural_defaults_smoke.rs   (asserts every bundled mouse_curve_default/keyboard_dynamics_default == "natural")
 
 crates/synapse-audio/
@@ -252,10 +251,10 @@ crates/synapse-audio/
 │   ├── direction.rs            (≤ 250 LoC: L/R energy + GCC-PHAT lag)
 │   └── error.rs                (≤ 150 LoC: AudioError + .code())
 └── tests/
-    ├── loopback_ring_fsv.rs
-    ├── vad_fsv.rs
-    ├── whisper_known_clip_fsv.rs
-    └── direction_pan_fsv.rs
+    ├── loopback_ring.rs
+    ├── vad.rs
+    ├── whisper_known_clip.rs
+    └── direction_pan.rs
 
 crates/synapse-mcp/src/
 ├── m1.rs / m1/                  (existing)
@@ -296,7 +295,7 @@ OcrResult (extension; word-level), OcrWord
 ### 3.3 Channel + lifetime invariants (hard contract)
 
 - **EventBus**: `ArcSwap<Vec<Subscriber>>`. Per-subscriber bounded `crossbeam::channel` 4096 events, drop-oldest. Slow consumer increments `events_dropped_for_subscriber{subscription_id}` metric; subscription marked `lossy=true` on next push so SSE clients see the gap.
-- **Reflex scheduler tick**: 1 ms via `CreateWaitableTimerEx` + `CREATE_WAITABLE_TIMER_HIGH_RESOLUTION` + MMCSS "Pro Audio". On MMCSS-unavailable boxes (CI/Linux) the bench gate stays disabled; production target is Win11. Fallback `tokio::time::interval(2ms)` is logged as `degraded` + spike check fires.
+- **Reflex scheduler tick**: 1 ms via `CreateWaitableTimerEx` + `CREATE_WAITABLE_TIMER_HIGH_RESOLUTION` + MMCSS "Pro Audio". On MMCSS-unavailable boxes (for example Linux) the bench gate stays disabled; production target is Win11. Fallback `tokio::time::interval(2ms)` is logged as `degraded` + spike check fires.
 - **Reflex cap 32 per session** (`REFLEX_CAP_REACHED`). Recursion guard ≤ 4 firings/tick (OQ-022, `REFLEX_RECURSION_LIMIT` — declare the new code in this PR and add to `synapse-core::error_codes`).
 - **Storage write batch flushes** every 100 ms or 64 KB or on explicit `Db::flush()`. Per-CF compaction filter runs in RocksDB's compaction thread; GC task runs in a dedicated `tokio::task` every 5 min checking soft caps and calling `DeleteRange` + manual `compact_range`. Disk-pressure responder polls disk every 30 s and emits `STORAGE_DISK_PRESSURE_LEVEL_N` on transitions.
 - **HTTP transport**: `axum` server bound to `127.0.0.1:7700` by default (`--bind`); refuses non-loopback by default with `HTTP_BIND_NON_LOOPBACK_REFUSED` (new code; declare it). Bearer token loaded from `%APPDATA%\synapse\token.txt` (M5 wizard generates; M3 falls back to `SYNAPSE_BEARER_TOKEN` env var for dev). `Origin` and `Host` headers checked against loopback list.
@@ -305,7 +304,7 @@ OcrResult (extension; word-level), OcrWord
 
 ### 3.4 Tracing instrumentation
 
-Every public `fn` in M3 crates carries `#[tracing::instrument(skip_all, fields(...))]` with the same convention as M1/M2 (`code = "..."` per error path; `source_of_truth=<name>` for state transitions). Every error-code emit also logs `tracing::warn!(code = "<CODE>", ...)`. FSV tests grep stdout for these codes.
+Every public `fn` in M3 crates carries `#[tracing::instrument(skip_all, fields(...))]` with the same convention as M1/M2 (`code = "..."` per error path; `readback=<name>` for state transitions). Every error-code emit also logs `tracing::warn!(code = "<CODE>", ...)`. Manual FSV issue evidence records source-of-truth values; tests and stdout greps are supporting regression evidence only.
 
 ---
 
@@ -385,7 +384,7 @@ Throw helper stays `mcp_error(code, msg)` from `crates/synapse-mcp/src/m1.rs:369
 |---|---|---|
 | 0a | `refactor(action): split emitter.rs / vigem.rs / invoke.rs / software.rs to ≤ 500 LoC` | All files under cap; `cargo test --workspace` green; no public API change; insta snapshots unchanged |
 | 0b | `refactor(mcp): split m2/click.rs (506) and m2/press.rs (545) to ≤ 500 LoC` | same |
-| 0c | `fix(a11y): widen TreeWalker to RawView for packaged Notepad MenuBar (#244)` | `synapse_a11y::snapshot()` returns the menu-bar children on Win11 22H2+ packaged Notepad; `m2_file_menu_invoke_fsv` runs without `#[ignore]` |
+| 0c | `fix(a11y): widen TreeWalker to RawView for packaged Notepad MenuBar (#244)` | `synapse_a11y::snapshot()` returns the menu-bar children on Win11 22H2+ packaged Notepad; manual #352 Notepad/File-menu evidence covers the invoke path |
 | 0d | `fix(action): SoftwareBackend mouse_move uses Win32 GetCursorPos in DPI-aware mode (#234)` | proptest: `(cursor_after - cursor_before) == (dx, dy)` within ±1 px across 100 random DPI scales |
 | 0e | `fix(action): thread dynamics through text_dispatch.rs (#233)` | Notepad receives every char of a 1000-char paste; recording backend events count == 2 × text length under `Natural::FAST` |
 | 0f | `fix(action): held-key auto-release calls backend KeyUp (#231)` | external `WH_KEYBOARD_LL` hook observes `KeyUp(a)` within 50 ms of timer expiry; existing `STUCK_KEY_AUTO_RELEASED` log line unchanged |
@@ -393,69 +392,69 @@ Throw helper stays `mcp_error(code, msg)` from `crates/synapse-mcp/src/m1.rs:369
 
 ### Block A — storage (work-items 1-6)
 
-| # | Title | Throws | Acceptance (FSV-mandatory) |
+| # | Title | Throws | Acceptance (manual SoT evidence required) |
 |---|---|---|---|
 | 1 | `feat(storage): cf.rs — pub const CF_* names matching 07 §4` | — | unit test asserts the 11 CF names equal their string literals (mirrors `error_codes_literal.rs`); doc-grep gate added to `scripts/check_docs.ps1` |
-| 2 | `feat(storage): Db::open(tempdir) w/ all 11 CFs + tuning per 07 §12` | `STORAGE_OPEN_FAILED`, `STORAGE_SCHEMA_MISMATCH` | unit FSV: open db, list CF handles, assert == 11 names; **boundary**: open against existing db with `SCHEMA_VERSION` mismatch → `STORAGE_SCHEMA_MISMATCH` + wipe-and-rebuild succeeds on retry |
-| 3 | `feat(storage): per-CF compaction filter w/ TTL from runtime config` | — | proptest: insert N records w/ timestamps spanning > TTL; call `compact_range`; **FSV** scan CF and assert old rows gone, fresh rows present |
-| 4 | `feat(storage): write batcher (100ms / 64KB / flush)` | `STORAGE_WRITE_FAILED` | bench: 10k events writes ≤ 200 ms wall; **FSV** after each scenario read back via `Db::scan(CF, ..)` and assert byte-equal payloads |
-| 5 | `feat(storage): GC task @ 5 min w/ soft-cap DeleteRange + compact` | — | scenario: fill CF to 2× soft cap; trigger GC; **FSV** read live size via `rocksdb::Properties::EstimatedNumKeys` and assert below soft; `cache_evictions_total{cf,reason}` metric incremented |
-| 6 | `feat(storage): disk-pressure responder 4 levels (07 §6.3)` | `STORAGE_DISK_PRESSURE_LEVEL_1..4`, `STORAGE_CF_HARD_CAP_REACHED` | tmpfs scenario (1 GB volume); fill DB; **FSV** events emitted on each transition; `df` readback verifies level math |
+| 2 | `feat(storage): Db::open(tempdir) w/ all 11 CFs + tuning per 07 §12` | `STORAGE_OPEN_FAILED`, `STORAGE_SCHEMA_MISMATCH` | supporting unit check opens db and lists CF handles; manual boundary evidence opens against existing db with `SCHEMA_VERSION` mismatch -> `STORAGE_SCHEMA_MISMATCH` + wipe-and-rebuild succeeds on retry |
+| 3 | `feat(storage): per-CF compaction filter w/ TTL from runtime config` | — | proptest inserts N records w/ timestamps spanning > TTL and calls `compact_range`; manual SoT readback scans CF and confirms old rows gone, fresh rows present |
+| 4 | `feat(storage): write batcher (100ms / 64KB / flush)` | `STORAGE_WRITE_FAILED` | bench: 10k events writes <= 200 ms wall; manual SoT readback after each scenario uses `Db::scan(CF, ..)` and confirms byte-equal payloads |
+| 5 | `feat(storage): GC task @ 5 min w/ soft-cap DeleteRange + compact` | — | scenario: fill CF to 2x soft cap; trigger GC; manual SoT readback reads live size via `rocksdb::Properties::EstimatedNumKeys` and confirms below soft; `cache_evictions_total{cf,reason}` metric incremented |
+| 6 | `feat(storage): disk-pressure responder 4 levels (07 §6.3)` | `STORAGE_DISK_PRESSURE_LEVEL_1..4`, `STORAGE_CF_HARD_CAP_REACHED` | tmpfs scenario (1 GB volume); fill DB; manual evidence records events emitted on each transition; `df` readback verifies level math |
 
 ### Block B — event bus + reflex runtime (work-items 7-13)
 
-| # | Title | Throws | Acceptance (FSV) |
+| # | Title | Throws | Acceptance (manual SoT evidence required) |
 |---|---|---|---|
-| 7 | `feat(reflex): EventBus + drop-oldest subscriber backpressure (4096 buf)` | `SUBSCRIPTION_CAP_REACHED` | per-subscriber proptest: 5000 events pushed; **FSV** read subscriber's queue, assert ≤ 4096; `events_dropped_for_subscriber` metric matches the overflow count |
-| 8 | `feat(reflex): scheduler thread @ TIME_CRITICAL + 1ms CreateWaitableTimerEx + MMCSS` | `REFLEX_TICK_LATE` | bench `reflex_tick_jitter_idle` p99 ≤ 200 µs; bench `reflex_tick_jitter_under_load` p99 ≤ 500 µs; **FSV**: tick log line carries actual elapsed-since-last-tick measurement |
-| 9 | `feat(reflex): aim_track controller (delta + gain + deadzone + max_speed + EMA α=0.7)` | `REFLEX_TRACK_LOST` | E2E vs a static `DetectedEntity` synthetic source: 60 ticks; **FSV** read cursor (`GetCursorPos`) and assert within ±deadzone of target |
-| 10 | `feat(reflex): hold_move + hold_button (KeyDown register / KeyUp lifetime end)` | `REFLEX_LIFETIME_EXPIRED` | E2E: hold `w` for 2 s via `UntilEvent` synthetic; lifetime fires; **FSV** `RecordingBackend::events()` shows `KeyUp(w)` exactly once; `held_keys` BitSet empty after |
-| 11 | `feat(reflex): combo (timed step sequence; consumes ComboStep)` | — | bench `reflex_combo_step_interval` step intervals within 500 µs of scheduled; **FSV** dispatched action sequence matches the `ComboStep` payload byte-for-byte |
-| 12 | `feat(reflex): on_event w/ EventFilter eval + debounce + recursion guard (OQ-022)` | `REFLEX_RECURSION_LIMIT`, `REFLEX_FILTER_INVALID` | proptest filter eval: `Not(Not(x)) == x` for total filters; **FSV**: synthetic event stream firing 5× in one tick → audit shows 4 firings + 1 `REFLEX_RECURSION_LIMIT` row |
-| 13 | `feat(reflex): conflict resolution (priority + newer-wins + starvation log)` | `REFLEX_STARVED` | two contending aim_tracks: higher priority wins; **FSV** loser's status row in `reflex_list` shows `status: "starved"` after 2 s; audit log shows `REFLEX_STARVED` |
+| 7 | `feat(reflex): EventBus + drop-oldest subscriber backpressure (4096 buf)` | `SUBSCRIPTION_CAP_REACHED` | per-subscriber proptest: 5000 events pushed; manual SoT readback reads subscriber queue, confirms <= 4096, and confirms `events_dropped_for_subscriber` matches the overflow count |
+| 8 | `feat(reflex): scheduler thread @ TIME_CRITICAL + 1ms CreateWaitableTimerEx + MMCSS` | `REFLEX_TICK_LATE` | bench `reflex_tick_jitter_idle` p99 <= 200 us; bench `reflex_tick_jitter_under_load` p99 <= 500 us; manual evidence records tick log elapsed-since-last-tick measurement |
+| 9 | `feat(reflex): aim_track controller (delta + gain + deadzone + max_speed + EMA alpha=0.7)` | `REFLEX_TRACK_LOST` | E2E vs a static `DetectedEntity` synthetic source: 60 ticks; manual SoT readback reads cursor (`GetCursorPos`) and confirms within +/-deadzone of target |
+| 10 | `feat(reflex): hold_move + hold_button (KeyDown register / KeyUp lifetime end)` | `REFLEX_LIFETIME_EXPIRED` | E2E: hold `w` for 2 s via `UntilEvent` synthetic; lifetime fires; manual SoT readback of `RecordingBackend::events()` shows `KeyUp(w)` exactly once; `held_keys` BitSet empty after |
+| 11 | `feat(reflex): combo (timed step sequence; consumes ComboStep)` | — | bench `reflex_combo_step_interval` step intervals within 500 us of scheduled; manual SoT readback confirms dispatched action sequence matches the `ComboStep` payload byte-for-byte |
+| 12 | `feat(reflex): on_event w/ EventFilter eval + debounce + recursion guard (OQ-022)` | `REFLEX_RECURSION_LIMIT`, `REFLEX_FILTER_INVALID` | proptest filter eval: `Not(Not(x)) == x` for total filters; manual SoT readback for synthetic event stream firing 5x in one tick shows audit has 4 firings + 1 `REFLEX_RECURSION_LIMIT` row |
+| 13 | `feat(reflex): conflict resolution (priority + newer-wins + starvation log)` | `REFLEX_STARVED` | two contending aim_tracks: higher priority wins; manual SoT readback of loser's `reflex_list` row shows `status: "starved"` after 2 s; audit log shows `REFLEX_STARVED` |
 
 ### Block C — profiles (work-items 14-17)
 
-| # | Title | Throws | Acceptance (FSV) |
+| # | Title | Throws | Acceptance (manual SoT evidence required) |
 |---|---|---|---|
-| 14 | `feat(profiles): TOML loader → Profile + version compat` | `PROFILE_PARSE_ERROR`, `PROFILE_VERSION_INCOMPATIBLE` | unit FSV: parse every bundled profile + 3 synthetic invalid TOMLs (missing required field / bad regex / future schema_version); each invalid case asserts the exact error code; **boundary**: empty profile dir → `profile_list` returns `[]` |
-| 15 | `feat(profiles): notify watcher + match resolver (debounced 200ms)` | `PROFILE_HUD_REGION_INVALID`, `PROFILE_KEYMAP_INVALID` | E2E: write `profiles/scratch.toml`; **FSV** `profile_list` shows it within 1 tick; edit; **FSV** in-memory profile replaced; delete; **FSV** removed from list |
+| 14 | `feat(profiles): TOML loader -> Profile + version compat` | `PROFILE_PARSE_ERROR`, `PROFILE_VERSION_INCOMPATIBLE` | supporting unit checks parse every bundled profile + 3 synthetic invalid TOMLs (missing required field / bad regex / future schema_version); manual evidence records exact error code per invalid case; boundary: empty profile dir -> `profile_list` returns `[]` |
+| 15 | `feat(profiles): notify watcher + match resolver (debounced 200ms)` | `PROFILE_HUD_REGION_INVALID`, `PROFILE_KEYMAP_INVALID` | E2E: write `profiles/scratch.toml`; manual SoT readback shows `profile_list` contains it within 1 tick; edit readback shows in-memory profile replaced; delete readback shows removal from list |
 | 16 | `feat(profiles): bundled notepad / vscode / chrome / terminal w/ Natural defaults` | — | smoke test asserts every bundled `mouse_curve_default == "natural"` AND `keyboard_dynamics_default == "natural"`; E2E launches each app, `profile_list` shows the active match |
-| 17 | `feat(mcp): profile_list + profile_activate tools` | `PROFILE_NOT_FOUND` | snapshot at `tests/snapshots/m3_profile_tools.snap`; **FSV** `profile_activate({id: "vscode"})` → next `health.subsystems.profiles.active_profile_id` equals `vscode` |
+| 17 | `feat(mcp): profile_list + profile_activate tools` | `PROFILE_NOT_FOUND` | snapshot at `tests/snapshots/m3_profile_tools.snap`; manual SoT readback after `profile_activate({id: "vscode"})` confirms next `health.subsystems.profiles.active_profile_id` equals `vscode` |
 
 ### Block D — audio (work-items 18-20)
 
-| # | Title | Throws | Acceptance (FSV) |
+| # | Title | Throws | Acceptance (manual SoT evidence required) |
 |---|---|---|---|
-| 18 | `feat(audio): WASAPI loopback ring 5s + detectors` | `AUDIO_DEVICE_LOST`, `AUDIO_LOOPBACK_INIT_FAILED` | playback known test asset; **FSV** events emitted (`loud_transient`, `speech_started/ended`); RMS metric flows; `audio_tail(seconds=2)` returns the last 2 s of PCM |
-| 19 | `feat(audio): Whisper-tiny-int8 STT (lazy load + sha256 verify)` | `AUDIO_STT_MODEL_NOT_LOADED`, `MODEL_HASH_MISMATCH` | known 5 s clip with ground-truth transcript; bench p99 ≤ 200 ms; **FSV** `audio_transcribe` returns the ground-truth string ±10% Levenshtein; missing model → `AUDIO_STT_MODEL_NOT_LOADED` |
-| 20 | `feat(audio): direction estimate (L/R energy + GCC-PHAT)` | — | 3 stereo test clips at -60°/0°/+60° azimuth; **FSV** estimate within ±15° per clip |
+| 18 | `feat(audio): WASAPI loopback ring 5s + detectors` | `AUDIO_DEVICE_LOST`, `AUDIO_LOOPBACK_INIT_FAILED` | playback known test asset; manual SoT readback confirms events emitted (`loud_transient`, `speech_started/ended`), RMS metric flows, and `audio_tail(seconds=2)` returns the last 2 s of PCM |
+| 19 | `feat(audio): Whisper-tiny-int8 STT (lazy load + sha256 verify)` | `AUDIO_STT_MODEL_NOT_LOADED`, `MODEL_HASH_MISMATCH` | known 5 s clip with ground-truth transcript; bench p99 <= 200 ms; manual SoT readback confirms `audio_transcribe` returns the ground-truth string +/-10% Levenshtein; missing model -> `AUDIO_STT_MODEL_NOT_LOADED` |
+| 20 | `feat(audio): direction estimate (L/R energy + GCC-PHAT)` | — | 3 stereo test clips at -60deg/0deg/+60deg azimuth; manual SoT readback confirms estimate within +/-15deg per clip |
 
 > Dev-loop note: WSL → Windows PulseAudio bridge on `tcp:127.0.0.1:4713` (mirrored networking) is available for fixture playback / capture (issue #85). Production path stays WASAPI direct — PulseAudio is **not** in the shipped surface.
 
 ### Block E — MCP HTTP + SSE + new tools (work-items 21-24)
 
-| # | Title | Throws | Acceptance (FSV) |
+| # | Title | Throws | Acceptance (manual SoT evidence required) |
 |---|---|---|---|
-| 21 | `feat(mcp): axum HTTP + Mcp-Session-Id + bearer auth + Origin/Host check` | `HTTP_BIND_NON_LOOPBACK_REFUSED`, `HTTP_TOKEN_INVALID`, `HTTP_ORIGIN_REFUSED`, `HTTP_SESSION_INVALID` | `curl` matrix: no token → 401; bad Origin → 403; missing/expired session id → 404; non-loopback bind without `--allow-non-loopback` → process exits with `HTTP_BIND_NON_LOOPBACK_REFUSED`; **FSV**: read daemon log for each refusal |
-| 22 | `feat(mcp): SSE push notifications w/ Last-Event-ID resume` | — | reconnect test: drop SSE mid-stream; reconnect with `Last-Event-ID: <seq>`; **FSV** server replays the exact missed events (assert byte-equal); buffer overflow → next push carries `lossy: true` and `subscription_started` is re-sent |
-| 23 | `feat(mcp): subscribe + subscribe_cancel + reflex_register + reflex_cancel + reflex_list + reflex_history` | `SUBSCRIPTION_NOT_FOUND`, `REFLEX_*` | tools/list snapshot updated; **FSV** E2E: register on_event for `value-changed`; fire; observe `reflex-fired` audit + `reflex_history` row; cancel; observe `reflex_list` no longer shows it |
-| 24 | `feat(mcp): replay_record + audio_tail + audio_transcribe` | `REPLAY_TARGET_INVALID`, `REPLAY_FORMAT_INVALID`, `AUDIO_*` | tools/list snapshot updated; **FSV** `replay_record({target:"observations", duration_ms:1000})` writes a JSONL file and the response's `path` returns that file; reader reads it back and assert valid `Observation` per line |
+| 21 | `feat(mcp): axum HTTP + Mcp-Session-Id + bearer auth + Origin/Host check` | `HTTP_BIND_NON_LOOPBACK_REFUSED`, `HTTP_TOKEN_INVALID`, `HTTP_ORIGIN_REFUSED`, `HTTP_SESSION_INVALID` | `curl` matrix: no token -> 401; bad Origin -> 403; missing/expired session id -> 404; non-loopback bind without `--allow-non-loopback` -> process exits with `HTTP_BIND_NON_LOOPBACK_REFUSED`; manual SoT readback reads daemon log for each refusal |
+| 22 | `feat(mcp): SSE push notifications w/ Last-Event-ID resume` | — | reconnect test: drop SSE mid-stream; reconnect with `Last-Event-ID: <seq>`; manual SoT readback confirms server replays the exact missed events byte-equal; buffer overflow -> next push carries `lossy: true` and `subscription_started` is re-sent |
+| 23 | `feat(mcp): subscribe + subscribe_cancel + reflex_register + reflex_cancel + reflex_list + reflex_history` | `SUBSCRIPTION_NOT_FOUND`, `REFLEX_*` | tools/list snapshot updated; manual E2E evidence registers on_event for `value-changed`, fires it, observes `reflex-fired` audit + `reflex_history` row, cancels it, then observes `reflex_list` no longer shows it |
+| 24 | `feat(mcp): replay_record + audio_tail + audio_transcribe` | `REPLAY_TARGET_INVALID`, `REPLAY_FORMAT_INVALID`, `AUDIO_*` | tools/list snapshot updated; manual SoT readback confirms `replay_record({target:"observations", duration_ms:1000})` writes a JSONL file at response `path`; direct file read confirms every line parses as `Observation` |
 
 ### Block F — safety + demo (work-items 25-26)
 
-| # | Title | Throws | Acceptance (FSV) |
+| # | Title | Throws | Acceptance (manual SoT evidence required) |
 |---|---|---|---|
-| 25 | `feat(safety): panic hotkey RegisterHotKey(Ctrl+Alt+Shift+P) → reflex_disable_all + ReleaseAll within 50ms` | `SAFETY_OPERATOR_HOTKEY_FIRED` | E2E: register 3 reflexes; press hotkey via `keybd_event` test injection; **FSV** all 3 reflexes status → `disabled`; `RELEASE_ALL_HANDLE` fired; `GetAsyncKeyState` for every previously-held key returns 0; daemon log carries `SAFETY_OPERATOR_HOTKEY_FIRED` |
-| 26 | `test(e2e): notepad save-dialog reflex demo (M3 demo gate)` | — | full §2 demo via stdio AND via HTTP w/ token; **FSV** all 4 source-of-truth reads pass; manual sign-off pasted into PR |
+| 25 | `feat(safety): panic hotkey RegisterHotKey(Ctrl+Alt+Shift+P) -> reflex_disable_all + ReleaseAll within 50ms` | `SAFETY_OPERATOR_HOTKEY_FIRED` | E2E: register 3 reflexes; press hotkey via `keybd_event` test injection; manual SoT readback confirms all 3 reflexes status -> `disabled`, `RELEASE_ALL_HANDLE` fired, `GetAsyncKeyState` for every previously-held key returns 0, and daemon log carries `SAFETY_OPERATOR_HOTKEY_FIRED` |
+| 26 | `test(e2e): notepad save-dialog reflex demo (M3 demo gate)` | — | full §2 demo via stdio AND via HTTP w/ token; manual evidence records all 4 source-of-truth reads; manual sign-off pasted into PR |
 
 Total: 6 carry-over PRs + 26 M3 PRs = 32 PRs. Order matters: A.0 (carry-over) → A (storage; reflex needs `Db` to write audit) → B (reflex runtime) → C (profiles) → D (audio) → E (HTTP + tools wire up) → F (safety + demo).
 
 ---
 
-## 7. Full-State Verification — the M3 contract (mandatory for every test)
+## 7. Manual Full-State Verification — the M3 contract
 
-Every test under `crates/synapse-{reflex,storage,profiles,audio}/tests/**` and `crates/synapse-mcp/tests/m3_*.rs` follows this template exactly. A test that does not follow it fails review.
+Every M3 work item follows this manual evidence template. Automated tests under `crates/synapse-{reflex,storage,profiles,audio}/tests/**` and `crates/synapse-mcp/tests/m3_*.rs` are supporting regression checks only and must not claim to perform FSV.
 
 ### 7.1 Source-of-truth table (M3)
 
@@ -474,21 +473,9 @@ Every test under `crates/synapse-{reflex,storage,profiles,audio}/tests/**` and `
 | Reflex recursion guard | per-tick firing count never exceeds 4; one `REFLEX_RECURSION_LIMIT` audit row per exceeded tick | audit scan |
 | HTTP refusal (auth/origin/loopback) | HTTP status code matches expected (401/403/404/exit code 2); daemon log carries the matching code | two reads |
 
-### 7.2 The required print pattern
+### 7.2 The required manual issue-evidence pattern
 
-Mirrors M2 §8.2 exactly:
-
-```
-println!("source_of_truth=<name> edge=<edge> before=<state>");
-let resp = client.tools_call("reflex_register", json!({...})).await?;
-println!("source_of_truth=<name> edge=<edge> after_response={}", resp["structuredContent"]);
-let truth_after = read_truth(...)?;       // <- THE SEPARATE READ
-println!("source_of_truth=<name> edge=<edge> after_truth={truth_after}");
-assert_eq!(truth_after, expected);
-println!("source_of_truth=<name> edge=<edge> final_value={truth_after:?}");
-```
-
-The `after_truth=` and `final_value=` lines are what reviewers grep for. Missing either ⇒ review fails the PR.
+For each scenario, the issue comment must name the SoT, show its before value, name the trigger, show the separate readback after the trigger, and record the final observed result. Missing the readback or final observed result means the change is not accepted, even if supporting checks pass.
 
 ### 7.3 Boundary & edge-case audit — ≥ 3 per primary path
 
@@ -498,7 +485,7 @@ Minimum cases per primary path:
 2. **Boundary**: `reflex_register` 32nd reflex succeeds, 33rd returns `REFLEX_CAP_REACHED`; `audio_tail({seconds: 5})` succeeds, `seconds: 6` returns `TOOL_PARAMS_INVALID`; SSE `Last-Event-ID` resume across exactly 4096-event buffer boundary.
 3. **Structurally invalid**: `reflex_register({kind: "nonsense"})` → `REFLEX_KIND_INVALID`; `profile_activate({profile_id: "does-not-exist"})` → `PROFILE_NOT_FOUND`; `audio_transcribe({language: "xx"})` → `TOOL_PARAMS_INVALID`.
 
-Storage gets a 4th class: **process-restart durability** — write data, restart the daemon (the test spawns a fresh `StdioMcpClient`), read back; data persists. The disk-pressure scenario gets a 5th: **all 4 levels must transition deterministically** with FSV between each transition.
+Storage gets a 4th class: **process-restart durability** — write data, restart the daemon, read back, and confirm data persists. The disk-pressure scenario gets a 5th: **all 4 levels must transition deterministically** with a manual SoT read between each transition.
 
 ### 7.4 Trigger → outcome reasoning (doc-comment on every test fn)
 
@@ -569,7 +556,7 @@ Pick inputs whose expected outputs are unambiguous; tests assert on them exactly
 | RocksDB: 10 000 PUT (`CF_EVENTS`, key=ts_le, val=jsonb) | write batcher | wall ≤ 200 ms; `Db::scan(CF_EVENTS, all)` returns 10 000 rows; sum(bytes) == expected |
 | Profile TOML w/ `schema_version = 999` | parser | `PROFILE_VERSION_INCOMPATIBLE` |
 | Profile TOML missing `[matches]` | parser | `PROFILE_PARSE_ERROR` |
-| Profile TOML w/ `mouse_curve_default = "instant"` | natural-defaults gate | smoke test fails CI |
+| Profile TOML w/ `mouse_curve_default = "instant"` | natural-defaults gate | smoke test fails locally |
 | Whisper-tiny test clip: `tests/fixtures/audio/hello_world_5s.wav` (transcript "Hello world. This is Synapse.") | STT | response `text` within Levenshtein ≤ 4 chars |
 | WASAPI loopback while playing `tests/fixtures/audio/loud_transient_1s.wav` | detectors | one `loud_transient` event with rms > -6 dBFS |
 | Stereo `tests/fixtures/audio/pan_minus60_0_plus60.wav` | direction | three direction estimates: -60° ±15°, 0° ±15°, +60° ±15° |
@@ -596,8 +583,8 @@ Pick inputs whose expected outputs are unambiguous; tests assert on them exactly
 ✓ Every M3 error code (declared + new) thrown ≥ 1× in a test that asserts data.code
 ✓ tools/list snapshot updated to 25 tools (15 prior + 10 M3); `additionalProperties:false` on every schema
 ✓ No mocks gate completion — real RocksDB on real disk, real WASAPI on real device, real Notepad in E2E
-✓ Local supporting checks green; manual configured-host FSV is the shipping gate (issues #246/#247/#350)
-✓ FSV evidence: every passing test stdout contains ≥ 1 `final_value=` line + ≥ 1 `after_truth=` line per scenario
+✓ Local supporting checks green; manual configured-host FSV is the shipping gate (issues #246/#247/#350/#351)
+✓ Manual evidence: issue resolution records source-of-truth before/after state plus final observed result values per scenario
 ✓ Soak (1 h) clean: no memory growth > 50 MB, no deadlocks, no held-key leaks after `release_all`
 ✓ scripts/check_docs.ps1 green
 ✓ CHANGELOG.md updated with M3 entry; tag v0.1.0-m3 cut
@@ -610,7 +597,7 @@ Pick inputs whose expected outputs are unambiguous; tests assert on them exactly
 | Risk | Mitigation |
 |---|---|
 | Time-critical thread jitter on Windows | `CreateWaitableTimerEx` w/ `CREATE_WAITABLE_TIMER_HIGH_RESOLUTION` + MMCSS Pro Audio; fallback to `tokio::time::interval(2ms)` logs `degraded` and fires spike check |
-| RocksDB Windows hiccups (`OQ-001`) | `--feature sled-backend` escape valve; if > 2 RocksDB crashes during M3 soak, flip default per OQ-001 |
+| RocksDB Windows hiccups (`OQ-001`) | M3 uses RocksDB only per ADR-0002; alternate backend requires a fresh implementation issue |
 | Hot-reload vs. active reflexes | Reflex params snapshot at registration; profile alias resolution happens at register-time; subsequent profile changes don't retroactively break running reflexes; missing alias on fire ⇒ `REFLEX_PARAMS_INVALID` |
 | HTTP/SSE reconnect semantics | `Last-Event-ID` header on reconnect; buffer 4096/sub; deeper outage ⇒ subscription marked `lossy=true` in next push |
 | Whisper-tiny accuracy weaker than expected (`OQ-014`) | Operator opt-in upgrade to `whisper-base` via separate `models import` flow; bundled-default decision deferred to M5 |
@@ -681,7 +668,7 @@ When debugging, identify the row, read both columns, the bug is in X:
 | `cargo deny check` fails on new dep | `deny.toml` SPDX allowlist — every M3 dep is already in `[workspace.dependencies]`; no new SPDX exposure |
 | Held key not released after panic | `crates/synapse-action/src/safety.rs` — confirm `RELEASE_ALL_HANDLE` was set before reflex started |
 | WASAPI loopback init fails | check `wasapi::initialize_mta()` order; `synapse-audio::loopback` must run on a dedicated thread |
-| RocksDB open error on Win | check `--feature multi-threaded-cf`; sled fallback via `--feature sled-backend` |
+| RocksDB open error on Win | check pinned `rocksdb` crate and `multi-threaded-cf`; file a new backend issue only if this configured host needs it |
 
 ## Appendix C — Occam's razor recap
 

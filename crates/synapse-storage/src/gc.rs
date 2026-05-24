@@ -90,7 +90,7 @@ impl GcConfig {
 }
 
 impl GcConfig {
-    pub(crate) fn rows_for_fsv(
+    pub(crate) fn for_row_caps(
         interval: Duration,
         cf_name: &'static str,
         soft_cap: u64,

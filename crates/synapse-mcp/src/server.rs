@@ -238,7 +238,7 @@ impl SynapseService {
             actual_title = %actual.window_title,
             recording_event_count_before,
             recording_event_count_after,
-            "source_of_truth=foreground edge=lost before_hwnd=0x{:x} after_hwnd=0x{:x} code=ACTION_FOREGROUND_LOST recording_events_before={} recording_events_after={}",
+            "readback=foreground edge=lost before_hwnd=0x{:x} after_hwnd=0x{:x} code=ACTION_FOREGROUND_LOST recording_events_before={} recording_events_after={}",
             expected.hwnd,
             actual.hwnd,
             recording_event_count_before,

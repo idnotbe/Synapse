@@ -2,8 +2,9 @@
 
 **Status:** Closed 2026-05-24 by release tag `v0.1.0-m2` (commit `51836fe`).
 GitHub context issue: #136. All M2 sub-issues (#137-#248) closed; shipped
-surface verified by 13 M2 FSV tests under `crates/synapse-mcp/tests/m2_*.rs`
-and 16 unit/proptest/bench files under `crates/synapse-action/tests/**`.
+surface verified by manual M2 FSV evidence plus 13 local regression tests under
+`crates/synapse-mcp/tests/m2_*.rs` and 16 unit/proptest/bench files under
+`crates/synapse-action/tests/**`. The tests are supporting evidence only.
 
 **Carry-over for M3** (landed bugs / known limitations recorded after the
 tag) is the table at the bottom of `docs/impplan/README.md` (#244, #239,
@@ -229,7 +230,7 @@ crates/synapse-action/
 │   └── action_recording_round_trip.rs
 └── tests/
     ├── action_no_stuck_keys_proptest.rs
-    ├── action_release_all_fsv.rs
+    ├── action_release_all.rs
     ├── action_curve_sampling.rs
     ├── action_dynamics_round_trip.rs
     ├── action_rate_limit.rs
@@ -363,7 +364,7 @@ Schemas: §5 below. Acceptance bullet: §7 work-item 12.
 
 ### 3.5 Tracing instrumentation
 
-Every public `fn` in `synapse-action` carries `#[tracing::instrument(skip_all, fields(...))]` with the fields the M1 tests already inspect (search the repo for `code = "MCP_TOOL_INVOCATION"` and follow the convention). Every error-code emit also logs a `tracing::warn!(code = "<CODE>", "...")` line. CI greps the test stdout for these codes.
+Every public `fn` in `synapse-action` carries `#[tracing::instrument(skip_all, fields(...))]` with the fields the M1 tests already inspect (search the repo for `code = "MCP_TOOL_INVOCATION"` and follow the convention). Every error-code emit also logs a `tracing::warn!(code = "<CODE>", "...")` line. Local supporting checks can grep test stdout for these codes.
 
 ---
 
@@ -488,24 +489,24 @@ the code(s) it must produce.
 
 ## 7. Work-items (PR-sized, ordered; each is one merge)
 
-| # | Title | Throws codes | Acceptance (FSV-mandatory) |
+| # | Title | Throws codes | Acceptance (manual SoT evidence required) |
 |---|---|---|---|
-| 1 | `feat(core): Action enum + every sub-type from 06 §4 (no Duration; ms u32)` | — | `serde_json::from_value(serde_json::to_value(action)?)? == action` for every variant via `proptest` (1000 cases each); `insta::assert_json_snapshot!("action_variants")` of every variant once; **FSV**: print each variant's JSON before/after round-trip, assert byte-equal |
+| 1 | `feat(core): Action enum + every sub-type from 06 §4 (no Duration; ms u32)` | — | `serde_json::from_value(serde_json::to_value(action)?)? == action` for every variant via `proptest` (1000 cases each); `insta::assert_json_snapshot!("action_variants")` of every variant once; manual evidence records each variant's JSON before/after round-trip and confirms byte-equality |
 | 2 | `feat(action): error.rs + ActionError + .code() table` | every M2 code | `crates/synapse-action/tests/error_codes_match.rs` asserts each enum variant's `.code()` equals the matching `error_codes::*` constant (read via `synapse_core::error_codes::ACTION_QUEUE_FULL` etc.) |
-| 3 | `feat(action): ActionEmitter mpsc actor + held-state tracking (BitSet for keys/buttons, HashMap<PadId, GamepadReport> for pads)` | `ACTION_QUEUE_FULL` | proptest: 1000 randomized `Action` streams ending in `Action::ReleaseAll` produce empty `held_keys`/`held_buttons` BitSets (use a `tokio::sync::oneshot` to read the final BitSet snapshot after `ReleaseAll`); **FSV**: each proptest run prints the final BitSet contents |
-| 4 | `feat(action): SoftwareBackend via enigo + direct windows::SendInput batched on Win` | `ACTION_BACKEND_UNAVAILABLE` (Linux), `ACTION_UNSUPPORTED_KEY` (unknown KeyCode) | bench `action_software_press` p99 ≤ 1 ms on Win (criterion file at `benches/action_software_press.rs`; local `critcmp` baseline export outside git); **FSV**: on Win11 test box, install a low-level `WH_KEYBOARD_LL` hook in the test harness, fire `act_press({keys:["a"]})`, assert the hook observed exactly `[KeyDown(a), KeyUp(a)]` within 33 ms (default hold) |
-| 5 | `feat(action): RecordingBackend (synapse-test-utils dev-dep) capturing the exact INPUT stream` | — | unit test: every `Action` variant routed to `RecordingBackend::execute` produces a deterministic `Vec<RecordedInput>`; `insta` snapshot of the recorded sequence for each of the 11 variants; **FSV**: assert the `Vec<RecordedInput>` length and per-step fields against a hard-coded expected sequence, not a fuzzy match |
-| 6 | `feat(action): curve.rs — Instant/Linear/EaseInOut/Bezier/Natural sampler with seeded RNG` | — | proptest: `samples[0] == start` and `samples[n-1] == end` for every curve over 1000 random `(start, end, duration_ms)` triples; bench `aim_curve_step_calc_natural` ≤ 1 µs/step (criterion); **FSV**: pin seed `42`, generate `Natural::FAST` samples for `start=(0,0) end=(100,100) duration_ms=50`, assert byte-equal hash to baseline committed in `tests/snapshots/curve_natural_seed_42.snap` |
-| 7 | `feat(action): dynamics.rs — Burst/Linear/Natural sampler` | — | proptest: characters typed via `RecordingBackend` round-trip equal to input across 10k random strings up to 200 chars; modifier ordering invariant (`Shift` down before key down, up after key up); **FSV**: pinned-seed `Natural::FAST` sample of `"Hello world."` matches the baseline IKI sequence in `tests/snapshots/dynamics_natural_hello_world.snap` |
-| 8 | `feat(action): InvokePattern bridge (invoke.rs) → synapse_a11y::re_resolve + uiautomation::Pattern::Invoke` | `ACTION_ELEMENT_NOT_RESOLVED`, `ACTION_TARGET_INVALID` | Win-only E2E: launch real Notepad via `tests/fixtures/launch_notepad.rs`, call `act_click({element_id: <File menu>})` with `use_invoke_pattern: true`; **FSV** read back via `synapse_a11y::snapshot(focused_window, 2)` and assert the `File` menu's `is_expanded` UIA property flipped to `true` within 25 ms; assert no cursor motion (the M1 capture path's cursor coords stayed put). 3 edge cases: (a) `element_id` for a destroyed window → `ACTION_ELEMENT_NOT_RESOLVED`; (b) `element_id` for an element without InvokePattern → falls through to coordinate click on element bbox center; (c) `element_id` malformed string → `ACTION_TARGET_INVALID` |
-| 9 | `feat(action): VigemBackend via vigem-client (X360 + DS4); lazy plug-in + wait_for_ready` | `ACTION_VIGEM_NOT_INSTALLED`, `ACTION_VIGEM_PLUGIN_FAILED` | Win-only E2E with ViGEmBus: enumerate `vigem-client`'s `Client::new`, send `Action::PadReport { pad: 0, report: GamepadReport { buttons: vec![PadButton::A], ..neutral } }`, **FSV** open the test harness's `XInputGetState(0, ..)` and assert `wButtons & XINPUT_GAMEPAD_A == XINPUT_GAMEPAD_A` within 50 ms; release, assert `wButtons == 0`. ViGEm absent ⇒ test calls `VigemBackend::ensure_ready()` and asserts `ACTION_VIGEM_NOT_INSTALLED` |
-| 10 | `feat(action): rate_limit.rs token bucket per backend; overshoot ⇒ ACTION_RATE_LIMITED + re-queue with 1 ms backoff` | `ACTION_RATE_LIMITED` | unit test (mocked clock via `tokio::time::pause`): submit 5100 software events in 1 simulated second; assert exactly 5000 succeed, ≥ 100 surface `ACTION_RATE_LIMITED`; **FSV**: print before/after bucket state; assert refill matches `5000/s` token rate |
-| 11 | `feat(action): held-key auto-release timer ⇒ STUCK_KEY_AUTO_RELEASED event` | `STUCK_KEY_AUTO_RELEASED`, `ACTION_HOLD_EXCEEDED_MAX` | unit test with `tokio::time::pause + advance(31s)`: send `KeyDown a` then advance time; **FSV** read `RecordingBackend::events()` and assert it contains `KeyUp(a)` and the tracing log captured by `tracing-subscriber::fmt::TestWriter` contains a line `code=STUCK_KEY_AUTO_RELEASED key=a held_ms=30000`. Caller-requested `hold_ms > 30_000` is rejected at the API boundary with `ACTION_HOLD_EXCEEDED_MAX` (no enqueue) |
-| 12 | `feat(action): ReleaseAll wiring — shutdown + SIGINT + panic hook` | `SAFETY_RELEASE_ALL_FIRED` | Win-only E2E: spawn `synapse-mcp` via `StdioMcpClient`, call `act_press({keys:["a"], hold_ms: 5000})`, immediately send SIGINT; **FSV** install a low-level keyboard hook in the test harness BEFORE spawning the daemon, assert the hook observes `KeyUp(a)` within 10 ms of the SIGINT being delivered; assert the daemon process exits with code `0` and the last log line is `code=SAFETY_RELEASE_ALL_FIRED reason=sigint`. 3 edge cases: (a) graceful Ctrl+C → ReleaseAll fires; (b) `std::panic!("force")` from a tool handler → panic hook fires ReleaseAll before re-panic; (c) parent stdin closes (rmcp `connection closed`) → ReleaseAll fires |
-| 13 | `feat(action): MouseDrag (down + curve + up), MouseScroll (`MOUSEEVENTF_WHEEL`/`HWHEEL`), double/triple-click via `GetDoubleClickTime`` | `ACTION_DRAG_DISTANCE_EXCEEDS_LIMIT` (drag distance > 4096 px) | Win-only E2E: launch Notepad, type `"abcdef"`, call `act_click({clicks: 2, target: <editor>})` → **FSV** read `synapse_a11y::focused_element().value()` (or fall back to clipboard via `act_clipboard(verb:"read")` after `Ctrl+C`) and assert the selection equals the word containing the click point. Scroll: open a long text file, `act_scroll({dy: -10})`, **FSV** observe the editor's `Scroll` pattern current position changed via UIA |
-| 14 | `feat(mcp): act_click / act_type / act_press / act_aim / act_drag / act_scroll / act_pad / act_clipboard / release_all` with `Natural`-by-default schemas | every M2 code via tool routes | `tests/m2_tools_fsv.rs` enumerates `tools/list`, asserts the names are exactly `["act_aim","act_click","act_clipboard","act_drag","act_pad","act_press","act_scroll","act_type","find","health","observe","read_text","release_all","set_capture_target","set_perception_mode"]` (15 names sorted), asserts every schema sets `additionalProperties:false`, and asserts every default in §5's table by reading the `default` JSON-Schema field directly. `insta` snapshot of every tool schema. **FSV** for each tool: spawn daemon, call tool with `RecordingBackend` env var, assert the resulting `Vec<RecordedInput>` matches a hard-coded expectation for that tool |
+| 3 | `feat(action): ActionEmitter mpsc actor + held-state tracking (BitSet for keys/buttons, HashMap<PadId, GamepadReport> for pads)` | `ACTION_QUEUE_FULL` | proptest: 1000 randomized `Action` streams ending in `Action::ReleaseAll` produce empty `held_keys`/`held_buttons` BitSets (use a `tokio::sync::oneshot` to read the final BitSet snapshot after `ReleaseAll`); manual evidence records final BitSet contents |
+| 4 | `feat(action): SoftwareBackend via enigo + direct windows::SendInput batched on Win` | `ACTION_BACKEND_UNAVAILABLE` (Linux), `ACTION_UNSUPPORTED_KEY` (unknown KeyCode) | bench `action_software_press` p99 <= 1 ms on Win (criterion file at `benches/action_software_press.rs`; local `critcmp` baseline export outside git); manual Win11 evidence installs a low-level `WH_KEYBOARD_LL` hook, fires `act_press({keys:["a"]})`, and confirms the hook observed exactly `[KeyDown(a), KeyUp(a)]` within 33 ms (default hold) |
+| 5 | `feat(action): RecordingBackend (synapse-test-utils dev-dep) capturing the exact INPUT stream` | — | unit test: every `Action` variant routed to `RecordingBackend::execute` produces a deterministic `Vec<RecordedInput>`; `insta` snapshot of the recorded sequence for each of the 11 variants; manual evidence confirms the `Vec<RecordedInput>` length and per-step fields against a hard-coded expected sequence, not a fuzzy match |
+| 6 | `feat(action): curve.rs — Instant/Linear/EaseInOut/Bezier/Natural sampler with seeded RNG` | — | proptest: `samples[0] == start` and `samples[n-1] == end` for every curve over 1000 random `(start, end, duration_ms)` triples; bench `aim_curve_step_calc_natural` <= 1 us/step (criterion); manual evidence pins seed `42`, generates `Natural::FAST` samples for `start=(0,0) end=(100,100) duration_ms=50`, and confirms byte-equal hash to baseline |
+| 7 | `feat(action): dynamics.rs — Burst/Linear/Natural sampler` | — | proptest: characters typed via `RecordingBackend` round-trip equal to input across 10k random strings up to 200 chars; modifier ordering invariant (`Shift` down before key down, up after key up); manual evidence confirms pinned-seed `Natural::FAST` sample of `"Hello world."` matches the baseline IKI sequence |
+| 8 | `feat(action): InvokePattern bridge (invoke.rs) → synapse_a11y::re_resolve + uiautomation::Pattern::Invoke` | `ACTION_ELEMENT_NOT_RESOLVED`, `ACTION_TARGET_INVALID` | Win-only E2E: launch real Notepad via `tests/fixtures/launch_notepad.rs`, call `act_click({element_id: <File menu>})` with `use_invoke_pattern: true`; manual SoT readback via `synapse_a11y::snapshot(focused_window, 2)` confirms the `File` menu's `is_expanded` UIA property flipped to `true` within 25 ms; assert no cursor motion. 3 edge cases: destroyed-window element id -> `ACTION_ELEMENT_NOT_RESOLVED`; element without InvokePattern -> coordinate click fallback; malformed element id -> `ACTION_TARGET_INVALID` |
+| 9 | `feat(action): VigemBackend via vigem-client (X360 + DS4); lazy plug-in + wait_for_ready` | `ACTION_VIGEM_NOT_INSTALLED`, `ACTION_VIGEM_PLUGIN_FAILED` | Win-only E2E with ViGEmBus: enumerate `vigem-client`'s `Client::new`, send `Action::PadReport { pad: 0, report: GamepadReport { buttons: vec![PadButton::A], ..neutral } }`, manually read `XInputGetState(0, ..)` and confirm `wButtons & XINPUT_GAMEPAD_A == XINPUT_GAMEPAD_A` within 50 ms; release, confirm `wButtons == 0`. ViGEm absent => test calls `VigemBackend::ensure_ready()` and asserts `ACTION_VIGEM_NOT_INSTALLED` |
+| 10 | `feat(action): rate_limit.rs token bucket per backend; overshoot ⇒ ACTION_RATE_LIMITED + re-queue with 1 ms backoff` | `ACTION_RATE_LIMITED` | unit test (mocked clock via `tokio::time::pause`): submit 5100 software events in 1 simulated second; assert exactly 5000 succeed, >= 100 surface `ACTION_RATE_LIMITED`; manual evidence records before/after bucket state and confirms refill matches `5000/s` token rate |
+| 11 | `feat(action): held-key auto-release timer ⇒ STUCK_KEY_AUTO_RELEASED event` | `STUCK_KEY_AUTO_RELEASED`, `ACTION_HOLD_EXCEEDED_MAX` | unit test with `tokio::time::pause + advance(31s)`: send `KeyDown a` then advance time; manual SoT readback reads `RecordingBackend::events()` and confirms it contains `KeyUp(a)` and the tracing log captured by `tracing-subscriber::fmt::TestWriter` contains `code=STUCK_KEY_AUTO_RELEASED key=a held_ms=30000`. Caller-requested `hold_ms > 30_000` is rejected at the API boundary with `ACTION_HOLD_EXCEEDED_MAX` (no enqueue) |
+| 12 | `feat(action): ReleaseAll wiring — shutdown + SIGINT + panic hook` | `SAFETY_RELEASE_ALL_FIRED` | Win-only E2E: spawn `synapse-mcp` via `StdioMcpClient`, call `act_press({keys:["a"], hold_ms: 5000})`, immediately send SIGINT; manual evidence from a low-level keyboard hook installed before daemon spawn confirms `KeyUp(a)` within 10 ms of SIGINT; process exits `0` and last log line is `code=SAFETY_RELEASE_ALL_FIRED reason=sigint`. 3 edge cases: graceful Ctrl+C, forced panic, and parent stdin close all fire ReleaseAll |
+| 13 | `feat(action): MouseDrag (down + curve + up), MouseScroll (`MOUSEEVENTF_WHEEL`/`HWHEEL`), double/triple-click via `GetDoubleClickTime`` | `ACTION_DRAG_DISTANCE_EXCEEDS_LIMIT` (drag distance > 4096 px) | Win-only E2E: launch Notepad, type `"abcdef"`, call `act_click({clicks: 2, target: <editor>})`; manual SoT readback reads `synapse_a11y::focused_element().value()` or clipboard after `Ctrl+C` and confirms selected word. Scroll evidence reads the editor's `Scroll` pattern current position via UIA after `act_scroll({dy: -10})` |
+| 14 | `feat(mcp): act_click / act_type / act_press / act_aim / act_drag / act_scroll / act_pad / act_clipboard / release_all` with `Natural`-by-default schemas | every M2 code via tool routes | A neutral supporting check enumerates `tools/list`, asserts the 15 sorted M2 names, verifies `additionalProperties:false`, and asserts every default in §5's table by reading the `default` JSON-Schema field directly. Manual evidence for each tool spawns daemon, calls tool with `RecordingBackend` env var, and confirms the resulting `Vec<RecordedInput>` matches a hard-coded expectation for that tool |
 | 15 | `bench: action_software_press, action_curve_step_calc_natural, action_recording_round_trip` | — | `criterion` runs all three; local `critcmp` exports are stored outside git; delta gate per `07 §1` |
-| 16 | `test(e2e): notepad_type_save` (the demo gate scenario, automated) | — | spawn Notepad via `tests/fixtures/launch_notepad.rs`, run the full sequence in §2 against the real OS; **FSV** read the resulting file from disk and `assert_eq!(fs::read_to_string(path)?, "Hello world.\nThis is Synapse.")`; **3 edge cases**: (a) save to non-existent directory → `act_type` succeeds but Notepad's save dialog reports the error; the test asserts the dialog text via UIA — the M2 test passes when the agent's last call returned a non-error response AND the source-of-truth file was either written or absent (no half-saved file); (b) Notepad loses focus mid-type → next `act_type` returns `ACTION_FOREGROUND_LOST`; (c) malformed `element_id` for the editor → `ACTION_TARGET_INVALID` |
+| 16 | `test(e2e): notepad_type_save` (the demo gate scenario, automated) | — | spawn Notepad via `tests/fixtures/launch_notepad.rs`, run the full sequence in §2 against the real OS; manual SoT readback reads the resulting file from disk and confirms `fs::read_to_string(path)? == "Hello world.\nThis is Synapse."`; 3 edge cases: save to non-existent directory, Notepad loses focus mid-type, and malformed editor element id |
 | 17 | `docs(prd): one-line patch to 05_mcp_tool_surface.md §3.12 act_type.dynamics default from "burst" to "natural"` | — | grep gate in `scripts/check_docs.ps1` (add): `act_type` schema in PRD has `"default": "natural"`; cross-PR ADR not needed because OQ-004 already records the decision |
 
 Total: 17 PRs. Order matters: 1 → 2 → 3 (lays the channel + actor) → 4-9
@@ -514,11 +515,11 @@ Total: 17 PRs. Order matters: 1 → 2 → 3 (lays the channel + actor) → 4-9
 
 ---
 
-## 8. Full-State Verification — the M2 contract (mandatory for every test)
+## 8. Manual Full-State Verification — the M2 contract
 
-Every test under `crates/synapse-action/tests/**` and
-`crates/synapse-mcp/tests/m2_*.rs` follows this template exactly. A test that
-does not follow it fails review.
+Every M2 work item requires manual source-of-truth evidence. Automated tests
+under `crates/synapse-action/tests/**` and `crates/synapse-mcp/tests/m2_*.rs`
+are supporting regression checks only and must not claim to perform FSV.
 
 ### 8.1 Identify the source of truth
 
@@ -542,20 +543,10 @@ post-state and read it back. The full M2 source-of-truth table:
 
 ### 8.2 The required print pattern
 
-Every test emits at least four log lines per scenario. Pattern (from
-existing M1 tests in `tests/m1_tools_fsv.rs`):
-
-```
-println!("source_of_truth=<name> edge=<edge> before=<state>");
-let resp = client.tools_call("act_type", json!({...})).await?;
-println!("source_of_truth=<name> edge=<edge> after_response={}", resp["structuredContent"]);
-let truth_after = read_truth(...)?;       // <- THE SEPARATE READ
-println!("source_of_truth=<name> edge=<edge> after_truth={truth_after}");
-assert_eq!(truth_after, expected);
-```
-
-The `after_truth` line is the line a reviewer greps for. Tests without it
-fail review.
+For each scenario, issue evidence names the SoT, records the before state,
+executes the trigger, performs a separate readback, and records the actual
+after state. Automated stdout may echo those values as support, but it is not
+FSV and cannot replace the agent's manual readback.
 
 ### 8.3 Boundary & edge-case audit
 
@@ -579,24 +570,16 @@ backend events and asserts the per-step IKI or sub-pixel tremor matches the
 
 The panic edge uses the debug-only `SYNAPSE_MCP_FORCE_PANIC_DURING_ACT=1`
 test gate. In debug builds, `synapse-mcp` panics during `act_press` after the
-tool invocation is accepted; in release builds the env var is ignored. The FSV
-must read the daemon JSONL log after the trigger and prove
+tool invocation is accepted; in release builds the env var is ignored. Manual
+issue evidence must read the daemon JSONL log after the trigger and prove
 `SAFETY_RELEASE_ALL_FIRED reason=panic` was emitted by the installed panic
 hook.
 
 ### 8.4 Evidence of success
 
-Every test ends with a log line that prints the literal post-state of the
-source of truth:
-
-```
-println!("source_of_truth=<name> edge=happy_path final_value={truth_after:?}");
-```
-
-A `cargo test --workspace -- --nocapture` run on the green build prints
-≥ 1 such line per test. CI greps for the `final_value=` pattern in the
-windows-runner stdout; tests that produce zero of these lines fail review
-even if `assert_*` passed.
+Manual FSV issue evidence records the literal post-state of the source of truth
+for each scenario. Local supporting checks may print similar values, but stdout
+grep is not FSV and cannot replace the manual source-of-truth readback.
 
 ### 8.5 Trigger-and-outcome reasoning
 
@@ -709,7 +692,7 @@ count and order. Mismatch ⇒ fail with the actual recorded sequence printed.
 ✓ All 9 M2 tools schema-snapshotted (work-item 14)
 ✓ All M2 error codes throwable + tested (work-item 2 + per-tool tests)
 ✓ Local supporting checks run where useful; GitHub Actions/CI are not M2 shipping gates
-✓ FSV evidence: every passing test stdout contains ≥ 1 `final_value=` line per scenario
+✓ Manual evidence: issue resolution records source-of-truth before/after state and final observed result values per scenario
 ✓ scripts/check_docs.ps1 green (after work-item 17 PRD doc-fix)
 ```
 
@@ -786,7 +769,7 @@ that doesn't trace back to this sentence, the design is wrong.
 | Held key not released after panic | `crates/synapse-action/src/safety.rs` — confirm `OnceLock` set before any `Action` is enqueued |
 | Action queue full immediately | bounded `mpsc(256)` — check work-item 3's actor; the M1 capture path also uses bounded channels (`crates/synapse-capture/src/lib.rs:17`) — same pattern |
 | `enigo` compile failure on Linux | `synapse-action` `Cargo.toml` `[target.'cfg(windows)'.dependencies]` — `enigo` and `vigem-client` MUST be Win-only |
-| FSV test passes locally but CI fails on Ubuntu | Linux backend stub returning the wrong error code — assert from `error_codes::ACTION_BACKEND_UNAVAILABLE` not `unimplemented!()` |
+| Supporting test passes locally but portable check fails on Ubuntu | Linux backend stub returning the wrong error code — assert from `error_codes::ACTION_BACKEND_UNAVAILABLE` not `unimplemented!()` |
 | `cargo deny check` fails on new dep | check `deny.toml` SPDX allowlist; `vigem-client` is MIT, `enigo` is MIT, `arc-swap` is MIT-OR-Apache-2.0 |
 | ViGEm pad does not appear to `XInputGetState` | `wait_for_ready` not called or ViGEmBus not installed; **never** silently swallow — surface `ACTION_VIGEM_PLUGIN_FAILED` with detail |
 

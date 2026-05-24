@@ -91,10 +91,10 @@ impl SynapseService {
 }
 '@
 
-    Write-Host "source_of_truth=check_docs_smoke before_fixture=$TempRoot expected_missing=CF_SYNTHETIC_MISSING"
+    Write-Host "readback=check_docs_smoke before_fixture=$TempRoot expected_missing=CF_SYNTHETIC_MISSING"
     $Output = & pwsh -NoProfile -ExecutionPolicy Bypass -File $ResolvedCheckDocsPath -Root $TempRoot -CheckAnchors 2>&1
     $ExitCode = $LASTEXITCODE
-    Write-Host "source_of_truth=check_docs_smoke after_exit=$ExitCode"
+    Write-Host "readback=check_docs_smoke after_exit=$ExitCode"
     Write-Host ($Output | Out-String)
 
     if ($ExitCode -eq 0) {

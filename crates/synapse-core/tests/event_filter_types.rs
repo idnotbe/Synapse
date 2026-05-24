@@ -15,7 +15,7 @@ use synapse_core::{
 };
 
 #[test]
-fn event_filter_variants_snapshot_with_fsv() -> Result<(), Box<dyn std::error::Error>> {
+fn event_filter_variants_snapshot_with_readback() -> Result<(), Box<dyn std::error::Error>> {
     let filters = event_filter_variants()
         .into_iter()
         .map(|(name, filter)| round_trip("EventFilter", name, filter).map(|value| (name, value)))
@@ -38,42 +38,42 @@ fn event_filter_variants_snapshot_with_fsv() -> Result<(), Box<dyn std::error::E
 }
 
 #[test]
-fn event_filter_validation_edges_have_fsv() {
+fn event_filter_validation_edges_have_readback() {
     let empty_and = EventFilter::And { args: Vec::new() };
     println!(
-        "source_of_truth=event_filter_validation edge=empty_and before=depth:{}",
+        "readback=event_filter_validation edge=empty_and before=depth:{}",
         empty_and.depth()
     );
     let empty_and_after = empty_and.validate();
-    println!("source_of_truth=event_filter_validation edge=empty_and after={empty_and_after:?}");
+    println!("readback=event_filter_validation edge=empty_and after={empty_and_after:?}");
     assert_eq!(empty_and_after, Err(EventFilterValidationError::EmptyAnd));
 
     let empty_or = EventFilter::Or { args: Vec::new() };
     println!(
-        "source_of_truth=event_filter_validation edge=empty_or before=depth:{}",
+        "readback=event_filter_validation edge=empty_or before=depth:{}",
         empty_or.depth()
     );
     let empty_or_after = empty_or.validate();
-    println!("source_of_truth=event_filter_validation edge=empty_or after={empty_or_after:?}");
+    println!("readback=event_filter_validation edge=empty_or after={empty_or_after:?}");
     assert_eq!(empty_or_after, Err(EventFilterValidationError::EmptyOr));
 
     let depth_8 = nested_not(EVENT_FILTER_MAX_DEPTH);
     println!(
-        "source_of_truth=event_filter_validation edge=depth_8 before=depth:{}",
+        "readback=event_filter_validation edge=depth_8 before=depth:{}",
         depth_8.depth()
     );
     let depth_8_after = depth_8.validate();
-    println!("source_of_truth=event_filter_validation edge=depth_8 after={depth_8_after:?}");
+    println!("readback=event_filter_validation edge=depth_8 after={depth_8_after:?}");
     assert_eq!(depth_8.depth(), EVENT_FILTER_MAX_DEPTH);
     assert_eq!(depth_8_after, Ok(()));
 
     let depth_9 = nested_not(EVENT_FILTER_MAX_DEPTH + 1);
     println!(
-        "source_of_truth=event_filter_validation edge=depth_9 before=depth:{}",
+        "readback=event_filter_validation edge=depth_9 before=depth:{}",
         depth_9.depth()
     );
     let depth_9_after = depth_9.validate();
-    println!("source_of_truth=event_filter_validation edge=depth_9 after={depth_9_after:?}");
+    println!("readback=event_filter_validation edge=depth_9 after={depth_9_after:?}");
     assert_eq!(
         depth_9_after,
         Err(EventFilterValidationError::DepthExceeded {
@@ -84,7 +84,7 @@ fn event_filter_validation_edges_have_fsv() {
 }
 
 #[test]
-fn event_filter_predicate_matches_have_fsv() {
+fn event_filter_predicate_matches_have_readback() {
     let event = sample_event();
     let low_hp = EventFilter::And {
         args: vec![
@@ -105,20 +105,20 @@ fn event_filter_predicate_matches_have_fsv() {
         ],
     };
     println!(
-        "source_of_truth=event_filter_match edge=low_hp before=event_kind:{} data:{}",
+        "readback=event_filter_match edge=low_hp before=event_kind:{} data:{}",
         event.kind, event.data
     );
     let matched = low_hp.matches(&event);
-    println!("source_of_truth=event_filter_match edge=low_hp after=matched:{matched}");
+    println!("readback=event_filter_match edge=low_hp after=matched:{matched}");
     assert!(matched);
 
     let missing_path = EventFilter::Data {
         path: "/missing".to_owned(),
         predicate: DataPredicate::Exists,
     };
-    println!("source_of_truth=event_filter_match edge=missing_path before=path:/missing");
+    println!("readback=event_filter_match edge=missing_path before=path:/missing");
     let missing_after = missing_path.matches(&event);
-    println!("source_of_truth=event_filter_match edge=missing_path after=matched:{missing_after}");
+    println!("readback=event_filter_match edge=missing_path after=matched:{missing_after}");
     assert!(!missing_after);
 
     let invalid_regex = EventFilter::Data {
@@ -127,11 +127,9 @@ fn event_filter_predicate_matches_have_fsv() {
             pattern: "[".to_owned(),
         },
     };
-    println!("source_of_truth=event_filter_match edge=invalid_regex before=pattern:[");
+    println!("readback=event_filter_match edge=invalid_regex before=pattern:[");
     let invalid_regex_after = invalid_regex.matches(&event);
-    println!(
-        "source_of_truth=event_filter_match edge=invalid_regex after=matched:{invalid_regex_after}"
-    );
+    println!("readback=event_filter_match edge=invalid_regex after=matched:{invalid_regex_after}");
     assert!(!invalid_regex_after);
 }
 
@@ -145,7 +143,7 @@ fn event_filter_double_not_proptest_is_equivalent() -> Result<(), Box<dyn std::e
     let algorithm = config.rng_algorithm;
     let mut runner = TestRunner::new_with_rng(config, TestRng::deterministic_rng(algorithm));
 
-    println!("source_of_truth=event_filter_double_not_proptest before=cases:1000");
+    println!("readback=event_filter_double_not_proptest before=cases:1000");
     runner.run(
         &(event_filter_strategy(), event_strategy()),
         |(filter, event)| {
@@ -159,7 +157,7 @@ fn event_filter_double_not_proptest_is_equivalent() -> Result<(), Box<dyn std::e
         },
     )?;
     println!(
-        "source_of_truth=event_filter_double_not_proptest after=cases:1000 final_value=all_equivalent"
+        "readback=event_filter_double_not_proptest after=cases:1000 result_value=all_equivalent"
     );
     Ok(())
 }
@@ -170,11 +168,11 @@ where
     T: Clone + Debug + PartialEq + Serialize + DeserializeOwned + 'static,
 {
     let before = serde_json::to_value(value.clone())?;
-    println!("source_of_truth=json_event_filter type={type_name} edge={edge} before={before}");
+    println!("readback=json_event_filter type={type_name} edge={edge} before={before}");
     let parsed = serde_json::from_value::<T>(before)?;
     let after = serde_json::to_value(&parsed)?;
     println!(
-        "source_of_truth=json_event_filter type={type_name} edge={edge} after={after} final_value={after}"
+        "readback=json_event_filter type={type_name} edge={edge} after={after} result_value={after}"
     );
     assert_eq!(parsed, value);
     Ok(parsed)

@@ -159,7 +159,7 @@ mod platform {
                             context,
                             attempts,
                             error = %err,
-                            "source_of_truth=windows_clipboard open_retry"
+                            "readback=windows_clipboard open_retry"
                         );
                         thread::sleep(OPEN_CLIPBOARD_RETRY_DELAY);
                     }

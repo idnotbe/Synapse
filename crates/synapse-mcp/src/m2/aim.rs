@@ -189,7 +189,7 @@ fn execute_recording(recording: &RecordingBackend, action: &Action) -> Result<()
         new_event_count = new_events.len(),
         event_sequence,
         ?new_events,
-        "source_of_truth=recording_backend tool=act_aim after_events_readback"
+        "readback=recording_backend tool=act_aim after_events_readback"
     );
     Ok(())
 }
@@ -284,7 +284,7 @@ mod tests {
             backend: default_aim_backend(),
         };
         let before = recording.events();
-        println!("source_of_truth=act_aim_recording edge=snap before={before:?}");
+        println!("readback=act_aim_recording edge=snap before={before:?}");
 
         let response = act_aim_with_handle(handle, Some(Arc::clone(&recording)), params)
             .await
@@ -292,7 +292,7 @@ mod tests {
         let after = recording.events();
         let sequence = event_sequence(&after);
         println!(
-            "source_of_truth=act_aim_recording edge=snap after={after:?} sequence={sequence} duration_ms={}",
+            "readback=act_aim_recording edge=snap after={after:?} sequence={sequence} duration_ms={}",
             response.duration_ms
         );
 
@@ -323,7 +323,7 @@ mod tests {
                 backend: default_aim_backend(),
             };
             println!(
-                "source_of_truth=act_aim_compile edge=duration before=style:{style:?} after=duration_ms:{}",
+                "readback=act_aim_compile edge=duration before=style:{style:?} after=duration_ms:{}",
                 duration_ms(&params)
             );
             assert_eq!(duration_ms(&params), expected);

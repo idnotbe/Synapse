@@ -268,7 +268,7 @@ pub fn current_input(state: &M1State, depth: u32) -> Result<ObservationInput, Er
     if state.force_observe_internal {
         return Err(mcp_error(
             error_codes::OBSERVE_INTERNAL,
-            "forced observe internal error for FSV",
+            "forced observe internal error",
         ));
     }
     if state.force_no_perception {

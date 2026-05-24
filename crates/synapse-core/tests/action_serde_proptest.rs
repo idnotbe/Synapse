@@ -274,7 +274,7 @@ where
         Ok(())
     })?;
 
-    println!("source_of_truth=action_serde edge={variant} final_value=ok cases=1000");
+    println!("readback=action_serde edge={variant} result_value=ok cases=1000");
     Ok(())
 }
 

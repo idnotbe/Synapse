@@ -59,7 +59,7 @@ firmware/pico-hid/
 │   ├── pad_state.rs            (14-byte XInput-like report accumulator)
 │   ├── safety.rs               (watchdog default 1000 ms ⇒ RELEASE_ALL internal)
 │   └── led.rs                  (idle slow blink / active steady / watchdog fast / error SOS)
-└── tests/protocol_roundtrip.rs (host-side parser; runs on x86 CI)
+└── tests/protocol_roundtrip.rs (host-side parser; runs as a local supporting check)
 ```
 
 ### Host driver (`synapse-hid-host`)
@@ -202,7 +202,7 @@ SAFETY_OPERATOR_HOTKEY_FIRED
 
 | # | Title | Acceptance |
 |---|---|---|
-| 22 | `bench: action_hardware_press p99 ≤ 5 ms (10 §2, requires HW attached)` | criterion bench passes on self-hosted Pico runner; weekly CI checked |
+| 22 | `bench: action_hardware_press p99 ≤ 5 ms (10 §2, requires HW attached)` | criterion bench passes on the configured host with Pico attached; manual evidence records exported metrics |
 | 23 | `chore(release): bundled pico-hid-x.y.z.uf2 release asset + hid flash subcommand` | `synapse-mcp hid flash --port COM7` reflashes existing Synapse-firmware Pico end-to-end |
 
 ---
@@ -229,7 +229,7 @@ SAFETY_OPERATOR_HOTKEY_FIRED
 
 | Risk | Mitigation |
 |---|---|
-| RP2040 firmware bugs are hard to debug | `--features loopback` firmware build echoes commands as PONG for off-target test; tests/protocol_roundtrip.rs runs on x86 CI |
+| RP2040 firmware bugs are hard to debug | `--features loopback` firmware build echoes commands as PONG for off-target test; tests/protocol_roundtrip.rs runs as a local supporting check |
 | Minecraft detection accuracy weak (Ultralytics weights AGPL — `OQ-025`) | Use any permissively-licensed substitute (RT-DETR-s or community fine-tune); document accuracy lower than `15 §6`; fine-tune planned for v1.x |
 | HUD OCR/template-match flakes on varied lighting | Test set across day/night/biome; threshold tuning per profile via `confidence_threshold`; fallback to WinRT OCR + regex parser |
 | Hardware HID latency under sustained load | Pipeline depth = 16 outstanding; firmware buffer 64; coalescing per `OQ-016` on hardware backend for sub-2 ms pending small moves |
@@ -260,6 +260,6 @@ M4 closed when:
 3. Manual happy-path + edge-case test plan filled in by operator in the M4 release PR (write the plan as the first task once M4 starts; mirror the M3 §8 structure).
 4. `CHANGELOG.md` updated; `git tag v0.1.0-m4` cut; bundled `pico-hid-x.y.z.uf2` published as part of the tag's release assets.
 
-**FSV reminder:** every Minecraft test row asserts on a separate source-of-truth read (`fs::read_to_string` for the saved-world state where possible; UIA `ValuePattern` on the F3 debug screen for coords; `XInputGetState` for the gamepad path; `RecordingBackend` events for the software-backend path; external `WH_KEYBOARD_LL` hook for the hardware-backend path). No row is "ok by inspection" — `before` / `after` / separate read / `final_value=` log line for every primary path, ≥3 edge cases each.
+**FSV reminder:** every Minecraft manual row records a separate source-of-truth read (`fs::read_to_string` for the saved-world state where possible; UIA `ValuePattern` on the F3 debug screen for coords; `XInputGetState` for the gamepad path; `RecordingBackend` events for the software-backend path; external `WH_KEYBOARD_LL` hook for the hardware-backend path). No row is "ok by inspection" — issue evidence must show `before`, `after`, the separate read, and final observed result for every primary path, with >=3 edge cases each.
 
 Open next: `06_m5_production_polish.md`.

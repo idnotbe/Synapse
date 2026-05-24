@@ -284,7 +284,7 @@ fn log_recording_readback(
         scheduled_smooth_total_ms = scheduled_smooth_total_ms(params.smooth, smooth_step_count),
         event_sequence,
         ?new_events,
-        "source_of_truth=recording_backend tool=act_scroll after_events_readback"
+        "readback=recording_backend tool=act_scroll after_events_readback"
     );
 }
 

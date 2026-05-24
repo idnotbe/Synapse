@@ -19,7 +19,7 @@ use synapse_test_utils::{fixtures::launch_notepad, stdio_mcp_client::StdioMcpCli
 use tempfile::TempDir;
 
 #[cfg(windows)]
-static WINDOWS_NOTEPAD_FSV_LOCK: LazyLock<tokio::sync::Mutex<()>> =
+static WINDOWS_NOTEPAD_LIVE_LOCK: LazyLock<tokio::sync::Mutex<()>> =
     LazyLock::new(|| tokio::sync::Mutex::new(()));
 
 #[cfg(windows)]
@@ -40,11 +40,11 @@ const DOUBLE_CLICK_CLEANUP_FILE_NAME: &str = "synapse-m2-double-click-cleanup.tx
 #[cfg(windows)]
 #[tokio::test]
 #[ignore = "requires an interactive Windows desktop with Notepad and UIA"]
-// #206 keeps the full disk-save FSV path linear so before/action/after evidence
+// #206 keeps the full disk-save live regression path linear so before/action/after evidence
 // prints in execution order instead of being hidden behind helper indirection.
 #[allow(clippy::too_many_lines)]
-async fn notepad_type_save_writes_byte_correct_file_fsv() -> anyhow::Result<()> {
-    let _notepad_lock = WINDOWS_NOTEPAD_FSV_LOCK.lock().await;
+async fn notepad_type_save_writes_byte_correct_file_live() -> anyhow::Result<()> {
+    let _notepad_lock = WINDOWS_NOTEPAD_LIVE_LOCK.lock().await;
     let target_path = std::env::temp_dir().join(DEMO_FILE_NAME);
     let cleanup = FileCleanup(target_path.clone());
     let stale_before_exists = target_path.exists();
@@ -54,7 +54,7 @@ async fn notepad_type_save_writes_byte_correct_file_fsv() -> anyhow::Result<()> 
         None
     };
     println!(
-        "source_of_truth=disk edge=stale_preexisting before_path={} before_exists={} before_len={:?}",
+        "readback=disk edge=stale_preexisting before_path={} before_exists={} before_len={:?}",
         target_path.display(),
         stale_before_exists,
         stale_before_len
@@ -64,7 +64,7 @@ async fn notepad_type_save_writes_byte_correct_file_fsv() -> anyhow::Result<()> 
             .with_context(|| format!("remove stale demo file {}", target_path.display()))?;
     }
     println!(
-        "source_of_truth=disk edge=happy before_path={} before_exists={}",
+        "readback=disk edge=happy before_path={} before_exists={}",
         target_path.display(),
         target_path.exists()
     );
@@ -75,18 +75,18 @@ async fn notepad_type_save_writes_byte_correct_file_fsv() -> anyhow::Result<()> 
     let pid = handle.pid();
     let pid_preexisting = handle.pid_preexisting();
     println!(
-        "source_of_truth=NotepadHandle edge=ownership after_hwnd=0x{hwnd:x} after_pid={pid} pid_preexisting={pid_preexisting}"
+        "readback=NotepadHandle edge=ownership after_hwnd=0x{hwnd:x} after_pid={pid} pid_preexisting={pid_preexisting}"
     );
     let mut client = StdioMcpClient::launch_and_init_with_log_dir(Some(log_dir.path())).await?;
 
     let editor_node = editor_node_from_uia_snapshot(hwnd)?;
     let editor_id = editor_node.element_id.clone();
     match synapse_a11y::focus_window(hwnd) {
-        Ok(()) => println!(
-            "source_of_truth=synapse_a11y::focus_window edge=window after=ok hwnd=0x{hwnd:x}"
-        ),
+        Ok(()) => {
+            println!("readback=synapse_a11y::focus_window edge=window after=ok hwnd=0x{hwnd:x}")
+        }
         Err(error) => {
-            println!("source_of_truth=synapse_a11y::focus_window edge=window after_error={error}");
+            println!("readback=synapse_a11y::focus_window edge=window after_error={error}");
         }
     }
     let editor = synapse_a11y::re_resolve(&editor_id)
@@ -95,10 +95,10 @@ async fn notepad_type_save_writes_byte_correct_file_fsv() -> anyhow::Result<()> 
         .set_focus()
         .with_context(|| format!("set UIA focus on Notepad editor element {editor_id}"))?;
     println!(
-        "source_of_truth=synapse_a11y::UIElement::set_focus edge=editor after=ok element_id={editor_id}"
+        "readback=synapse_a11y::UIElement::set_focus edge=editor after=ok element_id={editor_id}"
     );
     tokio::time::sleep(Duration::from_millis(200)).await;
-    println!("source_of_truth=editor_element edge=click before_element_id={editor_id}");
+    println!("readback=editor_element edge=click before_element_id={editor_id}");
     let click = client
         .tools_call(
             "act_click",
@@ -107,7 +107,7 @@ async fn notepad_type_save_writes_byte_correct_file_fsv() -> anyhow::Result<()> 
         .await?;
     let click_response: ActClickWireResponse = structured(&click)?;
     println!(
-        "source_of_truth=mcp_act_click edge=editor_focus after=ok:{} used_invoke_pattern:{} backend_used:{} elapsed_ms:{}",
+        "readback=mcp_act_click edge=editor_focus after=ok:{} used_invoke_pattern:{} backend_used:{} elapsed_ms:{}",
         click_response.ok,
         click_response.used_invoke_pattern,
         click_response.backend_used,
@@ -118,7 +118,7 @@ async fn notepad_type_save_writes_byte_correct_file_fsv() -> anyhow::Result<()> 
     tokio::time::sleep(Duration::from_millis(200)).await;
     let observe_before = observe(&mut client).await?;
     println!(
-        "source_of_truth=mcp_observe edge=before_type hwnd=0x{hwnd:x} pid={pid} title={:?} focused_role={:?} element_count={}",
+        "readback=mcp_observe edge=before_type hwnd=0x{hwnd:x} pid={pid} title={:?} focused_role={:?} element_count={}",
         observe_before.foreground.window_title,
         observe_before
             .focused
@@ -141,7 +141,7 @@ async fn notepad_type_save_writes_byte_correct_file_fsv() -> anyhow::Result<()> 
         .await?;
     let typed_response: ActTypeWireResponse = structured(&typed)?;
     println!(
-        "source_of_truth=mcp_act_type edge=demo_text after=ok:{} chars_typed:{} elapsed_ms:{} expected_chars:{}",
+        "readback=mcp_act_type edge=demo_text after=ok:{} chars_typed:{} elapsed_ms:{} expected_chars:{}",
         typed_response.ok,
         typed_response.chars_typed,
         typed_response.elapsed_ms,
@@ -155,7 +155,7 @@ async fn notepad_type_save_writes_byte_correct_file_fsv() -> anyhow::Result<()> 
 
     let observe_after_type = observe(&mut client).await?;
     println!(
-        "source_of_truth=mcp_observe edge=after_type focused_role={:?} focused_value_len={:?}",
+        "readback=mcp_observe edge=after_type focused_role={:?} focused_value_len={:?}",
         observe_after_type
             .focused
             .as_ref()
@@ -167,13 +167,13 @@ async fn notepad_type_save_writes_byte_correct_file_fsv() -> anyhow::Result<()> 
             .map(String::len)
     );
 
-    println!("source_of_truth=mcp_act_press edge=save_chord before=keys:[ctrl,s]");
+    println!("readback=mcp_act_press edge=save_chord before=keys:[ctrl,s]");
     let save = client
         .tools_call("act_press", json!({"keys": ["ctrl", "s"], "hold_ms": 33}))
         .await?;
     let save_response: ActPressWireResponse = structured(&save)?;
     println!(
-        "source_of_truth=mcp_act_press edge=save_chord after=ok:{} keys_pressed:{} backend_used:{} elapsed_ms:{}",
+        "readback=mcp_act_press edge=save_chord after=ok:{} keys_pressed:{} backend_used:{} elapsed_ms:{}",
         save_response.ok,
         save_response.keys_pressed,
         save_response.backend_used,
@@ -185,7 +185,7 @@ async fn notepad_type_save_writes_byte_correct_file_fsv() -> anyhow::Result<()> 
     tokio::time::sleep(Duration::from_millis(500)).await;
     let observe_save_dialog = observe(&mut client).await?;
     println!(
-        "source_of_truth=mcp_observe edge=save_dialog after_title={:?} process={:?} focused_role={:?}",
+        "readback=mcp_observe edge=save_dialog after_title={:?} process={:?} focused_role={:?}",
         observe_save_dialog.foreground.window_title,
         observe_save_dialog.foreground.process_name,
         observe_save_dialog
@@ -196,7 +196,7 @@ async fn notepad_type_save_writes_byte_correct_file_fsv() -> anyhow::Result<()> 
 
     let save_path_text = target_path.to_string_lossy().into_owned();
     println!(
-        "source_of_truth=mcp_act_type edge=filename before_path={} before_len={}",
+        "readback=mcp_act_type edge=filename before_path={} before_len={}",
         save_path_text,
         save_path_text.chars().count()
     );
@@ -212,18 +212,18 @@ async fn notepad_type_save_writes_byte_correct_file_fsv() -> anyhow::Result<()> 
         .await?;
     let filename_response: ActTypeWireResponse = structured(&filename)?;
     println!(
-        "source_of_truth=mcp_act_type edge=filename after=ok:{} chars_typed:{} elapsed_ms:{}",
+        "readback=mcp_act_type edge=filename after=ok:{} chars_typed:{} elapsed_ms:{}",
         filename_response.ok, filename_response.chars_typed, filename_response.elapsed_ms
     );
     assert!(filename_response.ok);
 
-    println!("source_of_truth=mcp_act_press edge=confirm_save before=keys:[enter]");
+    println!("readback=mcp_act_press edge=confirm_save before=keys:[enter]");
     let confirm = client
         .tools_call("act_press", json!({"keys": ["enter"], "hold_ms": 33}))
         .await?;
     let confirm_response: ActPressWireResponse = structured(&confirm)?;
     println!(
-        "source_of_truth=mcp_act_press edge=confirm_save after=ok:{} keys_pressed:{} backend_used:{} elapsed_ms:{}",
+        "readback=mcp_act_press edge=confirm_save after=ok:{} keys_pressed:{} backend_used:{} elapsed_ms:{}",
         confirm_response.ok,
         confirm_response.keys_pressed,
         confirm_response.backend_used,
@@ -234,7 +234,7 @@ async fn notepad_type_save_writes_byte_correct_file_fsv() -> anyhow::Result<()> 
     let after_text = wait_for_file_text(&target_path, Duration::from_secs(5))?;
     let first_50 = after_text.chars().take(50).collect::<String>();
     println!(
-        "source_of_truth=disk edge=happy after_bytes={}:{}",
+        "readback=disk edge=happy after_bytes={}:{}",
         after_text.len(),
         first_50.escape_debug()
     );
@@ -245,7 +245,7 @@ async fn notepad_type_save_writes_byte_correct_file_fsv() -> anyhow::Result<()> 
     let contains_act_type = logs.contains("tool.invocation kind=act_type");
     let contains_act_press = logs.contains("tool.invocation kind=act_press");
     println!(
-        "source_of_truth=daemon_log edge=happy after_bytes={} contains_act_type={} contains_act_press={}",
+        "readback=daemon_log edge=happy after_bytes={} contains_act_type={} contains_act_press={}",
         logs.len(),
         contains_act_type,
         contains_act_press
@@ -254,11 +254,11 @@ async fn notepad_type_save_writes_byte_correct_file_fsv() -> anyhow::Result<()> 
     assert!(contains_act_press);
 
     handle.close()?;
-    println!("source_of_truth=NotepadHandle::close edge=happy after=closed pid={pid}");
+    println!("readback=NotepadHandle::close edge=happy after=closed pid={pid}");
     std::fs::remove_file(&target_path)
         .with_context(|| format!("cleanup demo file {}", target_path.display()))?;
     println!(
-        "source_of_truth=disk edge=cleanup after_exists={}",
+        "readback=disk edge=cleanup after_exists={}",
         target_path.exists()
     );
     assert!(!target_path.exists());
@@ -269,11 +269,11 @@ async fn notepad_type_save_writes_byte_correct_file_fsv() -> anyhow::Result<()> 
 #[cfg(windows)]
 #[tokio::test]
 #[ignore = "requires an interactive Windows desktop with Notepad and UIA"]
-// #207 keeps the invalid-save FSV path linear so the disk/UIA/cleanup evidence
+// #207 keeps the invalid-save live regression path linear so the disk/UIA/cleanup evidence
 // remains ordered exactly like the real Windows flow.
 #[allow(clippy::too_many_lines)]
-async fn notepad_save_invalid_dir_shows_dialog_and_writes_no_file_fsv() -> anyhow::Result<()> {
-    let _notepad_lock = WINDOWS_NOTEPAD_FSV_LOCK.lock().await;
+async fn notepad_save_invalid_dir_shows_dialog_and_writes_no_file_live() -> anyhow::Result<()> {
+    let _notepad_lock = WINDOWS_NOTEPAD_LIVE_LOCK.lock().await;
     let invalid_path = PathBuf::from(INVALID_SAVE_PATH);
     let cleanup_path = std::env::temp_dir().join(INVALID_EDGE_CLEANUP_FILE_NAME);
     let cleanup = FileCleanup(cleanup_path.clone());
@@ -282,7 +282,7 @@ async fn notepad_save_invalid_dir_shows_dialog_and_writes_no_file_fsv() -> anyho
             .with_context(|| format!("remove stale cleanup file {}", cleanup_path.display()))?;
     }
     println!(
-        "source_of_truth=disk edge=invalid_dir before_path={} before_exists={} cleanup_path={} cleanup_before_exists={}",
+        "readback=disk edge=invalid_dir before_path={} before_exists={} cleanup_path={} cleanup_before_exists={}",
         invalid_path.display(),
         invalid_path.exists(),
         cleanup_path.display(),
@@ -295,7 +295,7 @@ async fn notepad_save_invalid_dir_shows_dialog_and_writes_no_file_fsv() -> anyho
     let hwnd = handle.hwnd();
     let pid = handle.pid();
     println!(
-        "source_of_truth=NotepadHandle edge=invalid_dir ownership after_hwnd=0x{hwnd:x} after_pid={pid} pid_preexisting={}",
+        "readback=NotepadHandle edge=invalid_dir ownership after_hwnd=0x{hwnd:x} after_pid={pid} pid_preexisting={}",
         handle.pid_preexisting()
     );
     let mut client = StdioMcpClient::launch_and_init_with_log_dir(Some(log_dir.path())).await?;
@@ -303,7 +303,7 @@ async fn notepad_save_invalid_dir_shows_dialog_and_writes_no_file_fsv() -> anyho
     let editor_node = editor_node_from_uia_snapshot(hwnd)?;
     let editor_id = editor_node.element_id.clone();
     focus_editor(hwnd, &editor_id)?;
-    println!("source_of_truth=editor_element edge=invalid_dir before_element_id={editor_id}");
+    println!("readback=editor_element edge=invalid_dir before_element_id={editor_id}");
     let click = client
         .tools_call(
             "act_click",
@@ -312,7 +312,7 @@ async fn notepad_save_invalid_dir_shows_dialog_and_writes_no_file_fsv() -> anyho
         .await?;
     let click_response: ActClickWireResponse = structured(&click)?;
     println!(
-        "source_of_truth=mcp_act_click edge=invalid_dir after=ok:{} used_invoke_pattern:{} backend_used:{} elapsed_ms:{}",
+        "readback=mcp_act_click edge=invalid_dir after=ok:{} used_invoke_pattern:{} backend_used:{} elapsed_ms:{}",
         click_response.ok,
         click_response.used_invoke_pattern,
         click_response.backend_used,
@@ -323,7 +323,7 @@ async fn notepad_save_invalid_dir_shows_dialog_and_writes_no_file_fsv() -> anyho
     tokio::time::sleep(Duration::from_millis(200)).await;
     let observe_before = observe(&mut client).await?;
     println!(
-        "source_of_truth=mcp_observe edge=invalid_dir before_type hwnd=0x{hwnd:x} pid={pid} title={:?}",
+        "readback=mcp_observe edge=invalid_dir before_type hwnd=0x{hwnd:x} pid={pid} title={:?}",
         observe_before.foreground.window_title
     );
     assert_eq!(observe_before.foreground.hwnd, hwnd);
@@ -341,7 +341,7 @@ async fn notepad_save_invalid_dir_shows_dialog_and_writes_no_file_fsv() -> anyho
         .await?;
     let typed_response: ActTypeWireResponse = structured(&typed)?;
     println!(
-        "source_of_truth=mcp_act_type edge=invalid_dir_body after=ok:{} chars_typed:{} elapsed_ms:{}",
+        "readback=mcp_act_type edge=invalid_dir_body after=ok:{} chars_typed:{} elapsed_ms:{}",
         typed_response.ok, typed_response.chars_typed, typed_response.elapsed_ms
     );
     assert!(typed_response.ok);
@@ -350,7 +350,7 @@ async fn notepad_save_invalid_dir_shows_dialog_and_writes_no_file_fsv() -> anyho
     tokio::time::sleep(Duration::from_millis(500)).await;
     let save_dialog = observe(&mut client).await?;
     println!(
-        "source_of_truth=mcp_observe edge=invalid_dir_save_dialog after_title={:?} process={:?} focused_role={:?}",
+        "readback=mcp_observe edge=invalid_dir_save_dialog after_title={:?} process={:?} focused_role={:?}",
         save_dialog.foreground.window_title,
         save_dialog.foreground.process_name,
         save_dialog
@@ -360,7 +360,7 @@ async fn notepad_save_invalid_dir_shows_dialog_and_writes_no_file_fsv() -> anyho
     );
 
     println!(
-        "source_of_truth=mcp_act_type edge=invalid_dir_filename before_path={} before_len={}",
+        "readback=mcp_act_type edge=invalid_dir_filename before_path={} before_len={}",
         INVALID_SAVE_PATH,
         INVALID_SAVE_PATH.chars().count()
     );
@@ -376,7 +376,7 @@ async fn notepad_save_invalid_dir_shows_dialog_and_writes_no_file_fsv() -> anyho
         .await?;
     let filename_response: ActTypeWireResponse = structured(&filename)?;
     println!(
-        "source_of_truth=mcp_act_type edge=invalid_dir_filename after=ok:{} chars_typed:{} elapsed_ms:{}",
+        "readback=mcp_act_type edge=invalid_dir_filename after=ok:{} chars_typed:{} elapsed_ms:{}",
         filename_response.ok, filename_response.chars_typed, filename_response.elapsed_ms
     );
     assert!(filename_response.ok);
@@ -386,7 +386,7 @@ async fn notepad_save_invalid_dir_shows_dialog_and_writes_no_file_fsv() -> anyho
     let dialog_text = summarize_nodes(&invalid_dialog.elements);
     let dialog_title = invalid_dialog.foreground.window_title.clone();
     println!(
-        "source_of_truth=disk edge=invalid_dir after_exists={}; source_of_truth=uia edge=invalid_dir after_dialog_title={:?} focused_role={:?} matched_text={}",
+        "readback=disk edge=invalid_dir after_exists={}; readback=uia edge=invalid_dir after_dialog_title={:?} focused_role={:?} matched_text={}",
         invalid_path.exists(),
         dialog_title,
         invalid_dialog
@@ -402,7 +402,7 @@ async fn notepad_save_invalid_dir_shows_dialog_and_writes_no_file_fsv() -> anyho
     tokio::time::sleep(Duration::from_millis(200)).await;
     let cleanup_dialog = observe(&mut client).await?;
     println!(
-        "source_of_truth=mcp_observe edge=invalid_dir_cleanup_dialog before_select hwnd=0x{:x} pid={} title={:?} process={:?} focused_role={:?}",
+        "readback=mcp_observe edge=invalid_dir_cleanup_dialog before_select hwnd=0x{:x} pid={} title={:?} process={:?} focused_role={:?}",
         cleanup_dialog.foreground.hwnd,
         cleanup_dialog.foreground.pid,
         cleanup_dialog.foreground.window_title,
@@ -429,7 +429,7 @@ async fn notepad_save_invalid_dir_shows_dialog_and_writes_no_file_fsv() -> anyho
     tokio::time::sleep(Duration::from_millis(100)).await;
     let cleanup_dialog_after_select = observe(&mut client).await?;
     println!(
-        "source_of_truth=mcp_observe edge=invalid_dir_cleanup_dialog after_select hwnd=0x{:x} pid={} title={:?} process={:?} focused_role={:?}",
+        "readback=mcp_observe edge=invalid_dir_cleanup_dialog after_select hwnd=0x{:x} pid={} title={:?} process={:?} focused_role={:?}",
         cleanup_dialog_after_select.foreground.hwnd,
         cleanup_dialog_after_select.foreground.pid,
         cleanup_dialog_after_select.foreground.window_title,
@@ -450,7 +450,7 @@ async fn notepad_save_invalid_dir_shows_dialog_and_writes_no_file_fsv() -> anyho
 
     let cleanup_path_text = cleanup_path.to_string_lossy().into_owned();
     println!(
-        "source_of_truth=mcp_act_type edge=invalid_dir_cleanup_filename before_path={} before_len={}",
+        "readback=mcp_act_type edge=invalid_dir_cleanup_filename before_path={} before_len={}",
         cleanup_path_text,
         cleanup_path_text.chars().count()
     );
@@ -466,7 +466,7 @@ async fn notepad_save_invalid_dir_shows_dialog_and_writes_no_file_fsv() -> anyho
         .await?;
     let cleanup_filename_response: ActTypeWireResponse = structured(&cleanup_filename)?;
     println!(
-        "source_of_truth=mcp_act_type edge=invalid_dir_cleanup_filename after=ok:{} chars_typed:{} elapsed_ms:{}",
+        "readback=mcp_act_type edge=invalid_dir_cleanup_filename after=ok:{} chars_typed:{} elapsed_ms:{}",
         cleanup_filename_response.ok,
         cleanup_filename_response.chars_typed,
         cleanup_filename_response.elapsed_ms
@@ -475,7 +475,7 @@ async fn notepad_save_invalid_dir_shows_dialog_and_writes_no_file_fsv() -> anyho
     press_keys(&mut client, "invalid_dir_cleanup_confirm", json!(["enter"])).await?;
     let cleanup_text = wait_for_file_text(&cleanup_path, Duration::from_secs(5))?;
     println!(
-        "source_of_truth=disk edge=invalid_dir_cleanup_save after_exists={} after_bytes={}",
+        "readback=disk edge=invalid_dir_cleanup_save after_exists={} after_bytes={}",
         cleanup_path.exists(),
         cleanup_text.len()
     );
@@ -486,7 +486,7 @@ async fn notepad_save_invalid_dir_shows_dialog_and_writes_no_file_fsv() -> anyho
     let contains_act_type = logs.contains("tool.invocation kind=act_type");
     let contains_act_press = logs.contains("tool.invocation kind=act_press");
     println!(
-        "source_of_truth=daemon_log edge=invalid_dir after_bytes={} contains_act_type={} contains_act_press={}",
+        "readback=daemon_log edge=invalid_dir after_bytes={} contains_act_type={} contains_act_press={}",
         logs.len(),
         contains_act_type,
         contains_act_press
@@ -495,11 +495,11 @@ async fn notepad_save_invalid_dir_shows_dialog_and_writes_no_file_fsv() -> anyho
     assert!(contains_act_press);
 
     handle.close()?;
-    println!("source_of_truth=NotepadHandle::close edge=invalid_dir after=closed pid={pid}");
+    println!("readback=NotepadHandle::close edge=invalid_dir after=closed pid={pid}");
     std::fs::remove_file(&cleanup_path)
         .with_context(|| format!("cleanup valid save file {}", cleanup_path.display()))?;
     println!(
-        "source_of_truth=disk edge=invalid_dir cleanup_after_exists={} invalid_after_exists={}",
+        "readback=disk edge=invalid_dir cleanup_after_exists={} invalid_after_exists={}",
         cleanup_path.exists(),
         invalid_path.exists()
     );
@@ -512,11 +512,11 @@ async fn notepad_save_invalid_dir_shows_dialog_and_writes_no_file_fsv() -> anyho
 #[cfg(windows)]
 #[tokio::test]
 #[ignore = "requires an interactive Windows desktop with Notepad and UIA"]
-async fn notepad_act_type_foreground_lost_returns_error_without_recording_events_fsv()
+async fn notepad_act_type_foreground_lost_returns_error_without_recording_events_live()
 -> anyhow::Result<()> {
-    let _notepad_lock = WINDOWS_NOTEPAD_FSV_LOCK.lock().await;
+    let _notepad_lock = WINDOWS_NOTEPAD_LIVE_LOCK.lock().await;
     let log_dir = TempDir::new()?;
-    println!("source_of_truth=foreground edge=lost before=target_absent");
+    println!("readback=foreground edge=lost before=target_absent");
     let target = launch_notepad()?;
     let target_hwnd = target.hwnd();
     let target_pid = target.pid();
@@ -530,7 +530,7 @@ async fn notepad_act_type_foreground_lost_returns_error_without_recording_events
     .await?;
     let observed_target = observe(&mut client).await?;
     println!(
-        "source_of_truth=foreground edge=lost before_hwnd=0x{:x} before_pid={} before_title={:?}",
+        "readback=foreground edge=lost before_hwnd=0x{:x} before_pid={} before_title={:?}",
         observed_target.foreground.hwnd,
         observed_target.foreground.pid,
         observed_target.foreground.window_title
@@ -547,7 +547,7 @@ async fn notepad_act_type_foreground_lost_returns_error_without_recording_events
     let actual_foreground = synapse_a11y::current_foreground_context()
         .context("read current foreground after focusing distractor Notepad")?;
     println!(
-        "source_of_truth=foreground edge=lost after_hwnd=0x{:x} after_pid={} after_title={:?} distractor_hwnd=0x{:x}",
+        "readback=foreground edge=lost after_hwnd=0x{:x} after_pid={} after_title={:?} distractor_hwnd=0x{:x}",
         actual_foreground.hwnd,
         actual_foreground.pid,
         actual_foreground.window_title,
@@ -569,18 +569,18 @@ async fn notepad_act_type_foreground_lost_returns_error_without_recording_events
         .await?;
     let code = error_code(&error);
     println!(
-        "source_of_truth=foreground edge=lost before_hwnd=0x{:x} after_hwnd=0x{:x} code={:?} raw_error={error}",
+        "readback=foreground edge=lost before_hwnd=0x{:x} after_hwnd=0x{:x} code={:?} raw_error={error}",
         observed_target.foreground.hwnd, actual_foreground.hwnd, code
     );
     assert_eq!(code, Some("ACTION_FOREGROUND_LOST"));
 
     assert!(client.shutdown().await?.success());
     let logs = read_logs(log_dir.path())?;
-    let contains_guard = logs.contains("source_of_truth=foreground edge=lost")
+    let contains_guard = logs.contains("readback=foreground edge=lost")
         && logs.contains("recording_events_before=0")
         && logs.contains("recording_events_after=0");
     println!(
-        "source_of_truth=recording_backend edge=foreground_lost after_log_bytes={} contains_zero_event_guard={}",
+        "readback=recording_backend edge=foreground_lost after_log_bytes={} contains_zero_event_guard={}",
         logs.len(),
         contains_guard
     );
@@ -588,11 +588,11 @@ async fn notepad_act_type_foreground_lost_returns_error_without_recording_events
 
     distractor.close()?;
     println!(
-        "source_of_truth=NotepadHandle::close edge=foreground_lost distractor_after=closed pid={distractor_pid}"
+        "readback=NotepadHandle::close edge=foreground_lost distractor_after=closed pid={distractor_pid}"
     );
     target.close()?;
     println!(
-        "source_of_truth=NotepadHandle::close edge=foreground_lost target_after=closed pid={target_pid}"
+        "readback=NotepadHandle::close edge=foreground_lost target_after=closed pid={target_pid}"
     );
     Ok(())
 }
@@ -603,9 +603,9 @@ async fn notepad_act_type_foreground_lost_returns_error_without_recording_events
 // #189 keeps the click/copy/readback sequence linear so the clipboard SoT is
 // visibly tied to the exact double-click action that produced it.
 #[allow(clippy::too_many_lines)]
-async fn notepad_double_click_selects_word_and_clipboard_reads_selection_fsv() -> anyhow::Result<()>
+async fn notepad_double_click_selects_word_and_clipboard_reads_selection_live() -> anyhow::Result<()>
 {
-    let _notepad_lock = WINDOWS_NOTEPAD_FSV_LOCK.lock().await;
+    let _notepad_lock = WINDOWS_NOTEPAD_LIVE_LOCK.lock().await;
     let cleanup_path = std::env::temp_dir().join(DOUBLE_CLICK_CLEANUP_FILE_NAME);
     let cleanup = FileCleanup(cleanup_path.clone());
     let stale_cleanup_before_exists = cleanup_path.exists();
@@ -615,7 +615,7 @@ async fn notepad_double_click_selects_word_and_clipboard_reads_selection_fsv() -
         None
     };
     println!(
-        "source_of_truth=disk edge=double_click_stale_cleanup before_path={} before_exists={} before_len={:?}",
+        "readback=disk edge=double_click_stale_cleanup before_path={} before_exists={} before_len={:?}",
         cleanup_path.display(),
         stale_cleanup_before_exists,
         stale_cleanup_before_len
@@ -625,7 +625,7 @@ async fn notepad_double_click_selects_word_and_clipboard_reads_selection_fsv() -
             .with_context(|| format!("remove stale cleanup file {}", cleanup_path.display()))?;
     }
     println!(
-        "source_of_truth=disk edge=double_click_select cleanup_before_path={} cleanup_before_exists={}",
+        "readback=disk edge=double_click_select cleanup_before_path={} cleanup_before_exists={}",
         cleanup_path.display(),
         cleanup_path.exists()
     );
@@ -635,7 +635,7 @@ async fn notepad_double_click_selects_word_and_clipboard_reads_selection_fsv() -
     let hwnd = handle.hwnd();
     let pid = handle.pid();
     println!(
-        "source_of_truth=NotepadHandle edge=double_click_select ownership after_hwnd=0x{hwnd:x} after_pid={pid} pid_preexisting={}",
+        "readback=NotepadHandle edge=double_click_select ownership after_hwnd=0x{hwnd:x} after_pid={pid} pid_preexisting={}",
         handle.pid_preexisting()
     );
     let mut client = StdioMcpClient::launch_and_init_with_log_dir(Some(log_dir.path())).await?;
@@ -647,7 +647,7 @@ async fn notepad_double_click_selects_word_and_clipboard_reads_selection_fsv() -
         .and_then(|response| structured::<ActClipboardWireResponse>(&response).ok())
         .and_then(|response| response.text);
     println!(
-        "source_of_truth=clipboard edge=double_click_select before_text_len={:?}",
+        "readback=clipboard edge=double_click_select before_text_len={:?}",
         original_clipboard.as_ref().map(|text| text.chars().count())
     );
     let clear = client
@@ -655,7 +655,7 @@ async fn notepad_double_click_selects_word_and_clipboard_reads_selection_fsv() -
         .await?;
     let clear_response: ActClipboardWireResponse = structured(&clear)?;
     println!(
-        "source_of_truth=clipboard edge=double_click_select clear_before after_ok:{} cleared:{}",
+        "readback=clipboard edge=double_click_select clear_before after_ok:{} cleared:{}",
         clear_response.ok, clear_response.cleared
     );
     assert!(clear_response.ok);
@@ -669,7 +669,7 @@ async fn notepad_double_click_selects_word_and_clipboard_reads_selection_fsv() -
         y: editor_node.bbox.y.saturating_add(editor_node.bbox.h / 2),
     };
     println!(
-        "source_of_truth=editor_element edge=double_click_select before_element_id={editor_id} word_point={word_point:?}"
+        "readback=editor_element edge=double_click_select before_element_id={editor_id} word_point={word_point:?}"
     );
     let click_focus = client
         .tools_call(
@@ -679,7 +679,7 @@ async fn notepad_double_click_selects_word_and_clipboard_reads_selection_fsv() -
         .await?;
     let click_focus_response: ActClickWireResponse = structured(&click_focus)?;
     println!(
-        "source_of_truth=mcp_act_click edge=double_click_caret after=ok:{} used_invoke_pattern:{} backend_used:{} elapsed_ms:{}",
+        "readback=mcp_act_click edge=double_click_caret after=ok:{} used_invoke_pattern:{} backend_used:{} elapsed_ms:{}",
         click_focus_response.ok,
         click_focus_response.used_invoke_pattern,
         click_focus_response.backend_used,
@@ -690,7 +690,7 @@ async fn notepad_double_click_selects_word_and_clipboard_reads_selection_fsv() -
     tokio::time::sleep(Duration::from_millis(200)).await;
     let observe_before = observe(&mut client).await?;
     println!(
-        "source_of_truth=mcp_observe edge=double_click_select before_type hwnd=0x{hwnd:x} pid={pid} title={:?}",
+        "readback=mcp_observe edge=double_click_select before_type hwnd=0x{hwnd:x} pid={pid} title={:?}",
         observe_before.foreground.window_title
     );
     assert_eq!(observe_before.foreground.hwnd, hwnd);
@@ -708,14 +708,14 @@ async fn notepad_double_click_selects_word_and_clipboard_reads_selection_fsv() -
         .await?;
     let typed_response: ActTypeWireResponse = structured(&typed)?;
     println!(
-        "source_of_truth=mcp_act_type edge=double_click_select after=ok:{} chars_typed:{} elapsed_ms:{}",
+        "readback=mcp_act_type edge=double_click_select after=ok:{} chars_typed:{} elapsed_ms:{}",
         typed_response.ok, typed_response.chars_typed, typed_response.elapsed_ms
     );
     assert!(typed_response.ok);
     assert_eq!(typed_response.chars_typed as usize, DOUBLE_CLICK_TEXT.len());
 
     println!(
-        "source_of_truth=windows_cursor edge=double_click_select before_point={word_point:?} expected_text={DOUBLE_CLICK_TEXT}"
+        "readback=windows_cursor edge=double_click_select before_point={word_point:?} expected_text={DOUBLE_CLICK_TEXT}"
     );
     let double_click = client
         .tools_call(
@@ -725,7 +725,7 @@ async fn notepad_double_click_selects_word_and_clipboard_reads_selection_fsv() -
         .await?;
     let double_click_response: ActClickWireResponse = structured(&double_click)?;
     println!(
-        "source_of_truth=mcp_act_click edge=double_click_select after=ok:{} clicks:2 used_invoke_pattern:{} backend_used:{} elapsed_ms:{}",
+        "readback=mcp_act_click edge=double_click_select after=ok:{} clicks:2 used_invoke_pattern:{} backend_used:{} elapsed_ms:{}",
         double_click_response.ok,
         double_click_response.used_invoke_pattern,
         double_click_response.backend_used,
@@ -739,7 +739,7 @@ async fn notepad_double_click_selects_word_and_clipboard_reads_selection_fsv() -
         .await?;
     let read_response: ActClipboardWireResponse = structured(&read)?;
     let selected_text = read_response.text.unwrap_or_default();
-    println!("source_of_truth=clipboard edge=double_click_select after_text={selected_text}");
+    println!("readback=clipboard edge=double_click_select after_text={selected_text}");
     let selection_matches = selected_text == DOUBLE_CLICK_TEXT;
 
     if let Some(original_clipboard) = original_clipboard {
@@ -751,7 +751,7 @@ async fn notepad_double_click_selects_word_and_clipboard_reads_selection_fsv() -
             .await?;
         let restore_response: ActClipboardWireResponse = structured(&restore)?;
         println!(
-            "source_of_truth=clipboard edge=double_click_select restore_after_ok:{} written:{} text_len:{:?}",
+            "readback=clipboard edge=double_click_select restore_after_ok:{} written:{} text_len:{:?}",
             restore_response.ok, restore_response.written, restore_response.text_len
         );
         assert!(restore_response.ok);
@@ -761,7 +761,7 @@ async fn notepad_double_click_selects_word_and_clipboard_reads_selection_fsv() -
             .await?;
         let clear_response: ActClipboardWireResponse = structured(&clear)?;
         println!(
-            "source_of_truth=clipboard edge=double_click_select restore_clear_after_ok:{} cleared:{}",
+            "readback=clipboard edge=double_click_select restore_clear_after_ok:{} cleared:{}",
             clear_response.ok, clear_response.cleared
         );
         assert!(clear_response.ok);
@@ -776,12 +776,12 @@ async fn notepad_double_click_selects_word_and_clipboard_reads_selection_fsv() -
     tokio::time::sleep(Duration::from_millis(500)).await;
     let cleanup_save_dialog = observe(&mut client).await?;
     println!(
-        "source_of_truth=mcp_observe edge=double_click_cleanup_save_dialog after_title={:?} process={:?}",
+        "readback=mcp_observe edge=double_click_cleanup_save_dialog after_title={:?} process={:?}",
         cleanup_save_dialog.foreground.window_title, cleanup_save_dialog.foreground.process_name
     );
     let cleanup_path_text = cleanup_path.to_string_lossy().into_owned();
     println!(
-        "source_of_truth=mcp_act_type edge=double_click_cleanup_filename before_path={} before_len={}",
+        "readback=mcp_act_type edge=double_click_cleanup_filename before_path={} before_len={}",
         cleanup_path_text,
         cleanup_path_text.chars().count()
     );
@@ -797,7 +797,7 @@ async fn notepad_double_click_selects_word_and_clipboard_reads_selection_fsv() -
         .await?;
     let cleanup_filename_response: ActTypeWireResponse = structured(&cleanup_filename)?;
     println!(
-        "source_of_truth=mcp_act_type edge=double_click_cleanup_filename after=ok:{} chars_typed:{} elapsed_ms:{}",
+        "readback=mcp_act_type edge=double_click_cleanup_filename after=ok:{} chars_typed:{} elapsed_ms:{}",
         cleanup_filename_response.ok,
         cleanup_filename_response.chars_typed,
         cleanup_filename_response.elapsed_ms
@@ -811,7 +811,7 @@ async fn notepad_double_click_selects_word_and_clipboard_reads_selection_fsv() -
     .await?;
     let cleanup_text = wait_for_file_text(&cleanup_path, Duration::from_secs(5))?;
     println!(
-        "source_of_truth=disk edge=double_click_cleanup_save after_exists={} after_text={cleanup_text:?}",
+        "readback=disk edge=double_click_cleanup_save after_exists={} after_text={cleanup_text:?}",
         cleanup_path.exists()
     );
     assert_eq!(cleanup_text, DOUBLE_CLICK_TEXT);
@@ -821,7 +821,7 @@ async fn notepad_double_click_selects_word_and_clipboard_reads_selection_fsv() -
     let contains_act_click = logs.contains("tool.invocation kind=act_click");
     let contains_act_clipboard = logs.contains("tool.invocation kind=act_clipboard");
     println!(
-        "source_of_truth=daemon_log edge=double_click_select after_bytes={} contains_act_click={} contains_act_clipboard={}",
+        "readback=daemon_log edge=double_click_select after_bytes={} contains_act_click={} contains_act_clipboard={}",
         logs.len(),
         contains_act_click,
         contains_act_clipboard
@@ -830,13 +830,11 @@ async fn notepad_double_click_selects_word_and_clipboard_reads_selection_fsv() -
     assert!(contains_act_clipboard);
 
     handle.close()?;
-    println!(
-        "source_of_truth=NotepadHandle::close edge=double_click_select after=closed pid={pid}"
-    );
+    println!("readback=NotepadHandle::close edge=double_click_select after=closed pid={pid}");
     std::fs::remove_file(&cleanup_path)
         .with_context(|| format!("cleanup double-click save file {}", cleanup_path.display()))?;
     println!(
-        "source_of_truth=disk edge=double_click_select cleanup_after_exists={}",
+        "readback=disk edge=double_click_select cleanup_after_exists={}",
         cleanup_path.exists()
     );
     assert!(!cleanup_path.exists());
@@ -867,11 +865,11 @@ async fn observe(client: &mut StdioMcpClient) -> anyhow::Result<Observation> {
 #[cfg(windows)]
 fn focus_editor(hwnd: i64, editor_id: &ElementId) -> anyhow::Result<()> {
     match synapse_a11y::focus_window(hwnd) {
-        Ok(()) => println!(
-            "source_of_truth=synapse_a11y::focus_window edge=window after=ok hwnd=0x{hwnd:x}"
-        ),
+        Ok(()) => {
+            println!("readback=synapse_a11y::focus_window edge=window after=ok hwnd=0x{hwnd:x}")
+        }
         Err(error) => {
-            println!("source_of_truth=synapse_a11y::focus_window edge=window after_error={error}");
+            println!("readback=synapse_a11y::focus_window edge=window after_error={error}");
         }
     }
     let editor = synapse_a11y::re_resolve(editor_id)
@@ -880,20 +878,20 @@ fn focus_editor(hwnd: i64, editor_id: &ElementId) -> anyhow::Result<()> {
         .set_focus()
         .with_context(|| format!("set UIA focus on Notepad editor element {editor_id}"))?;
     println!(
-        "source_of_truth=synapse_a11y::UIElement::set_focus edge=editor after=ok element_id={editor_id}"
+        "readback=synapse_a11y::UIElement::set_focus edge=editor after=ok element_id={editor_id}"
     );
     Ok(())
 }
 
 #[cfg(windows)]
 async fn press_keys(client: &mut StdioMcpClient, edge: &str, keys: Value) -> anyhow::Result<()> {
-    println!("source_of_truth=mcp_act_press edge={edge} before=keys:{keys}");
+    println!("readback=mcp_act_press edge={edge} before=keys:{keys}");
     let response = client
         .tools_call("act_press", json!({"keys": keys, "hold_ms": 33}))
         .await?;
     let response: ActPressWireResponse = structured(&response)?;
     println!(
-        "source_of_truth=mcp_act_press edge={edge} after=ok:{} keys_pressed:{} backend_used:{} elapsed_ms:{}",
+        "readback=mcp_act_press edge={edge} after=ok:{} keys_pressed:{} backend_used:{} elapsed_ms:{}",
         response.ok, response.keys_pressed, response.backend_used, response.elapsed_ms
     );
     assert!(response.ok);
@@ -983,7 +981,7 @@ fn editor_node_from_uia_snapshot(hwnd: i64) -> anyhow::Result<AccessibleNode> {
             )
         })?;
     println!(
-        "source_of_truth=synapse_a11y::snapshot edge=editor_fallback hwnd=0x{hwnd:x} node_count={} target={} role={:?} name={:?} bbox={:?} patterns={:?}",
+        "readback=synapse_a11y::snapshot edge=editor_fallback hwnd=0x{hwnd:x} node_count={} target={} role={:?} name={:?} bbox={:?} patterns={:?}",
         subtree.nodes.len(),
         target.element_id,
         target.role,

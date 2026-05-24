@@ -30,7 +30,7 @@ pub fn synthetic_notepad_input() -> ObservationInput {
             pid: 44,
             process_name: "notepad.exe".to_owned(),
             process_path: "C:\\Windows\\System32\\notepad.exe".to_owned(),
-            window_title: "manual-fsv.txt - Notepad".to_owned(),
+            window_title: "manual.txt - Notepad".to_owned(),
             window_bounds: Rect {
                 x: 10,
                 y: 20,

@@ -23,7 +23,7 @@ async fn coordinate_click_leaves_actor_held_state_empty() {
         Err(err) => panic!("before snapshot failed: {err}"),
     };
     println!(
-        "source_of_truth=act_click_actor edge=coordinate before=held_buttons:{:?} held_keys:{:?}",
+        "readback=act_click_actor edge=coordinate before=held_buttons:{:?} held_keys:{:?}",
         before.held_buttons, before.held_keys
     );
     let response = match act_click_with_handle(
@@ -50,7 +50,7 @@ async fn coordinate_click_leaves_actor_held_state_empty() {
         Err(err) => panic!("after snapshot failed: {err}"),
     };
     println!(
-        "source_of_truth=act_click_actor edge=coordinate after=ok:{} backend_used:{} held_buttons:{:?} held_keys:{:?}",
+        "readback=act_click_actor edge=coordinate after=ok:{} backend_used:{} held_buttons:{:?} held_keys:{:?}",
         response.ok, response.backend_used, after.held_buttons, after.held_keys
     );
     assert!(response.ok);

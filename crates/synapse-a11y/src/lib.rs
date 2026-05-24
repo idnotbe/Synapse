@@ -416,7 +416,7 @@ pub enum ExpandState {
 }
 
 /// Reads `ExpandCollapsePattern::CurrentExpandCollapseState` from the given
-/// element. Used by `act_click(use_invoke_pattern=true)` FSV tests to assert
+/// element. Used by `act_click(use_invoke_pattern=true)` manual verification tests to assert
 /// menu/expander state flipped after an invoke.
 ///
 /// # Errors
@@ -1867,9 +1867,9 @@ mod tests {
     #[test]
     fn coalesce_empty_input_prints_before_after_state() {
         let before = Vec::<AccessibleEvent>::new();
-        println!("source_of_truth=coalesced_events edge=empty before={before:?}");
+        println!("readback=coalesced_events edge=empty before={before:?}");
         let after = coalesce_events(before, Duration::from_millis(50));
-        println!("source_of_truth=coalesced_events edge=empty after={after:?}");
+        println!("readback=coalesced_events edge=empty after={after:?}");
         assert!(after.is_empty());
     }
 
@@ -1882,9 +1882,9 @@ mod tests {
         let mut second = event(2, 49, Some(id), AccessibleEventKind::NameChanged);
         second.name = Some("new".to_owned());
         let before = vec![first, second];
-        println!("source_of_truth=coalesced_events edge=within_50ms before={before:?}");
+        println!("readback=coalesced_events edge=within_50ms before={before:?}");
         let after = coalesce_events(before, Duration::from_millis(50));
-        println!("source_of_truth=coalesced_events edge=within_50ms after={after:?}");
+        println!("readback=coalesced_events edge=within_50ms after={after:?}");
         assert_eq!(after.len(), 1);
         assert_eq!(after[0].name.as_deref(), Some("new"));
         assert_eq!(after[0].seq, 2);
@@ -1898,9 +1898,9 @@ mod tests {
             event(1, 0, Some(id.clone()), AccessibleEventKind::FocusChanged),
             event(2, 50, Some(id), AccessibleEventKind::FocusChanged),
         ];
-        println!("source_of_truth=coalesced_events edge=exact_50ms before={before:?}");
+        println!("readback=coalesced_events edge=exact_50ms before={before:?}");
         let after = coalesce_events(before, Duration::from_millis(50));
-        println!("source_of_truth=coalesced_events edge=exact_50ms after={after:?}");
+        println!("readback=coalesced_events edge=exact_50ms after={after:?}");
         assert_eq!(after.len(), 2);
         Ok(())
     }
@@ -1923,9 +1923,9 @@ mod tests {
                 item
             })
             .collect();
-        println!("source_of_truth=debounced_events edge=rapid_typing before={before:?}");
+        println!("readback=debounced_events edge=rapid_typing before={before:?}");
         let after = debounce_value_changes(before, Duration::from_millis(200));
-        println!("source_of_truth=debounced_events edge=rapid_typing after={after:?}");
+        println!("readback=debounced_events edge=rapid_typing after={after:?}");
         assert!(after.len() <= 2);
         assert_eq!(
             after.last().and_then(|item| item.value.as_deref()),
@@ -1943,9 +1943,9 @@ mod tests {
         second.value = Some("b".to_owned());
         let focus = event(3, 25, Some(id), AccessibleEventKind::FocusChanged);
         let before = vec![first, second, focus];
-        println!("source_of_truth=debounced_events edge=focus_loss before={before:?}");
+        println!("readback=debounced_events edge=focus_loss before={before:?}");
         let after = debounce_value_changes(before, Duration::from_millis(200));
-        println!("source_of_truth=debounced_events edge=focus_loss after={after:?}");
+        println!("readback=debounced_events edge=focus_loss after={after:?}");
         assert_eq!(after.len(), 3);
         assert_eq!(after[1].value.as_deref(), Some("b"));
         assert_eq!(after[2].kind, AccessibleEventKind::FocusChanged);
@@ -1958,8 +1958,8 @@ mod tests {
         let runtime = [42, -1, 0x1234_abcd_u32.cast_signed()];
         let runtime_hex = runtime_id_hex(&runtime);
         let id = element_id(0x12ab, &runtime_hex);
-        println!("source_of_truth=element_id edge=runtime_hex before={runtime:?}");
-        println!("source_of_truth=element_id edge=runtime_hex after={id}");
+        println!("readback=element_id edge=runtime_hex before={runtime:?}");
+        println!("readback=element_id edge=runtime_hex after={id}");
         let parts = id.parts()?;
         assert_eq!(parts.hwnd, 0x12ab);
         assert_eq!(parts.runtime_id_hex, "0000002affffffff1234abcd");
@@ -1971,9 +1971,9 @@ mod tests {
         #[cfg(not(windows))]
         {
             let before = "focused_window";
-            println!("source_of_truth=a11y_error edge=non_windows before={before}");
+            println!("readback=a11y_error edge=non_windows before={before}");
             let after = focused_window();
-            println!("source_of_truth=a11y_error edge=non_windows after={after:?}");
+            println!("readback=a11y_error edge=non_windows after={after:?}");
             assert_eq!(
                 after.err().map(|err| err.code()),
                 Some(error_codes::A11Y_NOT_AVAILABLE)
@@ -1984,9 +1984,9 @@ mod tests {
     #[tokio::test]
     async fn cdp_probe_non_chromium_is_explicitly_not_chromium() {
         let before = ("notepad.exe", Vec::<u16>::new());
-        println!("source_of_truth=cdp_diagnostics edge=non_chromium before={before:?}");
+        println!("readback=cdp_diagnostics edge=non_chromium before={before:?}");
         let after = probe_chromium_cdp("notepad.exe", &[], Duration::from_millis(10)).await;
-        println!("source_of_truth=cdp_diagnostics edge=non_chromium after={after:?}");
+        println!("readback=cdp_diagnostics edge=non_chromium after={after:?}");
         assert_eq!(after.status, CdpStatus::NotChromium);
         assert!(after.reason_code.is_none());
     }
@@ -1994,9 +1994,9 @@ mod tests {
     #[tokio::test]
     async fn cdp_probe_chromium_without_port_surfaces_unreachable_code() {
         let before = ("chrome.exe", Vec::<u16>::new());
-        println!("source_of_truth=cdp_diagnostics edge=no_debug_port before={before:?}");
+        println!("readback=cdp_diagnostics edge=no_debug_port before={before:?}");
         let after = probe_chromium_cdp("chrome.exe", &[], Duration::from_millis(10)).await;
-        println!("source_of_truth=cdp_diagnostics edge=no_debug_port after={after:?}");
+        println!("readback=cdp_diagnostics edge=no_debug_port after={after:?}");
         assert_eq!(after.status, CdpStatus::Unreachable);
         assert_eq!(
             after.reason_code.as_deref(),
@@ -2009,9 +2009,9 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
         let port = listener.local_addr()?.port();
-        println!("source_of_truth=cdp_diagnostics edge=reachable_port before=port:{port}");
+        println!("readback=cdp_diagnostics edge=reachable_port before=port:{port}");
         let after = probe_chromium_cdp("msedge.exe", &[port], Duration::from_secs(1)).await;
-        println!("source_of_truth=cdp_diagnostics edge=reachable_port after={after:?}");
+        println!("readback=cdp_diagnostics edge=reachable_port after={after:?}");
         assert_eq!(after.status, CdpStatus::Ok);
         assert_eq!(
             after.endpoint.as_deref(),
@@ -2036,7 +2036,7 @@ mod tests {
             for pair in output.windows(2) {
                 prop_assert!(
                     pair[1].at_ms.saturating_sub(pair[0].at_ms) >= 50,
-                    "source_of_truth=coalesced_events edge=proptest after={output:?}"
+                    "readback=coalesced_events edge=proptest after={output:?}"
                 );
             }
         }
@@ -2047,10 +2047,10 @@ mod tests {
     fn windows_win_event_hook_apartment_readback_is_sta() -> Result<(), Box<dyn std::error::Error>>
     {
         let (sender, _receiver) = tokio::sync::mpsc::unbounded_channel();
-        println!("source_of_truth=winevent_hook edge=apartment before=unsubscribed");
+        println!("readback=winevent_hook edge=apartment before=unsubscribed");
         let subscription = subscribe_win_events(sender)?;
         let readback = subscription.readback().clone();
-        println!("source_of_truth=winevent_hook edge=apartment after={readback:?}");
+        println!("readback=winevent_hook edge=apartment after={readback:?}");
         assert!(readback.apartment.is_sta_family());
         assert_eq!(readback.hook_count, 10);
         assert_eq!(readback.event_ids.len(), 10);
@@ -2063,10 +2063,10 @@ mod tests {
     fn windows_foreground_snapshot_round_trips_element_id() -> Result<(), Box<dyn std::error::Error>>
     {
         let root = focused_window()?;
-        println!("source_of_truth=uia_snapshot edge=depth2 before=focused_window_resolved");
+        println!("readback=uia_snapshot edge=depth2 before=focused_window_resolved");
         let tree = snapshot(&root, 2)?;
         println!(
-            "source_of_truth=uia_snapshot edge=depth2 after=root:{} nodes:{} max_depth:{}",
+            "readback=uia_snapshot edge=depth2 after=root:{} nodes:{} max_depth:{}",
             tree.root,
             tree.nodes.len(),
             tree.max_depth
@@ -2075,7 +2075,7 @@ mod tests {
         let resolved = re_resolve(&tree.root)?;
         let round_trip = snapshot(&resolved, 0)?;
         println!(
-            "source_of_truth=uia_snapshot edge=round_trip after=root:{} nodes:{}",
+            "readback=uia_snapshot edge=round_trip after=root:{} nodes:{}",
             round_trip.root,
             round_trip.nodes.len()
         );

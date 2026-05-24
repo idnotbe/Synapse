@@ -25,7 +25,7 @@ pub(in crate::m2::press) fn execute_recording(
         new_event_count = new_events.len(),
         event_sequence,
         ?new_events,
-        "source_of_truth=recording_backend tool=act_press after_events_readback"
+        "readback=recording_backend tool=act_press after_events_readback"
     );
     Ok(())
 }

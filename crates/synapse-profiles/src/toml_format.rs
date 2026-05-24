@@ -1,0 +1,309 @@
+use std::{collections::BTreeMap, path::Path, path::PathBuf, time::SystemTime};
+
+use serde::Deserialize;
+use synapse_core::{
+    HudExtractor, HudFieldSpec, HudParser, HudRegion, Profile, ProfileBackends, ProfileCapture,
+    ProfileDetection, ProfileId, ProfileMatch, ProfileOcr, SCHEMA_VERSION,
+};
+
+use crate::{
+    error::ProfileError,
+    parser::{
+        LoadedProfile, ProfileDefaults, ScreenBounds, default_backend, default_capture_interval,
+        default_capture_target, default_confidence_threshold, default_cursor_visible,
+        default_hud_region_kind, default_max_detections, default_mode, default_ocr_backend,
+        natural_default, parse_backend, parse_capture_target, parse_mode, parse_ocr_backend,
+        parse_use_scope, validate_hud_region, validate_keymap, validate_match,
+    },
+};
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RawProfile {
+    id: ProfileId,
+    label: String,
+    schema_version: u32,
+    use_scope: String,
+    #[serde(default = "default_mode")]
+    mode: String,
+    mouse_curve_default: String,
+    keyboard_dynamics_default: String,
+    #[serde(default)]
+    matches: Vec<RawProfileMatch>,
+    #[serde(default)]
+    capture: RawCapture,
+    #[serde(default)]
+    detection: RawDetection,
+    #[serde(default)]
+    ocr: RawOcr,
+    #[serde(default)]
+    hud: Vec<RawHudField>,
+    #[serde(default)]
+    keymap: BTreeMap<String, String>,
+    #[serde(default)]
+    backends: RawBackends,
+}
+
+impl RawProfile {
+    pub fn into_loaded(
+        self,
+        path: PathBuf,
+        modified: SystemTime,
+        bounds: ScreenBounds,
+    ) -> Result<LoadedProfile, ProfileError> {
+        if self.schema_version > SCHEMA_VERSION {
+            return Err(ProfileError::VersionIncompatible {
+                path,
+                schema_version: self.schema_version,
+                supported_version: SCHEMA_VERSION,
+            });
+        }
+        if self.matches.is_empty() {
+            return Err(ProfileError::Parse {
+                path,
+                message: "profile must contain at least one [[matches]] entry".to_owned(),
+            });
+        }
+        let matches = self
+            .matches
+            .into_iter()
+            .map(RawProfileMatch::into_match)
+            .collect::<Vec<_>>();
+        for profile_match in &matches {
+            validate_match(&path, profile_match)?;
+        }
+        validate_keymap(&path, &self.keymap)?;
+
+        let hud = self
+            .hud
+            .into_iter()
+            .map(|raw| raw.into_spec(&path, bounds))
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let profile = Profile {
+            id: self.id,
+            label: self.label,
+            version: self.schema_version.to_string(),
+            use_scope: parse_use_scope(&self.use_scope, &path)?,
+            matches,
+            mode: parse_mode(&self.mode, &path)?,
+            capture: self.capture.into_capture(&path)?,
+            detection: self.detection.into_detection(),
+            ocr: self.ocr.into_ocr(&path)?,
+            hud,
+            keymap: self.keymap,
+            backends: self.backends.into_backends(&path)?,
+            event_extensions: Vec::new(),
+        };
+
+        Ok(LoadedProfile {
+            profile,
+            schema_version: self.schema_version,
+            defaults: ProfileDefaults {
+                mouse_curve_default: natural_default(
+                    &path,
+                    "mouse_curve_default",
+                    &self.mouse_curve_default,
+                )?,
+                keyboard_dynamics_default: natural_default(
+                    &path,
+                    "keyboard_dynamics_default",
+                    &self.keyboard_dynamics_default,
+                )?,
+            },
+            source_path: path,
+            modified,
+        })
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawProfileMatch {
+    #[serde(default)]
+    exe: Option<String>,
+    #[serde(default)]
+    title_regex: Option<String>,
+    #[serde(default)]
+    steam_appid: Option<u32>,
+    #[serde(default)]
+    window_class: Option<String>,
+    #[serde(default)]
+    process_args: Vec<String>,
+}
+
+impl RawProfileMatch {
+    fn into_match(self) -> ProfileMatch {
+        ProfileMatch {
+            exe: self.exe,
+            title_regex: self.title_regex,
+            steam_appid: self.steam_appid,
+            window_class: self.window_class,
+            process_args: self.process_args,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawCapture {
+    #[serde(default = "default_capture_target")]
+    target: String,
+    #[serde(default = "default_capture_interval")]
+    min_update_interval_ms: u32,
+    #[serde(default = "default_cursor_visible")]
+    cursor_visible: bool,
+}
+
+impl Default for RawCapture {
+    fn default() -> Self {
+        Self {
+            target: default_capture_target(),
+            min_update_interval_ms: default_capture_interval(),
+            cursor_visible: default_cursor_visible(),
+        }
+    }
+}
+
+impl RawCapture {
+    fn into_capture(self, path: &Path) -> Result<ProfileCapture, ProfileError> {
+        Ok(ProfileCapture {
+            target: parse_capture_target(&self.target, path)?,
+            min_update_interval_ms: self.min_update_interval_ms,
+            cursor_visible: self.cursor_visible,
+        })
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawDetection {
+    #[serde(default)]
+    model_id: Option<String>,
+    #[serde(default)]
+    classes_of_interest: Vec<String>,
+    #[serde(default = "default_confidence_threshold")]
+    confidence_threshold: f32,
+    #[serde(default = "default_max_detections")]
+    max_detections: u32,
+}
+
+impl Default for RawDetection {
+    fn default() -> Self {
+        Self {
+            model_id: None,
+            classes_of_interest: Vec::new(),
+            confidence_threshold: default_confidence_threshold(),
+            max_detections: default_max_detections(),
+        }
+    }
+}
+
+impl RawDetection {
+    fn into_detection(self) -> ProfileDetection {
+        ProfileDetection {
+            model_id: self.model_id,
+            classes_of_interest: self.classes_of_interest,
+            confidence_threshold: self.confidence_threshold,
+            max_detections: self.max_detections,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawOcr {
+    #[serde(default = "default_ocr_backend")]
+    default_backend: String,
+}
+
+impl Default for RawOcr {
+    fn default() -> Self {
+        Self {
+            default_backend: default_ocr_backend(),
+        }
+    }
+}
+
+impl RawOcr {
+    fn into_ocr(self, path: &Path) -> Result<ProfileOcr, ProfileError> {
+        Ok(ProfileOcr {
+            default_backend: parse_ocr_backend(&self.default_backend, path)?,
+            regions: Vec::new(),
+            parser_config: BTreeMap::new(),
+        })
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawHudField {
+    name: String,
+    #[serde(default = "default_hud_region_kind")]
+    region_kind: String,
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+}
+
+impl RawHudField {
+    fn into_spec(self, path: &Path, bounds: ScreenBounds) -> Result<HudFieldSpec, ProfileError> {
+        let region = match self.region_kind.as_str() {
+            "absolute" => HudRegion::Absolute {
+                x: self.x,
+                y: self.y,
+                w: self.w,
+                h: self.h,
+            },
+            other => {
+                return Err(ProfileError::Parse {
+                    path: path.to_path_buf(),
+                    message: format!("unknown HUD region_kind {other:?}"),
+                });
+            }
+        };
+        validate_hud_region(path, &self.name, &region, bounds)?;
+        Ok(HudFieldSpec {
+            name: self.name,
+            region,
+            extractor: HudExtractor::WinrtOcr,
+            parser: HudParser::Number,
+        })
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawBackends {
+    #[serde(default = "default_backend")]
+    default: String,
+    #[serde(default = "default_backend")]
+    keyboard_default: String,
+    #[serde(default = "default_backend")]
+    mouse_default: String,
+    #[serde(default = "default_backend")]
+    pad_default: String,
+}
+
+impl Default for RawBackends {
+    fn default() -> Self {
+        Self {
+            default: default_backend(),
+            keyboard_default: default_backend(),
+            mouse_default: default_backend(),
+            pad_default: default_backend(),
+        }
+    }
+}
+
+impl RawBackends {
+    fn into_backends(self, path: &Path) -> Result<ProfileBackends, ProfileError> {
+        Ok(ProfileBackends {
+            default: parse_backend(&self.default, path)?,
+            keyboard_default: parse_backend(&self.keyboard_default, path)?,
+            mouse_default: parse_backend(&self.mouse_default, path)?,
+            pad_default: parse_backend(&self.pad_default, path)?,
+        })
+    }
+}

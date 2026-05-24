@@ -140,7 +140,7 @@ fn measure_scan_100k() -> Result<BenchReport, Box<dyn Error>> {
     let rows = db.scan_cf(cf::CF_EVENTS)?;
     let elapsed = started.elapsed();
     println!(
-        "source_of_truth=bench_cf_scan bench=storage_scan_100k_rows before={before} after_truth={} final_value=rows:{}",
+        "regression_state=bench_cf_scan bench=storage_scan_100k_rows before={before} after={} observed=rows:{}",
         rows.len(),
         rows.len()
     );
@@ -157,7 +157,7 @@ fn measure_scan_100k() -> Result<BenchReport, Box<dyn Error>> {
     })
 }
 
-fn timed_single_put_10k(emit_fsv: bool) -> Result<Duration, Box<dyn Error>> {
+fn timed_single_put_10k(emit_readback: bool) -> Result<Duration, Box<dyn Error>> {
     let root = unique_root("single")?;
     let db = Db::open(&root.join("db"), TEST_SCHEMA_VERSION)?;
     let before = db.scan_cf(cf::CF_EVENTS)?.len();
@@ -168,9 +168,9 @@ fn timed_single_put_10k(emit_fsv: bool) -> Result<Duration, Box<dyn Error>> {
     db.flush()?;
     let elapsed = started.elapsed();
     let after = db.scan_cf(cf::CF_EVENTS)?;
-    if emit_fsv {
+    if emit_readback {
         println!(
-            "source_of_truth=bench_cf_scan bench=storage_events_single_put_10k before={before} after_truth={} final_value=rows:{}",
+            "regression_state=bench_cf_scan bench=storage_events_single_put_10k before={before} after={} observed=rows:{}",
             after.len(),
             after.len()
         );
@@ -181,7 +181,7 @@ fn timed_single_put_10k(emit_fsv: bool) -> Result<Duration, Box<dyn Error>> {
     Ok(elapsed)
 }
 
-fn timed_put_batch_1k(emit_fsv: bool) -> Result<Duration, Box<dyn Error>> {
+fn timed_put_batch_1k(emit_readback: bool) -> Result<Duration, Box<dyn Error>> {
     let root = unique_root("batch")?;
     let db = Db::open(&root.join("db"), TEST_SCHEMA_VERSION)?;
     let kvs = event_rows(BATCH_ROWS);
@@ -191,9 +191,9 @@ fn timed_put_batch_1k(emit_fsv: bool) -> Result<Duration, Box<dyn Error>> {
     db.flush()?;
     let elapsed = started.elapsed();
     let after = db.scan_cf(cf::CF_EVENTS)?;
-    if emit_fsv {
+    if emit_readback {
         println!(
-            "source_of_truth=bench_cf_scan bench=storage_put_batch_1k before={before} after_truth={} final_value=rows:{}",
+            "regression_state=bench_cf_scan bench=storage_put_batch_1k before={before} after={} observed=rows:{}",
             after.len(),
             after.len()
         );
@@ -249,7 +249,7 @@ impl BenchReport {
         let target_ms = self.target.as_secs_f64() * 1_000.0;
         let per_item_us = (self.elapsed.as_secs_f64() * 1_000_000.0) / self.unit_count;
         println!(
-            "source_of_truth=bench_report bench={} elapsed_ms={elapsed_ms:.3} target_ms={target_ms:.3} per_item_us={per_item_us:.3} unit_target_us={:?} after_truth=pass:{} final_value=rows:{}",
+            "regression_state=bench_report bench={} elapsed_ms={elapsed_ms:.3} target_ms={target_ms:.3} per_item_us={per_item_us:.3} unit_target_us={:?} after=pass:{} observed=rows:{}",
             self.name,
             self.unit_target_us,
             self.passed(),

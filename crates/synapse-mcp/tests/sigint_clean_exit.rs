@@ -12,7 +12,7 @@ async fn synthetic_sigint_results_in_exit_0_and_flushed_log() -> anyhow::Result<
     let client = StdioMcpClient::launch_and_init_with_log_dir(Some(dir.path())).await?;
     let before_logs = read_logs(dir.path())?;
     println!(
-        "source_of_truth=daemon_log edge=sigint before_shutdown_count={} before_safety_count={}",
+        "readback=daemon_log edge=sigint before_shutdown_count={} before_safety_count={}",
         event_code_count(&before_logs, "MCP_SHUTDOWN_GRACEFUL"),
         safety_reason_count(&before_logs, "sigint")
     );
@@ -24,7 +24,7 @@ async fn synthetic_sigint_results_in_exit_0_and_flushed_log() -> anyhow::Result<
     let safety_lines = safety_reason_lines(&logs, "sigint");
     let safety_count = safety_lines.len();
     println!(
-        "source_of_truth=daemon_log edge=sigint after_shutdown_count={shutdown_count} after_safety_count={safety_count} after_line={:?} exit_code={:?}",
+        "readback=daemon_log edge=sigint after_shutdown_count={shutdown_count} after_safety_count={safety_count} after_line={:?} exit_code={:?}",
         safety_lines.first(),
         status.code()
     );
@@ -61,7 +61,7 @@ async fn stdio_connection_closed_emits_release_all_log() -> anyhow::Result<()> {
         error_codes::ACTION_BACKEND_UNAVAILABLE
     );
     println!(
-        "source_of_truth=daemon_log edge=connection_closed before=safety_count:0 expected_held_pad_ids:[] pad_error={pad_error}"
+        "readback=daemon_log edge=connection_closed before=safety_count:0 expected_held_pad_ids:[] pad_error={pad_error}"
     );
 
     let status = client.shutdown().await?;
@@ -74,7 +74,7 @@ async fn stdio_connection_closed_emits_release_all_log() -> anyhow::Result<()> {
         .first()
         .context("connection_closed safety line missing")?;
     println!(
-        "source_of_truth=daemon_log edge=connection_closed after_safety_count={safety_count} after_line={safety_line:?}"
+        "readback=daemon_log edge=connection_closed after_safety_count={safety_count} after_line={safety_line:?}"
     );
     assert!(
         safety_count >= 1,

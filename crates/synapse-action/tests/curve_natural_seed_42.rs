@@ -5,7 +5,7 @@ use synapse_action::sample_curve;
 use synapse_core::{AimCurve, AimNaturalParams, Point};
 
 #[test]
-fn natural_fast_seed_42_hash_matches_snapshot_fsv() {
+fn natural_fast_seed_42_hash_matches_snapshot() {
     let start = Point { x: 0, y: 0 };
     let end = Point { x: 100, y: 100 };
     let curve = AimCurve::Natural {
@@ -20,7 +20,7 @@ fn natural_fast_seed_42_hash_matches_snapshot_fsv() {
     let sha256 = sha256_hex(&serialized);
 
     println!(
-        "source_of_truth=curve_natural_seed_42 edge=happy before=start:(0,0) end:(100,100) duration_ms:50 seed:42 after_samples={samples:?} after_serialized_len={} final_value=sha256:{sha256}",
+        "readback=curve_natural_seed_42 edge=happy before=start:(0,0) end:(100,100) duration_ms:50 seed:42 after_samples={samples:?} after_serialized_len={} result_value=sha256:{sha256}",
         serialized.len()
     );
     assert_eq!(samples.first().copied(), Some(start));
@@ -37,7 +37,7 @@ fn natural_fast_seed_42_hash_matches_snapshot_fsv() {
         Some(42),
     );
     println!(
-        "source_of_truth=curve_natural_seed_42 edge=params_seed_vs_explicit before=params_seed:42 after=params_eq_explicit:{} final_value=pass",
+        "readback=curve_natural_seed_42 edge=params_seed_vs_explicit before=params_seed:42 after=params_eq_explicit:{} result_value=pass",
         params_seed_samples == explicit_seed_samples
     );
     assert_eq!(params_seed_samples, explicit_seed_samples);
@@ -45,14 +45,14 @@ fn natural_fast_seed_42_hash_matches_snapshot_fsv() {
     let overridden_samples = sample_curve(&curve, start, end, 50, Some(43));
     let overridden_sha256 = sha256_hex(&serialize_samples(&overridden_samples));
     println!(
-        "source_of_truth=curve_natural_seed_42 edge=override_seed before=params_seed:42 override_seed:43 after_sha256:{overridden_sha256} final_value=different:{}",
+        "readback=curve_natural_seed_42 edge=override_seed before=params_seed:42 override_seed:43 after_sha256:{overridden_sha256} result_value=different:{}",
         overridden_sha256 != sha256
     );
     assert_ne!(overridden_sha256, sha256);
 
     let zero_duration = sample_curve(&curve, start, end, 0, None);
     println!(
-        "source_of_truth=curve_natural_seed_42 edge=zero_duration before=duration_ms:0 after_len={} after_first={:?} after_last={:?} final_value=pass",
+        "readback=curve_natural_seed_42 edge=zero_duration before=duration_ms:0 after_len={} after_first={:?} after_last={:?} result_value=pass",
         zero_duration.len(),
         zero_duration.first(),
         zero_duration.last()

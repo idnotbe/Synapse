@@ -26,7 +26,7 @@ fn x360_report_snapshot_maps_buttons_axes_and_triggers() {
     };
     let before = "buttons=[a,start,lb,a,guide] thumb_l=(1,-1) thumb_r=(0.5,-0.5) lt=1 rt=0.5";
     let after = x360_report_snapshot(&report);
-    println!("source_of_truth=vigem_x360_report edge=happy before={before} after={after:?}");
+    println!("readback=vigem_x360_report edge=happy before={before} after={after:?}");
     assert_eq!(
         after,
         X360ReportSnapshot {
@@ -53,7 +53,7 @@ fn x360_report_snapshot_clamps_invalid_numeric_edges() {
     };
     let before = "buttons=[down,right] thumb_l=(1.5,-2.0) thumb_r=(NaN,inf) lt=2.0 rt=NaN";
     let after = x360_report_snapshot(&report);
-    println!("source_of_truth=vigem_x360_report edge=clamp before={before} after={after:?}");
+    println!("readback=vigem_x360_report edge=clamp before={before} after={after:?}");
     assert_eq!(
         after,
         X360ReportSnapshot {
@@ -94,7 +94,7 @@ fn ds4_report_snapshot_maps_buttons_axes_triggers_and_specials() {
     };
     let before = "controller=ds4 buttons=[a,b,x,y,lb,rb,ls,rs,back,start,guide,up,right] thumb_l=(1,-1) thumb_r=(0,0.5) lt=0.25 rt=1";
     let after = ds4_report_snapshot(&report);
-    println!("source_of_truth=vigem_ds4_report edge=happy before={before} after={after:?}");
+    println!("readback=vigem_ds4_report edge=happy before={before} after={after:?}");
     assert_eq!(
         after,
         Ds4ReportSnapshot {
@@ -128,7 +128,7 @@ fn ds4_report_snapshot_clamps_invalid_numeric_and_dpad_edges() {
     let before =
         "controller=ds4 buttons=[up,down,left,right] thumb_l=(NaN,inf) thumb_r=(-2,2) lt=NaN rt=2";
     let after = ds4_report_snapshot(&report);
-    println!("source_of_truth=vigem_ds4_report edge=clamp before={before} after={after:?}");
+    println!("readback=vigem_ds4_report edge=clamp before={before} after={after:?}");
     assert_eq!(
         after,
         Ds4ReportSnapshot {
@@ -148,12 +148,12 @@ fn ds4_report_snapshot_clamps_invalid_numeric_and_dpad_edges() {
 fn pad_state_helpers_track_partial_updates_and_neutral_removal() {
     let mut state = EmitState::new();
     let before = state.snapshot();
-    println!("source_of_truth=vigem_pad_state edge=partial before={before:?}");
+    println!("readback=vigem_pad_state edge=partial before={before:?}");
     apply_pad_button(&mut state, 3, PadButton::B, ButtonAction::Down);
     apply_pad_stick(&mut state, 3, Stick::Left, 0.25, -0.75);
     apply_pad_trigger(&mut state, 3, Trigger::Right, 0.5);
     let after_down = state.snapshot();
-    println!("source_of_truth=vigem_pad_state edge=partial after_down={after_down:?}");
+    println!("readback=vigem_pad_state edge=partial after_down={after_down:?}");
     assert_eq!(after_down.pad_state[&3].buttons, vec![PadButton::B]);
     assert_eq!(after_down.pad_state[&3].thumb_l, (0.25, -0.75));
     assert!((after_down.pad_state[&3].rt - 0.5).abs() < f32::EPSILON);
@@ -162,7 +162,7 @@ fn pad_state_helpers_track_partial_updates_and_neutral_removal() {
     apply_pad_stick(&mut state, 3, Stick::Left, 0.0, 0.0);
     apply_pad_trigger(&mut state, 3, Trigger::Right, 0.0);
     let after_neutral = state.snapshot();
-    println!("source_of_truth=vigem_pad_state edge=partial after_neutral={after_neutral:?}");
+    println!("readback=vigem_pad_state edge=partial after_neutral={after_neutral:?}");
     assert!(!after_neutral.pad_state.contains_key(&3));
 }
 
@@ -172,7 +172,7 @@ fn non_windows_backend_fails_closed_without_state_mutation() {
     let backend = VigemBackend::new();
     let mut state = EmitState::new();
     let before = state.snapshot();
-    println!("source_of_truth=vigem_non_windows edge=pad_report before={before:?}");
+    println!("readback=vigem_non_windows edge=pad_report before={before:?}");
     let result = backend.execute(
         &Action::PadReport {
             pad: 1,
@@ -192,7 +192,7 @@ fn non_windows_backend_fails_closed_without_state_mutation() {
         .err()
         .unwrap_or_else(|| panic!("non-Windows ViGEm pad report must fail closed"));
     println!(
-        "source_of_truth=vigem_non_windows edge=pad_report after={after:?} after_code={}",
+        "readback=vigem_non_windows edge=pad_report after={after:?} after_code={}",
         error.code()
     );
     assert_eq!(
@@ -211,7 +211,7 @@ fn non_windows_ensure_ready_and_non_pad_edges_fail_closed() {
         .err()
         .unwrap_or_else(|| panic!("non-Windows ensure_ready must fail closed"));
     println!(
-        "source_of_truth=vigem_non_windows edge=ensure_ready before=platform:not_windows after_code={} after_detail={:?}",
+        "readback=vigem_non_windows edge=ensure_ready before=platform:not_windows after_code={} after_detail={:?}",
         ensure_error.code(),
         ensure_error.detail()
     );
@@ -236,7 +236,7 @@ fn non_windows_ensure_ready_and_non_pad_edges_fail_closed() {
         .err()
         .unwrap_or_else(|| panic!("non-Windows non-pad action must fail closed"));
     println!(
-        "source_of_truth=vigem_non_windows edge=non_pad before={before:?} after={after:?} after_code={}",
+        "readback=vigem_non_windows edge=non_pad before={before:?} after={after:?} after_code={}",
         error.code()
     );
     assert_eq!(
@@ -255,7 +255,7 @@ fn non_windows_empty_release_all_is_noop_but_non_empty_pad_state_fails() {
     let empty_result = backend.execute(&Action::ReleaseAll, &mut empty);
     let after_empty = empty.snapshot();
     println!(
-        "source_of_truth=vigem_non_windows edge=empty_release before={before_empty:?} after={after_empty:?} result={empty_result:?}"
+        "readback=vigem_non_windows edge=empty_release before={before_empty:?} after={after_empty:?} result={empty_result:?}"
     );
     assert!(empty_result.is_ok());
     assert_eq!(before_empty, after_empty);
@@ -280,7 +280,7 @@ fn non_windows_empty_release_all_is_noop_but_non_empty_pad_state_fails() {
         .err()
         .unwrap_or_else(|| panic!("non-empty non-Windows release_all must fail closed"));
     println!(
-        "source_of_truth=vigem_non_windows edge=non_empty_release before={before_seeded:?} after={after_seeded:?} after_code={}",
+        "readback=vigem_non_windows edge=non_empty_release before={before_seeded:?} after={after_seeded:?} after_code={}",
         error.code()
     );
     assert_eq!(
@@ -295,7 +295,7 @@ fn non_windows_empty_release_all_is_noop_but_non_empty_pad_state_fails() {
 fn vigem_error_mapping_preserves_declared_codes() {
     let not_installed = map_vigem_error("connect_vigembus", vigem_client::Error::BusNotFound);
     println!(
-        "source_of_truth=vigem_error_mapping edge=bus_missing after_code={} after_detail={:?}",
+        "readback=vigem_error_mapping edge=bus_missing after_code={} after_detail={:?}",
         not_installed.code(),
         not_installed.detail()
     );
@@ -306,7 +306,7 @@ fn vigem_error_mapping_preserves_declared_codes() {
 
     let plugin_failed = map_vigem_error("plugin_x360_target", vigem_client::Error::NoFreeSlot);
     println!(
-        "source_of_truth=vigem_error_mapping edge=plugin_failed after_code={} after_detail={:?}",
+        "readback=vigem_error_mapping edge=plugin_failed after_code={} after_detail={:?}",
         plugin_failed.code(),
         plugin_failed.detail()
     );

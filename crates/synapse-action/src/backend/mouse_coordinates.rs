@@ -63,7 +63,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn normalizes_single_monitor_extrema_fsv() {
+    fn normalizes_single_monitor_extrema() {
         let desktop = VirtualDesktop {
             left: 0,
             top: 0,
@@ -72,20 +72,20 @@ mod tests {
         };
 
         println!(
-            "source_of_truth=mouse_coordinates edge=single_monitor before=desktop:{desktop:?} input=(0,0)"
+            "readback=mouse_coordinates edge=single_monitor before=desktop:{desktop:?} input=(0,0)"
         );
         let top_left = normalize_absolute_mouse_point(Point { x: 0, y: 0 }, desktop);
         println!(
-            "source_of_truth=mouse_coordinates edge=single_monitor after={top_left:?} expected=(0,0)"
+            "readback=mouse_coordinates edge=single_monitor after={top_left:?} expected=(0,0)"
         );
         assert_eq!(top_left, AbsoluteMousePoint { dx: 0, dy: 0 });
 
         println!(
-            "source_of_truth=mouse_coordinates edge=single_monitor before=desktop:{desktop:?} input=(1919,1079)"
+            "readback=mouse_coordinates edge=single_monitor before=desktop:{desktop:?} input=(1919,1079)"
         );
         let bottom_right = normalize_absolute_mouse_point(Point { x: 1919, y: 1079 }, desktop);
         println!(
-            "source_of_truth=mouse_coordinates edge=single_monitor after={bottom_right:?} expected=(65535,65535)"
+            "readback=mouse_coordinates edge=single_monitor after={bottom_right:?} expected=(65535,65535)"
         );
         assert_eq!(
             bottom_right,
@@ -97,7 +97,7 @@ mod tests {
     }
 
     #[test]
-    fn normalizes_negative_origin_virtual_desktop_fsv() {
+    fn normalizes_negative_origin_virtual_desktop() {
         let desktop = VirtualDesktop {
             left: -1920,
             top: -1080,
@@ -106,20 +106,20 @@ mod tests {
         };
 
         println!(
-            "source_of_truth=mouse_coordinates edge=negative_origin before=desktop:{desktop:?} input=(-1920,-1080)"
+            "readback=mouse_coordinates edge=negative_origin before=desktop:{desktop:?} input=(-1920,-1080)"
         );
         let min = normalize_absolute_mouse_point(Point { x: -1920, y: -1080 }, desktop);
         println!(
-            "source_of_truth=mouse_coordinates edge=negative_origin after_min={min:?} expected=(0,0)"
+            "readback=mouse_coordinates edge=negative_origin after_min={min:?} expected=(0,0)"
         );
         assert_eq!(min, AbsoluteMousePoint { dx: 0, dy: 0 });
 
         println!(
-            "source_of_truth=mouse_coordinates edge=negative_origin before=desktop:{desktop:?} input=(1919,1079)"
+            "readback=mouse_coordinates edge=negative_origin before=desktop:{desktop:?} input=(1919,1079)"
         );
         let max = normalize_absolute_mouse_point(Point { x: 1919, y: 1079 }, desktop);
         println!(
-            "source_of_truth=mouse_coordinates edge=negative_origin after_max={max:?} expected=(65535,65535)"
+            "readback=mouse_coordinates edge=negative_origin after_max={max:?} expected=(65535,65535)"
         );
         assert_eq!(
             max,
@@ -131,7 +131,7 @@ mod tests {
     }
 
     #[test]
-    fn clamps_out_of_bounds_points_fsv() {
+    fn clamps_out_of_bounds_points() {
         let desktop = VirtualDesktop {
             left: 100,
             top: 200,
@@ -140,18 +140,18 @@ mod tests {
         };
 
         println!(
-            "source_of_truth=mouse_coordinates edge=clamp_low before=desktop:{desktop:?} input=(-10,10)"
+            "readback=mouse_coordinates edge=clamp_low before=desktop:{desktop:?} input=(-10,10)"
         );
         let low = normalize_absolute_mouse_point(Point { x: -10, y: 10 }, desktop);
-        println!("source_of_truth=mouse_coordinates edge=clamp_low after={low:?} expected=(0,0)");
+        println!("readback=mouse_coordinates edge=clamp_low after={low:?} expected=(0,0)");
         assert_eq!(low, AbsoluteMousePoint { dx: 0, dy: 0 });
 
         println!(
-            "source_of_truth=mouse_coordinates edge=clamp_high before=desktop:{desktop:?} input=(1000,1000)"
+            "readback=mouse_coordinates edge=clamp_high before=desktop:{desktop:?} input=(1000,1000)"
         );
         let high = normalize_absolute_mouse_point(Point { x: 1000, y: 1000 }, desktop);
         println!(
-            "source_of_truth=mouse_coordinates edge=clamp_high after={high:?} expected=(65535,65535)"
+            "readback=mouse_coordinates edge=clamp_high after={high:?} expected=(65535,65535)"
         );
         assert_eq!(
             high,
@@ -163,28 +163,28 @@ mod tests {
     }
 
     #[test]
-    fn rejects_invalid_virtual_desktop_metrics_fsv() {
+    fn rejects_invalid_virtual_desktop_metrics() {
         println!(
-            "source_of_truth=mouse_coordinates edge=invalid_width before=left:0 top:0 width:0 height:1"
+            "readback=mouse_coordinates edge=invalid_width before=left:0 top:0 width:0 height:1"
         );
         let zero_width = VirtualDesktop::new(0, 0, 0, 1);
         println!(
-            "source_of_truth=mouse_coordinates edge=invalid_width after={zero_width:?} expected=None"
+            "readback=mouse_coordinates edge=invalid_width after={zero_width:?} expected=None"
         );
         assert_eq!(zero_width, None);
 
         println!(
-            "source_of_truth=mouse_coordinates edge=invalid_height before=left:0 top:0 width:1 height:0"
+            "readback=mouse_coordinates edge=invalid_height before=left:0 top:0 width:1 height:0"
         );
         let zero_height = VirtualDesktop::new(0, 0, 1, 0);
         println!(
-            "source_of_truth=mouse_coordinates edge=invalid_height after={zero_height:?} expected=None"
+            "readback=mouse_coordinates edge=invalid_height after={zero_height:?} expected=None"
         );
         assert_eq!(zero_height, None);
     }
 
     #[test]
-    fn one_pixel_axis_maps_to_zero_fsv() {
+    fn one_pixel_axis_maps_to_zero() {
         let desktop = VirtualDesktop {
             left: 50,
             top: -7,
@@ -193,12 +193,10 @@ mod tests {
         };
 
         println!(
-            "source_of_truth=mouse_coordinates edge=one_pixel before=desktop:{desktop:?} input=(50,-7)"
+            "readback=mouse_coordinates edge=one_pixel before=desktop:{desktop:?} input=(50,-7)"
         );
         let normalized = normalize_absolute_mouse_point(Point { x: 50, y: -7 }, desktop);
-        println!(
-            "source_of_truth=mouse_coordinates edge=one_pixel after={normalized:?} expected=(0,0)"
-        );
+        println!("readback=mouse_coordinates edge=one_pixel after={normalized:?} expected=(0,0)");
         assert_eq!(normalized, AbsoluteMousePoint { dx: 0, dy: 0 });
     }
 }

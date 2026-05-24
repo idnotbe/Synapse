@@ -4,7 +4,7 @@
 > tagged). Gets a full self-contained M2-style rewrite as the first M5 task.
 > **All global invariants apply** (no backcompat, no mocks gate completion,
 > FSV with source-of-truth read-back, Natural-only motion, manual
-> configured-host shipping gate; CI is regression safety net only).
+> configured-host shipping gate; local checks are regression support only).
 
 PRD: `docs/computergames/15_roadmap_and_milestones.md` §7. Build/install: `14_build_and_packaging.md`. Acceptance: `15 §10`. Manual test plan: `13 §15`. Doctrine: `00_methodology.md` + `07_cross_cutting.md`.
 
@@ -175,7 +175,7 @@ STORAGE_DISK_PRESSURE_LEVEL_4
 |---|---|---|
 | 8 | `feat(profiles): factorio + discord + slack + file_explorer + <one_fps> + roblox_studio TOMLs` | each parses; profile_list shows all; bundled assets (HUD templates, if any) present |
 | 9 | `feat(profiles): inert unknown-scope profile templates` | parse; `use_scope = "unknown"`; keymap empty; mode pixel_only; reviewed-profile comment present |
-| 10 | `feat(profiles): smoke tests per profile (13 §10)` | each bundled profile passes its smoke test in CI |
+| 10 | `feat(profiles): smoke tests per profile (13 §10)` | each bundled profile passes its smoke test locally |
 
 ### Block D — perf + soak (work-items 11-13)
 
@@ -207,7 +207,7 @@ STORAGE_DISK_PRESSURE_LEVEL_4
 |---|---|---|
 | 20 | `docs: USER_GUIDE.md (operator quick-start + troubleshooting + profile authoring)` | new user follows guide to working install ≤ 5 min |
 | 21 | `chore: THIRD-PARTY-LICENSES.md via cargo about; included in MSI` | all deps listed; license SPDX permitted per `14 §14` |
-| 22 | `chore: CHANGELOG.md v1.0.0 + schema lock SCHEMA_VERSION="1"` | post-v1 schema changes blocked by CI gate referencing this version |
+| 22 | `chore: CHANGELOG.md v1.0.0 + schema lock SCHEMA_VERSION="1"` | post-v1 schema changes blocked by local schema-version checks referencing this version |
 
 ### Block H — manual test plan (work-item 23)
 

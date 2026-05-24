@@ -3,7 +3,7 @@ use serde::{Serialize, de::DeserializeOwned};
 use crate::{StorageError, StorageResult};
 
 // ADR-0001 / RUSTSEC-2025-0141 prohibit binary persisted codecs here; storage
-// payloads stay JSON so source-of-truth bytes remain inspectable.
+// payloads stay JSON so state-readback bytes remain inspectable.
 
 /// Encodes a typed storage payload as JSON bytes.
 ///

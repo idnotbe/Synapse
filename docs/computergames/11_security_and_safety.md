@@ -234,7 +234,7 @@ Disabled at compile time; enabling requires code change + ADR.
 | Listening on non-loopback by default | Forces explicit opt-in |
 | Generating signed binaries on the fly | Build pipeline is offline only |
 
-Enforced via `#[cfg(feature = "...")]` flags with no compile-time default; CI ensures features aren't enabled in shipped builds.
+Enforced via `#[cfg(feature = "...")]` flags with no compile-time default; local release checks ensure features aren't enabled in shipped builds.
 
 ---
 
@@ -319,7 +319,7 @@ If a reflex tries to fire an action whose permission the session lacks, the firi
 
 ## 14. Dependency hygiene
 
-`cargo deny`-style checks in CI:
+`cargo deny`-style checks in the local supporting gate:
 
 - No GPL-only / AGPL deps (license incompatible with MIT/Apache-2.0)
 - No deps with known vulns (`cargo audit`)

@@ -187,7 +187,7 @@ fn jitter_point(point: Point, stddev: f32, rng: &mut DeterministicRng) -> Point 
 
 #[allow(
     clippy::cast_possible_truncation,
-    reason = "pixel coordinates are rounded and clamped for #159/#160 FSV"
+    reason = "pixel coordinates are rounded and clamped for #159/#160"
 )]
 fn clamp_i32(value: f64) -> i32 {
     if !value.is_finite() {

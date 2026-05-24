@@ -1,0 +1,37 @@
+id = "vscode"
+label = "Visual Studio Code"
+schema_version = 1
+use_scope = "productivity"
+mode = "hybrid"
+mouse_curve_default = "natural"
+keyboard_dynamics_default = "natural"
+
+[[matches]]
+exe = "Code.exe"
+title_regex = ".* - Visual Studio Code$"
+
+[[matches]]
+exe = "VSCodium.exe"
+title_regex = ".* - VSCodium$"
+
+[capture]
+target = "foreground_window"
+min_update_interval_ms = 50
+cursor_visible = true
+
+[keymap]
+command_palette = "ctrl+shift+p"
+copy = "ctrl+c"
+find = "ctrl+f"
+go_to_file = "ctrl+p"
+paste = "ctrl+v"
+quick_open = "ctrl+p"
+save = "ctrl+s"
+save_all = "ctrl+k"
+terminal = "ctrl+shift+u"
+
+[backends]
+default = "auto"
+keyboard_default = "auto"
+mouse_default = "auto"
+pad_default = "auto"

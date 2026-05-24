@@ -70,7 +70,7 @@ mod tests {
     fn non_windows_default_matches_m2_contract() {
         let timing = query_double_click_timing();
         println!(
-            "source_of_truth=double_click_timing edge=default before=platform:{} after_window_ms:{} after_delay_ms:{} source:{}",
+            "readback=double_click_timing edge=default before=platform:{} after_window_ms:{} after_delay_ms:{} source:{}",
             std::env::consts::OS,
             timing.window_ms,
             timing.inter_click_delay_ms,
@@ -86,7 +86,7 @@ mod tests {
             let delay = inter_click_delay_ms_for_window(window_ms);
             let effective_window = window_ms.max(2);
             println!(
-                "source_of_truth=double_click_timing edge=window before_window_ms:{window_ms} after_delay_ms:{delay} effective_window_ms:{effective_window}"
+                "readback=double_click_timing edge=window before_window_ms:{window_ms} after_delay_ms:{delay} effective_window_ms:{effective_window}"
             );
             assert!(delay < effective_window);
             assert!(delay >= 1);

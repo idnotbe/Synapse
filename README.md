@@ -4,6 +4,13 @@
 
 Synapse is a Rust MCP server that gives AI agents a local computer-use body: structured perception, action, and low-latency reflexes live in Synapse while the connected model remains the brain. M1 ships the local perception tool surface; action, storage, profiles, and game-control surfaces start in later milestones.
 
+## Agent Doctrine
+
+Agents working in this repository must follow [AGENTS.md](AGENTS.md). Manual
+Full State Verification on the configured Windows host is the shipping gate.
+Scripts, tests, benchmarks, GitHub Actions, and CI are supporting evidence only;
+they are never FSV.
+
 ## Status: M1
 
 M1 is the local perception milestone: a working `synapse-mcp` binary serves MCP over stdio, exposes the six local tools below, and verifies the perception surface through local manual FSV instead of GitHub Actions. The live tracker is the [M1 milestone](https://github.com/ChrisRoyse/Synapse/milestone/2), with mission context pinned in [issue #86](https://github.com/ChrisRoyse/Synapse/issues/86). The implementation checklist is [docs/impplan/02_m1_perception_mvp.md](docs/impplan/02_m1_perception_mvp.md).

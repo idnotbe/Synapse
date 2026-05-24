@@ -199,7 +199,7 @@ impl<R: AsyncRead + Unpin> AsyncRead for CancelOnEofRead<R> {
             self.service_cancel.cancel();
             tracing::info!(
                 code = "MCP_STDIO_EOF_CONNECTION_CLOSED",
-                "source_of_truth=stdio edge=connection_closed after=eof"
+                "readback=stdio edge=connection_closed after=eof"
             );
         }
         result

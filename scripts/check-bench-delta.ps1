@@ -61,13 +61,13 @@ $epsilon = 0.000000001
 
 foreach ($benchName in $benchNames) {
     if (-not $baseline.ContainsKey($benchName)) {
-        Write-Output "source_of_truth=bench_delta bench=""$benchName"" status=FAIL reason=missing_from_baseline"
+        Write-Output "readback=bench_delta bench=""$benchName"" status=FAIL reason=missing_from_baseline"
         $failed = $true
         continue
     }
 
     if (-not $candidate.ContainsKey($benchName)) {
-        Write-Output "source_of_truth=bench_delta bench=""$benchName"" status=FAIL reason=missing_from_candidate"
+        Write-Output "readback=bench_delta bench=""$benchName"" status=FAIL reason=missing_from_candidate"
         $failed = $true
         continue
     }
@@ -82,7 +82,7 @@ foreach ($benchName in $benchNames) {
     }
 
     Write-Output (
-        "source_of_truth=bench_delta bench=""{0}"" baseline_ns={1:F3} candidate_ns={2:F3} delta_percent={3:F3} threshold_percent={4:F3} status={5}" -f
+        "readback=bench_delta bench=""{0}"" baseline_ns={1:F3} candidate_ns={2:F3} delta_percent={3:F3} threshold_percent={4:F3} status={5}" -f
         $benchName,
         $baselineNs,
         $candidateNs,

@@ -62,7 +62,7 @@ mod tests {
 
     #[test]
     fn linear_41_char_text_keeps_timing_and_bounded_sendinput_batches() {
-        let before = "Synapse M2 SendInput FSV 2026-05-23 cafe!";
+        let before = "Synapse M2 SendInput 2026-05-23 cafe OK!!";
         assert_eq!(before.chars().count(), 41);
 
         let dynamics = KeystrokeDynamics::Linear { ms_per_char: 50 };
@@ -76,7 +76,7 @@ mod tests {
             .max()
             .unwrap_or(0);
         println!(
-            "source_of_truth=text_dispatch_plan edge=linear_41 before=text:{before:?},dynamics:Linear(50) after={after:?} final_value=steps:{},total_delay_ms:{total_delay_ms},max_sendinput_events_per_call:{max_call_events}",
+            "readback=text_dispatch_plan edge=linear_41 before=text:{before:?},dynamics:Linear(50) after={after:?} result_value=steps:{},total_delay_ms:{total_delay_ms},max_sendinput_events_per_call:{max_call_events}",
             after.len()
         );
 
@@ -97,7 +97,7 @@ mod tests {
             .flat_map(|step| step.inputs.iter().copied())
             .collect();
         println!(
-            "source_of_truth=text_dispatch_plan edge=controls before=text:{before:?},dynamics:Linear(25) after={after:?} final_value=inputs:{inputs:?}"
+            "readback=text_dispatch_plan edge=controls before=text:{before:?},dynamics:Linear(25) after={after:?} result_value=inputs:{inputs:?}"
         );
 
         assert_eq!(after.len(), 3);
@@ -127,7 +127,7 @@ mod tests {
         let before = "";
         let after = text_dispatch_plan(before, &KeystrokeDynamics::Burst);
         println!(
-            "source_of_truth=text_dispatch_plan edge=empty before=text:{before:?},dynamics:Burst after={after:?} final_value=steps:{}",
+            "readback=text_dispatch_plan edge=empty before=text:{before:?},dynamics:Burst after={after:?} result_value=steps:{}",
             after.len()
         );
 
@@ -140,7 +140,7 @@ mod tests {
         let dynamics = KeystrokeDynamics::Linear { ms_per_char: 7 };
         let after = text_dispatch_plan(before, &dynamics);
         println!(
-            "source_of_truth=text_dispatch_plan edge=supplementary_unicode before=text:{before:?},dynamics:Linear(7) after={after:?} final_value=second_step_inputs:{:?}",
+            "readback=text_dispatch_plan edge=supplementary_unicode before=text:{before:?},dynamics:Linear(7) after={after:?} result_value=second_step_inputs:{:?}",
             after[1].inputs
         );
 
@@ -175,7 +175,7 @@ mod tests {
             .max()
             .unwrap_or(0);
         println!(
-            "source_of_truth=text_dispatch_plan edge=burst_long before=len:{} after={after:?} final_value=steps:{},max_sendinput_events_per_call:{max_call_events}",
+            "readback=text_dispatch_plan edge=burst_long before=len:{} after={after:?} result_value=steps:{},max_sendinput_events_per_call:{max_call_events}",
             before.len(),
             after.len()
         );

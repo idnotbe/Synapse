@@ -162,7 +162,7 @@ In hot loops we do not allocate per iteration:
 - Action emit: at most one allocation (the `Vec<INPUT>` passed to `SendInput`); amortized.
 - Detection inference: pre-allocated input/output tensors reused per frame.
 
-Local benchmark runs on the configured Windows host assert zero allocations in hot loops via `dhat` or `tracing-allocations`. Manual FSV reads the benchmark export and allocation evidence directly; GitHub Actions/CI is not the source of truth.
+Local benchmark runs on the configured Windows host assert zero allocations in hot loops via `dhat` or `tracing-allocations`. Manual FSV reads the benchmark export and allocation evidence directly; GitHub Actions/CI is not the source of truth, and benchmark scripts are supporting evidence only.
 
 ---
 

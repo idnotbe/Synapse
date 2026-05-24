@@ -2,9 +2,7 @@
 param(
     [int]$OlderThanDays = 30,
 
-    [string]$Root = ".",
-
-    [switch]$IncludeLegacyFsv
+    [string]$Root = "."
 )
 
 Set-StrictMode -Version Latest
@@ -47,7 +45,7 @@ function Visit-RunDirectory {
     if ($Directory.LastWriteTime -lt $script:cutoff) {
         $action = "remove"
         Write-Output (
-            "source_of_truth=run_cleanup kind={0} action={1} path=""{2}"" last_write_time=""{3:o}"" age_days={4:F3} cutoff=""{5:o}""" -f
+            "readback=run_cleanup kind={0} action={1} path=""{2}"" last_write_time=""{3:o}"" age_days={4:F3} cutoff=""{5:o}""" -f
             $Kind,
             $action,
             $Directory.FullName,
@@ -62,7 +60,7 @@ function Visit-RunDirectory {
     }
 
     Write-Output (
-        "source_of_truth=run_cleanup kind={0} action={1} path=""{2}"" last_write_time=""{3:o}"" age_days={4:F3} cutoff=""{5:o}""" -f
+        "readback=run_cleanup kind={0} action={1} path=""{2}"" last_write_time=""{3:o}"" age_days={4:F3} cutoff=""{5:o}""" -f
         $Kind,
         $action,
         $Directory.FullName,
@@ -76,9 +74,4 @@ $runsPath = Join-Path $rootPath ".runs"
 if (Test-Path -LiteralPath $runsPath) {
     Get-ChildItem -LiteralPath $runsPath -Directory -Force |
         ForEach-Object { Visit-RunDirectory -Directory $_ -Kind ".runs" }
-}
-
-if ($IncludeLegacyFsv) {
-    Get-ChildItem -LiteralPath $rootPath -Directory -Force -Filter "fsv-*" |
-        ForEach-Object { Visit-RunDirectory -Directory $_ -Kind "legacy_fsv" }
 }

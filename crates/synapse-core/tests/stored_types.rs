@@ -18,7 +18,7 @@ use synapse_core::{
 };
 
 #[test]
-fn stored_type_edge_round_trips_with_fsv() -> Result<(), Box<dyn std::error::Error>> {
+fn stored_type_edge_round_trips_with_readback() -> Result<(), Box<dyn std::error::Error>> {
     round_trip("StoredEvent", "empty", empty_event())?;
     round_trip("StoredEvent", "required_only", required_event())?;
     round_trip("StoredEvent", "fully_populated", full_event())?;
@@ -135,11 +135,11 @@ where
     T: Clone + Debug + PartialEq + Serialize + DeserializeOwned + 'static,
 {
     let before = serde_json::to_value(value.clone())?;
-    println!("source_of_truth=json_stored_record type={type_name} edge={edge} before={before}");
+    println!("readback=json_stored_record type={type_name} edge={edge} before={before}");
     let parsed = serde_json::from_value::<T>(before)?;
     let after = serde_json::to_value(&parsed)?;
     println!(
-        "source_of_truth=json_stored_record type={type_name} edge={edge} after={after} final_value={after}"
+        "readback=json_stored_record type={type_name} edge={edge} after={after} result_value={after}"
     );
     assert_eq!(parsed, value);
     Ok(parsed)
@@ -158,10 +158,10 @@ where
         "unknown_field".to_owned(),
         serde_json::Value::String("must reject".to_owned()),
     );
-    println!("source_of_truth=json_unknown_field type={type_name} before={json}");
+    println!("readback=json_unknown_field type={type_name} before={json}");
     let rejected = serde_json::from_value::<T>(json).is_err();
     println!(
-        "source_of_truth=json_unknown_field type={type_name} after=rejected:{rejected} final_value={rejected}"
+        "readback=json_unknown_field type={type_name} after=rejected:{rejected} result_value={rejected}"
     );
     assert!(rejected);
     Ok(())
@@ -183,7 +183,7 @@ where
     let algorithm = config.rng_algorithm;
     let mut runner = TestRunner::new_with_rng(config, TestRng::deterministic_rng(algorithm));
 
-    println!("source_of_truth=json_stored_record_proptest type={type_name} before=cases:1000");
+    println!("readback=json_stored_record_proptest type={type_name} before=cases:1000");
     runner.run(&strategy, |value| {
         let json = serde_json::to_value(value.clone())?;
         let parsed = serde_json::from_value::<T>(json)?;
@@ -191,7 +191,7 @@ where
         Ok(())
     })?;
     println!(
-        "source_of_truth=json_stored_record_proptest type={type_name} after=cases:1000 final_value=all_round_tripped"
+        "readback=json_stored_record_proptest type={type_name} after=cases:1000 result_value=all_round_tripped"
     );
     Ok(())
 }

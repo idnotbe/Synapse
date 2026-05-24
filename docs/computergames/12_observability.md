@@ -372,7 +372,7 @@ cargo run --features perf-profiling -- --mode stdio
 # Generates flamegraph.svg on Ctrl+C
 ```
 
-Not default; ~5% overhead when active. CI runs a weekly perf-profiling job producing flamegraphs of standard scenarios.
+Not default; ~5% overhead when active. Local perf-profiling runs produce flamegraphs of standard scenarios when performance work requires them.
 
 ---
 

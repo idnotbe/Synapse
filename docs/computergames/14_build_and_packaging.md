@@ -110,7 +110,6 @@ ort = { version = "2.0.0-rc.12", default-features = false }
 
 # Storage
 rocksdb = { version = "0.24.0", default-features = false, features = ["lz4", "zstd", "multi-threaded-cf"] }
-sled = "1.0.0-alpha.124"
 
 # Utility
 clap = { version = "4.6.1", features = ["derive"] }
@@ -185,7 +184,7 @@ debug = "line-tables-only"
 # Standard build
 cargo build --release
 
-# Build all examples (FSV harnesses analog)
+# Build all examples (supporting regression artifacts)
 cargo build --release --examples
 
 # Build only the binary
@@ -194,16 +193,13 @@ cargo build --release -p synapse-mcp
 # Run tests
 cargo test --workspace
 
-# Run with feature flags
-cargo build --release --features sled-backend
-
 # Build firmware (separate)
 cd firmware/pico-hid
 cargo build --release --target thumbv6m-none-eabi
 elf2uf2-rs target/thumbv6m-none-eabi/release/synapse-pico-hid synapse-pico-hid.uf2
 ```
 
-CI runs the matrix in `13_testing_strategy.md` §14.
+Local supporting checks follow the matrix in `13_testing_strategy.md` §14.
 
 ---
 
@@ -211,8 +207,7 @@ CI runs the matrix in `13_testing_strategy.md` §14.
 
 | Flag | Default | Effect |
 |---|---|---|
-| `rocksdb-backend` | on | Use RocksDB for storage (default) |
-| `sled-backend` | off | Use sled instead of RocksDB |
+| `rocksdb-backend` | on | Use RocksDB for storage (default and only M3 backend) |
 | `cuda` | off | ORT with CUDA execution provider |
 | `directml` | on | ORT with DirectML (default GPU path on Windows) |
 | `vlm` | off | Bundle a small VLM for `describe` |
@@ -455,7 +450,7 @@ Part of `scripts/release/sign.ps1`.
 
 1. **Branch:** `release/x.y.z` cut from `main`.
 2. **Tag:** `vx.y.z` on the commit.
-3. **CI release job** builds:
+3. **Local release build/signing step** builds:
    - `synapse-mcp.exe` (release profile, signed)
    - `synapse-overlay.exe` (signed)
    - `SynapseSetup-x.y.z.msi` (signed)
@@ -568,7 +563,7 @@ Generates a skeleton crate following the template.
 
 ## 19. What this doc does NOT cover
 
-- Specific CI pipeline YAML → `.github/workflows/`
+- Supporting automation configuration → `.github/workflows/`
 - Distribution channel publishing details → `scripts/release/`
 - Firmware build details → `09_hardware_hid_gateway.md` §8
 - Per-feature-flag testing combinations → `13_testing_strategy.md` §14

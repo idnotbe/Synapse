@@ -47,7 +47,7 @@ fn run_idle_sample() -> u64 {
         .unwrap_or_else(|| panic!("idle bench should collect warmup and measured samples"));
     let p99 = p99_jitter_us(measured);
     println!(
-        "source_of_truth=reflex_tick_jitter_idle samples:{} p99_jitter_us:{p99} final_value=elapsed_us={p99}",
+        "benchmark=reflex_tick_jitter_idle samples:{} p99_jitter_us:{p99}",
         measured.len()
     );
     p99

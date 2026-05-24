@@ -57,7 +57,7 @@ fn run_manual_bench() {
             .and_then(|value| value.parse::<usize>().ok())
             .unwrap_or(300);
         let Ok(root) = synapse_a11y::focused_window() else {
-            println!("source_of_truth=a11y_snapshot_bench after=status:no_foreground");
+            println!("readback=a11y_snapshot_bench after=status:no_foreground");
             std::process::exit(2);
         };
 
@@ -76,7 +76,7 @@ fn run_manual_bench() {
                 }
                 Err(err) => {
                     println!(
-                        "source_of_truth=a11y_snapshot_bench after=status:error code:{} detail:{err}",
+                        "readback=a11y_snapshot_bench after=status:error code:{} detail:{err}",
                         err.code()
                     );
                     std::process::exit(3);
@@ -90,7 +90,7 @@ fn run_manual_bench() {
             .last()
             .map_or(0.0, |sample| sample.as_secs_f64() * 1000.0);
         println!(
-            "source_of_truth=a11y_snapshot_bench after=status:ok iterations:{iterations} nodes:{last_nodes} p99_ms:{p99_ms:.3} max_ms:{max_ms:.3}"
+            "readback=a11y_snapshot_bench after=status:ok iterations:{iterations} nodes:{last_nodes} p99_ms:{p99_ms:.3} max_ms:{max_ms:.3}"
         );
         if p99_ms > 10.0 {
             std::process::exit(4);
@@ -99,6 +99,6 @@ fn run_manual_bench() {
 
     #[cfg(not(windows))]
     {
-        println!("source_of_truth=a11y_snapshot_bench after=status:unsupported");
+        println!("readback=a11y_snapshot_bench after=status:unsupported");
     }
 }

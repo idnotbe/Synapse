@@ -4,7 +4,7 @@ use std::{error::Error, sync::Arc, time::Duration};
 const TEST_SCHEMA_VERSION: u32 = 7;
 
 #[test]
-fn disk_pressure_transitions_emit_codes_once_with_fsv() -> Result<(), Box<dyn Error>> {
+fn disk_pressure_transitions_emit_codes_once() -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
     let db = Db::open(&temp.path().join("db"), TEST_SCHEMA_VERSION)?;
     let config = test_config();
@@ -51,7 +51,7 @@ fn disk_pressure_transitions_emit_codes_once_with_fsv() -> Result<(), Box<dyn Er
         let after_level = db.pressure_level();
         let after_codes = db.pressure.transition_codes()?;
         println!(
-            "source_of_truth=pressure_state free_bytes={} before_level={before_level:?} before_codes={before_codes:?} after_level={after_level:?} emitted_code={:?} compacted_cfs={} gc_advised={} final_value=level:{after_level:?},codes:{after_codes:?}",
+            "regression_state=pressure_state free_bytes={} before_level={before_level:?} before_codes={before_codes:?} after_level={after_level:?} emitted_code={:?} compacted_cfs={} gc_advised={} observed=level:{after_level:?},codes:{after_codes:?}",
             report.free_bytes,
             report.emitted_code,
             report.compacted_cfs.len(),
@@ -82,7 +82,7 @@ fn disk_pressure_transitions_emit_codes_once_with_fsv() -> Result<(), Box<dyn Er
 }
 
 #[test]
-fn disk_pressure_write_gating_with_fsv() -> Result<(), Box<dyn Error>> {
+fn disk_pressure_write_gating() -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
     let db = Db::open(&temp.path().join("db"), TEST_SCHEMA_VERSION)?;
     let config = test_config();
@@ -95,7 +95,7 @@ fn disk_pressure_write_gating_with_fsv() -> Result<(), Box<dyn Error>> {
     let after_l3_observations = db.scan_cf(cf::CF_OBSERVATIONS)?;
     let after_l3_events = db.scan_cf(cf::CF_EVENTS)?;
     println!(
-        "source_of_truth=cf_scan level=Level3 before_observations={} after_observations={} after_events={} final_value=observations:{:?},events:{:?}",
+        "regression_state=cf_scan level=Level3 before_observations={} after_observations={} after_events={} observed=observations:{:?},events:{:?}",
         before_observations.len(),
         after_l3_observations.len(),
         after_l3_events.len(),
@@ -116,7 +116,7 @@ fn disk_pressure_write_gating_with_fsv() -> Result<(), Box<dyn Error>> {
     let after_l4_audit = db.scan_cf(cf::CF_REFLEX_AUDIT)?;
     let after_l4_sessions = db.scan_cf(cf::CF_SESSIONS)?;
     println!(
-        "source_of_truth=cf_scan level=Level4 observations={} events={} audit={} sessions={} final_value=observations:{:?},events:{:?},audit:{:?},sessions:{:?}",
+        "regression_state=cf_scan level=Level4 observations={} events={} audit={} sessions={} observed=observations:{:?},events:{:?},audit:{:?},sessions:{:?}",
         after_l4_observations.len(),
         after_l4_events.len(),
         after_l4_audit.len(),
@@ -135,7 +135,7 @@ fn disk_pressure_write_gating_with_fsv() -> Result<(), Box<dyn Error>> {
 }
 
 #[tokio::test]
-async fn disk_pressure_periodic_task_runs_tick_with_fsv() -> Result<(), Box<dyn Error>> {
+async fn disk_pressure_periodic_task_runs_tick() -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
     let db = Db::open(&temp.path().join("db"), TEST_SCHEMA_VERSION)?;
     let task = pressure::spawn_with_free_bytes(
@@ -149,7 +149,7 @@ async fn disk_pressure_periodic_task_runs_tick_with_fsv() -> Result<(), Box<dyn 
     let after_level = db.pressure_level();
     let after_codes = db.pressure.transition_codes()?;
     println!(
-        "source_of_truth=pressure_state case=periodic_task after_level={after_level:?} after_codes={after_codes:?} final_value=level:{after_level:?}"
+        "regression_state=pressure_state case=periodic_task after_level={after_level:?} after_codes={after_codes:?} observed=level:{after_level:?}"
     );
     drop(task);
     assert_eq!(after_level, DiskPressureLevel::Level1);

@@ -10,7 +10,13 @@ Synapse is hard to test because:
 - HID output is observable only by another OS process, not the test
 - Some components (hardware HID) require physical hardware
 
-We layer tests carefully. Unit tests are cheap and ubiquitous. Integration tests scope to subsystems with OS-layer fakes. E2E tests run against the configured Windows host for manual FSV and release candidates.
+We layer tests carefully. Unit tests are cheap and ubiquitous. Integration tests scope to subsystems with OS-layer fakes. E2E exercises run against the configured Windows host for manual FSV and release candidates.
+
+Manual FSV is not an automated test class. The agent must define the source of
+truth, read it before, trigger the behavior, read it again, and record the
+actual state for the happy path plus at least three edge cases. Automated tests,
+benchmarks, scripts, harnesses, GitHub Actions, and CI are supporting evidence
+only.
 
 "Hard to test" is never an excuse for not testing.
 
@@ -25,7 +31,7 @@ We layer tests carefully. Unit tests are cheap and ubiquitous. Integration tests
 | **Property-based** | 10s of properties | `proptest` in critical crates | Yes |
 | **Snapshot** | 10s | `insta` for stable outputs | Yes |
 | **Performance regression** | dozens of benches | `criterion` + `critcmp` exported JSON | Local manual gate |
-| **End-to-end on real Windows** | ~10 scenarios | `tests/e2e/` driven by `synapse-mcp` | Configured-host FSV |
+| **End-to-end on real Windows** | ~10 scenarios | Manual configured-host runs driven through `synapse-mcp` | Configured-host FSV |
 | **Hardware-in-the-loop** | ~5 scenarios | RP2040 attached to host | Hardware work-items |
 | **Profile validation** | Per profile | Auto-generated from `profiles/*.toml` | Yes |
 
@@ -188,14 +194,14 @@ Tracked benches:
 
 ---
 
-## 8. End-to-end tests (real Windows)
+## 8. End-to-end manual FSV (real Windows)
 
-Self-hosted Windows 11 runner. CI tag: `windows-e2e`. Each test:
+Configured Windows 11 host. Each manual FSV run:
 
 1. Spawns `synapse-mcp` in stdio mode
 2. Connects as MCP client (Rust client in `synapse-test-utils`)
 3. Drives a scripted scenario
-4. Asserts observed events + outcomes
+4. Reads the source of truth separately and records before/after state
 
 Test scenarios:
 
@@ -248,7 +254,9 @@ Self-hosted runner has an RP2040 board attached. Rig:
 | `hid_high_volume` | 10,000 mouse-move commands at full rate, no drops |
 | `hid_reflash` | Reset to bootloader, flash, verify new identity |
 
-Run weekly. Optional in CI; pass-through if runner lacks hardware, with a warning logged.
+Run as hardware work-items or release-candidate checks on the configured host.
+If the hardware is absent, the work item is not accepted until the operator's
+target hardware is present or the issue explicitly scopes it out.
 
 ---
 
@@ -287,7 +295,7 @@ fn profile_minecraft_smoke() {
 - EventFilter parser
 - Profile TOML parser
 
-Each target runs nightly with `--max-total-time=600` (10 minutes). Crashes are CI-blocking; corpus is committed.
+Each target runs locally with `--max-total-time=600` (10 minutes) when parser or protocol changes require it. Crashes are release-blocking; corpus is committed.
 
 ---
 
@@ -322,35 +330,37 @@ Builds a regression corpus from real bugs.
 
 ---
 
-## 14. Automated-check reference
+## 14. Supporting automated-check reference
 
-Manual configured-host FSV is the shipping gate. Do not dispatch or wait on GitHub Actions/CI unless the operator explicitly reverses the no-CI decision. If automation is re-enabled later, the reference checks are:
+Manual configured-host FSV is the shipping gate. Do not dispatch or wait on GitHub Actions/CI unless the operator explicitly reverses the no-CI decision. These checks are supporting evidence only and must not be named or treated as FSV:
 
 | Job | OS | Trigger |
 |---|---|---|
-| `cargo fmt --check` | ubuntu | every PR |
-| `cargo clippy --workspace --all-targets -- -D warnings` | windows | every PR |
-| `cargo test --workspace` | windows | every PR |
-| `cargo test --workspace --no-default-features` | windows | every PR |
-| `cargo build --release --workspace` | windows | every PR |
-| `cargo deny check` | ubuntu | every PR |
-| `cargo audit` | ubuntu | every PR + daily cron |
-| `insta review --check` | ubuntu | every PR |
-| `e2e-real-windows` | self-hosted windows | nightly |
+| `cargo fmt --check` | configured host | changed Rust code |
+| `cargo clippy --workspace --all-targets -- -D warnings` | configured host | changed Rust code |
+| `cargo test --workspace` | configured host | supporting regression sweep |
+| `cargo test --workspace --no-default-features` | configured host | feature-surface changes |
+| `cargo build --release --workspace` | configured host | release candidate |
+| `cargo deny check` | configured host | dependency changes |
+| `cargo audit` | configured host | dependency/security sweep |
+| `insta review --check` | configured host | snapshot changes |
+| `e2e-real-windows` | configured Windows host | issue-specific manual FSV support |
 | `bench-regression` | configured Windows host | local `critcmp` export compare |
 | `hardware-in-loop` | self-hosted with Pico | weekly |
 | `soak` | self-hosted windows | weekly |
-| `fuzz` | ubuntu | nightly, 10min per target |
+| `fuzz` | configured host | parser/protocol changes, 10min per target |
 
-Self-hosted runners documented in `scripts/runners/`.
+Do not add new `*_fsv` tests, FSV harnesses, or FSV scripts. Legacy artifacts
+with FSV naming are regression artifacts until renamed or removed.
 
 ---
 
 ## 15. Manual test plan (release gate)
 
-M2 uses manual FSV on the operator's configured Windows host as the shipping
-gate. GitHub Actions/CI and missing-dependency portability tests are not M2
-release gates. Before tagging a release, the maintainer runs:
+M2+ uses manual FSV on the operator's configured Windows host as the shipping
+gate. GitHub Actions/CI, automated FSV scripts, and missing-dependency
+portability tests are not release gates. Before tagging a release, the
+maintainer runs:
 
 1. **Configured Windows 11 host.** Verify ViGEmBus is installed, Synapse is installed, Claude Desktop is connected, and run "open Notepad, type, save".
 2. **Live game session.** Pick one bundled game profile, play 15 minutes via agent, verify reasonable behavior and no stuck inputs.
@@ -369,13 +379,13 @@ Maintainer signs off with a release-notes entry summarizing what they tested.
 - `synapse-capture`, `synapse-a11y`, `synapse-audio`, `synapse-perception`: 70% (OS-bound, harder to cover)
 - `synapse-models`, `synapse-hid-host`, `synapse-telemetry`: 80%
 
-`tarpaulin` on Linux (where possible) + Windows for OS-bound crates. CI surfaces coverage delta on each PR; >5% drop blocks merge.
+`tarpaulin` on Linux (where possible) + Windows for OS-bound crates can provide supporting coverage deltas. A >5% drop blocks merge when reviewed locally.
 
 ---
 
 ## 17. What this doc does NOT cover
 
 - Specific test fixture details → `tests/fixtures/`
-- CI configuration files → `.github/workflows/`
+- Supporting automation configuration files → `.github/workflows/`
 - Hardware test rig wiring → `09_hardware_hid_gateway.md`
 - Profile authoring tutorial → community wiki (post-v1)

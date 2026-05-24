@@ -59,7 +59,7 @@ pub(in crate::m2::press) async fn execute_live_press_sequence(
         tracing::warn!(
             code = "M2_ACT_PRESS_CONNECTION_CLOSED_RELEASE",
             released_keys = pressed.len(),
-            "source_of_truth=connection_closed edge=act_press after=pressed_keys_released"
+            "readback=connection_closed edge=act_press after=pressed_keys_released"
         );
     }
     Ok(())
@@ -72,7 +72,7 @@ fn maybe_force_panic_after_keydown() {
     {
         tracing::warn!(
             code = "M2_ACT_PRESS_FORCE_PANIC_AFTER_KEYDOWN",
-            "source_of_truth=act_press edge=force_panic after=keydown"
+            "readback=act_press edge=force_panic after=keydown"
         );
         tokio::task::block_in_place(|| panic!("forced panic during act_press after keydown"));
     }

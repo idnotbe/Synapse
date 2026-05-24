@@ -151,7 +151,7 @@ synapse-mcp ──────────────────────�
    synapse-test-utils (zero internal deps; dev-only)
 ```
 
-**Acyclic.** `synapse-core` has zero internal deps; the type/error/constant root. Everything depends on it; nothing depends back. Enforced by `cargo build --workspace --check` in CI.
+**Acyclic.** `synapse-core` has zero internal deps; the type/error/constant root. Everything depends on it; nothing depends back. Enforced by local workspace build checks.
 
 ## 6. Crate responsibilities
 
@@ -255,7 +255,7 @@ impl Db {
 }
 ```
 
-Pinned `rocksdb` crate version. Feature flag `storage-sled` provides sled-backed fallback where RocksDB is fragile.
+Pinned `rocksdb` crate version. M3 uses RocksDB only; any future fallback backend requires a fresh ADR and maintained dependency graph.
 
 ### synapse-profiles
 

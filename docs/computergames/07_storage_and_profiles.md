@@ -14,15 +14,13 @@ Storage is **wipe-friendly**. Pre-v1 schema changes = wipe and rebuild. Post-v1:
 
 ---
 
-## 2. Backend choice: RocksDB (with sled fallback)
+## 2. Backend choice: RocksDB
 
 RocksDB via the `rocksdb` crate. Pinned version with `features = ["multi-threaded-cf"]`.
 
 Why RocksDB: mature on Windows (`bzip2`/`zlib` C dep is unavoidable but stable); column families scope reads/writes precisely; TTL/compaction filters give cheap rolling retention; snapshot reads for replay tool.
 
-Why a sled fallback: RocksDB has had Windows reliability hiccups; some operator environments forbid native C deps; `sled` is pure Rust, simpler, slower but adequate.
-
-Feature flag `synapse-storage/sled-backend` swaps the implementation. Same API surface; both implement `trait Db`. Default RocksDB; sled is `--feature sled-backend` opt-in for v1, promoted if RocksDB causes production issues.
+M3 removed the unused sled escape valve per ADR-0002. A future fallback backend requires a maintained dependency graph, implemented adapter, and manual source-of-truth verification on the configured Windows host.
 
 ---
 
@@ -279,7 +277,7 @@ For developers extending Synapse:
 7. **For long-term retention, push to external storage** (OTLP for metrics, replay export for events).
 8. **Compaction filter, then GC task, then disk pressure.** Layer cleanup.
 9. **Surface CF size in `health` and Prometheus.** Operators need to see what's growing.
-10. **Test with a low disk volume.** CI runs a scenario with a 1 GB tmpfs DB target.
+10. **Test with a low disk volume.** Manual configured-host FSV uses a constrained DB target and reads the physical DB/volume state after the pressure trigger.
 
 ---
 
@@ -471,7 +469,7 @@ Profiles are TOML data; no scripts in v1. Post-v1: optional profile signing via 
 
 ## 9. Migrations
 
-Pre-v1: none. DB wipe on schema change is acceptable. Local FSV tests wipe-and-rebuild from a sample data set.
+Pre-v1: none. DB wipe on schema change is acceptable. Manual FSV wipe-and-rebuild scenarios use a sample data set and then read the rebuilt database state directly.
 
 Post-v1: migrations live in `synapse-storage::migrations` with explicit `from -> to` functions. Idempotent and resumable. Migration failure halts the daemon with `STORAGE_SCHEMA_MISMATCH`; operator runs `synapse-mcp db migrate` manually.
 
@@ -518,7 +516,7 @@ Per-CF overrides: `CF_EVENTS`/`CF_ACTION_LOG`/`CF_REFLEX_AUDIT` use `LZ4` + pref
 
 ## 13. What this doc does NOT cover
 
-- Sled backend specifics → `synapse-storage::sled_impl` (code only at v1)
+- Alternate storage backends → future ADR only; M3 ships RocksDB
 - Replay tool UI → none at v1; CLI-only output
 - Operator config file schema → `14_build_and_packaging.md`
 - Per-CF compaction filter implementation → code only

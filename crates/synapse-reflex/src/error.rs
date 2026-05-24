@@ -59,7 +59,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn reflex_error_codes_cover_every_variant_with_fsv() {
+    fn reflex_error_codes_cover_every_variant() {
         let cases = [
             (
                 ReflexError::CapReached {
@@ -133,18 +133,10 @@ mod tests {
             ),
         ];
 
-        println!(
-            "source_of_truth=reflex_error_codes before=count:{}",
-            cases.len()
-        );
         let observed = cases
             .iter()
             .map(|(error, expected)| (error.code(), *expected))
             .collect::<Vec<_>>();
-        println!(
-            "source_of_truth=reflex_error_codes after_truth={observed:?} final_value=count:{}",
-            observed.len()
-        );
 
         for (actual, expected) in observed {
             assert_eq!(actual, expected);

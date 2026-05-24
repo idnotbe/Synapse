@@ -6,7 +6,7 @@ const SEED: u64 = 42;
 const MAX_TOTAL_WALL_MS: u32 = 400;
 
 #[test]
-fn natural_fast_seed_42_hello_world_iki_snapshot_fsv() {
+fn natural_fast_seed_42_hello_world_iki_snapshot() {
     let dynamics = natural_fast();
     let before = TEXT;
     let schedule = sample_typing_schedule(before, &dynamics, Some(SEED));
@@ -14,7 +14,7 @@ fn natural_fast_seed_42_hello_world_iki_snapshot_fsv() {
     let total_wall_ms = total_wall_ms(&ikis);
 
     println!(
-        "source_of_truth=dynamics_natural_hello_world edge=happy before=text:{before:?},seed:{SEED},dynamics:Natural::FAST after_schedule={schedule:?} final_value=ikis:{ikis:?},total_wall_ms:{total_wall_ms}"
+        "readback=dynamics_natural_hello_world edge=happy before=text:{before:?},seed:{SEED},dynamics:Natural::FAST after_schedule={schedule:?} result_value=ikis:{ikis:?},total_wall_ms:{total_wall_ms}"
     );
 
     assert_eq!(schedule.len(), TEXT.chars().count());
@@ -30,13 +30,13 @@ fn natural_fast_seed_42_hello_world_iki_snapshot_fsv() {
 }
 
 #[test]
-fn empty_input_has_empty_iki_vector_fsv() {
+fn empty_input_has_empty_iki_vector() {
     let dynamics = natural_fast();
     let before = "";
     let schedule = sample_typing_schedule(before, &dynamics, Some(SEED));
     let ikis = ikis_ms(&schedule);
     println!(
-        "source_of_truth=dynamics_natural_hello_world edge=empty before=text:{before:?},seed:{SEED} after_schedule={schedule:?} final_value=ikis:{ikis:?}"
+        "readback=dynamics_natural_hello_world edge=empty before=text:{before:?},seed:{SEED} after_schedule={schedule:?} result_value=ikis:{ikis:?}"
     );
 
     assert!(schedule.is_empty());
@@ -45,13 +45,13 @@ fn empty_input_has_empty_iki_vector_fsv() {
 }
 
 #[test]
-fn single_character_first_iki_is_zero_fsv() {
+fn single_character_first_iki_is_zero() {
     let dynamics = natural_fast();
     let before = "H";
     let schedule = sample_typing_schedule(before, &dynamics, Some(SEED));
     let ikis = ikis_ms(&schedule);
     println!(
-        "source_of_truth=dynamics_natural_hello_world edge=single_char before=text:{before:?},seed:{SEED} after_schedule={schedule:?} final_value=ikis:{ikis:?}"
+        "readback=dynamics_natural_hello_world edge=single_char before=text:{before:?},seed:{SEED} after_schedule={schedule:?} result_value=ikis:{ikis:?}"
     );
 
     assert_eq!(ikis, [0]);
@@ -59,7 +59,7 @@ fn single_character_first_iki_is_zero_fsv() {
 }
 
 #[test]
-fn seed_42_is_deterministic_and_seed_43_differs_fsv() {
+fn seed_42_is_deterministic_and_seed_43_differs() {
     let dynamics = natural_fast();
     let first = sample_typing_schedule(TEXT, &dynamics, Some(SEED));
     let second = sample_typing_schedule(TEXT, &dynamics, Some(SEED));
@@ -67,7 +67,7 @@ fn seed_42_is_deterministic_and_seed_43_differs_fsv() {
     let first_ikis = ikis_ms(&first);
     let different_ikis = ikis_ms(&different);
     println!(
-        "source_of_truth=dynamics_natural_hello_world edge=seed_determinism before=text:{TEXT:?},seed:{SEED} after_seed_42={first_ikis:?} after_seed_43={different_ikis:?} final_value=same_seed_equal:{},different_seed_differs:{}",
+        "readback=dynamics_natural_hello_world edge=seed_determinism before=text:{TEXT:?},seed:{SEED} after_seed_42={first_ikis:?} after_seed_43={different_ikis:?} result_value=same_seed_equal:{},different_seed_differs:{}",
         first == second,
         first_ikis != different_ikis
     );

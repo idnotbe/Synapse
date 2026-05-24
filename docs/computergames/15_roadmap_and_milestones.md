@@ -4,7 +4,7 @@
 
 | Milestone | Theme | Effort (solo) |
 |---|---|---|
-| **M0** | Bootstrap — workspace, MCP loopback, CI | 1 week |
+| **M0** | Bootstrap — workspace, MCP loopback, local checks | 1 week |
 | **M1** | Perception MVP — capture + UIA + observe() | 2-3 weeks |
 | **M2** | Action MVP — kbd/mouse/pad + clipboard | 2 weeks |
 | **M3** | Reflex + MCP surface — tools, push events, profiles | 2-3 weeks |
@@ -27,7 +27,7 @@
 - One tool: `health` returns `{"ok": true, "version": "..."}`
 - stdio transport with Claude Desktop / Codex CLI
 - `tracing` JSON file logger
-- CI: `cargo fmt`, `cargo clippy`, `cargo test` per PR
+- Local supporting checks: `cargo fmt`, `cargo clippy`, `cargo test`
 - README "Hello, Synapse"
 - `synapse-test-utils` with custom MCP client
 
@@ -149,7 +149,7 @@ Agent registers `on_event` reflex: "when Save dialog appears, type path + Enter.
 - Time-critical thread scheduling on Windows; debug jitter
 - Profile hot-reload vs active state ordering
 - Streamable HTTP / SSE re-connect semantics
-- RocksDB Windows reliability; sled-backend escape hatch matters
+- RocksDB Windows reliability; M3 uses RocksDB only per ADR-0002
 
 ---
 
@@ -255,8 +255,8 @@ Not committed; v2 roadmap decided after v1 ships.
 | M1 | DirectML on AMD/Intel | CPU fallback for detection; warn at startup if no GPU EP |
 | M2 | ViGEm install friction | Document Win11 GUI clickthrough; auto-detect; skip ViGEm features if absent |
 | M3 | Time-critical thread jitter | Multimedia timer; fall back to `tokio::time` 2 ms tick if no MMCSS |
-| M3 | RocksDB Windows hiccups | sled-backend feature flag escape valve |
-| M4 | RP2040 firmware debug pain | Loopback build feature off-target; CI on self-hosted Pico |
+| M3 | RocksDB Windows hiccups | pinned RocksDB version; alternate backend requires future ADR |
+| M4 | RP2040 firmware debug pain | Loopback build feature off-target; configured-host Pico checks |
 | M4 | Minecraft detection accuracy | Mark accuracy honestly; commit to fine-tune in v1.x |
 | M5 | MSI signing cert | Self-sign at v1.0; document SmartScreen warning; cert acquisition separate workstream |
 | M5 | VLM bundle size | VLM optional download; `describe` returns `MODEL_NOT_LOADED` until downloaded |

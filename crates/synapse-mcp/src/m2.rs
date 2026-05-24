@@ -120,7 +120,7 @@ impl M2State {
             window_ms = double_click_timing.window_ms,
             inter_click_delay_ms = double_click_timing.inter_click_delay_ms,
             source = double_click_timing.source,
-            "source_of_truth=double_click_timing after_cache_readback"
+            "readback=double_click_timing after_cache_readback"
         );
         let recording =
             recording_backend_enabled(recording_backend).then(|| Arc::new(RecordingBackend::new()));
@@ -266,7 +266,7 @@ mod tests {
             .as_ref()
             .map_or(0, |recording| recording.events().len());
         println!(
-            "source_of_truth=m2_state scenario=from_env before_env={before:?} expected_recording={expected} after_recording_enabled={} emitter_retained={} emitter_available={} recording_event_count={event_count}",
+            "readback=m2_state scenario=from_env before_env={before:?} expected_recording={expected} after_recording_enabled={} emitter_retained={} emitter_available={} recording_event_count={event_count}",
             state.recording_enabled(),
             state.emitter_retained(),
             state.emitter_available()
@@ -285,7 +285,7 @@ mod tests {
             Err(err) => panic!("snapshot failed: {err}"),
         };
         println!(
-            "source_of_truth=m2_state scenario=runtime_actor before_env={before:?} after_recording_enabled={} emitter_retained={} emitter_running={} held_keys={:?} held_key_timer_count={} held_buttons={:?} pad_state_len={}",
+            "readback=m2_state scenario=runtime_actor before_env={before:?} after_recording_enabled={} emitter_retained={} emitter_running={} held_keys={:?} held_key_timer_count={} held_buttons={:?} pad_state_len={}",
             state.recording_enabled(),
             state.emitter_retained(),
             state.emitter_running(),
@@ -318,7 +318,7 @@ mod tests {
         );
         let key = key_named("m2-cancel-token");
         println!(
-            "source_of_truth=m2_state scenario=injected_cancel before_cancelled:{} emitter_running:{}",
+            "readback=m2_state scenario=injected_cancel before_cancelled:{} emitter_running:{}",
             cancel.is_cancelled(),
             state.emitter_running()
         );
@@ -355,7 +355,7 @@ mod tests {
             .unwrap_or_else(|| panic!("emitter done receiver should contain final snapshot"));
 
         println!(
-            "source_of_truth=m2_state scenario=injected_cancel after_cancelled:{} before_held_keys:{:?} after_held_keys:{:?} done_held_keys:{:?} after_timer_count:{} after_buttons:{:?} after_pad_state_len:{}",
+            "readback=m2_state scenario=injected_cancel after_cancelled:{} before_held_keys:{:?} after_held_keys:{:?} done_held_keys:{:?} after_timer_count:{} after_buttons:{:?} after_pad_state_len:{}",
             cancel.is_cancelled(),
             before_cancel.held_keys,
             after_cancel.held_keys,
@@ -390,7 +390,7 @@ mod tests {
                 .as_ref()
                 .map_or(0, |recording| recording.events().len());
             println!(
-                "source_of_truth=m2_state scenario={name} before_env={before:?} expected_recording={expected} after_recording_enabled={} emitter_retained={} emitter_available={} recording_event_count={event_count}",
+                "readback=m2_state scenario={name} before_env={before:?} expected_recording={expected} after_recording_enabled={} emitter_retained={} emitter_available={} recording_event_count={event_count}",
                 state.recording_enabled(),
                 state.emitter_retained(),
                 state.emitter_available()

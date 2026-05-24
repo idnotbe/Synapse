@@ -412,7 +412,7 @@ struct BenchReport {
 impl BenchReport {
     fn print(&self) {
         println!(
-            "source_of_truth=action_software_press mode={} edge={} before={} after={} iterations:{} p50_keydown_ns:{} p99_keydown_ns:{} max_keydown_ns:{} target_p99_ns:{} final_value={}",
+            "readback=action_software_press mode={} edge={} before={} after={} iterations:{} p50_keydown_ns:{} p99_keydown_ns:{} max_keydown_ns:{} target_p99_ns:{} result_value={}",
             self.mode,
             self.edge,
             self.before,

@@ -20,7 +20,7 @@ fn cf_constants_match_literal_names() {
 }
 
 #[test]
-fn cf_names_sorted_snapshot_with_fsv() {
+fn cf_names_sorted_snapshot() {
     let mut actual = vec![
         synapse_storage::cf::CF_EVENTS,
         synapse_storage::cf::CF_OBSERVATIONS,
@@ -34,11 +34,11 @@ fn cf_names_sorted_snapshot_with_fsv() {
         synapse_storage::cf::CF_PROCESS_HISTORY,
         synapse_storage::cf::CF_KV,
     ];
-    println!("source_of_truth=storage_cf before=declared_order:{actual:?}");
+    println!("regression_state=storage_cf before=declared_order:{actual:?}");
     actual.sort_unstable();
     actual.dedup();
     println!(
-        "source_of_truth=storage_cf after=sorted_unique:{actual:?} final_count:{}",
+        "regression_state=storage_cf after=sorted_unique:{actual:?} final_count:{}",
         actual.len()
     );
     assert_eq!(actual.len(), 11);

@@ -201,7 +201,7 @@ mod tests {
         assert_eq!(after_consume.tokens, SOFTWARE_RATE_LIMIT_PER_S - 100);
         assert_eq!(after_refill.tokens, SOFTWARE_RATE_LIMIT_PER_S);
         println!(
-            "source_of_truth=token_bucket edge=software_100_refill before={before:?} after_consume={after_consume:?} after_refill={after_refill:?}"
+            "readback=token_bucket edge=software_100_refill before={before:?} after_consume={after_consume:?} after_refill={after_refill:?}"
         );
     }
 
@@ -219,7 +219,7 @@ mod tests {
         assert_eq!(after_consume.tokens, SOFTWARE_RATE_LIMIT_PER_S - 100);
         assert_eq!(after_refill.tokens, SOFTWARE_RATE_LIMIT_PER_S);
         println!(
-            "source_of_truth=token_bucket edge=tokio_paused_20ms before={before:?} after_consume={after_consume:?} after_refill={after_refill:?}"
+            "readback=token_bucket edge=tokio_paused_20ms before={before:?} after_consume={after_consume:?} after_refill={after_refill:?}"
         );
     }
 
@@ -236,7 +236,7 @@ mod tests {
         assert_eq!(after_empty.tokens, 0);
         assert_eq!(after_denied.tokens, 0);
         println!(
-            "source_of_truth=token_bucket edge=empty_denied before={before:?} after_empty={after_empty:?} after_denied={after_denied:?}"
+            "readback=token_bucket edge=empty_denied before={before:?} after_empty={after_empty:?} after_denied={after_denied:?}"
         );
     }
 
@@ -253,7 +253,7 @@ mod tests {
         assert_eq!(after_consume.tokens, 5);
         assert_eq!(after_refill.tokens, 10);
         println!(
-            "source_of_truth=token_bucket edge=clamp before={before:?} after_consume={after_consume:?} after_refill={after_refill:?}"
+            "readback=token_bucket edge=clamp before={before:?} after_consume={after_consume:?} after_refill={after_refill:?}"
         );
     }
 
@@ -272,7 +272,7 @@ mod tests {
         assert_eq!(after_half_token.last_refill_ns, 0);
         assert_eq!(after_full_token.tokens, 1);
         println!(
-            "source_of_truth=token_bucket edge=sub_token_elapsed before={before:?} after_half={after_half_token:?} after_full={after_full_token:?}"
+            "readback=token_bucket edge=sub_token_elapsed before={before:?} after_half={after_half_token:?} after_full={after_full_token:?}"
         );
     }
 
@@ -292,7 +292,7 @@ mod tests {
         assert_eq!(after_two_tokens.tokens, 2);
         assert_eq!(after_two_tokens.last_refill_ns, 400_000);
         println!(
-            "source_of_truth=token_bucket edge=fractional_remainder before={before:?} after_one_and_half={after_one_and_half_tokens:?} after_two={after_two_tokens:?}"
+            "readback=token_bucket edge=fractional_remainder before={before:?} after_one_and_half={after_one_and_half_tokens:?} after_two={after_two_tokens:?}"
         );
     }
 
@@ -310,7 +310,7 @@ mod tests {
         assert_eq!(after_refill_attempt.tokens, 0);
         assert_eq!(after_refill_attempt.last_refill_ns, 0);
         println!(
-            "source_of_truth=token_bucket edge=zero_rate before={before:?} after_empty={after_empty:?} after_refill_attempt={after_refill_attempt:?}"
+            "readback=token_bucket edge=zero_rate before={before:?} after_empty={after_empty:?} after_refill_attempt={after_refill_attempt:?}"
         );
     }
 
@@ -328,7 +328,7 @@ mod tests {
             assert_eq!(after.tokens, expected);
             assert_eq!(after.refill_rate_per_s, expected);
             println!(
-                "source_of_truth=token_bucket edge=backend_default backend={} after={after:?}",
+                "readback=token_bucket edge=backend_default backend={} after={after:?}",
                 backend.as_str()
             );
         }
@@ -345,7 +345,7 @@ mod tests {
 
         assert_eq!(after, 1);
         println!(
-            "source_of_truth=token_bucket edge=retry_after_hint before={before:?} after_retry_after_ms={after}"
+            "readback=token_bucket edge=retry_after_hint before={before:?} after_retry_after_ms={after}"
         );
     }
 }

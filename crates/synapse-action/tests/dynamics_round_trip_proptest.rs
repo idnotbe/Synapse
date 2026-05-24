@@ -9,11 +9,11 @@ use synapse_action::{
 use synapse_core::{Action, Backend, KeyCode, KeystrokeDynamics, KeystrokeNaturalParams};
 
 #[test]
-fn empty_string_records_zero_events_fsv() -> Result<(), Box<dyn std::error::Error>> {
+fn empty_string_records_zero_events() -> Result<(), Box<dyn std::error::Error>> {
     let text = "";
     let truth = record_and_reconstruct(text)?;
     println!(
-        "source_of_truth=dynamics_round_trip edge=empty before={text:?} after=events:{:?},reconstructed:{:?} final_value=events:{}",
+        "readback=dynamics_round_trip edge=empty before={text:?} after=events:{:?},reconstructed:{:?} result_value=events:{}",
         truth.events,
         truth.reconstructed,
         truth.events.len()
@@ -27,11 +27,11 @@ fn empty_string_records_zero_events_fsv() -> Result<(), Box<dyn std::error::Erro
 }
 
 #[test]
-fn extended_latin_string_round_trips_fsv() -> Result<(), Box<dyn std::error::Error>> {
+fn extended_latin_string_round_trips() -> Result<(), Box<dyn std::error::Error>> {
     let text = "Az ÀĿſƀ";
     let truth = record_and_reconstruct(text)?;
     println!(
-        "source_of_truth=dynamics_round_trip edge=extended_latin before={text:?} after=schedule:{:?},events:{:?},reconstructed:{:?} final_value={:?}",
+        "readback=dynamics_round_trip edge=extended_latin before={text:?} after=schedule:{:?},events:{:?},reconstructed:{:?} result_value={:?}",
         truth.schedule_chars, truth.events, truth.reconstructed, truth.reconstructed
     );
 
@@ -108,7 +108,7 @@ fn random_strings_round_trip_through_recording_backend_10k()
     })?;
 
     println!(
-        "source_of_truth=dynamics_round_trip edge=proptest final_value=ok cases=10000 max_chars=200 unicode_range=U+00C0..U+017F"
+        "readback=dynamics_round_trip edge=proptest result_value=ok cases=10000 max_chars=200 unicode_range=U+00C0..U+017F"
     );
     Ok(())
 }

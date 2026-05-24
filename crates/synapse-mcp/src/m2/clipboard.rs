@@ -107,7 +107,7 @@ pub async fn act_clipboard(params: ActClipboardParams) -> Result<ActClipboardRes
         written = response.written,
         cleared = response.cleared,
         text_len = response.text_len,
-        "source_of_truth=clipboard_backend tool=act_clipboard after_operation_readback"
+        "readback=clipboard_backend tool=act_clipboard after_operation_readback"
     );
     Ok(response)
 }
