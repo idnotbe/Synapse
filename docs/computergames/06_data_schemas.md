@@ -630,7 +630,7 @@ pub struct Profile {
     pub detection: ProfileDetection,
     pub ocr: ProfileOcr,
     pub hud: Vec<HudFieldSpec>,
-    pub keymap: std::collections::HashMap<String, String>,    // alias -> key name
+    pub keymap: std::collections::BTreeMap<String, String>,   // alias -> key name
     pub backends: ProfileBackends,
     pub event_extensions: Vec<EventExtension>,
 }
@@ -640,6 +640,8 @@ pub struct ProfileMatch {
     pub exe: Option<String>,                   // basename or full path regex
     pub title_regex: Option<String>,
     pub steam_appid: Option<u32>,
+    pub window_class: Option<String>,
+    pub process_args: Vec<String>,
 }
 
 #[derive(Copy, Clone, Debug, Serialize, Deserialize)]
@@ -678,6 +680,8 @@ pub struct ProfileDetection {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ProfileOcr {
     pub default_backend: OcrBackend,
+    pub regions: Vec<HudRegion>,
+    pub parser_config: std::collections::BTreeMap<String, String>,
 }
 
 #[derive(Copy, Clone, Debug, Serialize, Deserialize)]
@@ -720,7 +724,7 @@ pub enum HudParser {
     FractionNumerator,                          // "85/100" -> 85
     FractionDenominator,
     Regex { pattern: String, group: u32 },
-    Enum { mapping: std::collections::HashMap<String, String> },
+    Enum { mapping: std::collections::BTreeMap<String, String> },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
