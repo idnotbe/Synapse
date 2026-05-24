@@ -17,7 +17,8 @@ pub use types::{
     PerceptionMode, Point, Profile, ProfileBackends, ProfileCapture, ProfileCaptureTarget,
     ProfileDetection, ProfileId, ProfileMatch, ProfileOcr, ProfileUseScope, Rect, ReflexAimAxis,
     ReflexButtonTarget, ReflexId, ReflexKind, ReflexLifetime, ReflexRegistration, ReflexState,
-    ReflexStatus, ReflexThen, SensorStatus, SessionId, Size, Stick, SubscriptionId,
-    SubsystemHealth, Trigger, UiaPattern, WindowEdge, element_id, entity_id, new_reflex_id,
-    new_session_id, new_subscription_id,
+    ReflexStatus, ReflexThen, SensorStatus, SessionId, Size, Stick, StoredEvent, StoredObservation,
+    StoredProfileHistoryEntry, StoredRedaction, StoredReflexAudit, StoredReflexStep, StoredSession,
+    SubscriptionId, SubsystemHealth, Trigger, UiaPattern, WindowEdge, element_id, entity_id,
+    new_reflex_id, new_session_id, new_subscription_id,
 };

@@ -1,0 +1,37 @@
+---
+source: crates/synapse-core/tests/stored_types.rs
+expression: "round_trip(\"StoredReflexAudit\", \"snapshot\", full_reflex_audit())?"
+---
+{
+  "schema_version": 1,
+  "audit_id": "audit-full",
+  "reflex_id": "reflex-full",
+  "ts_ns": 42,
+  "status": "starved",
+  "event_id": "event-full",
+  "steps": [
+    {
+      "index": 1,
+      "action": {
+        "kind": "mouse_button",
+        "button": "left",
+        "action": "press",
+        "hold_ms": 16,
+        "backend": "software"
+      },
+      "status": "completed"
+    }
+  ],
+  "error_code": "REFLEX_STARVED",
+  "details": {
+    "lost_for_ms": 2000
+  },
+  "redacted": true,
+  "redactions": [
+    {
+      "kind": "secret",
+      "offset": 12,
+      "len": 8
+    }
+  ]
+}

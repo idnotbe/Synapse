@@ -81,7 +81,7 @@ Per `13_testing_strategy.md`.
 |---|---|---|
 | Unit | every pub fn w/ non-trivial logic | error variant must be triggered |
 | Integration | every subsystem boundary | real OS where possible (capture, RocksDB, UIA on Win) |
-| Property | filter eval, aim curves, keystroke, coord transforms, binary-codec round-trip | `proptest` |
+| Property | filter eval, aim curves, keystroke, coord transforms, JSON round-trip | `proptest` |
 | Snapshot | tool schemas, observation shape, error response shape | `insta` |
 | Bench | tracked perf bench list (§1 above) | `criterion`, `critcmp`, local exported JSON delta gate |
 | E2E | each milestone's demo scenario | real Notepad, real Minecraft, real RP2040 |

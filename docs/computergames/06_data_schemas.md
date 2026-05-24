@@ -1,6 +1,6 @@
 # 06 — Data Schemas
 
-Canonical types live in `synapse-core`. JSON serialization via `serde` (`#[serde(rename_all = "snake_case")]` everywhere). Bincode for RocksDB hot paths only.
+Canonical types live in `synapse-core`. JSON serialization via `serde` (`#[serde(rename_all = "snake_case")]` everywhere). RocksDB stored records use JSON; bincode is excluded by ADR-0001 / RUSTSEC-2025-0141.
 
 This doc is the spec; `synapse-core/src/types.rs` is the implementation. Drift between them is a CI failure.
 
@@ -800,38 +800,96 @@ Profile TOML examples in `07_storage_and_profiles.md`.
 
 ## 7. Storage records (RocksDB values)
 
-Most hot CF values use a maintained binary codec for storage efficiency; some are JSON for human inspection. Choice documented in `07_storage_and_profiles.md`.
+RocksDB stored records use JSON so the on-disk source of truth stays inspectable and avoids bincode's RUSTSEC-2025-0141 risk. Choice documented in `07_storage_and_profiles.md`.
 
 ```rust
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct StoredRedaction {
+    pub kind: String,
+    pub offset: u32,
+    pub len: u32,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct StoredEvent {
-    pub event: Event,
-    pub stored_at: chrono::DateTime<chrono::Utc>,
+    pub schema_version: u32,
+    pub event_id: String,
+    pub ts_ns: u64,
+    pub session_id: Option<SessionId>,
+    pub source: EventSource,
+    pub kind: String,
+    pub data: serde_json::Value,
+    pub window_id: Option<i64>,
+    pub element_id: Option<ElementId>,
+    pub redacted: bool,
+    pub redactions: Vec<StoredRedaction>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct StoredObservation {
-    pub obs: Observation,
-    pub stored_at: chrono::DateTime<chrono::Utc>,
+    pub schema_version: u32,
+    pub observation_id: String,
+    pub ts_ns: u64,
+    pub session_id: Option<SessionId>,
+    pub mode: PerceptionMode,
+    pub foreground: ForegroundContext,
+    pub focused: Option<FocusedElement>,
+    pub elements: Vec<AccessibleNode>,
+    pub entities: Vec<DetectedEntity>,
+    pub hud: HudReadings,
+    pub audio: AudioContext,
+    pub recent_events: Vec<EventSummary>,
+    pub clipboard_summary: Option<ClipboardSummary>,
+    pub fs_recent: Vec<FsEvent>,
+    pub diagnostics: ObservationDiagnostics,
     pub reason: String,                         // "1hz_sample" | "before_action" | "user_requested"
+    pub redacted: bool,
+    pub redactions: Vec<StoredRedaction>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct StoredReflexStep {
+    pub index: u32,
+    pub action: Action,
+    pub status: String,
+    pub error_code: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct StoredReflexAudit {
+    pub schema_version: u32,
+    pub audit_id: String,
     pub reflex_id: ReflexId,
-    pub at: chrono::DateTime<chrono::Utc>,
-    pub kind: String,                           // "registered" | "fired" | "cancelled" | "expired" | "starved"
-    pub payload: serde_json::Value,
+    pub ts_ns: u64,
+    pub status: ReflexState,
+    pub event_id: Option<String>,
+    pub steps: Vec<StoredReflexStep>,
+    pub error_code: Option<String>,
+    pub details: serde_json::Value,
+    pub redacted: bool,
+    pub redactions: Vec<StoredRedaction>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct StoredProfileHistoryEntry {
+    pub profile_id: ProfileId,
+    pub activated_at: chrono::DateTime<chrono::Utc>,
+    pub reason: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct StoredSession {
+    pub schema_version: u32,
     pub session_id: SessionId,
-    pub created_at: chrono::DateTime<chrono::Utc>,
-    pub closed_at: Option<chrono::DateTime<chrono::Utc>>,
-    pub client: String,                         // e.g., "claude-desktop/0.4.2"
+    pub started_at: chrono::DateTime<chrono::Utc>,
+    pub ended_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub transport: String,                      // "stdio" | "http"
+    pub client: Option<String>,                 // e.g., "claude-desktop/0.4.2"
     pub mode: PerceptionMode,
     pub active_profile: Option<ProfileId>,
+    pub profile_history: Vec<StoredProfileHistoryEntry>,
+    pub redacted: bool,
+    pub redactions: Vec<StoredRedaction>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

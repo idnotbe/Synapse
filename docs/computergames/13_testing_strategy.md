@@ -118,7 +118,7 @@ Every test gets a `tempfile::TempDir`-backed RocksDB via `synapse-test-utils::Te
 - **Aim curves** — generated start/end produce step sequences whose first step starts at start, last ends at end, total ms matches duration within tolerance.
 - **Keystroke dynamics** — generated text round-trips, no chars dropped, modifier-state consistent.
 - **Coordinate transforms** — `screen_to_window(window_to_screen(p, h), h) == p` for any window.
-- **Bincode round-trip** — every persistable type round-trips bytes-identical.
+- **JSON round-trip** — every persistable type round-trips through `serde_json` bytes-identically after canonical serialization.
 
 Critical bug class: action emitter dropping `KeyUp` after `KeyDown` = stuck key. Property test:
 

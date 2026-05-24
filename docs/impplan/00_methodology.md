@@ -155,7 +155,7 @@ Per `12_observability.md`:
 Per `07_storage_and_profiles.md` §6 (data lifecycle):
 
 - Every new CF declares TTL + soft cap + hard cap in `synapse-core::retention::DEFAULTS`. No "decide later."
-- Binary codec for hot/binary CFs, JSON for human-readable/audit CFs. `bincode` is disallowed after RUSTSEC-2025-0141 (ADR-0001); pick a maintained codec before M3 storage. M0-M2 use JSON only.
+- JSON for persisted typed records. `bincode` is disallowed after RUSTSEC-2025-0141 (ADR-0001); a future maintained binary codec requires an explicit ADR and migration plan.
 - Per-frame writes forbidden — aggregate, batch every 100 ms or 64 KB
 - Three cleanup layers: compaction filter, periodic GC (5 min), disk-pressure responder
 - Test with 1 GB tmpfs DB volume in CI to verify pressure levels (`07_storage_and_profiles.md` §6.3)

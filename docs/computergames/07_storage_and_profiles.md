@@ -51,15 +51,15 @@ override:   --db <path>     (CLI flag)
 
 | CF | Key | Value | Encoding | TTL | Soft cap | Hard cap | Notes |
 |---|---|---|---|---|---|---|---|
-| `CF_EVENTS` | `[seq u64 BE]` | `StoredEvent` | binary codec | 24h | 2 GB | 4 GB | Append-only ring; the replay log |
-| `CF_OBSERVATIONS` | `[seq u64 BE]` | `StoredObservation` | binary codec | 6h | 500 MB | 1 GB | 1Hz sample + reason-triggered snapshots |
+| `CF_EVENTS` | `[seq u64 BE]` | `StoredEvent` | json | 24h | 2 GB | 4 GB | Append-only ring; the replay log |
+| `CF_OBSERVATIONS` | `[seq u64 BE]` | `StoredObservation` | json | 6h | 500 MB | 1 GB | 1Hz sample + reason-triggered snapshots |
 | `CF_PROFILES` | `[profile_id utf8]` | TOML bytes | raw bytes | none | 20 MB | 50 MB | Cached load; source of truth is on-disk TOML |
 | `CF_MODEL_CACHE` | `[model_sha256 32 bytes]` | model bytes | raw bytes | LRU when full | 1 GB | 2 GB | Downloaded ONNX models, sha-verified |
 | `CF_SESSIONS` | `[session_id utf8]` | `StoredSession` | json | 30d | 50 MB | 100 MB | One row per session |
-| `CF_REFLEX_AUDIT` | `[reflex_id 16 bytes][at_ns u64 BE]` | `StoredReflexAudit` | binary codec | 7d | 200 MB | 500 MB | Per-reflex audit |
-| `CF_OCR_CACHE` | `[image_sha256 32 bytes]` | `OcrResult` | binary codec | 1h | 50 MB | 100 MB | Memoization of OCR on stable regions |
+| `CF_REFLEX_AUDIT` | `[reflex_id 16 bytes][at_ns u64 BE]` | `StoredReflexAudit` | json | 7d | 200 MB | 500 MB | Per-reflex audit |
+| `CF_OCR_CACHE` | `[image_sha256 32 bytes]` | `OcrResult` | json | 1h | 50 MB | 100 MB | Memoization of OCR on stable regions |
 | `CF_TELEMETRY` | `[metric_name utf8][at_ns u64 BE]` | `f64 LE` | raw 8 bytes | 6h | 100 MB | 200 MB | Local metric ringbuffer |
-| `CF_ACTION_LOG` | `[at_ns u64 BE][seq u32 BE]` | `StoredActionRecord` | binary codec | 24h | 200 MB | 500 MB | Every action emitted |
+| `CF_ACTION_LOG` | `[at_ns u64 BE][seq u32 BE]` | `StoredActionRecord` | json | 24h | 200 MB | 500 MB | Every action emitted |
 | `CF_PROCESS_HISTORY` | `[at_ns u64 BE][pid u32]` | json | json | 6h | 20 MB | 50 MB | Process started/exited events |
 | `CF_KV` | `[utf8]` | bytes | raw | none | 10 MB | 50 MB | Generic key-value extension |
 
@@ -272,7 +272,7 @@ For developers extending Synapse:
 2. **Pick a TTL upfront.** Every new CF declares TTL + soft cap + hard cap in `synapse-core::retention::DEFAULTS`.
 3. **Don't write per-frame.** Aggregate. 60 fps = 5,184,000 events per day if per frame. Batch.
 4. **Use write batches.** Many small writes → one batch flush every 100 ms.
-5. **Bincode for hot CFs, JSON for human-readable / audit CFs.** Bincode is 2-3× smaller, 5-10× faster to decode.
+5. **JSON for persisted typed records.** Bincode is excluded by ADR-0001 / RUSTSEC-2025-0141; prefer inspectable JSON until a maintained binary codec is explicitly selected.
 6. **Don't store what you can recompute cheaply.** Detection results, OCR results, panel materializations.
 7. **For long-term retention, push to external storage** (OTLP for metrics, replay export for events).
 8. **Compaction filter, then GC task, then disk pressure.** Layer cleanup.

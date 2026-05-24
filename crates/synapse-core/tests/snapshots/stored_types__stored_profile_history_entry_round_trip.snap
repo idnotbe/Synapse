@@ -1,0 +1,9 @@
+---
+source: crates/synapse-core/tests/stored_types.rs
+expression: "round_trip(\"StoredProfileHistoryEntry\", \"snapshot\",\nfull_profile_history_entry(),)?"
+---
+{
+  "profile_id": "vscode",
+  "activated_at": "1970-01-01T00:00:02Z",
+  "reason": "window_match"
+}
