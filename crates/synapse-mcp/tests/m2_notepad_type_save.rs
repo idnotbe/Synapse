@@ -28,6 +28,10 @@ const DEMO_FILE_NAME: &str = "synapse-m2-demo.txt";
 const DEMO_TEXT_TO_TYPE: &str = "Hello world.\nThis is Synapse.";
 #[cfg(windows)]
 const EXPECTED_DISK_TEXT: &str = "Hello world.\r\nThis is Synapse.";
+#[cfg(windows)]
+const INVALID_SAVE_PATH: &str = r"Z:\nope\synapse-m2-invalid-dir.txt";
+#[cfg(windows)]
+const INVALID_EDGE_CLEANUP_FILE_NAME: &str = "synapse-m2-invalid-edge-cleanup.txt";
 
 #[cfg(windows)]
 #[tokio::test]
@@ -255,6 +259,204 @@ async fn notepad_type_save_writes_byte_correct_file_fsv() -> anyhow::Result<()> 
 }
 
 #[cfg(windows)]
+#[tokio::test]
+#[ignore = "requires an interactive Windows desktop with Notepad and UIA"]
+async fn notepad_save_invalid_dir_shows_dialog_and_writes_no_file_fsv() -> anyhow::Result<()> {
+    let _notepad_lock = WINDOWS_NOTEPAD_FSV_LOCK.lock().await;
+    let invalid_path = PathBuf::from(INVALID_SAVE_PATH);
+    let cleanup_path = std::env::temp_dir().join(INVALID_EDGE_CLEANUP_FILE_NAME);
+    let cleanup = FileCleanup(cleanup_path.clone());
+    if cleanup_path.exists() {
+        std::fs::remove_file(&cleanup_path)
+            .with_context(|| format!("remove stale cleanup file {}", cleanup_path.display()))?;
+    }
+    println!(
+        "source_of_truth=disk edge=invalid_dir before_path={} before_exists={} cleanup_path={} cleanup_before_exists={}",
+        invalid_path.display(),
+        invalid_path.exists(),
+        cleanup_path.display(),
+        cleanup_path.exists()
+    );
+    assert!(!invalid_path.exists());
+
+    let log_dir = TempDir::new()?;
+    let handle = launch_notepad()?;
+    let hwnd = handle.hwnd();
+    let pid = handle.pid();
+    println!(
+        "source_of_truth=NotepadHandle edge=invalid_dir ownership after_hwnd=0x{hwnd:x} after_pid={pid} pid_preexisting={}",
+        handle.pid_preexisting()
+    );
+    let mut client = StdioMcpClient::launch_and_init_with_log_dir(Some(log_dir.path())).await?;
+
+    let editor_id = editor_from_uia_snapshot(hwnd)?;
+    focus_editor(hwnd, &editor_id)?;
+    println!("source_of_truth=editor_element edge=invalid_dir before_element_id={editor_id}");
+    let click = client
+        .tools_call(
+            "act_click",
+            json!({"target": {"element_id": editor_id.to_string()}, "use_invoke_pattern": true}),
+        )
+        .await?;
+    let click_response: ActClickWireResponse = structured(&click)?;
+    println!(
+        "source_of_truth=mcp_act_click edge=invalid_dir after=ok:{} used_invoke_pattern:{} backend_used:{} elapsed_ms:{}",
+        click_response.ok,
+        click_response.used_invoke_pattern,
+        click_response.backend_used,
+        click_response.elapsed_ms
+    );
+    assert!(click_response.ok);
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let observe_before = observe(&mut client).await?;
+    println!(
+        "source_of_truth=mcp_observe edge=invalid_dir before_type hwnd=0x{hwnd:x} pid={pid} title={:?}",
+        observe_before.foreground.window_title
+    );
+    assert_eq!(observe_before.foreground.hwnd, hwnd);
+    assert_eq!(observe_before.foreground.pid, pid);
+
+    let typed = client
+        .tools_call(
+            "act_type",
+            json!({
+                "text": DEMO_TEXT_TO_TYPE,
+                "dynamics": "linear",
+                "linear_ms_per_char": 30
+            }),
+        )
+        .await?;
+    let typed_response: ActTypeWireResponse = structured(&typed)?;
+    println!(
+        "source_of_truth=mcp_act_type edge=invalid_dir_body after=ok:{} chars_typed:{} elapsed_ms:{}",
+        typed_response.ok, typed_response.chars_typed, typed_response.elapsed_ms
+    );
+    assert!(typed_response.ok);
+
+    press_keys(&mut client, "invalid_dir_save_chord", json!(["ctrl", "s"])).await?;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let save_dialog = observe(&mut client).await?;
+    println!(
+        "source_of_truth=mcp_observe edge=invalid_dir_save_dialog after_title={:?} process={:?} focused_role={:?}",
+        save_dialog.foreground.window_title,
+        save_dialog.foreground.process_name,
+        save_dialog
+            .focused
+            .as_ref()
+            .map(|focused| focused.role.as_str())
+    );
+
+    println!(
+        "source_of_truth=mcp_act_type edge=invalid_dir_filename before_path={} before_len={}",
+        INVALID_SAVE_PATH,
+        INVALID_SAVE_PATH.chars().count()
+    );
+    let filename = client
+        .tools_call(
+            "act_type",
+            json!({
+                "text": INVALID_SAVE_PATH,
+                "dynamics": "linear",
+                "linear_ms_per_char": 20
+            }),
+        )
+        .await?;
+    let filename_response: ActTypeWireResponse = structured(&filename)?;
+    println!(
+        "source_of_truth=mcp_act_type edge=invalid_dir_filename after=ok:{} chars_typed:{} elapsed_ms:{}",
+        filename_response.ok, filename_response.chars_typed, filename_response.elapsed_ms
+    );
+    assert!(filename_response.ok);
+
+    press_keys(&mut client, "invalid_dir_confirm_save", json!(["enter"])).await?;
+    let invalid_dialog = wait_for_invalid_save_dialog(&mut client, Duration::from_secs(5)).await?;
+    let dialog_text = summarize_nodes(&invalid_dialog.elements);
+    let dialog_title = invalid_dialog.foreground.window_title.clone();
+    println!(
+        "source_of_truth=disk edge=invalid_dir after_exists={}; source_of_truth=uia edge=invalid_dir after_dialog_title={:?} focused_role={:?} matched_text={}",
+        invalid_path.exists(),
+        dialog_title,
+        invalid_dialog
+            .focused
+            .as_ref()
+            .map(|focused| focused.role.as_str()),
+        dialog_text
+    );
+    assert!(!invalid_path.exists());
+    assert!(dialog_mentions_invalid_path(&invalid_dialog));
+
+    press_keys(&mut client, "invalid_dir_dismiss_error", json!(["escape"])).await?;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    press_keys(
+        &mut client,
+        "invalid_dir_select_filename",
+        json!(["ctrl", "a"]),
+    )
+    .await?;
+
+    let cleanup_path_text = cleanup_path.to_string_lossy().into_owned();
+    println!(
+        "source_of_truth=mcp_act_type edge=invalid_dir_cleanup_filename before_path={} before_len={}",
+        cleanup_path_text,
+        cleanup_path_text.chars().count()
+    );
+    let cleanup_filename = client
+        .tools_call(
+            "act_type",
+            json!({
+                "text": cleanup_path_text,
+                "dynamics": "linear",
+                "linear_ms_per_char": 20
+            }),
+        )
+        .await?;
+    let cleanup_filename_response: ActTypeWireResponse = structured(&cleanup_filename)?;
+    println!(
+        "source_of_truth=mcp_act_type edge=invalid_dir_cleanup_filename after=ok:{} chars_typed:{} elapsed_ms:{}",
+        cleanup_filename_response.ok,
+        cleanup_filename_response.chars_typed,
+        cleanup_filename_response.elapsed_ms
+    );
+    assert!(cleanup_filename_response.ok);
+    press_keys(&mut client, "invalid_dir_cleanup_confirm", json!(["enter"])).await?;
+    let cleanup_text = wait_for_file_text(&cleanup_path, Duration::from_secs(5))?;
+    println!(
+        "source_of_truth=disk edge=invalid_dir_cleanup_save after_exists={} after_bytes={}",
+        cleanup_path.exists(),
+        cleanup_text.len()
+    );
+    assert_eq!(cleanup_text, EXPECTED_DISK_TEXT);
+
+    assert!(client.shutdown().await?.success());
+    let logs = read_logs(log_dir.path())?;
+    let contains_act_type = logs.contains("tool.invocation kind=act_type");
+    let contains_act_press = logs.contains("tool.invocation kind=act_press");
+    println!(
+        "source_of_truth=daemon_log edge=invalid_dir after_bytes={} contains_act_type={} contains_act_press={}",
+        logs.len(),
+        contains_act_type,
+        contains_act_press
+    );
+    assert!(contains_act_type);
+    assert!(contains_act_press);
+
+    handle.close()?;
+    println!("source_of_truth=NotepadHandle::close edge=invalid_dir after=closed pid={pid}");
+    std::fs::remove_file(&cleanup_path)
+        .with_context(|| format!("cleanup valid save file {}", cleanup_path.display()))?;
+    println!(
+        "source_of_truth=disk edge=invalid_dir cleanup_after_exists={} invalid_after_exists={}",
+        cleanup_path.exists(),
+        invalid_path.exists()
+    );
+    assert!(!cleanup_path.exists());
+    assert!(!invalid_path.exists());
+    std::mem::forget(cleanup);
+    Ok(())
+}
+
+#[cfg(windows)]
 struct FileCleanup(PathBuf);
 
 #[cfg(windows)]
@@ -268,6 +470,101 @@ impl Drop for FileCleanup {
 async fn observe(client: &mut StdioMcpClient) -> anyhow::Result<Observation> {
     let response = client.tools_call("observe", json!({})).await?;
     structured(&response)
+}
+
+#[cfg(windows)]
+fn focus_editor(hwnd: i64, editor_id: &ElementId) -> anyhow::Result<()> {
+    match synapse_a11y::focus_window(hwnd) {
+        Ok(()) => println!(
+            "source_of_truth=synapse_a11y::focus_window edge=window after=ok hwnd=0x{hwnd:x}"
+        ),
+        Err(error) => {
+            println!("source_of_truth=synapse_a11y::focus_window edge=window after_error={error}")
+        }
+    }
+    let editor = synapse_a11y::re_resolve(editor_id)
+        .with_context(|| format!("re-resolve Notepad editor element {editor_id}"))?;
+    editor
+        .set_focus()
+        .with_context(|| format!("set UIA focus on Notepad editor element {editor_id}"))?;
+    println!(
+        "source_of_truth=synapse_a11y::UIElement::set_focus edge=editor after=ok element_id={editor_id}"
+    );
+    Ok(())
+}
+
+#[cfg(windows)]
+async fn press_keys(client: &mut StdioMcpClient, edge: &str, keys: Value) -> anyhow::Result<()> {
+    println!("source_of_truth=mcp_act_press edge={edge} before=keys:{keys}");
+    let response = client
+        .tools_call("act_press", json!({"keys": keys, "hold_ms": 33}))
+        .await?;
+    let response: ActPressWireResponse = structured(&response)?;
+    println!(
+        "source_of_truth=mcp_act_press edge={edge} after=ok:{} keys_pressed:{} backend_used:{} elapsed_ms:{}",
+        response.ok, response.keys_pressed, response.backend_used, response.elapsed_ms
+    );
+    assert!(response.ok);
+    Ok(())
+}
+
+#[cfg(windows)]
+async fn wait_for_invalid_save_dialog(
+    client: &mut StdioMcpClient,
+    timeout: Duration,
+) -> anyhow::Result<Observation> {
+    let start = Instant::now();
+    let mut last_observation = None;
+    while start.elapsed() <= timeout {
+        let observation = observe(client).await?;
+        if dialog_mentions_invalid_path(&observation) {
+            return Ok(observation);
+        }
+        last_observation = Some(observation);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    let summary = last_observation.as_ref().map_or_else(
+        || "no observation captured".to_owned(),
+        |observation| {
+            format!(
+                "title={:?}; focused={:?}; nodes={}",
+                observation.foreground.window_title,
+                observation
+                    .focused
+                    .as_ref()
+                    .map(|focused| (&focused.role, &focused.name)),
+                summarize_nodes(&observation.elements)
+            )
+        },
+    );
+    Err(anyhow::anyhow!(
+        "invalid save dialog did not appear before timeout; last={summary}"
+    ))
+}
+
+#[cfg(windows)]
+fn dialog_mentions_invalid_path(observation: &Observation) -> bool {
+    let haystack = format!(
+        "{} {} {}",
+        observation.foreground.window_title,
+        observation
+            .focused
+            .as_ref()
+            .map_or("", |focused| focused.name.as_str()),
+        observation
+            .elements
+            .iter()
+            .map(|node| node.name.as_str())
+            .collect::<Vec<_>>()
+            .join(" ")
+    )
+    .to_ascii_lowercase();
+    haystack.contains("z:\\")
+        || haystack.contains("doesn't exist")
+        || haystack.contains("does not exist")
+        || haystack.contains("not found")
+        || haystack.contains("path")
 }
 
 #[cfg(windows)]
