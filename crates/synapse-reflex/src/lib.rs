@@ -33,6 +33,12 @@ pub use scheduler::{
 };
 
 /// Runtime handle for the M3 reflex subsystem.
+///
+/// Reflex input controllers use the shared [`synapse_action::ActionHandle`] as
+/// the `synapse-action::handle` interlock authority. Held input state remains
+/// owned by the private `synapse-action` emitter `BitSet`; reflex must enqueue
+/// `hold_*` down/up actions through this handle and must not mirror, read, or
+/// mutate held state independently.
 #[derive(Debug)]
 pub struct ReflexRuntime {
     db: Arc<Db>,
