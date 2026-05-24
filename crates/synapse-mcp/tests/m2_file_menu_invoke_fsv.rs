@@ -18,7 +18,7 @@ use std::{
     time::{Duration, Instant},
 };
 #[cfg(windows)]
-use synapse_a11y::ExpandState;
+use synapse_a11y::{ElementSearchScope, ExpandState};
 #[cfg(windows)]
 use synapse_core::{AccessibleNode, Point, UiaPattern};
 use synapse_test_utils::stdio_mcp_client::StdioMcpClient;
@@ -39,8 +39,8 @@ const POLL: Duration = Duration::from_millis(75);
 #[tokio::test]
 #[ignore = "requires an interactive Windows desktop with Notepad and UIA"]
 #[allow(clippy::too_many_lines)] // FSV body intentionally keeps every step in order
-async fn act_click_invoke_pattern_file_menu_expands_without_cursor_motion_fsv()
--> anyhow::Result<()> {
+async fn act_click_invoke_pattern_file_menu_expands_without_cursor_motion_fsv() -> anyhow::Result<()>
+{
     let _notepad_lock = WINDOWS_NOTEPAD_FILE_MENU_LOCK.lock().await;
     let log_dir = TempDir::new()?;
 
@@ -62,28 +62,21 @@ async fn act_click_invoke_pattern_file_menu_expands_without_cursor_motion_fsv()
         );
     }
 
-    // Packaged Notepad's MenuBar is virtualised out of the ControlView TreeWalker
-    // until the user has interacted with it. Press Alt to populate the tree
-    // without expanding any menu, then snapshot.
     let mut client = StdioMcpClient::launch_and_init_with_log_dir(Some(log_dir.path())).await?;
-    let _ = client
-        .tools_call("act_press", json!({"keys": ["alt"]}))
-        .await?;
-    tokio::time::sleep(Duration::from_millis(250)).await;
 
     let window = synapse_a11y::window_from_hwnd(hwnd)
         .with_context(|| format!("resolve Notepad hwnd 0x{hwnd:x}"))?;
-    let subtree = synapse_a11y::snapshot(&window, 6)
-        .with_context(|| format!("snapshot Notepad hwnd 0x{hwnd:x}"))?;
-    let file_menu_node = find_file_menu_node(&subtree.nodes).with_context(|| {
+    let control_snapshot = synapse_a11y::snapshot(&window, 6)
+        .with_context(|| format!("control snapshot Notepad hwnd 0x{hwnd:x}"))?;
+    let file_menu_node = find_file_menu_node(&window)?.with_context(|| {
         format!(
-            "Notepad snapshot did not contain a `File` ExpandCollapse node; nodes={}",
-            summarize_nodes(&subtree.nodes)
+            "direct UIA search did not find a `File` ExpandCollapse node; control_nodes={}",
+            summarize_nodes(&control_snapshot.nodes)
         )
     })?;
     println!(
-        "source_of_truth=synapse_a11y::snapshot edge=file_menu_invoke before=pid:{pid} hwnd:0x{hwnd:x} node_count:{} target:{} role:{:?} name:{:?} bbox:{:?} patterns:{:?}",
-        subtree.nodes.len(),
+        "source_of_truth=synapse_a11y::find_by_name_and_pattern edge=file_menu_invoke before=pid:{pid} hwnd:0x{hwnd:x} control_node_count:{} target:{} role:{:?} name:{:?} bbox:{:?} patterns:{:?}",
+        control_snapshot.nodes.len(),
         file_menu_node.element_id,
         file_menu_node.role,
         file_menu_node.name,
@@ -128,10 +121,8 @@ async fn act_click_invoke_pattern_file_menu_expands_without_cursor_motion_fsv()
 
     // Re-look up File menu by name after invoke — the menu Flyout may have made
     // the runtime id change, so we look up by name+ExpandCollapse again.
-    let subtree_after = synapse_a11y::snapshot(&window, 6)
-        .context("post-invoke File menu snapshot")?;
-    let file_after = find_file_menu_node(&subtree_after.nodes)
-        .context("post-invoke snapshot missing File menu node")?;
+    let file_after = find_file_menu_node(&window)?
+        .context("post-invoke direct search missing File menu node")?;
     let file_after_element = synapse_a11y::re_resolve(&file_after.element_id)
         .context("re-resolve File menu post-invoke")?;
     let after_state = synapse_a11y::expand_state_of(&file_after_element)
@@ -162,12 +153,107 @@ async fn act_click_invoke_pattern_file_menu_expands_without_cursor_motion_fsv()
         // We spawned this process; do a best-effort kill of the launcher PID.
         let _ = child.kill();
         let _ = child.wait();
-        println!(
-            "source_of_truth=Notepad_launched_child edge=file_menu_invoke after=killed"
-        );
+        println!("source_of_truth=Notepad_launched_child edge=file_menu_invoke after=killed");
     } else {
         println!(
             "source_of_truth=Notepad_pre_existing edge=file_menu_invoke after=preserved pid={pid}"
+        );
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+#[tokio::test]
+#[ignore = "requires an interactive Windows desktop with Notepad and UIA"]
+async fn a11y_find_by_name_and_pattern_file_menu_edges_fsv() -> anyhow::Result<()> {
+    let _notepad_lock = WINDOWS_NOTEPAD_FILE_MENU_LOCK.lock().await;
+    let (hwnd, pid, launched_child) = find_or_spawn_notepad_window()?;
+    println!(
+        "source_of_truth=notepad_source edge=raw_search_edges after=hwnd:0x{hwnd:x} pid:{pid} launched_fresh:{}",
+        launched_child.is_some()
+    );
+    let window = synapse_a11y::window_from_hwnd(hwnd)
+        .with_context(|| format!("resolve Notepad hwnd 0x{hwnd:x}"))?;
+    if let Err(error) = synapse_a11y::focus_window(hwnd) {
+        println!(
+            "source_of_truth=synapse_a11y::focus_window edge=raw_search_edges after_error={error}"
+        );
+    } else {
+        println!(
+            "source_of_truth=synapse_a11y::focus_window edge=raw_search_edges after=ok hwnd=0x{hwnd:x}"
+        );
+    }
+    let control_nodes = match synapse_a11y::snapshot(&window, 6) {
+        Ok(snapshot) => {
+            let nodes = summarize_nodes(&snapshot.nodes);
+            println!(
+                "source_of_truth=synapse_a11y::snapshot edge=raw_search_edges before=control_node_count:{} nodes={nodes}",
+                snapshot.nodes.len()
+            );
+            nodes
+        }
+        Err(error) => {
+            println!(
+                "source_of_truth=synapse_a11y::snapshot edge=raw_search_edges before_error={error}"
+            );
+            String::new()
+        }
+    };
+
+    let happy = find_file_menu_node(&window)?.with_context(|| {
+        format!("direct UIA search did not find a `File` ExpandCollapse node; control_nodes={control_nodes}")
+    })?;
+    println!(
+        "source_of_truth=synapse_a11y::find_by_name_and_pattern edge=happy after_found=true target:{} role:{:?} name:{:?} patterns:{:?}",
+        happy.element_id, happy.role, happy.name, happy.patterns
+    );
+    assert!(happy.enabled);
+    assert!(happy.patterns.contains(&UiaPattern::ExpandCollapse));
+
+    let empty_name = synapse_a11y::find_by_name_and_pattern(
+        &window,
+        "",
+        UiaPattern::ExpandCollapse,
+        ElementSearchScope::Subtree,
+    )?;
+    println!(
+        "source_of_truth=synapse_a11y::find_by_name_and_pattern edge=empty_name before_name_len=0 after_found={}",
+        empty_name.is_some()
+    );
+    assert!(empty_name.is_none());
+
+    let missing_name = "SynapseDefinitelyMissingMenuItem244";
+    let missing = synapse_a11y::find_by_name_and_pattern(
+        &window,
+        missing_name,
+        UiaPattern::ExpandCollapse,
+        ElementSearchScope::Subtree,
+    )?;
+    println!(
+        "source_of_truth=synapse_a11y::find_by_name_and_pattern edge=missing_name before_name={missing_name:?} after_found={}",
+        missing.is_some()
+    );
+    assert!(missing.is_none());
+
+    let wrong_pattern = synapse_a11y::find_by_name_and_pattern(
+        &window,
+        "File",
+        UiaPattern::RangeValue,
+        ElementSearchScope::Subtree,
+    )?;
+    println!(
+        "source_of_truth=synapse_a11y::find_by_name_and_pattern edge=wrong_pattern before_name=\"File\" before_pattern=RangeValue after_found={}",
+        wrong_pattern.is_some()
+    );
+    assert!(wrong_pattern.is_none());
+
+    if let Some(mut child) = launched_child {
+        let _ = child.kill();
+        let _ = child.wait();
+        println!("source_of_truth=Notepad_launched_child edge=raw_search_edges after=killed");
+    } else {
+        println!(
+            "source_of_truth=Notepad_pre_existing edge=raw_search_edges after=preserved pid={pid}"
         );
     }
     Ok(())
@@ -217,25 +303,14 @@ fn notepad_exe_path() -> std::path::PathBuf {
 }
 
 #[cfg(windows)]
-fn find_file_menu_node(nodes: &[AccessibleNode]) -> Option<AccessibleNode> {
-    nodes
-        .iter()
-        .find(|node| {
-            node.enabled
-                && node.name.eq_ignore_ascii_case("File")
-                && node.patterns.contains(&UiaPattern::ExpandCollapse)
-        })
-        .cloned()
-        .or_else(|| {
-            nodes
-                .iter()
-                .find(|node| {
-                    node.enabled
-                        && node.name.to_ascii_lowercase().contains("file")
-                        && node.patterns.contains(&UiaPattern::ExpandCollapse)
-                })
-                .cloned()
-        })
+fn find_file_menu_node(root: &synapse_a11y::UIElement) -> anyhow::Result<Option<AccessibleNode>> {
+    synapse_a11y::find_by_name_and_pattern(
+        root,
+        "File",
+        UiaPattern::ExpandCollapse,
+        ElementSearchScope::Subtree,
+    )
+    .context("direct UIA name+ExpandCollapse search")
 }
 
 #[cfg(windows)]

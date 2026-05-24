@@ -7,7 +7,9 @@ use std::{
 };
 
 use serde::{Deserialize, Serialize};
-use synapse_core::{AccessibleSubtree, ElementId, ForegroundContext, Point, error_codes};
+use synapse_core::{
+    AccessibleNode, AccessibleSubtree, ElementId, ForegroundContext, Point, UiaPattern, error_codes,
+};
 use thiserror::Error;
 use tokio::{net::TcpStream, sync::mpsc::UnboundedSender, time::timeout};
 
@@ -361,6 +363,30 @@ pub fn snapshot(root: &UIElement, depth: u32) -> A11yResult<AccessibleSubtree> {
     platform::snapshot(root, depth)
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ElementSearchScope {
+    Children,
+    Descendants,
+    Subtree,
+}
+
+/// Finds the first enabled element under `root` with the requested UIA name and
+/// pattern availability. This uses direct UIA search rather than the cached
+/// `ControlView` `TreeWalker` used by `snapshot()`.
+///
+/// # Errors
+///
+/// Returns a structured UIA error for OS failures, or `A11Y_NOT_AVAILABLE` on
+/// non-Windows platforms.
+pub fn find_by_name_and_pattern(
+    root: &UIElement,
+    name: &str,
+    pattern: UiaPattern,
+    scope: ElementSearchScope,
+) -> A11yResult<Option<AccessibleNode>> {
+    platform::find_by_name_and_pattern(root, name, pattern, scope)
+}
+
 /// Re-resolves a composite Synapse element id back to a live UIA element.
 ///
 /// # Errors
@@ -561,8 +587,8 @@ mod platform {
         core::UICacheRequest,
         patterns::UIExpandCollapsePattern,
         types::{
-            ControlType, ElementMode, ExpandCollapseState, Handle, Point as UiaPoint, TreeScope,
-            UIProperty,
+            ControlType, ElementMode, ExpandCollapseState, Handle, Point as UiaPoint,
+            PropertyConditionFlags, TreeScope, UIProperty,
         },
         variants::{Value, Variant},
     };
@@ -599,7 +625,7 @@ mod platform {
 
     use super::{
         A11yError, A11yResult, AccessibleEvent, AccessibleEventKind, ComApartmentKind,
-        WinEventHookReadback, runtime_id_hex,
+        ElementSearchScope, WinEventHookReadback, runtime_id_hex,
     };
 
     static UIA_CLIENT: OnceLock<ProcessUiaClient> = OnceLock::new();
@@ -612,6 +638,12 @@ mod platform {
         requested_depth: u32,
         captured_at: Instant,
         tree: AccessibleSubtree,
+    }
+
+    #[derive(Clone, Copy)]
+    enum TreeView {
+        Control,
+        Raw,
     }
 
     const WIN_EVENT_IDS: [u32; 10] = [
@@ -781,7 +813,7 @@ mod platform {
 
     pub fn focused_element() -> A11yResult<UIElement> {
         with_automation(|automation| {
-            let cache = create_cache_request(automation, 0, ElementMode::Full)?;
+            let cache = create_cache_request(automation, 0, ElementMode::Full, TreeView::Control)?;
             automation
                 .get_focused_element_build_cache(&cache)
                 .map_err(map_uia_error)
@@ -790,7 +822,7 @@ mod platform {
 
     pub fn element_from_point(point: Point) -> A11yResult<UIElement> {
         with_automation(|automation| {
-            let cache = create_cache_request(automation, 0, ElementMode::Full)?;
+            let cache = create_cache_request(automation, 0, ElementMode::Full, TreeView::Control)?;
             automation
                 .element_from_point_build_cache(UiaPoint::new(point.x, point.y), &cache)
                 .map_err(map_uia_error)
@@ -823,22 +855,74 @@ mod platform {
         })
     }
 
+    pub fn find_by_name_and_pattern(
+        root: &UIElement,
+        name: &str,
+        pattern: UiaPattern,
+        scope: ElementSearchScope,
+    ) -> A11yResult<Option<AccessibleNode>> {
+        if name.is_empty() {
+            return Ok(None);
+        }
+
+        with_automation(|automation| {
+            let cache = create_cache_request(automation, 0, ElementMode::Full, TreeView::Raw)?;
+            let name_condition = automation
+                .create_property_condition(
+                    UIProperty::Name,
+                    Variant::from(name),
+                    Some(PropertyConditionFlags::IgnoreCase),
+                )
+                .map_err(map_uia_error)?;
+            let pattern_condition = automation
+                .create_property_condition(pattern_property(pattern), Variant::from(true), None)
+                .map_err(map_uia_error)?;
+            let condition = automation
+                .create_and_condition(name_condition, pattern_condition)
+                .map_err(map_uia_error)?;
+            let elements = root
+                .find_all_build_cache(scope.into(), &condition, &cache)
+                .map_err(map_uia_error)?;
+            let root_hwnd = root
+                .build_updated_cache(&cache)
+                .ok()
+                .and_then(|cached_root| cached_hwnd(&cached_root))
+                .unwrap_or(0);
+
+            elements
+                .into_iter()
+                .filter(|element| element.is_cached_enabled().unwrap_or(true))
+                .map(|element| node_from_cached_element(&element, None, 0, root_hwnd, 0))
+                .next()
+                .transpose()
+        })
+    }
+
     pub fn re_resolve(id: &ElementId) -> A11yResult<UIElement> {
         let parts = id.parts().map_err(|err| A11yError::InvalidElementId {
             detail: err.to_string(),
         })?;
         with_automation(|automation| {
-            let cache = create_cache_request(automation, 8, ElementMode::Full)?;
+            let control_cache =
+                create_cache_request(automation, 8, ElementMode::Full, TreeView::Control)?;
             let hwnd = isize::try_from(parts.hwnd).map_err(|err| A11yError::InvalidElementId {
                 detail: err.to_string(),
             })?;
             let root = automation
-                .element_from_handle_build_cache(Handle::from(hwnd), &cache)
+                .element_from_handle_build_cache(Handle::from(hwnd), &control_cache)
                 .map_err(map_uia_error)?;
-            find_by_runtime_id_hex(&root, &parts.runtime_id_hex, 0, 8)?.ok_or_else(|| {
+            if let Some(found) = find_by_runtime_id_hex(&root, &parts.runtime_id_hex, 0, 8)? {
+                return Ok(found);
+            }
+
+            let raw_cache = create_cache_request(automation, 8, ElementMode::Full, TreeView::Raw)?;
+            let raw_root = automation
+                .element_from_handle_build_cache(Handle::from(hwnd), &raw_cache)
+                .map_err(map_uia_error)?;
+            find_by_runtime_id_hex(&raw_root, &parts.runtime_id_hex, 0, 8)?.ok_or_else(|| {
                 A11yError::ElementStale {
                     detail: format!(
-                        "element id {id} was not found under hwnd 0x{:x}",
+                        "element id {id} was not found under hwnd 0x{:x} in control or raw view",
                         parts.hwnd
                     ),
                 }
@@ -921,6 +1005,7 @@ mod platform {
         automation: &UIAutomation,
         depth: u32,
         element_mode: ElementMode,
+        tree_view: TreeView,
     ) -> A11yResult<UICacheRequest> {
         let cache = automation.create_cache_request().map_err(map_uia_error)?;
         for property in [
@@ -948,13 +1033,12 @@ mod platform {
         ] {
             cache.add_property(property).map_err(map_uia_error)?;
         }
-        cache
-            .set_tree_filter(
-                automation
-                    .get_control_view_condition()
-                    .map_err(map_uia_error)?,
-            )
-            .map_err(map_uia_error)?;
+        let tree_filter = match tree_view {
+            TreeView::Control => automation.get_control_view_condition(),
+            TreeView::Raw => automation.create_true_condition(),
+        }
+        .map_err(map_uia_error)?;
+        cache.set_tree_filter(tree_filter).map_err(map_uia_error)?;
         let scope = if depth == 0 {
             TreeScope::Element
         } else {
@@ -972,7 +1056,7 @@ mod platform {
         root: &UIElement,
         depth: u32,
     ) -> A11yResult<AccessibleSubtree> {
-        let cache = create_cache_request(automation, depth, ElementMode::None)?;
+        let cache = create_cache_request(automation, depth, ElementMode::None, TreeView::Control)?;
         let cached_root = root.build_updated_cache(&cache).map_err(map_uia_error)?;
         let root_hwnd = cached_hwnd(&cached_root).unwrap_or(0);
         let mut nodes = Vec::new();
@@ -1199,6 +1283,31 @@ mod platform {
 
     fn non_empty(value: String) -> Option<String> {
         if value.is_empty() { None } else { Some(value) }
+    }
+
+    const fn pattern_property(pattern: UiaPattern) -> UIProperty {
+        match pattern {
+            UiaPattern::Invoke => UIProperty::IsInvokePatternAvailable,
+            UiaPattern::Toggle => UIProperty::IsTogglePatternAvailable,
+            UiaPattern::Value => UIProperty::IsValuePatternAvailable,
+            UiaPattern::Selection => UIProperty::IsSelectionPatternAvailable,
+            UiaPattern::ExpandCollapse => UIProperty::IsExpandCollapsePatternAvailable,
+            UiaPattern::Scroll => UIProperty::IsScrollPatternAvailable,
+            UiaPattern::Text => UIProperty::IsTextPatternAvailable,
+            UiaPattern::Window => UIProperty::IsWindowPatternAvailable,
+            UiaPattern::Transform => UIProperty::IsTransformPatternAvailable,
+            UiaPattern::RangeValue => UIProperty::IsRangeValuePatternAvailable,
+        }
+    }
+
+    impl From<ElementSearchScope> for TreeScope {
+        fn from(scope: ElementSearchScope) -> Self {
+            match scope {
+                ElementSearchScope::Children => Self::Children,
+                ElementSearchScope::Descendants => Self::Descendants,
+                ElementSearchScope::Subtree => Self::Subtree,
+            }
+        }
     }
 
     fn window_title(hwnd: HWND) -> String {
@@ -1494,7 +1603,9 @@ mod platform {
 
 #[cfg(not(windows))]
 mod platform {
-    use synapse_core::{AccessibleSubtree, ElementId, ForegroundContext, Point};
+    use synapse_core::{
+        AccessibleNode, AccessibleSubtree, ElementId, ForegroundContext, Point, UiaPattern,
+    };
     use tokio::sync::mpsc::UnboundedSender;
 
     use super::{A11yError, A11yResult, AccessibleEvent, UIElement, WinEventHookReadback};
@@ -1570,6 +1681,17 @@ mod platform {
     pub fn snapshot(_root: &UIElement, _depth: u32) -> A11yResult<AccessibleSubtree> {
         Err(A11yError::not_available(
             "UIA tree snapshots require Windows",
+        ))
+    }
+
+    pub fn find_by_name_and_pattern(
+        _root: &UIElement,
+        _name: &str,
+        _pattern: UiaPattern,
+        _scope: super::ElementSearchScope,
+    ) -> A11yResult<Option<AccessibleNode>> {
+        Err(A11yError::not_available(
+            "UIA direct element search requires Windows",
         ))
     }
 

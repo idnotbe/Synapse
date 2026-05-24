@@ -406,6 +406,16 @@ async fn notepad_save_invalid_dir_shows_dialog_and_writes_no_file_fsv() -> anyho
         json!(["ctrl", "a"]),
     )
     .await?;
+    let cleanup_dialog = observe(&mut client).await?;
+    println!(
+        "source_of_truth=mcp_observe edge=invalid_dir_cleanup_dialog after_title={:?} process={:?} focused_role={:?}",
+        cleanup_dialog.foreground.window_title,
+        cleanup_dialog.foreground.process_name,
+        cleanup_dialog
+            .focused
+            .as_ref()
+            .map(|focused| focused.role.as_str())
+    );
 
     let cleanup_path_text = cleanup_path.to_string_lossy().into_owned();
     println!(
