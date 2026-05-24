@@ -281,7 +281,27 @@ mod platform {
         if force {
             command.arg("/F");
         }
-        command.status().context("run taskkill")
+        let status = command.status().context("run taskkill")?;
+        if force
+            && !status.success()
+            && let Ok(cim_status) = terminate_process_via_cim(pid)
+        {
+            return Ok(cim_status);
+        }
+        Ok(status)
+    }
+
+    fn terminate_process_via_cim(pid: u32) -> anyhow::Result<ExitStatus> {
+        let command_text = format!(
+            "Get-CimInstance Win32_Process -Filter \"ProcessId={pid}\" | ForEach-Object {{ Invoke-CimMethod -InputObject $_ -MethodName Terminate | Out-Null }}"
+        );
+        Command::new("powershell.exe")
+            .args(["-NoProfile", "-Command", &command_text])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .context("run PowerShell Win32_Process.Terminate fallback")
     }
 
     fn terminate_launcher_if_distinct(

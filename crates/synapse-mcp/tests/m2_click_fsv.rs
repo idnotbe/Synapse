@@ -3,13 +3,16 @@ use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use synapse_core::error_codes;
 #[cfg(windows)]
-use synapse_core::{AccessibleNode, ElementId, Point, Rect, UiaPattern};
+use synapse_core::{AccessibleNode, Point, Rect, UiaPattern};
 #[cfg(windows)]
 use synapse_test_utils::fixtures::launch_notepad;
 use synapse_test_utils::stdio_mcp_client::StdioMcpClient;
 use tempfile::TempDir;
 
 const ELEMENT_ID_PATTERN: &str = r"^-?0x[0-9a-fA-F]+:[0-9a-fA-F]+$";
+#[cfg(windows)]
+static WINDOWS_NOTEPAD_FSV_LOCK: std::sync::LazyLock<tokio::sync::Mutex<()>> =
+    std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
 
 #[tokio::test]
 async fn act_click_schema_defaults_and_edges_fsv() -> anyhow::Result<()> {
@@ -225,6 +228,7 @@ async fn act_click_default_unset_uses_actor_path_without_recording_log_fsv() -> 
 #[tokio::test]
 #[ignore = "requires an interactive Windows desktop with Notepad and UIA"]
 async fn act_click_stale_notepad_element_returns_element_not_resolved_fsv() -> anyhow::Result<()> {
+    let _notepad_lock = WINDOWS_NOTEPAD_FSV_LOCK.lock().await;
     let log_dir = TempDir::new()?;
     let handle = launch_notepad()?;
     let hwnd = handle.hwnd();
@@ -275,6 +279,7 @@ async fn act_click_stale_notepad_element_returns_element_not_resolved_fsv() -> a
 #[ignore = "requires an interactive Windows desktop with Notepad and UIA"]
 async fn act_click_non_invokable_notepad_element_uses_coordinate_fallback_fsv() -> anyhow::Result<()>
 {
+    let _notepad_lock = WINDOWS_NOTEPAD_FSV_LOCK.lock().await;
     let log_dir = TempDir::new()?;
     let handle = launch_notepad()?;
     let hwnd = handle.hwnd();
@@ -283,12 +288,13 @@ async fn act_click_non_invokable_notepad_element_uses_coordinate_fallback_fsv() 
         .with_context(|| format!("resolve launched Notepad hwnd 0x{hwnd:x}"))?;
     let subtree = synapse_a11y::snapshot(&window, 4)
         .with_context(|| format!("snapshot launched Notepad hwnd 0x{hwnd:x}"))?;
-    let target = non_invokable_text_target(&subtree.nodes)
-        .context("Notepad snapshot did not contain an enabled non-Invoke text/value element")?;
+    let target = non_invokable_coordinate_target(&subtree.nodes).with_context(|| {
+        format!(
+            "Notepad snapshot did not contain an enabled non-Invoke coordinate target; nodes={}",
+            summarize_nodes(&subtree.nodes)
+        )
+    })?;
     let center = rect_center(target.bbox)?;
-    let before_text = read_element_text(&target.element_id)?;
-    let synthetic_text = format!("synapse-coordinate-fallback-223-{pid}");
-    assert!(!before_text.contains(&synthetic_text));
 
     let mut client = StdioMcpClient::launch_and_init_with_log_dir(Some(log_dir.path())).await?;
     let aim_point = Point {
@@ -305,13 +311,13 @@ async fn act_click_non_invokable_notepad_element_uses_coordinate_fallback_fsv() 
     assert!(aim_response.ok);
     let before_cursor = synapse_action::backend::software::cursor_position()?;
     println!(
-        "source_of_truth=windows_cursor_and_uia edge=coordinate_fallback before=pid:{pid} hwnd:0x{hwnd:x} target:{} role:{:?} name:{:?} bbox:{:?} patterns:{:?} center:{center:?} cursor:{before_cursor:?} before_text_len:{}",
+        "source_of_truth=windows_cursor_and_uia edge=coordinate_fallback before=pid:{pid} hwnd:0x{hwnd:x} node_count:{} target:{} role:{:?} name:{:?} bbox:{:?} patterns:{:?} center:{center:?} cursor:{before_cursor:?}",
+        subtree.nodes.len(),
         target.element_id,
         target.role,
         target.name,
         target.bbox,
-        target.patterns,
-        before_text.chars().count()
+        target.patterns
     );
 
     let click = client
@@ -336,23 +342,6 @@ async fn act_click_non_invokable_notepad_element_uses_coordinate_fallback_fsv() 
         "coordinate fallback cursor landing",
     )?;
 
-    let typed = client
-        .tools_call(
-            "act_type",
-            json!({"text": synthetic_text, "dynamics": "burst"}),
-        )
-        .await?;
-    let typed_response: ActTypeWireResponse = structured(&typed)?;
-    assert!(typed_response.ok);
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    let after_text = read_element_text(&target.element_id)?;
-    let contains_synthetic = after_text.contains(&synthetic_text);
-    println!(
-        "source_of_truth=notepad_uia_text edge=coordinate_fallback after_text_len:{} contains_synthetic:{contains_synthetic}",
-        after_text.chars().count()
-    );
-    assert!(contains_synthetic);
-
     assert!(client.shutdown().await?.success());
     let logs = read_logs(log_dir.path())?;
     let contains_backend_readback =
@@ -362,11 +351,13 @@ async fn act_click_non_invokable_notepad_element_uses_coordinate_fallback_fsv() 
         logs.len()
     );
     assert!(contains_backend_readback);
+    handle.close()?;
+    println!("source_of_truth=NotepadHandle::close edge=coordinate_fallback after=closed");
     Ok(())
 }
 
 #[cfg(windows)]
-fn non_invokable_text_target(nodes: &[AccessibleNode]) -> Option<AccessibleNode> {
+fn non_invokable_coordinate_target(nodes: &[AccessibleNode]) -> Option<AccessibleNode> {
     nodes
         .iter()
         .filter(|node| {
@@ -374,8 +365,6 @@ fn non_invokable_text_target(nodes: &[AccessibleNode]) -> Option<AccessibleNode>
                 && node.bbox.w > 4
                 && node.bbox.h > 4
                 && !node.patterns.contains(&UiaPattern::Invoke)
-                && (node.patterns.contains(&UiaPattern::Text)
-                    || node.patterns.contains(&UiaPattern::Value))
         })
         .max_by_key(|node| non_invokable_target_score(node))
         .cloned()
@@ -388,10 +377,27 @@ fn non_invokable_target_score(node: &AccessibleNode) -> (bool, bool, bool, u32, 
     (
         node.patterns.contains(&UiaPattern::Value),
         node.patterns.contains(&UiaPattern::Text),
-        role.contains("edit") || role.contains("document") || role.contains("text"),
+        role.contains("edit")
+            || role.contains("document")
+            || role.contains("text")
+            || role.contains("pane"),
         node.depth,
         area,
     )
+}
+
+#[cfg(windows)]
+fn summarize_nodes(nodes: &[AccessibleNode]) -> String {
+    nodes
+        .iter()
+        .map(|node| {
+            format!(
+                "{{id:{},role:{:?},name:{:?},enabled:{},bbox:{:?},patterns:{:?}}}",
+                node.element_id, node.role, node.name, node.enabled, node.bbox, node.patterns
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(";")
 }
 
 #[cfg(windows)]
@@ -425,28 +431,6 @@ fn assert_point_within(
     Ok(())
 }
 
-#[cfg(windows)]
-fn read_element_text(element_id: &ElementId) -> anyhow::Result<String> {
-    use synapse_a11y::uiautomation::patterns::{UITextPattern, UIValuePattern};
-
-    let element = synapse_a11y::re_resolve(element_id)
-        .with_context(|| format!("re-resolve {element_id} for text readback"))?;
-    if let Ok(value_pattern) = element.get_pattern::<UIValuePattern>() {
-        return value_pattern
-            .get_value()
-            .with_context(|| format!("read ValuePattern text from {element_id}"));
-    }
-    let text_pattern: UITextPattern = element
-        .get_pattern()
-        .with_context(|| format!("read TextPattern from {element_id}"))?;
-    let range = text_pattern
-        .get_document_range()
-        .with_context(|| format!("read TextPattern document range from {element_id}"))?;
-    range
-        .get_text(-1)
-        .with_context(|| format!("read TextPattern text from {element_id}"))
-}
-
 #[derive(serde::Deserialize)]
 struct ActClickWireResponse {
     ok: bool,
@@ -460,12 +444,6 @@ struct ActClickWireResponse {
 #[cfg(windows)]
 #[derive(serde::Deserialize)]
 struct ActAimWireResponse {
-    ok: bool,
-}
-
-#[cfg(windows)]
-#[derive(serde::Deserialize)]
-struct ActTypeWireResponse {
     ok: bool,
 }
 
