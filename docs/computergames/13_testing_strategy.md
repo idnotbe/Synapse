@@ -348,9 +348,11 @@ Self-hosted runners documented in `scripts/runners/`.
 
 ## 15. Manual test plan (release gate)
 
-Before tagging a release, the maintainer runs:
+M2 uses manual FSV on the operator's configured Windows host as the shipping
+gate. GitHub Actions/CI and missing-dependency portability tests are not M2
+release gates. Before tagging a release, the maintainer runs:
 
-1. **Fresh install on clean Windows 11 VM.** Install ViGEmBus, install Synapse, connect Claude Desktop, run "open Notepad, type, save".
+1. **Configured Windows 11 host.** Verify ViGEmBus is installed, Synapse is installed, Claude Desktop is connected, and run "open Notepad, type, save".
 2. **Live game session.** Pick one bundled game profile, play 15 minutes via agent, verify reasonable behavior and no stuck inputs.
 3. **Hardware HID flash + smoke.** Flash a Pico, connect, run hardware aim test.
 4. **Panic hotkey drill.** Start a long-running reflex, hit `Ctrl+Alt+Shift+P`, verify everything stops within 100 ms.

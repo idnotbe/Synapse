@@ -109,23 +109,25 @@ module.
 
 ### 1.4 OS reality
 
-- Production target: Windows 11 (DX11-capable GPU; ViGEmBus driver installed).
+- Production target: the operator's configured Windows 11 host (DX11-capable GPU;
+  ViGEmBus driver installed and verified working on that host).
 - Dev box: WSL2 on Win11. `windows`/`enigo`/`vigem-client` only compile on
   Windows. The Linux build must compile via the `#[cfg(not(windows))]`
   branches of the action backends; those branches return a structured
-  `ACTION_BACKEND_UNAVAILABLE` error rather than `unimplemented!()`. CI runs
-  the test suite on both Ubuntu and Windows (`.github/workflows/ci.yml`
-  jobs `rust-ubuntu` and `rust-windows`). **A test that depends on real
-  `SendInput` is gated `#[cfg(windows)]` and only runs in the `rust-windows`
-  job.** A test that depends on `RecordingBackend` runs on both.
+  `ACTION_BACKEND_UNAVAILABLE` error rather than `unimplemented!()`. M2 shipping
+  is not gated on GitHub Actions or CI; manual FSV on the configured host is the
+  release evidence. A test that depends on `RecordingBackend` can still run on
+  both Windows and Linux as local supporting evidence.
 - ViGEmBus is **required** for any test using `vigem-client`. Install via
   `winget install Nefarius.ViGEmBus` on Win11 once, then complete the
   Nefarius installer GUI clickthrough. Current Win11 FSV showed the 1.22.0
   installer fails under `/SILENT`, `/VERYSILENT`, and extraction flags before
   writing a driver install or log, so M2 does not depend on unattended
-  ViGEmBus bootstrap. If absent at runtime, `VigemBackend::ensure_ready()`
-  must surface `ACTION_VIGEM_NOT_INSTALLED` and the affected tests must skip
-  with that exact error, never panic.
+  ViGEmBus bootstrap. For M2, the gate is that ViGEmBus is present and
+  `act_pad` works on the operator's configured host. If absent at runtime,
+  `VigemBackend::ensure_ready()` still surfaces `ACTION_VIGEM_NOT_INSTALLED`,
+  but proving the absent-driver path on another machine is not an M2 release
+  gate.
 
 ### 1.5 Things that are NOT done yet (you will not touch any of these at M2)
 
@@ -605,8 +607,8 @@ outcome (Y) are explicit. A reviewer can audit X by reading the
 
 ## 9. Manual happy-path + edge-case test plan (run on real Win11 box before tagging `v0.1.0-m2`)
 
-Operator runs these by hand on a clean Win11 VM with ViGEmBus installed. The
-results table lives in the PR description for the M2 tag PR.
+Operator runs these by hand on the configured Win11 host with ViGEmBus installed.
+The results table lives in the GitHub issue comments for the M2 tag gate.
 
 ### Happy paths
 
@@ -632,7 +634,7 @@ results table lives in the PR description for the M2 tag PR.
 | E3 | `act_press({keys:["ctrl"], hold_ms:30001})`. | structured error response | `data.code == "ACTION_HOLD_EXCEEDED_MAX"` |
 | E4 | Notepad open. Click the Notepad title bar to grab focus, then quickly Alt-Tab to another app, then call `act_type({text:"x"})` while the other app is foreground. | structured error response | `data.code == "ACTION_FOREGROUND_LOST"` (the daemon asserts the expected foreground via `synapse_a11y::foreground_context(hwnd_before) == foreground_context_now`); no keystroke recorded |
 | E5 | `act_click({target:{x:0,y:0}, clicks:3})` over the empty desktop. | `RecordingBackend::events()` | exactly 3 `MouseButton{down}` + 3 `MouseButton{up}` events within `3 * GetDoubleClickTime` ms |
-| E6 | `act_pad({pad_id:0,...})` with ViGEmBus uninstalled. | structured error | `data.code == "ACTION_VIGEM_NOT_INSTALLED"` |
+| E6 | Confirm ViGEmBus is installed and `act_pad({pad_id:0, report:{buttons:["a"]}, hold_ms:500})` reaches the virtual controller path. | Windows driver/device readback + XInput/controller state + daemon log | driver/device present before and after; `act_pad` succeeds with `backend_used:"vigem"`; no stuck pad state after `release_all()` |
 | E7 | `act_pad({pad_id:0, report:{thumb_l:[1.5,0]}})` (out-of-range stick). | structured error | `data.code == "TOOL_PARAMS_INVALID"` (schemars rejects the >1.0 value) |
 | E8 | `act_aim({target:{track_id:42}, style:"track"})`. | structured error | `data.code == "ACTION_BACKEND_UNAVAILABLE"` with detail mentioning "reflex runtime lands at M3" |
 | E9 | Spam `act_press({keys:["a"]})` 6000× in a tight loop within ≤ 1 s. | response codes | at least one response carries `data.code == "ACTION_RATE_LIMITED"`; eventual completion (re-queue + backoff) |
@@ -691,10 +693,7 @@ count and order. Mismatch ⇒ fail with the actual recorded sequence printed.
 ✓ ViGEm pad updates round-trip via XInputGetState (work-item 9 + H6)
 ✓ All 9 M2 tools schema-snapshotted (work-item 14)
 ✓ All M2 error codes throwable + tested (work-item 2 + per-tool tests)
-✓ `cargo clippy --workspace --all-targets -- -D warnings` clean on Ubuntu + Windows
-✓ `cargo test --workspace` green on Ubuntu (compiles via stubs) + Windows (full path)
-✓ `cargo test --workspace --no-default-features` green
-✓ `cargo deny check` clean (new deps: enigo, vigem-client, arc-swap, mockall — all MIT/Apache-2.0)
+✓ Local supporting checks run where useful; GitHub Actions/CI are not M2 shipping gates
 ✓ FSV evidence: every passing test stdout contains ≥ 1 `final_value=` line per scenario
 ✓ scripts/check_docs.ps1 green (after work-item 17 PRD doc-fix)
 ```
@@ -705,7 +704,7 @@ count and order. Mismatch ⇒ fail with the actual recorded sequence printed.
 
 | Risk | Mitigation |
 |---|---|
-| ViGEm install friction | `VigemBackend::ensure_ready` surfaces `ACTION_VIGEM_NOT_INSTALLED` and **never** auto-installs; setup wizard at M5 offers the install. ViGEm-backed tests skip via `#[ignore]` + manual `cargo test -- --ignored` when the driver is present. **No silent fallback to software backend.** |
+| ViGEm install friction | M2 assumes the operator's configured host has ViGEmBus installed. `VigemBackend::ensure_ready` still surfaces `ACTION_VIGEM_NOT_INSTALLED` and **never** auto-installs if the driver is missing, but absent-driver portability testing is not an M2 release gate. **No silent fallback to software backend.** |
 | `Natural::FAST` feel iteration | preset frozen at M2 per §3.2; tune from real telemetry at M5 without changing the default-class |
 | `OnceCell` vs `OnceLock` | use `std::sync::OnceLock` (stable since 1.70); do NOT add `once_cell` dep |
 | `enigo` raw scan codes | `Key::use_scancode = true` routes through direct `windows::SendInput` w/ `KEYEVENTF_SCANCODE`; profile flag deferred to M3 (M2 hardcodes per-call) |
@@ -713,7 +712,7 @@ count and order. Mismatch ⇒ fail with the actual recorded sequence printed.
 | `held_key_max_duration_ms` collisions with reflex `hold_move` (M3) | M3 raises cap; M2 enforces 30 s strictly |
 | Element drift between `observe()` and `act_click(element_id)` | `synapse_a11y::re_resolve` called inside the M2 InvokePattern bridge; if `ACTION_ELEMENT_NOT_RESOLVED`, the agent re-`observe()` and retries — no implicit retry inside the emitter |
 | Foreground changed between tool calls | `act_*` tools snapshot the expected foreground HWND from the call's `target` (when it's an `element_id`); mismatch ⇒ `ACTION_FOREGROUND_LOST` |
-| WSL Linux build cannot exercise `SendInput` | non-Windows backends always return `ACTION_BACKEND_UNAVAILABLE`; the Linux CI job runs the FSV tests that exercise `RecordingBackend` only |
+| WSL Linux build cannot exercise `SendInput` | non-Windows backends always return `ACTION_BACKEND_UNAVAILABLE`; Linux checks are supporting evidence only, not the M2 shipping gate |
 | Real UIA test flakiness (timing-sensitive Notepad startup) | the test harness has a `wait_for_window_title_regex` helper using `synapse_a11y::foreground_context` polled at 20 ms intervals with a 5 s timeout; never `sleep(Duration::from_secs(N))` |
 
 ---

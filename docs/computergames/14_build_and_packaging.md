@@ -286,8 +286,9 @@ Air-gapped installs: `.zip` with binaries + bundled models + profiles. Extract a
 Supports `--non-interactive --accept-defaults` for headless installs except
 for ViGEmBus provisioning on current Win11. The Nefarius 1.22.0 installer is
 known to fail with silent/extraction flags, so non-interactive setup must skip
-ViGEmBus and leave `act_pad`/ViGEm FSV gates pending until an operator runs the
-GUI installer.
+ViGEmBus and report that gamepad support requires operator GUI installation.
+For M2, the release gate is manual FSV on the configured operator host where
+ViGEmBus is already installed and verified working.
 
 ---
 

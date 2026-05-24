@@ -117,7 +117,8 @@ Hardware HID, combos (M3), run-shell/launch.
 
 ### Risk areas
 
-- ViGEm needs ViGEmBus installed; CI runner needs it preinstalled
+- ViGEm needs ViGEmBus installed on the operator's configured Windows host;
+  M2 ships from manual FSV on that host, not from CI runner coverage
 - `Natural` curve takes iteration; default `EaseInOut` until M5
 
 ---
