@@ -34,8 +34,12 @@ pub(super) async fn serve(bind: &str) -> anyhow::Result<ExitCode> {
         .context("read HTTP listener address")?;
     let shutdown_cancel = CancellationToken::new();
     let connection_closed_cancel = CancellationToken::new();
-    let app = router(shutdown_cancel.clone(), connection_closed_cancel.clone())
-        .context("build HTTP MCP router")?;
+    let app = router(
+        shutdown_cancel.clone(),
+        connection_closed_cancel.clone(),
+        local_addr,
+    )
+    .context("build HTTP MCP router")?;
 
     tracing::info!(
         code = "MCP_HTTP_STARTED",
@@ -65,8 +69,9 @@ pub(super) async fn serve(bind: &str) -> anyhow::Result<ExitCode> {
 fn router(
     shutdown_cancel: CancellationToken,
     connection_closed_cancel: CancellationToken,
+    bind_addr: SocketAddr,
 ) -> anyhow::Result<Router> {
-    let auth = Arc::new(HttpAuth::load().context("load HTTP bearer token")?);
+    let auth = Arc::new(HttpAuth::load(bind_addr).context("load HTTP bearer token")?);
     tracing::info!(
         code = "MCP_HTTP_AUTH_CONFIGURED",
         source = auth.source_label(),
@@ -81,7 +86,10 @@ fn router(
     Ok(Router::new()
         .route("/health", get(health))
         .nest_service("/mcp", mcp_service)
-        .layer(middleware::from_fn_with_state(auth, auth::require_bearer))
+        .layer(middleware::from_fn_with_state(
+            auth,
+            auth::require_http_security,
+        ))
         .with_state(state))
 }
 

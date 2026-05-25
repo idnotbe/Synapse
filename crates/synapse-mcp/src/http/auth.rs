@@ -1,10 +1,10 @@
-use std::{path::PathBuf, sync::Arc};
+use std::{net::SocketAddr, path::PathBuf, sync::Arc};
 
 use anyhow::{Context, bail};
 use axum::{
     body::Body,
     extract::State,
-    http::{HeaderMap, Request, StatusCode, header},
+    http::{HeaderMap, Request, StatusCode, Uri, header, uri::Authority},
     middleware::Next,
     response::{IntoResponse, Response},
 };
@@ -18,6 +18,7 @@ const APPDATA_ENV: &str = "APPDATA";
 pub(super) struct HttpAuth {
     token_digest: [u8; 32],
     source: TokenSource,
+    bind_addr: SocketAddr,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -33,12 +34,23 @@ enum AuthFailure {
     Invalid,
 }
 
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum OriginFailure {
+    HostMissing,
+    HostMalformed,
+    HostRefused,
+    OriginMissingNonLoopback,
+    OriginMalformed,
+    OriginRefused,
+}
+
 impl HttpAuth {
-    pub(super) fn load() -> anyhow::Result<Self> {
+    pub(super) fn load(bind_addr: SocketAddr) -> anyhow::Result<Self> {
         let (token, source) = load_token()?;
         Ok(Self {
             token_digest: digest_token(&token),
             source,
+            bind_addr,
         })
     }
 
@@ -47,6 +59,7 @@ impl HttpAuth {
         Self {
             token_digest: digest_token(token),
             source: TokenSource::Env,
+            bind_addr: SocketAddr::from(([127, 0, 0, 1], 7700)),
         }
     }
 
@@ -66,6 +79,11 @@ impl HttpAuth {
         }
     }
 
+    fn validate_origin_and_host(&self, headers: &HeaderMap) -> Result<(), OriginFailure> {
+        validate_host(headers)?;
+        validate_origin(headers, self.bind_addr)
+    }
+
     fn token_matches(&self, candidate: &str) -> bool {
         let candidate_digest = digest_token(candidate);
         bool::from(
@@ -76,11 +94,14 @@ impl HttpAuth {
     }
 }
 
-pub(super) async fn require_bearer(
+pub(super) async fn require_http_security(
     State(auth): State<Arc<HttpAuth>>,
     request: Request<Body>,
     next: Next,
 ) -> Response {
+    if let Err(failure) = auth.validate_origin_and_host(request.headers()) {
+        return forbidden(failure);
+    }
     match auth.authorize(request.headers()) {
         Ok(()) => next.run(request).await,
         Err(failure) => unauthorized(failure),
@@ -136,6 +157,57 @@ fn bearer_token(headers: &HeaderMap) -> Result<&str, AuthFailure> {
     Ok(token)
 }
 
+fn validate_host(headers: &HeaderMap) -> Result<(), OriginFailure> {
+    let raw = headers
+        .get(header::HOST)
+        .ok_or(OriginFailure::HostMissing)?
+        .to_str()
+        .map_err(|_| OriginFailure::HostMalformed)?
+        .trim();
+    let authority = Authority::try_from(raw).map_err(|_| OriginFailure::HostMalformed)?;
+    if host_allowed(authority.host()) {
+        Ok(())
+    } else {
+        Err(OriginFailure::HostRefused)
+    }
+}
+
+fn validate_origin(headers: &HeaderMap, bind_addr: SocketAddr) -> Result<(), OriginFailure> {
+    let Some(raw) = headers.get(header::ORIGIN) else {
+        return if bind_addr.ip().is_loopback() {
+            Ok(())
+        } else {
+            Err(OriginFailure::OriginMissingNonLoopback)
+        };
+    };
+    let raw = raw
+        .to_str()
+        .map_err(|_| OriginFailure::OriginMalformed)?
+        .trim();
+    let uri = raw
+        .parse::<Uri>()
+        .map_err(|_| OriginFailure::OriginMalformed)?;
+    if uri.scheme_str() != Some("http") {
+        return Err(OriginFailure::OriginRefused);
+    }
+    let authority = uri.authority().ok_or(OriginFailure::OriginMalformed)?;
+    if host_allowed(authority.host()) {
+        Ok(())
+    } else {
+        Err(OriginFailure::OriginRefused)
+    }
+}
+
+fn host_allowed(host: &str) -> bool {
+    matches!(
+        host.trim_start_matches('[')
+            .trim_end_matches(']')
+            .to_ascii_lowercase()
+            .as_str(),
+        "127.0.0.1" | "localhost" | "::1"
+    )
+}
+
 fn digest_token(token: &str) -> [u8; 32] {
     let digest = Sha256::digest(token.as_bytes());
     let mut output = [0_u8; 32];
@@ -157,8 +229,23 @@ fn unauthorized(failure: AuthFailure) -> Response {
         .into_response()
 }
 
+fn forbidden(failure: OriginFailure) -> Response {
+    tracing::warn!(
+        code = synapse_core::error_codes::HTTP_ORIGIN_REFUSED,
+        reason = ?failure,
+        "HTTP origin or host rejected"
+    );
+    (
+        StatusCode::FORBIDDEN,
+        synapse_core::error_codes::HTTP_ORIGIN_REFUSED,
+    )
+        .into_response()
+}
+
 #[cfg(test)]
 mod tests {
+    use std::net::SocketAddr;
+
     use axum::http::{HeaderMap, HeaderValue, header};
 
     use super::HttpAuth;
@@ -195,5 +282,34 @@ mod tests {
             HeaderValue::from_static("bearer local-token"),
         );
         assert!(auth.authorize(&headers).is_ok());
+    }
+
+    #[test]
+    fn origin_and_host_accept_loopback_and_reject_edges() {
+        let auth = HttpAuth::from_token("local-token");
+        let mut headers = HeaderMap::new();
+        headers.insert(header::HOST, HeaderValue::from_static("127.0.0.1:7700"));
+        assert!(auth.validate_origin_and_host(&headers).is_ok());
+
+        headers.insert(header::ORIGIN, HeaderValue::from_static("http://127.0.0.1"));
+        assert!(auth.validate_origin_and_host(&headers).is_ok());
+
+        headers.insert(
+            header::ORIGIN,
+            HeaderValue::from_static("http://evil.example"),
+        );
+        assert!(auth.validate_origin_and_host(&headers).is_err());
+
+        headers.insert(header::HOST, HeaderValue::from_static("evil.example"));
+        assert!(auth.validate_origin_and_host(&headers).is_err());
+    }
+
+    #[test]
+    fn missing_origin_is_rejected_for_non_loopback_bind() {
+        let mut auth = HttpAuth::from_token("local-token");
+        auth.bind_addr = SocketAddr::from(([0, 0, 0, 0], 7700));
+        let mut headers = HeaderMap::new();
+        headers.insert(header::HOST, HeaderValue::from_static("127.0.0.1:7700"));
+        assert!(auth.validate_origin_and_host(&headers).is_err());
     }
 }
