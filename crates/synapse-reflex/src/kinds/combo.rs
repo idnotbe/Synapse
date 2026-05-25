@@ -1,9 +1,10 @@
 use std::time::Duration;
 
 use chrono::Utc;
-use serde_json::json;
+use serde::Serialize;
+use serde_json::{Value, json};
 use synapse_action::ActionHandle;
-use synapse_core::{Action, Backend, ComboInput, ComboStep, Event, EventSource, ReflexId};
+use synapse_core::{Action, Backend, ComboInput, ComboStep, Event, EventSource, Key, ReflexId};
 
 use crate::{EventBus, ReflexError, ReflexResult};
 
@@ -74,10 +75,19 @@ struct TimedComboAction {
     action: Action,
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize)]
+struct ComboDispatchRecord {
+    due_ms: u32,
+    sequence: usize,
+    elapsed_ms: u128,
+    action: Value,
+}
+
 #[derive(Clone, Debug)]
 pub struct ComboController {
     reflex_id: ReflexId,
     scheduled: Vec<TimedComboAction>,
+    dispatched: Vec<ComboDispatchRecord>,
     cursor: usize,
     elapsed: Duration,
     phase: ComboPhase,
@@ -90,6 +100,7 @@ impl ComboController {
         Self {
             reflex_id: reflex_id.into(),
             scheduled: build_schedule(params),
+            dispatched: Vec::new(),
             cursor: 0,
             elapsed: Duration::ZERO,
             phase: ComboPhase::Pending,
@@ -187,6 +198,12 @@ impl ComboController {
                         scheduled.due_ms, scheduled.sequence
                     ),
                 })?;
+            self.dispatched.push(ComboDispatchRecord {
+                due_ms: scheduled.due_ms,
+                sequence: scheduled.sequence,
+                elapsed_ms: self.elapsed.as_millis(),
+                action: combo_action_summary(&scheduled.action),
+            });
             self.cursor = self.cursor.saturating_add(1);
             dispatched = dispatched.saturating_add(1);
         }
@@ -218,6 +235,7 @@ impl ComboController {
                 "scheduled_actions": self.scheduled.len(),
                 "dispatched_actions": self.cursor,
                 "elapsed_ms": self.elapsed.as_millis(),
+                "dispatches": &self.dispatched,
             }),
             correlations: Vec::new(),
         };
@@ -235,6 +253,34 @@ impl ComboController {
             actions,
         }
     }
+}
+
+fn combo_action_summary(action: &Action) -> Value {
+    match action {
+        Action::KeyDown { key, .. } => keyed_action_summary("key_down", key),
+        Action::KeyUp { key, .. } => keyed_action_summary("key_up", key),
+        Action::MouseButton { button, action, .. } => json!({
+            "kind": "mouse_button",
+            "button": button,
+            "action": action,
+        }),
+        Action::MouseMoveRelative { dx, dy, .. } => json!({
+            "kind": "mouse_move_relative",
+            "dx": dx,
+            "dy": dy,
+        }),
+        other => json!({
+            "kind": "other",
+            "debug": format!("{other:?}"),
+        }),
+    }
+}
+
+fn keyed_action_summary(kind: &'static str, key: &Key) -> Value {
+    json!({
+        "kind": kind,
+        "key": key,
+    })
 }
 
 fn build_schedule(params: ComboParams) -> Vec<TimedComboAction> {

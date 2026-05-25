@@ -1,15 +1,21 @@
+use std::sync::Once;
+
 use enigo::{Button as EnigoButton, Direction, Enigo, Mouse};
 use synapse_core::{AimCurve, AimStyle, AimTarget, ButtonAction, MouseButton, MouseTarget, Point};
 use windows::Win32::{
-    Foundation::POINT as WinPoint,
+    Foundation::{E_ACCESSDENIED, POINT as WinPoint},
     UI::{
+        HiDpi::{
+            DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetDpiForSystem,
+            SetProcessDpiAwarenessContext, SetThreadDpiAwarenessContext,
+        },
         Input::KeyboardAndMouse::{
             INPUT, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_HWHEEL, MOUSEEVENTF_MOVE,
             MOUSEEVENTF_VIRTUALDESK, MOUSEEVENTF_WHEEL,
         },
         WindowsAndMessaging::{
-            GetCursorPos, GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN,
-            SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
+            GetPhysicalCursorPos, GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN,
+            SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SetPhysicalCursorPos,
         },
     },
 };
@@ -22,17 +28,21 @@ use crate::backend::mouse_coordinates::{VirtualDesktop, normalize_absolute_mouse
 use crate::{ActionError, EmitState, sample_curve};
 
 const WHEEL_DELTA: i32 = 120;
+static DPI_AWARENESS: Once = Once::new();
 
 pub(super) fn cursor_position() -> Result<Point, ActionError> {
+    activate_thread_dpi_awareness();
     let mut point = WinPoint { x: 0, y: 0 };
     // SAFETY: `point` is a valid writable POINT for the duration of the call.
-    unsafe { GetCursorPos(&raw mut point) }.map_err(|err| ActionError::BackendUnavailable {
-        detail: format!("GetCursorPos failed: {err}"),
+    unsafe { GetPhysicalCursorPos(&raw mut point) }.map_err(|err| {
+        ActionError::BackendUnavailable {
+            detail: format!("GetPhysicalCursorPos failed: {err}"),
+        }
     })?;
-    Ok(Point {
+    Ok(mcp_point_from_cursor_api(Point {
         x: point.x,
         y: point.y,
-    })
+    }))
 }
 
 #[tracing::instrument(skip_all, fields(action_kind = "software_mouse_move"))]
@@ -54,11 +64,10 @@ pub(super) fn mouse_move_relative(dx: f32, dy: f32) -> Result<(), ActionError> {
         return Ok(());
     }
     let current = cursor_position()?;
-    let target = Point {
-        x: current.x.saturating_add(rounded.0),
-        y: current.y.saturating_add(rounded.1),
-    };
-    send_absolute_mouse_move(target, "relative absolute mouse move")
+    send_absolute_mouse_move(
+        relative_mouse_target(current, rounded),
+        "relative mouse move",
+    )
 }
 
 #[tracing::instrument(skip_all, fields(action_kind = "software_mouse_button"))]
@@ -192,13 +201,15 @@ const fn enigo_button(button: MouseButton) -> EnigoButton {
 }
 
 fn send_absolute_mouse_move(point: Point, detail: &'static str) -> Result<(), ActionError> {
-    let input = absolute_mouse_input(point)?;
-    send_input_batch(&[input], detail)
-}
-
-fn absolute_mouse_input(point: Point) -> Result<INPUT, ActionError> {
-    let desktop = virtual_desktop()?;
-    Ok(absolute_mouse_input_for_desktop(point, desktop))
+    activate_thread_dpi_awareness();
+    // Physical cursor APIs avoid DPI virtualization drift between the MCP
+    // process and the operator-visible screen coordinate space.
+    let point = cursor_api_point_from_mcp(point);
+    unsafe { SetPhysicalCursorPos(point.x, point.y) }.map_err(|error| {
+        ActionError::BackendUnavailable {
+            detail: format!("SetPhysicalCursorPos failed for {detail}: {error}"),
+        }
+    })
 }
 
 fn absolute_mouse_input_for_desktop(point: Point, desktop: VirtualDesktop) -> INPUT {
@@ -211,7 +222,46 @@ fn absolute_mouse_input_for_desktop(point: Point, desktop: VirtualDesktop) -> IN
     )
 }
 
+const fn relative_mouse_target(current: Point, rounded: (i32, i32)) -> Point {
+    Point {
+        x: current.x.saturating_add(rounded.0),
+        y: current.y.saturating_add(rounded.1),
+    }
+}
+
+fn mcp_point_from_cursor_api(point: Point) -> Point {
+    let scale = cursor_dpi_scale();
+    Point {
+        x: round_scaled(f64::from(point.x) / scale),
+        y: round_scaled(f64::from(point.y) / scale),
+    }
+}
+
+fn cursor_api_point_from_mcp(point: Point) -> Point {
+    let scale = cursor_dpi_scale();
+    Point {
+        x: round_scaled(f64::from(point.x) * scale),
+        y: round_scaled(f64::from(point.y) * scale),
+    }
+}
+
+fn cursor_dpi_scale() -> f64 {
+    let dpi = unsafe { GetDpiForSystem() };
+    if dpi == 0 { 1.0 } else { f64::from(dpi) / 96.0 }
+}
+
+#[allow(clippy::cast_possible_truncation)]
+fn round_scaled(value: f64) -> i32 {
+    if !value.is_finite() {
+        return 0;
+    }
+    value
+        .round()
+        .clamp(f64::from(i32::MIN), f64::from(i32::MAX)) as i32
+}
+
 fn virtual_desktop() -> Result<VirtualDesktop, ActionError> {
+    activate_thread_dpi_awareness();
     // SAFETY: GetSystemMetrics is read-only for these virtual-screen metrics.
     let left = unsafe { GetSystemMetrics(SM_XVIRTUALSCREEN) };
     let top = unsafe { GetSystemMetrics(SM_YVIRTUALSCREEN) };
@@ -226,4 +276,47 @@ fn virtual_desktop() -> Result<VirtualDesktop, ActionError> {
 
 const fn signed_to_u32(value: i32) -> u32 {
     u32::from_ne_bytes(value.to_ne_bytes())
+}
+
+fn ensure_dpi_awareness() {
+    DPI_AWARENESS.call_once(|| {
+        match unsafe { SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) } {
+            Ok(()) => {}
+            Err(error) if error.code() == E_ACCESSDENIED => {}
+            Err(error) => {
+                tracing::warn!(
+                    component = "software_mouse",
+                    error = %error,
+                    "failed to set process DPI awareness; cursor coordinates may be virtualized"
+                );
+            }
+        }
+    });
+}
+
+fn activate_thread_dpi_awareness() {
+    ensure_dpi_awareness();
+    let _previous =
+        unsafe { SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn relative_mouse_target_uses_current_cursor_plus_delta() {
+        let target = relative_mouse_target(Point { x: 10, y: 20 }, (7, -3));
+
+        assert_eq!(target, Point { x: 17, y: 17 });
+    }
+
+    #[test]
+    fn cursor_api_conversion_round_trips_system_dpi_coordinates() {
+        let point = Point { x: 421, y: 426 };
+        let api_point = cursor_api_point_from_mcp(point);
+        let restored = mcp_point_from_cursor_api(api_point);
+
+        assert_eq!(restored, point);
+    }
 }

@@ -3,13 +3,13 @@ use std::{error::Error, io, time::Duration};
 use serde_json::json;
 use synapse_action::{ACTION_QUEUE_CAPACITY, ActionHandle, ActionMessage};
 use synapse_core::{
-    Action, Backend, Event, EventFilter, EventSource, ReflexLifetime, ReflexState, SCHEMA_VERSION,
-    StoredReflexAudit, error_codes,
+    Action, Backend, Event, EventFilter, EventSource, Key, KeyCode, ReflexLifetime, ReflexState,
+    SCHEMA_VERSION, StoredReflexAudit, error_codes,
 };
 use synapse_reflex::{
-    DEFAULT_REFLEX_PRIORITY, EventBus, REFLEX_LIFETIME_EXPIRED_KIND, REFLEX_RECURSION_LIMIT_KIND,
-    REFLEX_STARVED_KIND, REFLEX_TICK_LATE_KIND, ReflexScheduler, ScheduledReflex, SchedulerConfig,
-    SchedulerTrigger,
+    DEFAULT_REFLEX_PRIORITY, EventBus, HoldMoveParams, REFLEX_LIFETIME_EXPIRED_KIND,
+    REFLEX_RECURSION_LIMIT_KIND, REFLEX_STARVED_KIND, REFLEX_TICK_LATE_KIND, ReflexScheduler,
+    ScheduledReflex, ScheduledReflexDriver, SchedulerConfig, SchedulerTrigger,
 };
 use synapse_storage::{Db, cf, decode_json};
 use tempfile::tempdir;
@@ -204,6 +204,58 @@ fn on_event_debounce_suppresses_same_tick_duplicates() -> Result<(), Box<dyn Err
 
     assert_eq!(samples.len(), 1);
     assert_eq!(action_rx.len(), 1);
+    Ok(())
+}
+
+#[test]
+fn scheduler_runs_hold_move_duration_driver_to_keyup() -> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let db = std::sync::Arc::new(Db::open(&temp.path().join("db"), SCHEMA_VERSION)?);
+    let bus = EventBus::default();
+    let (action_handle, mut action_rx) = ActionHandle::channel();
+    let key = named_key("w");
+    let reflex =
+        ScheduledReflex::hold_move("scheduler-hold-move", HoldMoveParams::new(key.clone()))
+            .with_lifetime(ReflexLifetime::Duration { ms: 10 });
+
+    let mut scheduler = ReflexScheduler::spawn_with_audit_db(
+        bus,
+        action_handle,
+        vec![reflex],
+        slow_ticks_config(8),
+        std::sync::Arc::clone(&db),
+    )?;
+    assert!(wait_for_status(
+        &scheduler,
+        "scheduler-hold-move",
+        ReflexState::Expired,
+        WAIT_TIMEOUT
+    ));
+    let samples = scheduler.wait_for_samples(8, WAIT_TIMEOUT);
+    scheduler.stop()?;
+    db.flush()?;
+
+    let actions = drain_actions(&mut action_rx);
+    let audits = read_audits(&db)?;
+
+    assert_eq!(samples.len(), 8);
+    assert_eq!(
+        actions,
+        vec![
+            Action::KeyDown {
+                key: key.clone(),
+                backend: Backend::Software,
+            },
+            Action::KeyUp {
+                key,
+                backend: Backend::Software,
+            },
+        ]
+    );
+    assert!(audits.iter().any(|audit| {
+        audit.status == ReflexState::Expired
+            && audit.error_code.as_deref() == Some(error_codes::REFLEX_LIFETIME_EXPIRED)
+    }));
     Ok(())
 }
 
@@ -471,6 +523,7 @@ fn scheduler_rejects_invalid_trigger_filter() {
         reflex_id: "reflex-invalid-filter".to_owned(),
         trigger: SchedulerTrigger::OnEvent(EventFilter::And { args: Vec::new() }),
         then: vec![Action::ReleaseAll],
+        driver: ScheduledReflexDriver::Actions,
         priority: 0,
         lifetime: ReflexLifetime::UntilCancelled,
         exclusive: false,
@@ -534,6 +587,15 @@ fn mouse_move_reflex(id: &str, dx: f32) -> ScheduledReflex {
             backend: Backend::Software,
         }],
     )
+}
+
+fn named_key(value: &str) -> Key {
+    Key {
+        code: KeyCode::Named {
+            value: value.to_owned(),
+        },
+        use_scancode: false,
+    }
 }
 
 fn drain_actions(action_rx: &mut tokio::sync::mpsc::Receiver<ActionMessage>) -> Vec<Action> {

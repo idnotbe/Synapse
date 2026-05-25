@@ -21,7 +21,13 @@ use uuid::Uuid;
 use crate::{
     EventBus, REFLEX_LIFETIME_EXPIRED_KIND, SubscriberHandle,
     error::{ReflexError, ReflexResult},
-    kinds::{combo::ComboController, on_event::OnEventState},
+    kinds::{
+        aim_track::{AimTrackController, AimTrackParams},
+        combo::ComboController,
+        hold_button::{HoldButtonController, HoldButtonParams},
+        hold_move::{HoldMoveController, HoldMoveParams},
+        on_event::OnEventState,
+    },
     write_audit,
 };
 use scheduler_tick::tick;
@@ -88,6 +94,7 @@ pub struct ScheduledReflex {
     pub reflex_id: ReflexId,
     pub trigger: SchedulerTrigger,
     pub then: Vec<Action>,
+    pub driver: ScheduledReflexDriver,
     pub priority: u32,
     pub lifetime: ReflexLifetime,
     pub exclusive: bool,
@@ -101,6 +108,7 @@ impl ScheduledReflex {
             reflex_id: reflex_id.into(),
             trigger: SchedulerTrigger::EveryTick,
             then,
+            driver: ScheduledReflexDriver::Actions,
             priority: DEFAULT_REFLEX_PRIORITY,
             lifetime: ReflexLifetime::UntilCancelled,
             exclusive: false,
@@ -118,6 +126,7 @@ impl ScheduledReflex {
             reflex_id: reflex_id.into(),
             trigger: SchedulerTrigger::OnEvent(filter),
             then,
+            driver: ScheduledReflexDriver::Actions,
             priority: DEFAULT_REFLEX_PRIORITY,
             lifetime: ReflexLifetime::UntilCancelled,
             exclusive: false,
@@ -136,10 +145,53 @@ impl ScheduledReflex {
             reflex_id: reflex_id.into(),
             trigger: SchedulerTrigger::OnEvent(filter),
             then,
+            driver: ScheduledReflexDriver::Actions,
             priority: DEFAULT_REFLEX_PRIORITY,
             lifetime: ReflexLifetime::UntilCancelled,
             exclusive: false,
             debounce,
+        }
+    }
+
+    #[must_use]
+    pub fn aim_track(reflex_id: impl Into<ReflexId>, params: AimTrackParams) -> Self {
+        Self {
+            reflex_id: reflex_id.into(),
+            trigger: SchedulerTrigger::EveryTick,
+            then: Vec::new(),
+            driver: ScheduledReflexDriver::AimTrack(params),
+            priority: DEFAULT_REFLEX_PRIORITY,
+            lifetime: ReflexLifetime::UntilCancelled,
+            exclusive: false,
+            debounce: Duration::ZERO,
+        }
+    }
+
+    #[must_use]
+    pub fn hold_move(reflex_id: impl Into<ReflexId>, params: HoldMoveParams) -> Self {
+        Self {
+            reflex_id: reflex_id.into(),
+            trigger: SchedulerTrigger::EveryTick,
+            then: Vec::new(),
+            driver: ScheduledReflexDriver::HoldMove(params),
+            priority: DEFAULT_REFLEX_PRIORITY,
+            lifetime: ReflexLifetime::UntilCancelled,
+            exclusive: false,
+            debounce: Duration::ZERO,
+        }
+    }
+
+    #[must_use]
+    pub fn hold_button(reflex_id: impl Into<ReflexId>, params: HoldButtonParams) -> Self {
+        Self {
+            reflex_id: reflex_id.into(),
+            trigger: SchedulerTrigger::EveryTick,
+            then: Vec::new(),
+            driver: ScheduledReflexDriver::HoldButton(params),
+            priority: DEFAULT_REFLEX_PRIORITY,
+            lifetime: ReflexLifetime::UntilCancelled,
+            exclusive: false,
+            debounce: Duration::ZERO,
         }
     }
 
@@ -160,6 +212,14 @@ impl ScheduledReflex {
         self.exclusive = exclusive;
         self
     }
+}
+
+#[derive(Clone, Debug)]
+pub enum ScheduledReflexDriver {
+    Actions,
+    AimTrack(AimTrackParams),
+    HoldMove(HoldMoveParams),
+    HoldButton(HoldButtonParams),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -397,6 +457,9 @@ impl ReflexScheduler {
                 })
                 .collect::<Vec<_>>(),
         ));
+        let aim_track_states = aim_track_states(&reflexes)?;
+        let hold_move_states = hold_move_states(&reflexes)?;
+        let hold_button_states = hold_button_states(&reflexes)?;
         let reflexes = reflexes
             .into_iter()
             .enumerate()
@@ -419,6 +482,9 @@ impl ReflexScheduler {
             action_handle,
             reflexes,
             active_combos: Vec::new(),
+            aim_track_states,
+            hold_move_states,
+            hold_button_states,
             on_event_states,
             starvation_states,
             subscription,
@@ -465,6 +531,9 @@ struct RuntimeState {
     action_handle: ActionHandle,
     reflexes: Vec<RuntimeReflex>,
     active_combos: Vec<ComboController>,
+    aim_track_states: Vec<Option<AimTrackController>>,
+    hold_move_states: Vec<Option<HoldMoveController>>,
+    hold_button_states: Vec<Option<HoldButtonController>>,
     on_event_states: Vec<OnEventState>,
     starvation_states: Vec<crate::conflict::StarvationState>,
     subscription: SubscriberHandle,
@@ -475,6 +544,56 @@ struct RuntimeState {
     config: SchedulerConfig,
     audit_db: Option<Arc<Db>>,
     tick_index: u64,
+}
+
+fn aim_track_states(reflexes: &[ScheduledReflex]) -> ReflexResult<Vec<Option<AimTrackController>>> {
+    reflexes
+        .iter()
+        .map(|reflex| match &reflex.driver {
+            ScheduledReflexDriver::AimTrack(params) => {
+                AimTrackController::new(reflex.reflex_id.clone(), params.clone()).map(Some)
+            }
+            ScheduledReflexDriver::Actions
+            | ScheduledReflexDriver::HoldMove(_)
+            | ScheduledReflexDriver::HoldButton(_) => Ok(None),
+        })
+        .collect()
+}
+
+fn hold_move_states(reflexes: &[ScheduledReflex]) -> ReflexResult<Vec<Option<HoldMoveController>>> {
+    reflexes
+        .iter()
+        .map(|reflex| match &reflex.driver {
+            ScheduledReflexDriver::HoldMove(params) => HoldMoveController::new(
+                reflex.reflex_id.clone(),
+                params.clone(),
+                reflex.lifetime.clone(),
+            )
+            .map(Some),
+            ScheduledReflexDriver::Actions
+            | ScheduledReflexDriver::AimTrack(_)
+            | ScheduledReflexDriver::HoldButton(_) => Ok(None),
+        })
+        .collect()
+}
+
+fn hold_button_states(
+    reflexes: &[ScheduledReflex],
+) -> ReflexResult<Vec<Option<HoldButtonController>>> {
+    reflexes
+        .iter()
+        .map(|reflex| match &reflex.driver {
+            ScheduledReflexDriver::HoldButton(params) => HoldButtonController::new(
+                reflex.reflex_id.clone(),
+                params.clone(),
+                reflex.lifetime.clone(),
+            )
+            .map(Some),
+            ScheduledReflexDriver::Actions
+            | ScheduledReflexDriver::AimTrack(_)
+            | ScheduledReflexDriver::HoldMove(_) => Ok(None),
+        })
+        .collect()
 }
 
 pub(crate) fn validate_reflexes(reflexes: &[ScheduledReflex]) -> ReflexResult<()> {
@@ -635,9 +754,14 @@ fn status_for_reflex(
 }
 
 fn kind_summary(reflex: &ScheduledReflex) -> String {
-    match &reflex.trigger {
-        SchedulerTrigger::EveryTick => format!("every_tick:{} actions", reflex.then.len()),
-        SchedulerTrigger::OnEvent(_filter) => format!("on_event:{} actions", reflex.then.len()),
+    match &reflex.driver {
+        ScheduledReflexDriver::Actions => match &reflex.trigger {
+            SchedulerTrigger::EveryTick => format!("every_tick:{} actions", reflex.then.len()),
+            SchedulerTrigger::OnEvent(_filter) => format!("on_event:{} actions", reflex.then.len()),
+        },
+        ScheduledReflexDriver::AimTrack(_params) => "aim_track".to_owned(),
+        ScheduledReflexDriver::HoldMove(params) => format!("hold_move:{} keys", params.keys.len()),
+        ScheduledReflexDriver::HoldButton(_params) => "hold_button".to_owned(),
     }
 }
 
@@ -664,11 +788,35 @@ fn mark_reflex_fired(runtime: &RuntimeState, index: usize) {
         }
     }
     if let Some(status) = expired_status {
-        write_lifetime_expired_audit(runtime, &status);
+        write_lifetime_expired_audit(runtime, &status, "one_shot");
     }
 }
 
-fn write_lifetime_expired_audit(runtime: &RuntimeState, status: &ReflexStatus) {
+fn mark_reflex_lifetime_expired(runtime: &RuntimeState, index: usize, reason: &str) {
+    if let Some(control) = lock_controls(&runtime.controls).get_mut(index) {
+        control.active = false;
+    }
+    let expired_status = if let Some(status) = lock_statuses(&runtime.statuses).get_mut(index) {
+        status.state = ReflexState::Expired;
+        status.last_fired_at = Some(Utc::now());
+        status.fire_count = status.fire_count.saturating_add(1);
+        status.last_error_code = Some(error_codes::REFLEX_LIFETIME_EXPIRED.to_owned());
+        Some(status.clone())
+    } else {
+        None
+    };
+    if let Some(status) = expired_status {
+        write_lifetime_expired_audit(runtime, &status, reason);
+    }
+}
+
+fn mark_reflex_error(runtime: &RuntimeState, index: usize, code: &str) {
+    if let Some(status) = lock_statuses(&runtime.statuses).get_mut(index) {
+        status.last_error_code = Some(code.to_owned());
+    }
+}
+
+fn write_lifetime_expired_audit(runtime: &RuntimeState, status: &ReflexStatus, reason: &str) {
     let Some(db) = runtime.audit_db.as_deref() else {
         return;
     };
@@ -683,7 +831,7 @@ fn write_lifetime_expired_audit(runtime: &RuntimeState, status: &ReflexStatus) {
         error_code: Some(error_codes::REFLEX_LIFETIME_EXPIRED.to_owned()),
         details: json!({
             "kind": REFLEX_LIFETIME_EXPIRED_KIND,
-            "reason": "one_shot",
+            "reason": reason,
             "tick_index": runtime.tick_index,
             "fire_count": status.fire_count,
         }),
@@ -730,6 +878,9 @@ pub use scheduler_stats::p99_jitter_us;
 
 #[path = "scheduler_combo.rs"]
 mod scheduler_combo;
+
+#[path = "scheduler_stateful.rs"]
+mod scheduler_stateful;
 
 #[path = "scheduler_tick.rs"]
 mod scheduler_tick;

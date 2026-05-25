@@ -51,8 +51,8 @@ pub use kinds::on_event::{
 };
 pub use scheduler::{
     DEFAULT_REFLEX_PRIORITY, MAX_REFLEX_PRIORITY, MAX_SCHEDULED_REFLEXES, REFLEX_TICK_LATE_KIND,
-    ReflexScheduler, ScheduledReflex, SchedulerConfig, SchedulerHandle, SchedulerTrigger,
-    TickSample, p99_jitter_us,
+    ReflexScheduler, ScheduledReflex, ScheduledReflexDriver, SchedulerConfig, SchedulerHandle,
+    SchedulerTrigger, TickSample, p99_jitter_us,
 };
 
 pub const REFLEX_CANCELLED_KIND: &str = "reflex_cancelled";
@@ -152,7 +152,13 @@ impl ReflexRuntime {
                 ),
             });
         }
-        let mut next = self.reflexes.clone();
+        let terminal_ids = self.terminal_runtime_reflex_ids();
+        let mut next = self
+            .reflexes
+            .iter()
+            .filter(|reflex| !terminal_ids.contains(&reflex.reflex_id))
+            .cloned()
+            .collect::<Vec<_>>();
         next.push(reflex.clone());
         scheduler::validate_reflexes(&next)?;
 
@@ -224,6 +230,8 @@ impl ReflexRuntime {
             return Ok(ReflexCancelOutcome::NotFound);
         }
         self.disabled_reflex_ids.remove(reflex_id);
+        self.reflexes
+            .retain(|reflex| reflex.reflex_id.as_str() != reflex_id);
         let status = scheduler
             .statuses()
             .into_iter()
@@ -261,6 +269,14 @@ impl ReflexRuntime {
         self.scheduler
             .as_ref()
             .map_or_else(Vec::new, SchedulerHandle::statuses)
+    }
+
+    fn terminal_runtime_reflex_ids(&self) -> HashSet<ReflexId> {
+        self.statuses()
+            .into_iter()
+            .filter(|status| matches!(status.state, ReflexState::Cancelled | ReflexState::Expired))
+            .map(|status| status.id)
+            .collect()
     }
 
     /// Lists reflex statuses visible to MCP callers.
@@ -792,6 +808,58 @@ mod tests {
         assert_eq!(restored[0].id, "reflex-runtime-cancel");
         assert_eq!(restored[0].state, ReflexState::Cancelled);
         assert_eq!(restored[0].kind_summary, "on_event:1 actions");
+        Ok(())
+    }
+
+    #[test]
+    fn cancelled_reflex_does_not_resurrect_on_later_registration() -> Result<(), Box<dyn Error>> {
+        let temp = tempdir()?;
+        let db = Arc::new(Db::open(&temp.path().join("db"), TEST_SCHEMA_VERSION)?);
+        let (action_handle, _action_rx) = ActionHandle::channel();
+        let mut runtime =
+            ReflexRuntime::spawn(Arc::clone(&db), action_handle, EventBus::default())?;
+        let cancelled_reflex = ScheduledReflex::on_event(
+            "reflex-runtime-cancelled-first",
+            EventFilter::Kind {
+                kind: "support-cancelled-first".to_owned(),
+            },
+            vec![Action::ReleaseAll],
+        );
+        let active_reflex = ScheduledReflex::on_event(
+            "reflex-runtime-active-second",
+            EventFilter::Kind {
+                kind: "support-active-second".to_owned(),
+            },
+            vec![Action::ReleaseAll],
+        );
+
+        runtime.register(&cancelled_reflex)?;
+        assert!(matches!(
+            runtime.cancel("reflex-runtime-cancelled-first")?,
+            ReflexCancelOutcome::Cancelled { .. }
+        ));
+        runtime.register(&active_reflex)?;
+
+        let active_statuses = runtime.list(false)?;
+        assert_eq!(active_statuses.len(), 1);
+        assert_eq!(active_statuses[0].id, "reflex-runtime-active-second");
+        assert_eq!(active_statuses[0].state, ReflexState::Active);
+
+        let visible_with_expired = runtime.list(true)?;
+        assert!(visible_with_expired.iter().any(|status| {
+            status.id == "reflex-runtime-cancelled-first" && status.state == ReflexState::Cancelled
+        }));
+        assert!(visible_with_expired.iter().any(|status| {
+            status.id == "reflex-runtime-active-second" && status.state == ReflexState::Active
+        }));
+        assert_eq!(
+            runtime
+                .statuses()
+                .into_iter()
+                .find(|status| status.id == "reflex-runtime-cancelled-first")
+                .map(|status| status.state),
+            None
+        );
         Ok(())
     }
 

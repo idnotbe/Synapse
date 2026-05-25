@@ -13,8 +13,9 @@ use synapse_core::{
 use uuid::Uuid;
 
 use super::{
-    REFLEX_TICK_LATE_KIND, RuntimeState, SchedulerTrigger, TickSample,
+    REFLEX_TICK_LATE_KIND, RuntimeState, ScheduledReflexDriver, SchedulerTrigger, TickSample,
     scheduler_combo::{dispatch_reflex_action, step_active_combos},
+    scheduler_stateful::step_stateful_controllers,
 };
 use crate::{
     ReflexError, ReflexResult,
@@ -33,6 +34,15 @@ pub(super) fn tick(runtime: &mut RuntimeState, elapsed: Duration, degraded: bool
         &mut dispatched_actions,
         &mut dispatch_blocked,
     );
+    if !dispatch_blocked {
+        step_stateful_controllers(
+            runtime,
+            &events,
+            elapsed,
+            &mut dispatched_actions,
+            &mut dispatch_blocked,
+        );
+    }
 
     if !dispatch_blocked {
         dispatch_triggered_reflexes(
@@ -162,6 +172,9 @@ fn collect_triggered_reflexes(
             continue;
         }
         let reflex = &runtime.reflexes[index].reflex;
+        if !matches!(reflex.driver, ScheduledReflexDriver::Actions) {
+            continue;
+        }
         match &reflex.trigger {
             SchedulerTrigger::EveryTick => {
                 triggered.push(TriggeredReflex {

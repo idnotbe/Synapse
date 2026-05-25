@@ -1,5 +1,6 @@
 ---
 source: crates/synapse-mcp/tests/m3_reflex_register_tool.rs
+assertion_line: 140
 expression: shape
 ---
 {
@@ -1522,6 +1523,69 @@ expression: shape
         ],
         "type": "object"
       },
+      "ReflexAimAxis": {
+        "enum": [
+          "xy",
+          "x_only",
+          "y_only"
+        ],
+        "type": "string"
+      },
+      "ReflexButtonTarget": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "button": {
+                "$ref": "#/$defs/MouseButton"
+              },
+              "kind": {
+                "const": "mouse",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "button"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "button": {
+                "$ref": "#/$defs/PadButton"
+              },
+              "kind": {
+                "const": "pad",
+                "type": "string"
+              },
+              "pad": {
+                "format": "uint8",
+                "maximum": 255,
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "kind",
+              "pad",
+              "button"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "ReflexComboStepParam": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/ComboStep"
+          },
+          {
+            "$ref": "#/$defs/ReflexTimedThenStep"
+          }
+        ]
+      },
       "ReflexLifetime": {
         "oneOf": [
           {
@@ -1708,6 +1772,27 @@ expression: shape
         ],
         "type": "object"
       },
+      "ReflexTimedThenStep": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "type": "string"
+          },
+          "at_ms": {
+            "default": 0,
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "params": {
+            "default": {}
+          }
+        },
+        "required": [
+          "action"
+        ],
+        "type": "object"
+      },
       "ReflexWhenParam": {
         "anyOf": [
           {
@@ -1764,13 +1849,82 @@ expression: shape
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "additionalProperties": false,
     "properties": {
+      "axis": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/ReflexAimAxis"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
       "backend": {
         "$ref": "#/$defs/Backend",
         "default": "auto"
       },
+      "button": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/ReflexButtonTarget"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "deadzone_px": {
+        "default": null,
+        "format": "float",
+        "type": [
+          "number",
+          "null"
+        ]
+      },
+      "debounce_ms": {
+        "default": 0,
+        "format": "uint32",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "ema_alpha": {
+        "default": null,
+        "format": "float",
+        "type": [
+          "number",
+          "null"
+        ]
+      },
       "exclusive": {
         "default": false,
         "type": "boolean"
+      },
+      "gain": {
+        "default": null,
+        "format": "float",
+        "type": [
+          "number",
+          "null"
+        ]
+      },
+      "key": {
+        "default": null,
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "keys": {
+        "default": null,
+        "items": {
+          "type": "string"
+        },
+        "type": [
+          "array",
+          "null"
+        ]
       },
       "kind": {
         "enum": [
@@ -1788,6 +1942,14 @@ expression: shape
           "kind": "until_cancelled"
         }
       },
+      "max_speed_px_per_tick": {
+        "default": null,
+        "format": "float",
+        "type": [
+          "number",
+          "null"
+        ]
+      },
       "priority": {
         "default": 100,
         "format": "uint32",
@@ -1795,8 +1957,39 @@ expression: shape
         "minimum": 0,
         "type": "integer"
       },
+      "re_assert": {
+        "default": false,
+        "type": "boolean"
+      },
+      "steps": {
+        "items": {
+          "$ref": "#/$defs/ReflexComboStepParam"
+        },
+        "type": [
+          "array",
+          "null"
+        ]
+      },
+      "target": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/AimTarget"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
       "then": {
-        "$ref": "#/$defs/ReflexThenParam"
+        "anyOf": [
+          {
+            "$ref": "#/$defs/ReflexThenParam"
+          },
+          {
+            "type": "null"
+          }
+        ]
       },
       "when": {
         "anyOf": [
@@ -1810,8 +2003,7 @@ expression: shape
       }
     },
     "required": [
-      "kind",
-      "then"
+      "kind"
     ],
     "title": "ReflexRegisterParams",
     "type": "object"
