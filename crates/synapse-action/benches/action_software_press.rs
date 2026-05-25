@@ -22,6 +22,7 @@ const RECORDING_ITERATIONS: usize = 2_000;
 #[cfg(windows)]
 const WINDOWS_ITERATIONS: usize = 200;
 const WINDOWS_TARGET_P99_NS: u64 = 3_000_000;
+const RATE_LIMIT_SAFE_PACE: Duration = Duration::from_micros(250);
 #[cfg(windows)]
 const WINDOWS_KEY_STATE_TIMEOUT: Duration = Duration::from_nanos(WINDOWS_TARGET_P99_NS);
 #[cfg(windows)]
@@ -74,12 +75,17 @@ fn bench_action_software_press_recording(criterion: &mut Criterion) {
     let key = bench_key();
 
     criterion.bench_function(BENCH_NAME, |bencher| {
-        bencher.iter(|| {
-            let readback = harness
-                .press_once(black_box(&key))
-                .unwrap_or_else(|err| panic!("{BENCH_NAME} recording iteration failed: {err}"));
-            black_box(readback.keydown_ns);
-            black_box(readback.actor_empty);
+        bencher.iter_custom(|iterations| {
+            let mut total_keydown_ns = 0_u128;
+            for _ in 0..iterations {
+                let readback = harness
+                    .press_once(black_box(&key))
+                    .unwrap_or_else(|err| panic!("{BENCH_NAME} recording iteration failed: {err}"));
+                total_keydown_ns = total_keydown_ns.saturating_add(readback.keydown_ns);
+                black_box(readback.actor_empty);
+                std::thread::sleep(RATE_LIMIT_SAFE_PACE);
+            }
+            duration_from_nanos_saturating(total_keydown_ns)
         });
     });
 
@@ -95,12 +101,17 @@ fn bench_action_software_press_sendinput(criterion: &mut Criterion) {
     let key = bench_key();
 
     criterion.bench_function("action_software_press_sendinput", |bencher| {
-        bencher.iter(|| {
-            let readback = harness
-                .press_once(black_box(&key))
-                .unwrap_or_else(|err| panic!("{BENCH_NAME} SendInput iteration failed: {err}"));
-            black_box(readback.keydown_ns);
-            black_box(readback.actor_empty);
+        bencher.iter_custom(|iterations| {
+            let mut total_keydown_ns = 0_u128;
+            for _ in 0..iterations {
+                let readback = harness
+                    .press_once(black_box(&key))
+                    .unwrap_or_else(|err| panic!("{BENCH_NAME} SendInput iteration failed: {err}"));
+                total_keydown_ns = total_keydown_ns.saturating_add(readback.keydown_ns);
+                black_box(readback.actor_empty);
+                std::thread::sleep(RATE_LIMIT_SAFE_PACE);
+            }
+            duration_from_nanos_saturating(total_keydown_ns)
         });
     });
 
@@ -125,6 +136,7 @@ fn measure_recording_reference() -> Result<BenchReport, Box<dyn Error>> {
         let readback = harness.press_once(&key)?;
         elapsed.push(readback.keydown_ns);
         latest = Some(readback);
+        std::thread::sleep(RATE_LIMIT_SAFE_PACE);
     }
 
     let final_snapshot = harness.shutdown()?;
@@ -235,6 +247,7 @@ fn measure_windows_sendinput() -> Result<BenchReport, Box<dyn Error>> {
         if readback.actor_empty {
             actor_empty_count = actor_empty_count.saturating_add(1);
         }
+        std::thread::sleep(RATE_LIMIT_SAFE_PACE);
     }
 
     let after_down = press_key_is_down();
@@ -435,6 +448,10 @@ fn runtime() -> Result<Runtime, Box<dyn Error>> {
     Ok(tokio::runtime::Builder::new_current_thread()
         .enable_time()
         .build()?)
+}
+
+fn duration_from_nanos_saturating(nanos: u128) -> Duration {
+    Duration::from_nanos(nanos.min(u128::from(u64::MAX)) as u64)
 }
 
 fn percentile(values: &[u128], percentile: usize) -> u128 {
