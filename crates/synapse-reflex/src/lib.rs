@@ -20,7 +20,9 @@ use synapse_core::{
     ReflexId, ReflexLifetime, ReflexState, ReflexStatus, SCHEMA_VERSION, StoredReflexAudit,
     error_codes,
 };
-use synapse_storage::{Db, DiskPressureLevel, StorageResult, cf, decode_json};
+use synapse_storage::{
+    Db, DiskPressureLevel, GcReport, PressureReport, StorageResult, cf, decode_json,
+};
 use uuid::Uuid;
 
 pub use audit::write_audit;
@@ -400,6 +402,68 @@ impl ReflexRuntime {
     #[tracing::instrument(skip_all, fields(component = "reflex_runtime"))]
     pub fn storage_cf_sizes(&self) -> StorageResult<BTreeMap<String, u64>> {
         self.db.cf_sizes()
+    }
+
+    /// Returns exact row counts for each storage column family.
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage error when a column family cannot be scanned.
+    #[tracing::instrument(skip_all, fields(component = "reflex_runtime"))]
+    pub fn storage_cf_row_counts(&self) -> StorageResult<BTreeMap<String, u64>> {
+        self.db.cf_row_counts()
+    }
+
+    /// Writes a bounded diagnostic batch to storage and flushes it immediately.
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage error when the write or flush fails.
+    #[tracing::instrument(skip_all, fields(component = "reflex_runtime", cf_name))]
+    pub fn storage_put_probe_rows(
+        &self,
+        cf_name: &str,
+        rows: Vec<(Vec<u8>, Vec<u8>)>,
+    ) -> StorageResult<()> {
+        self.db.put_batch(cf_name, rows)?;
+        self.db.flush()
+    }
+
+    /// Runs one row-cap storage GC pass for operator diagnostics.
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage error when the GC pass fails.
+    #[tracing::instrument(skip_all, fields(component = "reflex_runtime", cf_name))]
+    pub fn storage_run_gc_once_with_row_caps(
+        &self,
+        cf_name: &'static str,
+        soft_cap_rows: u64,
+        hard_cap_rows: u64,
+    ) -> StorageResult<GcReport> {
+        self.db
+            .run_gc_once_with_row_caps(cf_name, soft_cap_rows, hard_cap_rows)
+    }
+
+    /// Applies one synthetic free-space sample through the production pressure responder.
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage error when the pressure check fails.
+    #[tracing::instrument(skip_all, fields(component = "reflex_runtime", free_bytes))]
+    pub fn storage_run_pressure_sample(&self, free_bytes: u64) -> StorageResult<PressureReport> {
+        self.db
+            .run_pressure_check_with_free_bytes_sample(free_bytes)
+    }
+
+    /// Returns the in-process storage pressure transition code history.
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage error when the pressure state cannot be read.
+    #[tracing::instrument(skip_all, fields(component = "reflex_runtime"))]
+    pub fn storage_pressure_transition_codes(&self) -> StorageResult<Vec<&'static str>> {
+        self.db.pressure_transition_codes()
     }
 
     /// Returns the number of currently active reflexes.

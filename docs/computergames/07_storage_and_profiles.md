@@ -277,7 +277,12 @@ For developers extending Synapse:
 7. **For long-term retention, push to external storage** (OTLP for metrics, replay export for events).
 8. **Compaction filter, then GC task, then disk pressure.** Layer cleanup.
 9. **Surface CF size in `health` and Prometheus.** Operators need to see what's growing.
-10. **Test with a low disk volume.** Manual configured-host FSV uses a constrained DB target and reads the physical DB/volume state after the pressure trigger.
+10. **Verify storage through live MCP readbacks.** Manual configured-host FSV
+    uses `storage_inspect`, `storage_put_probe_rows`, `storage_gc_once`, and
+    `storage_pressure_sample` against the running daemon, then reads row counts,
+    pressure transition codes, and daemon logs after each trigger. A constrained
+    DB target or low-volume setup may support investigation, but it is not a
+    substitute for the live MCP trigger plus separate source-of-truth readback.
 
 ---
 
@@ -293,6 +298,20 @@ For developers extending Synapse:
 | `synapse-mcp models list` | Inventory of cached models |
 | `synapse-mcp models import <path>` | Side-load a model file |
 | `synapse-mcp models gc` | Drop unreferenced models |
+
+The live M3 daemon also exposes storage diagnostic MCP tools used for manual
+FSV:
+
+| MCP tool | Effect |
+|---|---|
+| `storage_inspect` | Reads schema version, pressure level, transition codes, per-CF row counts, and logical bytes |
+| `storage_put_probe_rows` | Writes bounded synthetic rows to `CF_EVENTS`, `CF_OBSERVATIONS`, `CF_SESSIONS`, or `CF_KV` and flushes |
+| `storage_gc_once` | Runs one row-cap GC pass for a diagnostic CF |
+| `storage_pressure_sample` | Applies one synthetic free-byte sample through the production disk-pressure responder |
+
+These tools are operator diagnostics for direct state verification. They are not
+FSV automation, and their responses must be followed by separate SoT reads when
+used as acceptance evidence.
 
 ---
 

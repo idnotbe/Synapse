@@ -149,7 +149,7 @@ fn assert_no_instant_or_burst_motion_defaults(tools: &[Value]) -> anyhow::Result
             .get("name")
             .and_then(Value::as_str)
             .context("tool name missing")?;
-        collect_motion_defaults(name, tool, name.to_owned(), &mut observed)?;
+        collect_motion_defaults(name, tool, name, &mut observed)?;
     }
     observed.sort_by_key(|row| {
         format!(
@@ -182,7 +182,7 @@ fn assert_no_instant_or_burst_motion_defaults(tools: &[Value]) -> anyhow::Result
 fn collect_motion_defaults(
     tool: &str,
     value: &Value,
-    path: String,
+    path: &str,
     observed: &mut Vec<Value>,
 ) -> anyhow::Result<()> {
     match value {
@@ -204,12 +204,12 @@ fn collect_motion_defaults(
                 }));
             }
             for (key, child) in map {
-                collect_motion_defaults(tool, child, format!("{path}.{key}"), observed)?;
+                collect_motion_defaults(tool, child, &format!("{path}.{key}"), observed)?;
             }
         }
         Value::Array(items) => {
             for (index, child) in items.iter().enumerate() {
-                collect_motion_defaults(tool, child, format!("{path}[{index}]"), observed)?;
+                collect_motion_defaults(tool, child, &format!("{path}[{index}]"), observed)?;
             }
         }
         Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}

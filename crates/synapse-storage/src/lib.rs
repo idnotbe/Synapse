@@ -197,6 +197,16 @@ impl Db {
         self.pressure.level()
     }
 
+    /// Returns the in-process disk-pressure transition code history.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError::ReadFailed`] if the pressure state cannot be read.
+    #[tracing::instrument(skip_all)]
+    pub fn pressure_transition_codes(&self) -> StorageResult<Vec<&'static str>> {
+        self.pressure.transition_codes()
+    }
+
     /// Returns approximate logical bytes currently stored in each Synapse column family.
     ///
     /// This scans row keys and values so health reports reflect persisted data
@@ -217,6 +227,20 @@ impl Db {
             sizes.insert(cf_name.to_owned(), bytes);
         }
         Ok(sizes)
+    }
+
+    /// Returns exact row counts for each Synapse column family.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError::ReadFailed`] when a column family cannot be scanned.
+    #[tracing::instrument(skip_all)]
+    pub fn cf_row_counts(&self) -> StorageResult<BTreeMap<String, u64>> {
+        let mut counts = BTreeMap::new();
+        for cf_name in cf::ALL_COLUMN_FAMILIES {
+            counts.insert(cf_name.to_owned(), self.scan_cf(cf_name)?.len() as u64);
+        }
+        Ok(counts)
     }
 
     /// Runs one disk-pressure check immediately.

@@ -238,6 +238,11 @@ fn response_from_transcription(transcription: Transcription) -> AudioTranscribeR
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    clippy::float_cmp,
+    reason = "unit tests intentionally assert exact sentinel values and failure paths"
+)]
 mod tests {
     use synapse_audio::{AudioConfig, AudioFormat, AudioRuntime};
 

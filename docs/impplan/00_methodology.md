@@ -158,7 +158,11 @@ Per `07_storage_and_profiles.md` §6 (data lifecycle):
 - JSON for persisted typed records. `bincode` is disallowed after RUSTSEC-2025-0141 (ADR-0001); a future maintained binary codec requires an explicit ADR and migration plan.
 - Per-frame writes forbidden — aggregate, batch every 100 ms or 64 KB
 - Three cleanup layers: compaction filter, periodic GC (5 min), disk-pressure responder
-- Test with a constrained local DB volume on the configured host to verify pressure levels (`07_storage_and_profiles.md` §6.3)
+- Verify storage pressure and GC through the live `storage_*` MCP diagnostic
+  tools on the configured host, with a separate `storage_inspect`/daemon-log
+  readback after each trigger. A constrained local DB volume can support
+  investigation, but it is not FSV by itself (`07_storage_and_profiles.md`
+  §6.3/§7).
 
 ---
 

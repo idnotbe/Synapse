@@ -84,7 +84,7 @@ A work-item is "done" iff:
 
 | Crate | Path | State | Next phase owner |
 |---|---|---|---|
-| `synapse-mcp` | `crates/synapse-mcp` | **15 MCP tools live** (6 M1 + 9 M2) over stdio; `--mode http` returns `NOT_YET_IMPLEMENTED` exit 2; tool-surface readback recorded in #352 | M3 adds `subscribe`, `reflex_*`, `profile_*`, `replay_record`, `audio_*` + HTTP transport |
+| `synapse-mcp` | `crates/synapse-mcp` | **30 MCP tools live** on the M3 branch path (15 M0-M2 + 15 M3, including `storage_*` diagnostics); HTTP/SSE transport is live on loopback with bearer/session gates; tool-surface readback recorded in #331/#352 | Finish manual M3 evidence, docs sweep, soak/regression, release notes, and tag |
 | `synapse-core` | `crates/synapse-core` | full M0-M2 type set + 80 error codes (all `pub const`); `Action` enum + `AimCurve`/`AimNaturalParams::FAST` + `KeystrokeDynamics`/`KeystrokeNaturalParams::FAST` shipped; `ComboStep`/`ComboInput` carried for M3 | extend with `Profile`, `ReflexRegistration`, `Event`, `EventFilter` extensions, `StoredEvent`, etc. |
 | `synapse-capture` | `crates/synapse-capture` | windows-capture 2.0 + DXGI fallback + DPI awareness + `screen_to_window`/`window_to_screen` + capture-target resolver | unchanged at M3 |
 | `synapse-a11y` | `crates/synapse-a11y` | UIA tree walker + cache batch + WinEvent on COM STA + chromiumoxide CDP attach + `re_resolve` + `expand_state_of` + `coalesce_events`/`debounce_value_changes` | M3 consumes for `subscribe` event source |

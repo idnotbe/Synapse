@@ -7,6 +7,7 @@ use super::utils::{enigo, enigo_error, enigo_preserving_held_keys, sleep_ms};
 
 #[tracing::instrument(skip_all, fields(action_kind = "software_key_press"))]
 pub(super) fn press_key(key: &Key, hold_ms: u32, state: &mut EmitState) -> Result<(), ActionError> {
+    validate_key(key)?;
     let mut enigo = enigo()?;
     state.hold_key(key);
     emit_key(&mut enigo, key, Direction::Press)?;
@@ -18,6 +19,7 @@ pub(super) fn press_key(key: &Key, hold_ms: u32, state: &mut EmitState) -> Resul
 
 #[tracing::instrument(skip_all, fields(action_kind = "software_key_state"))]
 pub(super) fn key_down(key: &Key, state: &mut EmitState) -> Result<(), ActionError> {
+    validate_key(key)?;
     let mut enigo = enigo_preserving_held_keys()?;
     state.hold_key(key);
     emit_key(&mut enigo, key, Direction::Press)
@@ -144,4 +146,32 @@ fn single_ascii(value: &str) -> Option<char> {
     let mut chars = value.chars();
     let ch = chars.next()?;
     chars.next().is_none().then_some(ch)
+}
+
+#[cfg(test)]
+mod tests {
+    use synapse_core::{Key, KeyCode, error_codes};
+
+    use super::*;
+
+    #[test]
+    fn unsupported_key_down_does_not_mark_key_held() {
+        let key = Key {
+            code: KeyCode::Named {
+                value: "f24".to_owned(),
+            },
+            use_scancode: false,
+        };
+        let mut state = EmitState::new();
+        let before = state.snapshot();
+        let error = match key_down(&key, &mut state) {
+            Ok(()) => panic!("f24 should be unsupported by Enigo"),
+            Err(error) => error,
+        };
+        let after = state.snapshot();
+
+        assert_eq!(error.code(), error_codes::ACTION_UNSUPPORTED_KEY);
+        assert!(before.held_keys.is_empty());
+        assert!(after.held_keys.is_empty());
+    }
 }

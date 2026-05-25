@@ -27,10 +27,11 @@ Doctrine: `docs/impplan/00_methodology.md` + `07_cross_cutting.md`.
 ## 0. Mission in one sentence (Occam's razor)
 
 **Fill out the four empty M3 crates (`synapse-reflex`, `synapse-storage`,
-`synapse-profiles`, `synapse-audio`) and add ten MCP tools to `synapse-mcp`
-so an agent can subscribe to events over SSE, register reflexes that fire
-without further round-trips, load TOML profiles for the foreground app, and
-read transcribed audio — backed by RocksDB with per-CF TTL/GC and a
+`synapse-profiles`, `synapse-audio`) and add the M3 MCP surface to
+`synapse-mcp` so an agent can subscribe to events over SSE, register reflexes
+that fire without further round-trips, load TOML profiles for the foreground
+app, read transcribed audio, and manually inspect/trigger storage GC and disk
+pressure through live MCP tools — backed by RocksDB with per-CF TTL/GC and a
 loopback-only HTTP transport with bearer auth.** Everything else in this
 document is a consequence of that sentence plus the global invariants. If a
 contributor finds themselves designing something that doesn't trace back to
@@ -105,13 +106,22 @@ act_type, find, health, observe, read_text, release_all, set_capture_target,
 set_perception_mode
 ```
 
-Retained supporting checks may assert this exact list under neutral names. M3 adds 10 more -> final list at end of M3 is 25 tools (`subscribe`, `subscribe_cancel`, `reflex_register`, `reflex_cancel`, `reflex_list`, `reflex_history`, `profile_list`, `profile_activate`, `replay_record`, `audio_tail`, `audio_transcribe` - that's 11 names but `subscribe`+`subscribe_cancel` are one PR; see §7 work-item 21). Update the workspace tools snapshot in the work-item that adds each tool.
+Retained supporting checks may assert this exact list under neutral names. M3
+adds 15 more -> final list at end of M3 is 30 live tools:
+`subscribe`, `subscribe_cancel`, `reflex_register`, `reflex_cancel`,
+`reflex_list`, `reflex_history`, `profile_list`, `profile_activate`,
+`replay_record`, `audio_tail`, `audio_transcribe`, `storage_inspect`,
+`storage_put_probe_rows`, `storage_gc_once`, and
+`storage_pressure_sample`. The four `storage_*` tools are the operator-facing
+manual-FSV surface for storage GC and disk-pressure evidence; they are not
+scripts or harnesses. Update the workspace tools snapshot in the work-item that
+adds each tool.
 
 ### 1.4 Already-wired entry points you will reuse
 
 | Asset | Path | Use |
 |---|---|---|
-| `SynapseService::new()` + `tool_router` macro | `crates/synapse-mcp/src/server.rs:46` | M3 adds 10 `#[tool(...)]` methods next to the 15 existing |
+| `SynapseService::new()` + `tool_router` macro | `crates/synapse-mcp/src/server.rs:46` | M3 adds 15 `#[tool(...)]` methods next to the 15 existing |
 | `mcp_error(code, msg) -> ErrorData` | `crates/synapse-mcp/src/m1.rs:369` | Throw every M3 error code through this helper (`{"code":-32099,"message":..,"data":{"code":"<NAME>"}}`) |
 | `init_process_dpi_awareness` | `crates/synapse-mcp/src/main.rs:62` | Already called once; do NOT re-call |
 | `install_panic_hook` | `crates/synapse-action/src/safety.rs:13` | Already installed by `main.rs:103` — reuse, do not add a second hook |
@@ -330,6 +340,10 @@ Every public `fn` in M3 crates carries `#[tracing::instrument(skip_all, fields(.
 | `audio_tail` | `seconds` | `5` (cap 5 — matches loopback ring) | `05 §3.30` |
 | `audio_transcribe` | `seconds` | `5` | `05 §3.30` |
 | `audio_transcribe` | `language` | `"en"` | `05 §3.30` |
+| `storage_inspect` | — | no params | `05 §3.31` |
+| `storage_put_probe_rows` | `cf_name`, `key_prefix`, `rows`, `value_bytes` | required | `05 §3.32` |
+| `storage_gc_once` | `cf_name`, `soft_cap_rows`, `hard_cap_rows` | required | `05 §3.33` |
+| `storage_pressure_sample` | `free_bytes` | required | `05 §3.34` |
 
 All schemas serialize with `additionalProperties: false` and the `insta` snapshots at `tests/snapshots/m3_*.snap` enforce every default. The M3 work-item that adds each tool also updates the workspace tools snapshot.
 
@@ -401,8 +415,8 @@ Throw helper stays `mcp_error(code, msg)` from `crates/synapse-mcp/src/m1.rs:369
 | 2 | `feat(storage): Db::open(tempdir) w/ all 11 CFs + tuning per 07 §12` | `STORAGE_OPEN_FAILED`, `STORAGE_SCHEMA_MISMATCH` | supporting unit check opens db and lists CF handles; manual boundary evidence opens against existing db with `SCHEMA_VERSION` mismatch -> `STORAGE_SCHEMA_MISMATCH` + wipe-and-rebuild succeeds on retry |
 | 3 | `feat(storage): per-CF compaction filter w/ TTL from runtime config` | — | proptest inserts N records w/ timestamps spanning > TTL and calls `compact_range`; manual SoT readback scans CF and confirms old rows gone, fresh rows present |
 | 4 | `feat(storage): write batcher (100ms / 64KB / flush)` | `STORAGE_WRITE_FAILED` | bench: 10k events writes <= 200 ms wall; manual SoT readback after each scenario uses `Db::scan(CF, ..)` and confirms byte-equal payloads |
-| 5 | `feat(storage): GC task @ 5 min w/ soft-cap DeleteRange + compact` | — | scenario: fill CF to 2x soft cap; trigger GC; manual SoT readback reads live size via `rocksdb::Properties::EstimatedNumKeys` and confirms below soft; `cache_evictions_total{cf,reason}` metric incremented |
-| 6 | `feat(storage): disk-pressure responder 4 levels (07 §6.3)` | `STORAGE_DISK_PRESSURE_LEVEL_1..4`, `STORAGE_CF_HARD_CAP_REACHED` | tmpfs scenario (1 GB volume); fill DB; manual evidence records events emitted on each transition; `df` readback verifies level math |
+| 5 | `feat(storage): GC task @ 5 min w/ soft-cap DeleteRange + compact` | — | scenario: use `storage_put_probe_rows` to fill `CF_EVENTS` to 2x soft cap; trigger `storage_gc_once`; manual SoT readback uses `storage_inspect` and daemon log to confirm row count dropped below soft cap and `cache_evictions_total{cf,reason}` incremented |
+| 6 | `feat(storage): disk-pressure responder 4 levels (07 §6.3)` | `STORAGE_DISK_PRESSURE_LEVEL_1..4`, `STORAGE_CF_HARD_CAP_REACHED` | trigger `storage_pressure_sample` with synthetic free-byte values for L1-L4; manual evidence records emitted transition codes via `storage_inspect` and daemon log; L4 write gate is verified by `storage_put_probe_rows` before/after row counts |
 
 ### Block B — event bus + reflex runtime (work-items 7-13)
 
@@ -443,6 +457,7 @@ Throw helper stays `mcp_error(code, msg)` from `crates/synapse-mcp/src/m1.rs:369
 | 22 | `feat(mcp): SSE push notifications w/ Last-Event-ID resume` | — | reconnect test: drop SSE mid-stream; reconnect with `Last-Event-ID: <seq>`; manual SoT readback confirms server replays the exact missed events byte-equal; buffer overflow -> next push carries `lossy: true` and `subscription_started` is re-sent |
 | 23 | `feat(mcp): subscribe + subscribe_cancel + reflex_register + reflex_cancel + reflex_list + reflex_history` | `SUBSCRIPTION_NOT_FOUND`, `REFLEX_*` | tools/list snapshot updated; manual E2E evidence registers on_event for `value-changed`, fires it, observes `reflex-fired` audit + `reflex_history` row, cancels it, then observes `reflex_list` no longer shows it |
 | 24 | `feat(mcp): replay_record + audio_tail + audio_transcribe` | `REPLAY_TARGET_INVALID`, `REPLAY_FORMAT_INVALID`, `AUDIO_*` | tools/list snapshot updated; manual SoT readback confirms `replay_record({target:"observations", duration_ms:1000})` writes a JSONL file at response `path`; direct file read confirms every line parses as `Observation` |
+| 24a | `feat(mcp): storage_inspect + storage_put_probe_rows + storage_gc_once + storage_pressure_sample` | `TOOL_PARAMS_INVALID`, `SAFETY_PERMISSION_DENIED`, storage `STORAGE_*` | tools/list snapshot updated; manual E5/E6 evidence uses only live MCP calls plus separate `storage_inspect`/log readbacks for storage row counts, pressure transition codes, and write-gate behavior |
 
 ### Block F — safety + demo (work-items 25-26)
 
@@ -451,7 +466,10 @@ Throw helper stays `mcp_error(code, msg)` from `crates/synapse-mcp/src/m1.rs:369
 | 25 | `feat(safety): panic hotkey RegisterHotKey(Ctrl+Alt+Shift+P) -> reflex_disable_all + ReleaseAll within 50ms` | `SAFETY_OPERATOR_HOTKEY_FIRED` | E2E: register 3 reflexes; press hotkey via `keybd_event` test injection; manual SoT readback confirms all 3 reflexes status -> `disabled`, `RELEASE_ALL_HANDLE` fired, `GetAsyncKeyState` for every previously-held key returns 0, and daemon log carries `SAFETY_OPERATOR_HOTKEY_FIRED` |
 | 26 | `test(e2e): notepad save-dialog reflex demo (M3 demo gate)` | — | full §2 demo via stdio AND via HTTP w/ token; manual evidence records all 4 source-of-truth reads; manual sign-off pasted into PR |
 
-Total: 6 carry-over PRs + 26 M3 PRs = 32 PRs. Order matters: A.0 (carry-over) → A (storage; reflex needs `Db` to write audit) → B (reflex runtime) → C (profiles) → D (audio) → E (HTTP + tools wire up) → F (safety + demo).
+Total: 6 carry-over PRs + 26 M3 PRs plus storage diagnostic MCP surface = 33
+PR-sized work items. Order matters: A.0 (carry-over) → A (storage; reflex
+needs `Db` to write audit) → B (reflex runtime) → C (profiles) → D (audio) →
+E (HTTP + tools wire up) → F (safety + demo).
 
 ---
 
@@ -472,7 +490,8 @@ Every M3 work item follows this manual evidence template. Automated tests under 
 | `audio_transcribe` | response `text` equals the ground-truth transcript within Levenshtein ≤ 10% of length | text compare |
 | `audio_tail` | the returned PCM byte length equals `seconds * sample_rate * channels * 2` (i16) | byte-length math |
 | `Db::put_batch` | `Db::get(cf, key)` returns the value after flush | round-trip |
-| Disk-pressure transition | `df` readback (or `windows::Storage::FileProperties` for Win) + emitted event | external read + event drain |
+| Storage GC | `storage_inspect` row counts/bytes + daemon log line for `cache_evictions_total` | read before, trigger `storage_gc_once`, read after |
+| Disk-pressure transition | `storage_pressure_sample` response + `storage_inspect.pressure_transition_codes` + daemon log | one synthetic free-byte sample per transition, with a separate read after each |
 | Reflex recursion guard | per-tick firing count never exceeds 4; one `REFLEX_RECURSION_LIMIT` audit row per exceeded tick | audit scan |
 | HTTP refusal (auth/origin/loopback) | HTTP status code matches expected (401/403/404/exit code 2); daemon log carries the matching code | two reads |
 
@@ -488,7 +507,12 @@ Minimum cases per primary path:
 2. **Boundary**: `reflex_register` 32nd reflex succeeds, 33rd returns `REFLEX_CAP_REACHED`; `audio_tail({seconds: 5})` succeeds, `seconds: 6` returns `TOOL_PARAMS_INVALID`; SSE `Last-Event-ID` resume across exactly 4096-event buffer boundary.
 3. **Structurally invalid**: `reflex_register({kind: "nonsense"})` → `REFLEX_KIND_INVALID`; `profile_activate({profile_id: "does-not-exist"})` → `PROFILE_NOT_FOUND`; `audio_transcribe({language: "xx"})` → `TOOL_PARAMS_INVALID`.
 
-Storage gets a 4th class: **process-restart durability** — write data, restart the daemon, read back, and confirm data persists. The disk-pressure scenario gets a 5th: **all 4 levels must transition deterministically** with a manual SoT read between each transition.
+Storage gets a 4th class: **process-restart durability** — write data, restart
+the daemon, read back, and confirm data persists. The disk-pressure scenario
+gets a 5th: **all 4 levels must transition deterministically** with a manual
+SoT read between each transition. For M3 storage edges, the trigger and SoT
+readback are the live `storage_*` MCP tools plus daemon log inspection; do not
+replace this with a script, harness, or automated FSV helper.
 
 ### 7.4 Trigger → outcome reasoning (doc-comment on every test fn)
 
@@ -532,8 +556,8 @@ Trigger = the tool call. X = the process inside the daemon. Y = the observable o
 | E2 | `reflex_register(on_event, when=<filter that matches itself>)` to trigger recursion | audit log | per-tick firings clamp to 4; one `REFLEX_RECURSION_LIMIT` audit row per over-tick |
 | E3 | `profile_activate({profile_id:"does-not-exist"})` | response | `PROFILE_NOT_FOUND` |
 | E4 | Edit `profiles/vscode.toml` to add a deliberate parse error; save | daemon log + `profile_list` | `PROFILE_PARSE_ERROR`; previous valid profile remains active |
-| E5 | Fill `CF_EVENTS` to 2× soft cap; trigger GC | live CF size via `Db` properties | drops below soft cap; `cache_evictions_total{cf=CF_EVENTS}` incremented |
-| E6 | 1 GB tmpfs DB volume; fill until levels 1→2→3→4 transition | df readback + events | each transition emits `STORAGE_DISK_PRESSURE_LEVEL_N`; level 4 disables non-essential writes |
+| E5 | `storage_put_probe_rows(CF_EVENTS)` to 2× row soft cap; trigger `storage_gc_once` | `storage_inspect` row counts/bytes + daemon log | drops below soft cap; `cache_evictions_total{cf=CF_EVENTS}` incremented |
+| E6 | `storage_pressure_sample` with free-byte values for L1→L2→L3→L4; attempt one non-essential and one essential write at L4 | `storage_inspect` transition codes + row counts + daemon log | each transition emits `STORAGE_DISK_PRESSURE_LEVEL_N`; level 4 disables non-essential writes while preserving session/reflex-audit class writes |
 | E7 | HTTP: `curl` with bad bearer token | response code | 401; daemon log `code=HTTP_TOKEN_INVALID` |
 | E8 | HTTP: `curl -H "Origin: http://evil.example"` from loopback | response code | 403; daemon log `code=HTTP_ORIGIN_REFUSED` |
 | E9 | Start daemon with `--bind 0.0.0.0:7700` (without `--allow-non-loopback`) | process exit code + last log line | exits 2; last log line `code=HTTP_BIND_NON_LOOPBACK_REFUSED` |
@@ -584,7 +608,7 @@ Pick inputs whose expected outputs are unambiguous; tests assert on them exactly
 ✓ All bundled profiles satisfy Natural-defaults invariant (07 §12)
 ✓ HTTP transport: bearer auth + Host/Origin + SSE resume + Mcp-Session-Id work end-to-end
 ✓ Every M3 error code (declared + new) thrown ≥ 1× in a test that asserts data.code
-✓ tools/list snapshot updated to 25 tools (15 prior + 10 M3); `additionalProperties:false` on every schema
+✓ tools/list snapshot updated to 30 tools (15 prior + 15 M3); `additionalProperties:false` on every schema
 ✓ No mocks gate completion — real RocksDB on real disk, real WASAPI on real device, real Notepad in E2E
 ✓ Local supporting checks green; manual configured-host FSV is the shipping gate (issues #246/#247/#350/#351)
 ✓ Manual evidence: issue resolution records source-of-truth before/after state plus final observed result values per scenario
@@ -675,4 +699,8 @@ When debugging, identify the row, read both columns, the bug is in X:
 
 ## Appendix C — Occam's razor recap
 
-The single simplest description of M3: **fill out four empty crates, add ten MCP tools, add an HTTP transport with SSE, and write to a real on-disk RocksDB.** Every other clause traces back to that sentence plus the global invariants (no backcompat, no mocks gate completion, Natural-only motion, manual FSV is the shipping gate). If a design doesn't trace back, it's wrong.
+The single simplest description of M3: **fill out four empty crates, add the 15
+M3 MCP tools, add an HTTP transport with SSE, and write to a real on-disk
+RocksDB.** Every other clause traces back to that sentence plus the global
+invariants (no backcompat, no mocks gate completion, Natural-only motion,
+manual FSV is the shipping gate). If a design doesn't trace back, it's wrong.

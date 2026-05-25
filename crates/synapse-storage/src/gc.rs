@@ -188,6 +188,16 @@ fn run_cf(db: &DB, budget: GcBudget) -> StorageResult<GcCfReport> {
             "reason" => SOFT_CAP_REASON
         )
         .increment(evicted_rows);
+        tracing::info!(
+            code = "STORAGE_CACHE_EVICTIONS_TOTAL_INCREMENTED",
+            metric_name = CACHE_EVICTIONS_TOTAL,
+            cf = budget.cf_name,
+            reason = SOFT_CAP_REASON,
+            delta = evicted_rows,
+            before_value,
+            after_value,
+            "storage cache eviction counter incremented"
+        );
     }
 
     Ok(GcCfReport {

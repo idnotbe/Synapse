@@ -4,6 +4,7 @@ pub mod permissions;
 pub mod profile;
 pub mod reflex;
 pub mod replay;
+pub mod storage;
 pub mod subscribe;
 #[cfg(test)]
 mod tests;
@@ -404,7 +405,7 @@ impl M3ToolStub {
 }
 
 #[must_use]
-pub const fn m3_tool_stubs() -> [M3ToolStub; 11] {
+pub const fn m3_tool_stubs() -> [M3ToolStub; 15] {
     [
         subscribe::subscribe(),
         subscribe::subscribe_cancel(),
@@ -417,6 +418,10 @@ pub const fn m3_tool_stubs() -> [M3ToolStub; 11] {
         replay::replay_record(),
         audio::audio_tail(),
         audio::audio_transcribe(),
+        storage::storage_inspect(),
+        storage::storage_put_probe_rows(),
+        storage::storage_gc_once(),
+        storage::storage_pressure_sample(),
     ]
 }
 

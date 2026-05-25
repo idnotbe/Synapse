@@ -20,6 +20,8 @@ pub enum Permission {
     WriteProfileActive,
     WriteReplay,
     ReadAudio,
+    ReadStorage,
+    WriteStorage,
     InputKeyboard,
     InputMouse,
     InputPad,
@@ -71,6 +73,8 @@ impl Permission {
             Self::WriteProfileActive => "WRITE_PROFILE_ACTIVE",
             Self::WriteReplay => "WRITE_REPLAY",
             Self::ReadAudio => "READ_AUDIO",
+            Self::ReadStorage => "READ_STORAGE",
+            Self::WriteStorage => "WRITE_STORAGE",
             Self::InputKeyboard => "INPUT_KEYBOARD",
             Self::InputMouse => "INPUT_MOUSE",
             Self::InputPad => "INPUT_PAD",
@@ -88,6 +92,8 @@ impl Permission {
             "WRITE_PROFILE_ACTIVE" => Ok(Self::WriteProfileActive),
             "WRITE_REPLAY" => Ok(Self::WriteReplay),
             "READ_AUDIO" => Ok(Self::ReadAudio),
+            "READ_STORAGE" => Ok(Self::ReadStorage),
+            "WRITE_STORAGE" => Ok(Self::WriteStorage),
             "INPUT_KEYBOARD" | "KEYBOARD" => Ok(Self::InputKeyboard),
             "INPUT_MOUSE" | "MOUSE" => Ok(Self::InputMouse),
             "INPUT_PAD" | "PAD" => Ok(Self::InputPad),
@@ -333,6 +339,10 @@ pub fn configured_grants_from_parts(
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    reason = "unit tests intentionally keep failure messages close to the assertion"
+)]
 mod tests {
     use super::*;
 

@@ -4,7 +4,7 @@ use anyhow::{Context, ensure};
 use serde_json::{Value, json};
 use synapse_test_utils::stdio_mcp_client::StdioMcpClient;
 
-const EXPECTED_TOOLS: [&str; 26] = [
+const EXPECTED_TOOLS: [&str; 30] = [
     "act_aim",
     "act_click",
     "act_clipboard",
@@ -29,6 +29,10 @@ const EXPECTED_TOOLS: [&str; 26] = [
     "replay_record",
     "set_capture_target",
     "set_perception_mode",
+    "storage_gc_once",
+    "storage_inspect",
+    "storage_pressure_sample",
+    "storage_put_probe_rows",
     "subscribe",
     "subscribe_cancel",
 ];
@@ -49,7 +53,7 @@ async fn m3_tools_list_snapshot_defaults_and_closed_schemas() -> anyhow::Result<
         .map(str::to_owned)
         .collect::<Vec<_>>();
     assert_eq!(names, expected);
-    assert_eq!(names.len(), 26);
+    assert_eq!(names.len(), 30);
     assert_no_duplicate_names(&names)?;
 
     assert_schema_roots_closed(tools)?;
@@ -225,6 +229,14 @@ fn read_required_fields(readbacks: &mut Vec<Value>, tools: &[Value]) -> anyhow::
     read_required(readbacks, tools, "subscribe_cancel", "subscription_id")?;
     read_required(readbacks, tools, "reflex_cancel", "reflex_id")?;
     read_required(readbacks, tools, "profile_activate", "profile_id")?;
+    read_required(readbacks, tools, "storage_put_probe_rows", "cf_name")?;
+    read_required(readbacks, tools, "storage_put_probe_rows", "key_prefix")?;
+    read_required(readbacks, tools, "storage_put_probe_rows", "rows")?;
+    read_required(readbacks, tools, "storage_put_probe_rows", "value_bytes")?;
+    read_required(readbacks, tools, "storage_gc_once", "cf_name")?;
+    read_required(readbacks, tools, "storage_gc_once", "soft_cap_rows")?;
+    read_required(readbacks, tools, "storage_gc_once", "hard_cap_rows")?;
+    read_required(readbacks, tools, "storage_pressure_sample", "free_bytes")?;
     Ok(())
 }
 

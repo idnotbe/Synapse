@@ -10,7 +10,9 @@
 6. **Idempotency tokens where it matters.** `act_run_shell`, `act_launch`, and similar accept an optional `idempotency_key` for safe retries.
 7. **Stable identifiers.** `element_id`, `entity_id`, `track_id`, `reflex_id`, `session_id` are returned by tools and accepted unchanged by subsequent calls. Agent never invents these.
 
-The tool list below is the contract. Schemas use abbreviated JSON Schema syntax; canonical schema lives in `synapse-mcp/src/tools/definitions/*.rs` and is exported via standard MCP `tools/list`.
+The tool list below is the current live M3 contract. Schemas use abbreviated
+JSON Schema syntax; canonical schema is exported by the daemon through standard
+MCP `tools/list`.
 
 ---
 
@@ -20,36 +22,41 @@ The tool list below is the contract. Schemas use abbreviated JSON Schema syntax;
 |---|---|---|---|
 | 1 | `observe` | read | none |
 | 2 | `find` | read | none |
-| 3 | `describe` | read (slow path) | none |
-| 4 | `read_text` | read | none |
-| 5 | `read_hud` | read | none |
-| 6 | `audio_tail` | read | none |
-| 7 | `audio_transcribe` | read | optional STT inference |
-| 8 | `subscribe` | read | opens push stream |
-| 9 | `set_capture_target` | config | reconfigures capture |
-| 10 | `set_perception_mode` | config | reconfigures perception |
-| 11 | `act_click` | write | mouse click |
-| 12 | `act_type` | write | keyboard |
-| 13 | `act_press` | write | keyboard |
-| 14 | `act_aim` | write | mouse move |
-| 15 | `act_drag` | write | mouse drag |
-| 16 | `act_scroll` | write | mouse scroll |
-| 17 | `act_pad` | write | gamepad |
-| 18 | `act_combo` | write | scheduled sequence |
-| 19 | `act_clipboard` | write/read | clipboard |
-| 20 | `act_run_shell` | write (gated) | spawns process |
-| 21 | `act_launch` | write (gated) | launches process |
-| 22 | `reflex_register` | write | adds reflex |
-| 23 | `reflex_cancel` | write | removes reflex |
-| 24 | `reflex_list` | read | none |
-| 25 | `reflex_history` | read | none |
-| 26 | `release_all` | write | releases all held inputs |
-| 27 | `profile_list` | read | none |
-| 28 | `profile_activate` | config | loads profile |
-| 29 | `health` | read | none |
-| 30 | `replay_record` | config | enables/disables replay log |
+| 3 | `read_text` | read | none |
+| 4 | `audio_tail` | read | none |
+| 5 | `audio_transcribe` | read | optional STT inference |
+| 6 | `subscribe` | read | opens push stream |
+| 7 | `subscribe_cancel` | config | closes push stream |
+| 8 | `set_capture_target` | config | reconfigures capture |
+| 9 | `set_perception_mode` | config | reconfigures perception |
+| 10 | `act_click` | write | mouse click |
+| 11 | `act_type` | write | keyboard |
+| 12 | `act_press` | write | keyboard |
+| 13 | `act_aim` | write | mouse move |
+| 14 | `act_drag` | write | mouse drag |
+| 15 | `act_scroll` | write | mouse scroll |
+| 16 | `act_pad` | write | gamepad |
+| 17 | `act_clipboard` | write/read | clipboard |
+| 18 | `release_all` | write | releases all held inputs |
+| 19 | `reflex_register` | write | adds reflex |
+| 20 | `reflex_cancel` | write | removes reflex |
+| 21 | `reflex_list` | read | none |
+| 22 | `reflex_history` | read | none |
+| 23 | `profile_list` | read | none |
+| 24 | `profile_activate` | config | loads profile |
+| 25 | `health` | read | none |
+| 26 | `replay_record` | config | writes replay JSONL |
+| 27 | `storage_inspect` | read | none |
+| 28 | `storage_put_probe_rows` | write | writes bounded synthetic storage rows |
+| 29 | `storage_gc_once` | write | runs one GC pass |
+| 30 | `storage_pressure_sample` | write | applies one synthetic pressure sample |
 
 30 tools. Hard cap until ADR-approved exception.
+
+Deferred ideas from earlier drafts (`describe`, `read_hud`, standalone
+`act_combo`, `act_run_shell`, and `act_launch`) are not live M3 tools. Adding
+any of them requires either replacing an existing tool or an ADR-approved cap
+change.
 
 ---
 
@@ -132,7 +139,7 @@ Returns:
 
 Implementation: combines string similarity against UIA names/automation IDs and detection class labels with a small bias for foreground-window scope.
 
-### 3.3 `describe`
+### 3.3 `describe` (deferred, not live M3)
 
 Slow-path natural-language description via small VLM. Used for first-orientation on unknown games or when a11y + detection produce sparse results.
 
@@ -197,7 +204,7 @@ Returns:
 Pre-v1 OCR cache/tool payloads using `text` / `language` / `backend` are wipe-and-rebuild;
 the M3 response shape does not carry a compatibility shim.
 
-### 3.5 `read_hud`
+### 3.5 `read_hud` (deferred, not live M3)
 
 Read named HUD regions defined by the active profile.
 
@@ -527,7 +534,7 @@ Drives a virtual or hardware gamepad.
 }
 ```
 
-### 3.18 `act_combo`
+### 3.18 `act_combo` (deferred, not live M3)
 
 ```json
 {
@@ -572,7 +579,7 @@ Drives a virtual or hardware gamepad.
 }
 ```
 
-### 3.20 `act_run_shell`
+### 3.20 `act_run_shell` (deferred, not live M3)
 
 Gated. Disabled unless `--allow-shell <pattern>` was passed at startup.
 
@@ -600,7 +607,7 @@ Returns:
 {"exit_code": 0, "stdout": "...", "stderr": "...", "duration_ms": 152}
 ```
 
-### 3.21 `act_launch`
+### 3.21 `act_launch` (deferred, not live M3)
 
 Gated.
 
@@ -765,6 +772,92 @@ M3 subsystem status strings are `initializing`, `ok`, `degraded_latency`,
       "verb": {"enum": ["start","stop","status"]},
       "session_id": {"type": "string"}
     }
+  }
+}
+```
+
+### 3.31 `storage_inspect`
+
+Operator-facing storage readback for manual FSV. This reads exact row counts,
+logical byte sizes, schema version, and in-process disk-pressure transition
+codes from the live RocksDB-backed runtime.
+
+```json
+{"name": "storage_inspect", "input_schema": {"type": "object", "additionalProperties": false}}
+```
+
+Returns:
+
+```json
+{
+  "schema_version": 1,
+  "pressure_level": {"name": "Normal", "value": 0},
+  "pressure_transition_codes": [],
+  "cf_row_counts": {"CF_EVENTS": 4},
+  "cf_sizes": {"CF_EVENTS": 248}
+}
+```
+
+### 3.32 `storage_put_probe_rows`
+
+Writes bounded synthetic rows to a small allow-list of diagnostic column
+families (`CF_EVENTS`, `CF_OBSERVATIONS`, `CF_SESSIONS`, `CF_KV`) and flushes
+them. This exists so manual storage FSV can use known synthetic inputs and then
+read the physical storage state through `storage_inspect`.
+
+```json
+{
+  "name": "storage_put_probe_rows",
+  "input_schema": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["cf_name", "key_prefix", "rows", "value_bytes"],
+    "properties": {
+      "cf_name": {"type": "string"},
+      "key_prefix": {"type": "string", "maxLength": 128},
+      "rows": {"type": "integer", "minimum": 0, "maximum": 10000},
+      "value_bytes": {"type": "integer", "minimum": 0, "maximum": 65536}
+    }
+  }
+}
+```
+
+### 3.33 `storage_gc_once`
+
+Runs one row-cap GC pass for a diagnostic column family. Manual FSV reads
+`storage_inspect` before, calls this trigger, then reads `storage_inspect` and
+the daemon log afterward.
+
+```json
+{
+  "name": "storage_gc_once",
+  "input_schema": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["cf_name", "soft_cap_rows", "hard_cap_rows"],
+    "properties": {
+      "cf_name": {"type": "string"},
+      "soft_cap_rows": {"type": "integer", "minimum": 1, "maximum": 1000000},
+      "hard_cap_rows": {"type": "integer", "minimum": 1, "maximum": 1000000}
+    }
+  }
+}
+```
+
+### 3.34 `storage_pressure_sample`
+
+Applies one synthetic free-byte sample through the production disk-pressure
+responder. Manual FSV must separately read `storage_inspect` and logs after each
+sample to confirm the pressure level and emitted transition code.
+
+```json
+{
+  "name": "storage_pressure_sample",
+  "input_schema": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["free_bytes"],
+    "properties": {"free_bytes": {"type": "integer", "minimum": 0}}
   }
 }
 ```

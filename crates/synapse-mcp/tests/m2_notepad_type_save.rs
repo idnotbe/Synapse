@@ -83,7 +83,7 @@ async fn notepad_type_save_writes_byte_correct_file_live() -> anyhow::Result<()>
     let editor_id = editor_node.element_id.clone();
     match synapse_a11y::focus_window(hwnd) {
         Ok(()) => {
-            println!("readback=synapse_a11y::focus_window edge=window after=ok hwnd=0x{hwnd:x}")
+            println!("readback=synapse_a11y::focus_window edge=window after=ok hwnd=0x{hwnd:x}");
         }
         Err(error) => {
             println!("readback=synapse_a11y::focus_window edge=window after_error={error}");
@@ -866,7 +866,7 @@ async fn observe(client: &mut StdioMcpClient) -> anyhow::Result<Observation> {
 fn focus_editor(hwnd: i64, editor_id: &ElementId) -> anyhow::Result<()> {
     match synapse_a11y::focus_window(hwnd) {
         Ok(()) => {
-            println!("readback=synapse_a11y::focus_window edge=window after=ok hwnd=0x{hwnd:x}")
+            println!("readback=synapse_a11y::focus_window edge=window after=ok hwnd=0x{hwnd:x}");
         }
         Err(error) => {
             println!("readback=synapse_a11y::focus_window edge=window after_error={error}");

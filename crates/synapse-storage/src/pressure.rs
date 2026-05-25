@@ -164,7 +164,6 @@ impl PressureState {
         DiskPressureLevel::from_u8(self.level.load(Ordering::SeqCst))
     }
 
-    #[cfg(test)]
     pub fn transition_codes(&self) -> StorageResult<Vec<&'static str>> {
         self.emitted_codes
             .lock()

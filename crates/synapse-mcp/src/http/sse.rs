@@ -642,6 +642,12 @@ fn manual_routes_enabled() -> bool {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    clippy::match_wildcard_for_single_variants,
+    clippy::similar_names,
+    reason = "unit tests intentionally keep failure messages close to the assertion"
+)]
 mod tests {
     use chrono::Utc;
     use synapse_core::{Event, EventFilter, EventSource};

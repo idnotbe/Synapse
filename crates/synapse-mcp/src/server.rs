@@ -54,6 +54,12 @@ use crate::{
         },
         replay::{ReplayRecordParams, ReplayRecordResponse, record_replay},
         shared_m3_state_from_config_with_shutdown_reason_and_sse_state, shared_m3_state_from_env,
+        storage::{
+            StorageGcOnceParams, StorageGcOnceResponse, StorageInspectParams,
+            StorageInspectResponse, StoragePressureSampleParams, StoragePressureSampleResponse,
+            StoragePutProbeRowsParams, StoragePutProbeRowsResponse, apply_storage_pressure_sample,
+            inspect_storage, put_probe_rows, run_storage_gc_once,
+        },
         subscribe::{
             SubscribeCancelParams, SubscribeCancelResponse, SubscribeParams, SubscribeResponse,
             cancel_subscription, subscribe_to_events,
@@ -489,7 +495,7 @@ impl SynapseService {
                     .as_ref()
                     .map(CancellationToken::is_cancelled),
             );
-            state.scaffold_ready() && m3_stub_count == 11
+            state.scaffold_ready() && m3_stub_count == 15
         });
         match (recording_enabled, m3_scaffold_ready) {
             (true, true) => {
@@ -1179,6 +1185,85 @@ impl SynapseService {
             &crate::m3::audio::required_permissions_transcribe(&params.0),
         )?;
         transcribe_audio(&self.m3_state, &params.0).map(Json)
+    }
+
+    #[tool(description = "Inspect storage sizes, row counts, and pressure state")]
+    pub async fn storage_inspect(
+        &self,
+        params: Parameters<StorageInspectParams>,
+    ) -> Result<Json<StorageInspectResponse>, ErrorData> {
+        tracing::info!(
+            code = "MCP_TOOL_INVOCATION",
+            kind = "storage_inspect",
+            "tool.invocation kind=storage_inspect"
+        );
+        self.require_m3_permissions(
+            "storage_inspect",
+            &crate::m3::storage::required_permissions_inspect(&params.0),
+        )?;
+        let runtime = self.reflex_runtime()?;
+        inspect_storage(&runtime, &params.0).map(Json)
+    }
+
+    #[tool(description = "Write bounded synthetic probe rows to a storage column family")]
+    pub async fn storage_put_probe_rows(
+        &self,
+        params: Parameters<StoragePutProbeRowsParams>,
+    ) -> Result<Json<StoragePutProbeRowsResponse>, ErrorData> {
+        tracing::info!(
+            code = "MCP_TOOL_INVOCATION",
+            kind = "storage_put_probe_rows",
+            cf_name = %params.0.cf_name,
+            rows = params.0.rows,
+            value_bytes = params.0.value_bytes,
+            "tool.invocation kind=storage_put_probe_rows"
+        );
+        self.require_m3_permissions(
+            "storage_put_probe_rows",
+            &crate::m3::storage::required_permissions_put(&params.0),
+        )?;
+        let runtime = self.reflex_runtime()?;
+        put_probe_rows(&runtime, &params.0).map(Json)
+    }
+
+    #[tool(description = "Run one row-cap storage GC pass for diagnostics")]
+    pub async fn storage_gc_once(
+        &self,
+        params: Parameters<StorageGcOnceParams>,
+    ) -> Result<Json<StorageGcOnceResponse>, ErrorData> {
+        tracing::info!(
+            code = "MCP_TOOL_INVOCATION",
+            kind = "storage_gc_once",
+            cf_name = %params.0.cf_name,
+            soft_cap_rows = params.0.soft_cap_rows,
+            hard_cap_rows = params.0.hard_cap_rows,
+            "tool.invocation kind=storage_gc_once"
+        );
+        self.require_m3_permissions(
+            "storage_gc_once",
+            &crate::m3::storage::required_permissions_gc(&params.0),
+        )?;
+        let runtime = self.reflex_runtime()?;
+        run_storage_gc_once(&runtime, &params.0).map(Json)
+    }
+
+    #[tool(description = "Apply one synthetic free-byte sample through storage pressure handling")]
+    pub async fn storage_pressure_sample(
+        &self,
+        params: Parameters<StoragePressureSampleParams>,
+    ) -> Result<Json<StoragePressureSampleResponse>, ErrorData> {
+        tracing::info!(
+            code = "MCP_TOOL_INVOCATION",
+            kind = "storage_pressure_sample",
+            free_bytes = params.0.free_bytes,
+            "tool.invocation kind=storage_pressure_sample"
+        );
+        self.require_m3_permissions(
+            "storage_pressure_sample",
+            &crate::m3::storage::required_permissions_pressure(&params.0),
+        )?;
+        let runtime = self.reflex_runtime()?;
+        apply_storage_pressure_sample(&runtime, &params.0).map(Json)
     }
 }
 

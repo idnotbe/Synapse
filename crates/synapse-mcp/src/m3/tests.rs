@@ -80,6 +80,10 @@ fn m3_tool_stub_names_are_stable() {
         "replay_record",
         "audio_tail",
         "audio_transcribe",
+        "storage_inspect",
+        "storage_put_probe_rows",
+        "storage_gc_once",
+        "storage_pressure_sample",
     ];
     println!("readback=m3_tool_stubs before=expected:{expected:?}");
     let actual = m3_tool_stubs().map(|stub| stub.name);

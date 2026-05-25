@@ -873,6 +873,11 @@ fn apply_backend_default(action: &mut Action, fallback: Backend) {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    clippy::float_cmp,
+    reason = "unit tests intentionally assert exact schema-mapping values and failure paths"
+)]
 mod tests {
     use serde_json::json;
     use synapse_core::{

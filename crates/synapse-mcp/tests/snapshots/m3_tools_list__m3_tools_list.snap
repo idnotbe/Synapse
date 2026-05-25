@@ -3,7 +3,7 @@ source: crates/synapse-mcp/tests/m3_tools_list.rs
 expression: snapshot
 ---
 {
-  "count": 26,
+  "count": 30,
   "m3_defaults": [
     {
       "actual": [],
@@ -91,6 +91,46 @@ expression: snapshot
       "actual_contains": "profile_id",
       "path": "inputSchema.required",
       "tool": "profile_activate"
+    },
+    {
+      "actual_contains": "cf_name",
+      "path": "inputSchema.required",
+      "tool": "storage_put_probe_rows"
+    },
+    {
+      "actual_contains": "key_prefix",
+      "path": "inputSchema.required",
+      "tool": "storage_put_probe_rows"
+    },
+    {
+      "actual_contains": "rows",
+      "path": "inputSchema.required",
+      "tool": "storage_put_probe_rows"
+    },
+    {
+      "actual_contains": "value_bytes",
+      "path": "inputSchema.required",
+      "tool": "storage_put_probe_rows"
+    },
+    {
+      "actual_contains": "cf_name",
+      "path": "inputSchema.required",
+      "tool": "storage_gc_once"
+    },
+    {
+      "actual_contains": "soft_cap_rows",
+      "path": "inputSchema.required",
+      "tool": "storage_gc_once"
+    },
+    {
+      "actual_contains": "hard_cap_rows",
+      "path": "inputSchema.required",
+      "tool": "storage_gc_once"
+    },
+    {
+      "actual_contains": "free_bytes",
+      "path": "inputSchema.required",
+      "tool": "storage_pressure_sample"
     }
   ],
   "tools": [
@@ -118,6 +158,10 @@ expression: snapshot
     "replay_record",
     "set_capture_target",
     "set_perception_mode",
+    "storage_gc_once",
+    "storage_inspect",
+    "storage_pressure_sample",
+    "storage_put_probe_rows",
     "subscribe",
     "subscribe_cancel"
   ]

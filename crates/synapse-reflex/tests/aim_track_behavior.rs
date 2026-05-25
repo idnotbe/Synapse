@@ -1,3 +1,9 @@
+#![allow(
+    clippy::float_cmp,
+    clippy::missing_const_for_fn,
+    reason = "integration tests assert exact controller sentinel values and keep helpers simple"
+)]
+
 use std::time::Duration;
 
 use chrono::Utc;
