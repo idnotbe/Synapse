@@ -28,6 +28,44 @@ const DEFAULT_BIND: &str = "127.0.0.1:7700";
 pub type SharedM3State = Arc<Mutex<M3State>>;
 
 #[derive(Clone, Debug)]
+pub struct M3ServiceConfig {
+    pub db_path: Option<PathBuf>,
+    pub profile_dir: Option<PathBuf>,
+    pub reflex_disabled: bool,
+    pub bind: String,
+    pub bearer_token: Option<String>,
+}
+
+impl M3ServiceConfig {
+    #[must_use]
+    pub fn from_cli_parts(
+        db_path: Option<PathBuf>,
+        profile_dir: Option<PathBuf>,
+        reflex_disabled: bool,
+        bind: String,
+    ) -> Self {
+        Self {
+            db_path,
+            profile_dir,
+            reflex_disabled,
+            bind,
+            bearer_token: std::env::var(BEARER_TOKEN_ENV).ok(),
+        }
+    }
+
+    pub fn from_env() -> Result<Self> {
+        let reflex_disabled_raw = std::env::var(REFLEX_DISABLED_ENV).ok();
+        Ok(Self {
+            db_path: std::env::var_os(DB_ENV).map(PathBuf::from),
+            profile_dir: std::env::var_os(PROFILE_DIR_ENV).map(PathBuf::from),
+            reflex_disabled: parse_bool_env(REFLEX_DISABLED_ENV, reflex_disabled_raw.as_deref())?,
+            bind: std::env::var(BIND_ENV).unwrap_or_else(|_| DEFAULT_BIND.to_owned()),
+            bearer_token: std::env::var(BEARER_TOKEN_ENV).ok(),
+        })
+    }
+}
+
+#[derive(Clone, Debug)]
 pub struct M3State {
     pub db_path: Option<PathBuf>,
     pub profile_dir: Option<PathBuf>,
@@ -43,31 +81,21 @@ pub struct M3State {
 }
 
 pub fn shared_m3_state_from_env() -> Result<SharedM3State> {
-    Ok(Arc::new(Mutex::new(M3State::from_env()?)))
+    Ok(Arc::new(Mutex::new(M3State::from_config(
+        M3ServiceConfig::from_env()?,
+    )?)))
 }
 
-pub fn shared_m3_state_from_env_with_shutdown_reason(
-    shutdown_cancel: CancellationToken,
-    shutdown_reason: &'static str,
-    connection_closed_cancel: Option<CancellationToken>,
-) -> Result<SharedM3State> {
-    Ok(Arc::new(Mutex::new(
-        M3State::from_env_with_shutdown_reason(
-            shutdown_cancel,
-            shutdown_reason,
-            connection_closed_cancel,
-        )?,
-    )))
-}
-
-pub fn shared_m3_state_from_env_with_shutdown_reason_and_sse_state(
+pub fn shared_m3_state_from_config_with_shutdown_reason_and_sse_state(
+    config: M3ServiceConfig,
     shutdown_cancel: CancellationToken,
     shutdown_reason: &'static str,
     connection_closed_cancel: Option<CancellationToken>,
     sse_state: SseState,
 ) -> Result<SharedM3State> {
     Ok(Arc::new(Mutex::new(
-        M3State::from_env_with_shutdown_reason_and_sse_state(
+        M3State::from_config_with_shutdown_reason_and_sse_state(
+            config,
             shutdown_cancel,
             shutdown_reason,
             connection_closed_cancel,
@@ -77,76 +105,33 @@ pub fn shared_m3_state_from_env_with_shutdown_reason_and_sse_state(
 }
 
 impl M3State {
-    pub fn from_env() -> Result<Self> {
-        Self::from_env_with_sse_state(SseState::from_env())
-    }
-
-    pub fn from_env_with_sse_state(sse_state: SseState) -> Result<Self> {
-        Self::from_env_with_shutdown_reason_and_sse_state(
+    pub fn from_config(config: M3ServiceConfig) -> Result<Self> {
+        Self::from_config_with_shutdown_reason_and_sse_state(
+            config,
             CancellationToken::new(),
             "shutdown",
             None,
-            sse_state,
+            SseState::from_env(),
         )
     }
 
-    pub fn from_env_with_shutdown_reason(
-        shutdown_cancel: CancellationToken,
-        shutdown_reason: &'static str,
-        connection_closed_cancel: Option<CancellationToken>,
-    ) -> Result<Self> {
-        Self::from_parts(
-            std::env::var_os(DB_ENV).map(PathBuf::from),
-            std::env::var_os(PROFILE_DIR_ENV).map(PathBuf::from),
-            std::env::var(REFLEX_DISABLED_ENV).ok().as_deref(),
-            std::env::var(BEARER_TOKEN_ENV).ok(),
-            std::env::var(BIND_ENV).ok(),
-            shutdown_cancel,
-            shutdown_reason,
-            connection_closed_cancel,
-        )
-    }
-
-    pub fn from_env_with_shutdown_reason_and_sse_state(
+    pub fn from_config_with_shutdown_reason_and_sse_state(
+        config: M3ServiceConfig,
         shutdown_cancel: CancellationToken,
         shutdown_reason: &'static str,
         connection_closed_cancel: Option<CancellationToken>,
         sse_state: SseState,
     ) -> Result<Self> {
         Self::from_parts_with_sse_state(
-            std::env::var_os(DB_ENV).map(PathBuf::from),
-            std::env::var_os(PROFILE_DIR_ENV).map(PathBuf::from),
-            std::env::var(REFLEX_DISABLED_ENV).ok().as_deref(),
-            std::env::var(BEARER_TOKEN_ENV).ok(),
-            std::env::var(BIND_ENV).ok(),
+            config.db_path,
+            config.profile_dir,
+            Some(bool_env_value(config.reflex_disabled)),
+            config.bearer_token,
+            Some(config.bind),
             shutdown_cancel,
             shutdown_reason,
             connection_closed_cancel,
             sse_state,
-        )
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub fn from_parts(
-        db_path: Option<PathBuf>,
-        profile_dir: Option<PathBuf>,
-        reflex_disabled: Option<&str>,
-        bearer_token: Option<String>,
-        bind: Option<String>,
-        shutdown_cancel: CancellationToken,
-        shutdown_reason: &'static str,
-        connection_closed_cancel: Option<CancellationToken>,
-    ) -> Result<Self> {
-        Self::from_parts_with_sse_state(
-            db_path,
-            profile_dir,
-            reflex_disabled,
-            bearer_token,
-            bind,
-            shutdown_cancel,
-            shutdown_reason,
-            connection_closed_cancel,
-            SseState::from_env(),
         )
     }
 
@@ -269,4 +254,8 @@ fn parse_bool_env(name: &str, value: Option<&str>) -> Result<bool> {
         Some(value) if value.eq_ignore_ascii_case("false") => Ok(false),
         Some(value) => bail!("{name} must be one of 1, 0, true, or false; got {value:?}"),
     }
+}
+
+const fn bool_env_value(value: bool) -> &'static str {
+    if value { "1" } else { "0" }
 }

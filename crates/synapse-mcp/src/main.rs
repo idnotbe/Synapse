@@ -48,6 +48,17 @@ struct Cli {
     reflex_disabled: bool,
 }
 
+impl Cli {
+    fn m3_config(&self) -> m3::M3ServiceConfig {
+        m3::M3ServiceConfig::from_cli_parts(
+            self.db.clone(),
+            self.profile_dir.clone(),
+            self.reflex_disabled,
+            self.bind.clone(),
+        )
+    }
+}
+
 #[tokio::main]
 async fn main() -> ExitCode {
     match run().await {
@@ -72,9 +83,9 @@ async fn run() -> anyhow::Result<ExitCode> {
     );
 
     match cli.mode {
-        Mode::Stdio => run_stdio(telemetry_guard).await,
+        Mode::Stdio => run_stdio(telemetry_guard, cli.m3_config()).await,
         Mode::Http => {
-            let code = http::serve(&cli.bind, cli.allow_non_loopback).await?;
+            let code = http::serve(&cli.bind, cli.allow_non_loopback, cli.m3_config()).await?;
             drop(telemetry_guard);
             Ok(code)
         }
@@ -96,15 +107,19 @@ fn configure_telemetry(cli: &Cli) -> anyhow::Result<TelemetryGuard> {
     .context("initialize telemetry")
 }
 
-async fn run_stdio(telemetry_guard: TelemetryGuard) -> anyhow::Result<ExitCode> {
+async fn run_stdio(
+    telemetry_guard: TelemetryGuard,
+    m3_config: m3::M3ServiceConfig,
+) -> anyhow::Result<ExitCode> {
     tracing::info!(code = "MCP_STDIO_STARTED", "starting stdio MCP transport");
     let rmcp_token = CancellationToken::new();
     let emitter_shutdown_token = CancellationToken::new();
     let emitter_connection_closed_token = CancellationToken::new();
-    let service = SynapseService::try_with_m2_shutdown_reason(
+    let service = SynapseService::try_with_m2_shutdown_reason_and_m3_config(
         emitter_shutdown_token.clone(),
         "sigint",
         emitter_connection_closed_token.clone(),
+        m3_config,
     )
     .context("initialize Synapse service state")?;
     synapse_action::install_panic_hook();

@@ -250,6 +250,59 @@ impl ReflexRuntime {
         Ok(statuses)
     }
 
+    /// Returns persisted reflex audit rows in newest-first order.
+    ///
+    /// When `reflex_id` is present, the audit column family is read by the
+    /// reflex audit key prefix. Without a `reflex_id`, rows are sorted globally
+    /// by persisted timestamp and audit id before the limit is applied.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`ReflexError`] when the audit column family cannot be scanned
+    /// or an audit row cannot be decoded.
+    #[tracing::instrument(skip_all, fields(component = "reflex_runtime", reflex_id, limit))]
+    pub fn history(
+        &self,
+        reflex_id: Option<&str>,
+        limit: usize,
+    ) -> ReflexResult<Vec<StoredReflexAudit>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+
+        let rows = reflex_id
+            .map_or_else(
+                || self.db.scan_cf(cf::CF_REFLEX_AUDIT),
+                |reflex_id| {
+                    self.db
+                        .scan_cf_prefix(cf::CF_REFLEX_AUDIT, audit_key_prefix(reflex_id).as_bytes())
+                },
+            )
+            .map_err(|error| ReflexError::ParamsInvalid {
+                detail: format!("reflex audit scan failed: {error}"),
+            })?;
+
+        let mut audits = rows
+            .into_iter()
+            .map(|(_key, value)| {
+                decode_json::<StoredReflexAudit>(&value).map_err(|error| {
+                    ReflexError::ParamsInvalid {
+                        detail: format!("reflex audit decode failed: {error}"),
+                    }
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        audits.sort_by(|left, right| {
+            right
+                .ts_ns
+                .cmp(&left.ts_ns)
+                .then_with(|| right.audit_id.cmp(&left.audit_id))
+                .then_with(|| right.reflex_id.cmp(&left.reflex_id))
+        });
+        audits.truncate(limit);
+        Ok(audits)
+    }
+
     /// Returns the storage path backing this runtime.
     #[must_use]
     #[tracing::instrument(skip_all, fields(component = "reflex_runtime"))]
@@ -478,6 +531,10 @@ impl AuditStatusAccumulator {
 
 fn datetime_from_ts_ns(ts_ns: u64) -> DateTime<Utc> {
     DateTime::<Utc>::from(UNIX_EPOCH + Duration::from_nanos(ts_ns))
+}
+
+fn audit_key_prefix(reflex_id: &str) -> String {
+    format!("{reflex_id}:")
 }
 
 #[cfg(test)]

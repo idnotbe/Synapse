@@ -20,6 +20,7 @@ use crate::{
     http::auth::{self, HttpAuth},
     http::session,
     http::sse::{self, SseState},
+    m3::M3ServiceConfig,
     server::SynapseService,
 };
 
@@ -31,7 +32,11 @@ struct HttpState {
     sse_state: SseState,
 }
 
-pub(super) async fn serve(bind: &str, allow_non_loopback: bool) -> anyhow::Result<ExitCode> {
+pub(super) async fn serve(
+    bind: &str,
+    allow_non_loopback: bool,
+    m3_config: M3ServiceConfig,
+) -> anyhow::Result<ExitCode> {
     synapse_action::install_panic_hook();
     let addr = bind
         .parse::<SocketAddr>()
@@ -65,6 +70,7 @@ pub(super) async fn serve(bind: &str, allow_non_loopback: bool) -> anyhow::Resul
         connection_closed_cancel.clone(),
         local_addr,
         sse_state,
+        m3_config,
     )
     .context("build HTTP MCP router")?;
 
@@ -98,6 +104,7 @@ fn router(
     connection_closed_cancel: CancellationToken,
     bind_addr: SocketAddr,
     sse_state: SseState,
+    m3_config: M3ServiceConfig,
 ) -> anyhow::Result<Router> {
     let auth = Arc::new(HttpAuth::load(bind_addr).context("load HTTP bearer token")?);
     tracing::info!(
@@ -110,12 +117,17 @@ fn router(
             shutdown_cancel.clone(),
             connection_closed_cancel.clone(),
             sse_state.clone(),
+            m3_config.clone(),
         )
         .context("initialize HTTP health service state")?,
     );
-    let mcp_service =
-        streamable_service(shutdown_cancel, connection_closed_cancel, sse_state.clone())
-            .context("initialize HTTP MCP session state")?;
+    let mcp_service = streamable_service(
+        shutdown_cancel,
+        connection_closed_cancel,
+        sse_state.clone(),
+        m3_config,
+    )
+    .context("initialize HTTP MCP session state")?;
     let state = HttpState {
         health_service,
         sse_state,
@@ -137,6 +149,7 @@ fn streamable_service(
     shutdown_cancel: CancellationToken,
     connection_closed_cancel: CancellationToken,
     sse_state: SseState,
+    m3_config: M3ServiceConfig,
 ) -> anyhow::Result<McpHttpService> {
     let config = StreamableHttpServerConfig::default()
         .with_cancellation_token(shutdown_cancel.child_token());
@@ -149,6 +162,7 @@ fn streamable_service(
                 shutdown_cancel.clone(),
                 connection_closed_cancel.clone(),
                 sse_state.clone(),
+                m3_config.clone(),
             )
         },
         Arc::new(session_manager),
@@ -160,12 +174,14 @@ fn http_service(
     shutdown_cancel: CancellationToken,
     connection_closed_cancel: CancellationToken,
     sse_state: SseState,
+    m3_config: M3ServiceConfig,
 ) -> io::Result<SynapseService> {
-    SynapseService::try_with_m2_shutdown_reason_and_sse_state(
+    SynapseService::try_with_m2_shutdown_reason_and_sse_state_and_m3_config(
         shutdown_cancel,
         "http",
         connection_closed_cancel,
         sse_state,
+        m3_config,
     )
     .map_err(|error| io::Error::other(format!("{error:#}")))
 }

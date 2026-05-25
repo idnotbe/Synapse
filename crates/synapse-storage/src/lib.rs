@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use rocksdb::{
     BlockBasedOptions, Cache, ColumnFamilyDescriptor, ColumnFamilyRef, DB, DBCompressionType,
-    IteratorMode, Options, SliceTransform,
+    Direction, IteratorMode, Options, SliceTransform,
 };
 use synapse_core::error_codes;
 
@@ -264,6 +264,36 @@ impl Db {
                 cf_name: cf_name.to_owned(),
                 detail: source.to_string(),
             })?;
+            rows.push((key.to_vec(), value.to_vec()));
+        }
+        Ok(rows)
+    }
+
+    /// Scans a column family from a key prefix into owned key/value bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError::ReadFailed`] when the column family is missing
+    /// or `RocksDB` iteration fails.
+    #[tracing::instrument(skip_all, fields(cf_name, prefix_len = prefix.len()))]
+    pub fn scan_cf_prefix(
+        &self,
+        cf_name: &str,
+        prefix: &[u8],
+    ) -> StorageResult<Vec<(Vec<u8>, Vec<u8>)>> {
+        let handle = self.cf_handle(cf_name)?;
+        let mut rows = Vec::new();
+        for item in self
+            .inner
+            .iterator_cf(&handle, IteratorMode::From(prefix, Direction::Forward))
+        {
+            let (key, value) = item.map_err(|source| StorageError::ReadFailed {
+                cf_name: cf_name.to_owned(),
+                detail: source.to_string(),
+            })?;
+            if !key.starts_with(prefix) {
+                break;
+            }
             rows.push((key.to_vec(), value.to_vec()));
         }
         Ok(rows)

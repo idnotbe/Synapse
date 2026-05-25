@@ -37,18 +37,17 @@ use crate::{
         shared_m2_state_from_env_with_shutdown_reason,
     },
     m3::{
-        SharedM3State,
+        M3ServiceConfig, SharedM3State,
         profile::{
             ProfileActivateParams, ProfileActivateResponse, ProfileListParams, ProfileListResponse,
             activate_profile, list_profiles,
         },
         reflex::{
-            ReflexCancelParams, ReflexCancelResponse, ReflexListParams, ReflexListResponse,
-            ReflexRegisterParams, ReflexRegisterResponse, cancel_reflex, list_reflexes,
-            register_reflex,
+            ReflexCancelParams, ReflexCancelResponse, ReflexHistoryParams, ReflexHistoryResponse,
+            ReflexListParams, ReflexListResponse, ReflexRegisterParams, ReflexRegisterResponse,
+            cancel_reflex, history_reflexes, list_reflexes, register_reflex,
         },
-        shared_m3_state_from_env, shared_m3_state_from_env_with_shutdown_reason,
-        shared_m3_state_from_env_with_shutdown_reason_and_sse_state,
+        shared_m3_state_from_config_with_shutdown_reason_and_sse_state, shared_m3_state_from_env,
         subscribe::{
             SubscribeCancelParams, SubscribeCancelResponse, SubscribeParams, SubscribeResponse,
             cancel_subscription, subscribe_to_events,
@@ -90,10 +89,11 @@ impl SynapseService {
         })
     }
 
-    pub fn try_with_m2_shutdown_reason(
+    pub fn try_with_m2_shutdown_reason_and_m3_config(
         shutdown_cancel: CancellationToken,
         shutdown_reason: &'static str,
         connection_closed_cancel: CancellationToken,
+        m3_config: M3ServiceConfig,
     ) -> anyhow::Result<Self> {
         Ok(Self {
             started_at: Instant::now(),
@@ -104,19 +104,22 @@ impl SynapseService {
                 shutdown_reason,
                 Some(connection_closed_cancel.clone()),
             ),
-            m3_state: shared_m3_state_from_env_with_shutdown_reason(
+            m3_state: shared_m3_state_from_config_with_shutdown_reason_and_sse_state(
+                m3_config,
                 shutdown_cancel,
                 shutdown_reason,
                 Some(connection_closed_cancel),
+                SseState::from_env(),
             )?,
         })
     }
 
-    pub fn try_with_m2_shutdown_reason_and_sse_state(
+    pub fn try_with_m2_shutdown_reason_and_sse_state_and_m3_config(
         shutdown_cancel: CancellationToken,
         shutdown_reason: &'static str,
         connection_closed_cancel: CancellationToken,
         sse_state: SseState,
+        m3_config: M3ServiceConfig,
     ) -> anyhow::Result<Self> {
         Ok(Self {
             started_at: Instant::now(),
@@ -127,7 +130,8 @@ impl SynapseService {
                 shutdown_reason,
                 Some(connection_closed_cancel.clone()),
             ),
-            m3_state: shared_m3_state_from_env_with_shutdown_reason_and_sse_state(
+            m3_state: shared_m3_state_from_config_with_shutdown_reason_and_sse_state(
+                m3_config,
                 shutdown_cancel,
                 shutdown_reason,
                 Some(connection_closed_cancel),
@@ -719,6 +723,22 @@ impl SynapseService {
         );
         let runtime = self.reflex_runtime()?;
         list_reflexes(&runtime, &params.0).map(Json)
+    }
+
+    #[tool(description = "Return persisted reflex audit history")]
+    pub async fn reflex_history(
+        &self,
+        params: Parameters<ReflexHistoryParams>,
+    ) -> Result<Json<ReflexHistoryResponse>, ErrorData> {
+        tracing::info!(
+            code = "MCP_TOOL_INVOCATION",
+            kind = "reflex_history",
+            reflex_id = ?params.0.reflex_id,
+            limit = params.0.limit,
+            "tool.invocation kind=reflex_history"
+        );
+        let runtime = self.reflex_runtime()?;
+        history_reflexes(&runtime, &params.0).map(Json)
     }
 
     #[tool(description = "List loaded profiles")]

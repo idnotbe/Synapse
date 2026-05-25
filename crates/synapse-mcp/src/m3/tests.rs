@@ -1,25 +1,28 @@
-use super::{M3State, m3_tool_stubs};
+use super::{M3ServiceConfig, M3State, m3_tool_stubs};
+use crate::http::sse::SseState;
 use std::path::PathBuf;
 use tokio_util::sync::CancellationToken;
 
 #[test]
-fn m3_state_from_parts_reads_env_shape() -> anyhow::Result<()> {
-    let before_reflex = Some("TRUE");
+fn m3_state_from_config_reads_cli_shape() -> anyhow::Result<()> {
     println!(
-        "readback=m3_state scenario=from_parts before_db=db before_profile=profiles before_reflex={before_reflex:?}"
+        "readback=m3_state scenario=from_config before_db=db before_profile=profiles before_reflex=true"
     );
-    let state = M3State::from_parts(
-        Some(PathBuf::from("db")),
-        Some(PathBuf::from("profiles")),
-        before_reflex,
-        Some("token".to_owned()),
-        Some("127.0.0.1:7701".to_owned()),
+    let state = M3State::from_config_with_shutdown_reason_and_sse_state(
+        M3ServiceConfig {
+            db_path: Some(PathBuf::from("db")),
+            profile_dir: Some(PathBuf::from("profiles")),
+            reflex_disabled: true,
+            bind: "127.0.0.1:7701".to_owned(),
+            bearer_token: Some("token".to_owned()),
+        },
         CancellationToken::new(),
         "sigint",
         Some(CancellationToken::new()),
+        SseState::from_env(),
     )?;
     println!(
-        "readback=m3_state scenario=from_parts after_db={:?} after_profile={:?} after_reflex_disabled={} after_bind={} after_token_present={} after_connection_token={}",
+        "readback=m3_state scenario=from_config after_db={:?} after_profile={:?} after_reflex_disabled={} after_bind={} after_token_present={} after_connection_token={}",
         state.db_path,
         state.profile_dir,
         state.reflex_disabled,
@@ -36,7 +39,7 @@ fn m3_state_from_parts_reads_env_shape() -> anyhow::Result<()> {
 fn m3_state_rejects_invalid_reflex_disabled() {
     let before_reflex = Some("yes");
     println!("readback=m3_state scenario=invalid_reflex before={before_reflex:?}");
-    let after = M3State::from_parts(
+    let after = M3State::from_parts_with_sse_state(
         None,
         None,
         before_reflex,
@@ -45,6 +48,7 @@ fn m3_state_rejects_invalid_reflex_disabled() {
         CancellationToken::new(),
         "shutdown",
         None,
+        SseState::from_env(),
     );
     println!("readback=m3_state scenario=invalid_reflex after={after:?}");
     assert!(after.is_err());
