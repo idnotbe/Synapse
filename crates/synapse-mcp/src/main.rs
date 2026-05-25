@@ -1,3 +1,4 @@
+mod http;
 mod m1;
 mod m2;
 mod m3;
@@ -71,10 +72,9 @@ async fn run() -> anyhow::Result<ExitCode> {
     match cli.mode {
         Mode::Stdio => run_stdio(telemetry_guard).await,
         Mode::Http => {
-            tracing::error!(code = "NOT_YET_IMPLEMENTED", "--mode http lands at M3");
+            let code = http::serve(&cli.bind).await?;
             drop(telemetry_guard);
-            eprintln!("NOT_YET_IMPLEMENTED: --mode http lands at M3");
-            Ok(ExitCode::from(2))
+            Ok(code)
         }
     }
 }

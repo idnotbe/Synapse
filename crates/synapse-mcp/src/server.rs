@@ -108,7 +108,7 @@ impl SynapseService {
             .and_then(|state| state.emitter_done_receiver())
     }
 
-    fn health_payload(&self) -> Health {
+    pub(crate) fn health_payload(&self) -> Health {
         let mut subsystems = BTreeMap::new();
         subsystems.insert("profiles".to_owned(), self.profile_health());
         Health {
