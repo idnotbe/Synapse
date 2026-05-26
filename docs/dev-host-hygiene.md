@@ -8,10 +8,13 @@ If a required host prerequisite is absent, treat that as setup/acquisition work,
 not as completion evidence, a portability gate, or a reason to mark the issue
 blocked by itself. Missing means: figure out where the thing must come from,
 where it must physically appear, and make it happen on this configured host.
-Use Synapse computer-control surfaces as the same practical control surface the
-operator has on this configured host, plus normal OS, shell, browser,
-package-manager, and device-manager workflows, to install, connect, download,
-configure, or generate the real prerequisite on this host.
+Synapse gives the agent local computer control, so treat Synapse/local control
+as the operator-equivalent host control surface. If the operator could download,
+install, connect, configure, generate, flash, launch, or inspect it from this
+host, the agent must attempt those reversible local steps using Synapse plus
+normal OS, shell, browser, package-manager, and device-management workflows.
+Do not ask the operator to download or install something while reversible local
+acquisition/setup remains possible.
 Then read the physical source of truth where the prerequisite must appear:
 package inventory, driver/service list, `Get-PnpDevice`, registry Enum key,
 firmware volume, config file, model path plus hash, or equivalent.

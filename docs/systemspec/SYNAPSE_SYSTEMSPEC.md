@@ -54,7 +54,11 @@ Comprehensive technical reference for the Synapse MCP server, produced by readin
 
 ## Authority
 
-- `AGENTS.md` and `docs/impplan/00_methodology.md` are the operating doctrine. Manual FSV is the shipping gate; this systemspec is descriptive only.
+- `AGENTS.md` and `docs/impplan/00_methodology.md` are the operating doctrine.
+  Manual FSV is the shipping gate; this systemspec is descriptive only.
+  Missing configured-host prerequisites are acquisition/setup work: agents use
+  Synapse/local control as the operator-equivalent host control surface to make
+  reversible local prerequisites real, then read the physical source of truth.
 - For the contract-level PRD, see `docs/computergames/` (numbered 00–17).
 - For the per-milestone work-item ledger, see `docs/impplan/` (numbered 00–07).
 
@@ -105,7 +109,7 @@ Source files covered:
 
 Synapse is a Rust [Model Context Protocol](https://modelcontextprotocol.io) (MCP) server that exposes a Windows 11/10 host's local desktop and game state as low-token structured JSON, accepts high-level action intents (click, type, aim, press, drag, combo), and runs sub-frame reflex controllers so model latency never costs a frame. The shipping binary is `synapse-mcp` (`crates/synapse-mcp/src/main.rs`); MCP clients (Claude Desktop/Code, Codex, custom runners) connect over **stdio** (newline-delimited JSON-RPC) or **streamable HTTP** (loopback by default, bearer-auth required).
 
-The repository operates under the doctrine in `AGENTS.md`: manual Full State Verification (FSV) on the configured Windows host is the shipping gate; GitHub Actions, CI, scripts, tests, and benches are supporting evidence only; missing configured-host prerequisites are acquisition/setup work where the agent figures out where the thing must come from, where it must physically appear, makes it happen through Synapse/local host control, and verifies the real source of truth; and agent commits include `[skip ci]`.
+The repository operates under the doctrine in `AGENTS.md`: manual Full State Verification (FSV) on the configured Windows host is the shipping gate; GitHub Actions, CI, scripts, tests, and benches are supporting evidence only; missing configured-host prerequisites are acquisition/setup work where the agent figures out where the thing must come from, where it must physically appear, uses Synapse/local control as the operator-equivalent host control surface to make it happen when reversible local steps exist, and verifies the real source of truth; and agent commits include `[skip ci]`.
 
 ## 2. Architecture map
 

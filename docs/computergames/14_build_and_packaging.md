@@ -40,6 +40,26 @@ Firmware (`firmware/pico-hid`) is excluded because it targets `thumbv6m-none-eab
 
 ---
 
+## 1.1 Configured-host prerequisites
+
+Missing build, firmware, packaging, driver, signing, or release prerequisites
+are acquisition/setup work, not blockers by themselves. Agents must use
+Synapse/local computer control as the operator-equivalent host control surface,
+plus normal OS, shell, browser, package-manager, and device-management
+workflows, to download, install, connect, configure, generate, flash, launch,
+or inspect the missing prerequisite when those steps are reversible and local to
+the configured host. Do not ask the operator to download or install something
+while reversible local acquisition/setup remains possible.
+
+The source of truth is the physical place the prerequisite should appear:
+package inventory, Rust target list, driver/service list, `Get-PnpDevice`,
+registry Enum key, firmware volume, installer path and hash, signing tool
+inventory, config file, or equivalent. Ask only before hard-to-reverse external
+actions such as spending money, private credentials, billing, external account
+changes, or irreversible shared-state changes.
+
+---
+
 ## 2. Workspace dependencies
 
 Declared in `[workspace.dependencies]` so every crate uses the same version.

@@ -39,14 +39,17 @@ this repo must include `[skip ci]`.
 ## Missing Dependency Acquisition Rule
 
 If a required local tool, driver, model, device, file, service, account state,
-or other prerequisite is missing, do not treat the absence as a stopping point
-or mark the issue blocked for that reason alone. Missing means: figure out
-where the thing must come from, where it must physically appear, and make it
-happen. Use Synapse's local computer-control surfaces as the same practical
-control surface the operator has on this configured host, plus normal OS,
-shell, browser, package-manager, and device-management workflows, to acquire,
-install, connect, configure, generate, or otherwise make the prerequisite real
-on this host.
+installer, hardware surface, or other prerequisite is missing, do not treat the
+absence as a stopping point or mark the issue blocked for that reason alone.
+Missing means: figure out where the thing must come from, where it must
+physically appear, and make it happen on this configured host. Synapse gives the
+agent local computer control; treat those Synapse/local control surfaces as the
+operator-equivalent host control surface. If the operator could download,
+install, connect, configure, generate, flash, launch, or inspect it from this
+host, the agent must attempt those reversible local steps using Synapse plus
+normal OS, shell, browser, package-manager, and device-management workflows.
+Do not ask the operator to download or install something while reversible local
+acquisition/setup remains possible.
 
 Missing prerequisites become concrete work items with source-of-truth readback:
 identify what is missing, identify the authoritative place it should appear,
@@ -55,7 +58,8 @@ the next step requires a hard-to-reverse external action such as spending money,
 using private credentials, changing billing, or modifying an external account,
 prepare the exact action and ask only for that approval. Complete every
 reversible local step before asking. Do not call the issue done until the real
-prerequisite and the feature that depends on it are manually verified.
+prerequisite and the feature that depends on it are manually verified at the
+physical source of truth.
 
 ## Required Wake-Up Context
 

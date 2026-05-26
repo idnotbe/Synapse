@@ -10,6 +10,13 @@
 configured Windows host is the shipping gate. Automated tests, scripts,
 benchmarks, GitHub Actions, and CI are supporting evidence only and must never
 be presented as FSV.
+Missing configured-host prerequisites are acquisition/setup work, not blockers:
+agents must use Synapse/local computer control as an operator-equivalent host
+control surface, plus normal OS, shell, browser, package-manager, and
+device-management workflows, to make missing tools, drivers, models, files,
+services, account state, firmware, and hardware surfaces real. They must then
+read the physical source of truth directly and ask only before hard-to-reverse
+external actions.
 
 ---
 

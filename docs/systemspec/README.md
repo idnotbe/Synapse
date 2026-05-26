@@ -22,6 +22,10 @@ Comprehensive technical reference for the Synapse MCP server, produced by readin
 
 ## Authority
 
-- `AGENTS.md` and `docs/impplan/00_methodology.md` are the operating doctrine. Manual FSV is the shipping gate; this systemspec is descriptive only.
+- `AGENTS.md` and `docs/impplan/00_methodology.md` are the operating doctrine.
+  Manual FSV is the shipping gate; this systemspec is descriptive only.
+  Missing configured-host prerequisites are acquisition/setup work: agents use
+  Synapse/local control as the operator-equivalent host control surface to make
+  reversible local prerequisites real, then read the physical source of truth.
 - For the contract-level PRD, see `docs/computergames/` (numbered 00–17).
 - For the per-milestone work-item ledger, see `docs/impplan/` (numbered 00–07).

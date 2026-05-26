@@ -11,6 +11,13 @@ Full State Verification on the configured Windows host is the shipping gate.
 Scripts, tests, benchmarks, GitHub Actions, and CI are supporting evidence only;
 they are never FSV.
 
+Missing local tools, drivers, models, devices, files, services, account state,
+or other prerequisites are acquisition/setup work, not blockers. Agents must
+use Synapse/local computer control as an operator-equivalent host control
+surface, plus normal OS, shell, browser, package-manager, and device-management
+workflows, to make the missing thing real and then read the physical source of
+truth directly. Ask only before hard-to-reverse external actions.
+
 ## Status: M1
 
 M1 is the local perception milestone: a working `synapse-mcp` binary serves MCP over stdio, exposes the six local tools below, and verifies the perception surface through local manual FSV instead of GitHub Actions. The live tracker is the [M1 milestone](https://github.com/ChrisRoyse/Synapse/milestone/2), with mission context pinned in [issue #86](https://github.com/ChrisRoyse/Synapse/issues/86). The implementation checklist is [docs/impplan/02_m1_perception_mvp.md](docs/impplan/02_m1_perception_mvp.md).

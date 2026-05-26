@@ -13,11 +13,15 @@ issues disagree, inspect the physical source of truth and update the issue.
 is mandatory and cannot be replaced by tests, scripts, benchmarks, CI, GitHub
 Actions, harnesses, or return values. Missing tools, drivers, models, files,
 services, firmware, account state, or hardware are acquisition/setup work, not a
-reason to mark an issue blocked by absence alone. Use Synapse/local computer
-control plus normal host workflows to make the prerequisite real, then read the
-authoritative source of truth directly. Ask only for narrow approval before
-hard-to-reverse external actions such as spending money, private credentials,
-billing, external-account changes, or irreversible shared-state changes.
+reason to mark an issue blocked by absence alone. Synapse gives the agent local
+computer control; treat Synapse/local control as the operator-equivalent host
+control surface. If the operator could download, install, connect, configure,
+generate, flash, launch, or inspect it from this host, the agent must attempt
+those reversible local steps using Synapse plus normal host workflows before
+asking the operator. Then read the authoritative source of truth directly. Ask
+only for narrow approval before hard-to-reverse external actions such as
+spending money, private credentials, billing, external-account changes, or
+irreversible shared-state changes.
 
 **No GitHub Actions or CI gate.** Agent commits pushed during M4 include
 `[skip ci]`. Local checks may support regression confidence, but the shipping
@@ -747,6 +751,9 @@ Strict prohibitions:
   daemon, firmware, or OS path.
 - Do not close a hardware-bound issue without physical host/device SoT readback.
 - Do not mark missing hardware/tooling/model state as blocked for absence alone.
+- Do not ask the operator to download, install, or connect something while a
+  reversible local acquisition/setup path remains available through Synapse or
+  host workflows.
 
 Supporting evidence allowed:
 
