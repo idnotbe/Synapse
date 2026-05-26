@@ -1,11 +1,13 @@
 #![allow(unsafe_code)]
 
+pub mod discover;
 pub mod error;
 pub mod handshake;
 pub mod pipeline;
 pub mod protocol;
 pub mod transport;
 
+pub use discover::{candidate_port_names, connect_auto, is_synapse_pico_port};
 pub use error::{HidError, HidResult};
 pub use handshake::{
     FirmwareIdentity, HandshakeError, IDENTIFY_RESP_LEN, IDENTIFY_TIMEOUT_MS,
