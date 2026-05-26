@@ -13,8 +13,9 @@ surface for Synapse, shipping from manual configured-host FSV rather than CI.
 
 - Added the M3 MCP tools: `subscribe`, `subscribe_cancel`,
   `reflex_register`, `reflex_cancel`, `reflex_list`, `reflex_history`,
-  `profile_get`, `profile_set_active`, `replay_record`, `audio_tail`, and
-  `audio_transcribe`.
+  `profile_list`, `profile_activate`, `replay_record`, `audio_tail`,
+  `audio_transcribe`, `storage_inspect`, `storage_put_probe_rows`,
+  `storage_gc_once`, and `storage_pressure_sample`.
 - Filled the M3 crates `synapse-reflex`, `synapse-storage`,
   `synapse-profiles`, and `synapse-audio` with the runtime implementations
   used by the daemon.

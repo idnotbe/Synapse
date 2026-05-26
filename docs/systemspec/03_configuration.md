@@ -171,7 +171,7 @@ clap (CLI flag > env via clap) → Cli
                     └→ http::auth::HttpAuth::load         → reads %APPDATA%/synapse/token.txt, else SYNAPSE_BEARER_TOKEN
 ```
 
-There is no merge step: CLI/env values configure individual subsystems independently, each at the moment the subsystem is constructed. There is no hot-reload of CLI flags or env vars — restart the daemon to change any of them. Profile TOML files, by contrast, are watched and hot-reloaded with a 200 ms debounce (see [09_profile_subsystem.md](09_profile_subsystem.md) in the deep-dives).
+There is no merge step: CLI/env values configure individual subsystems independently, each at the moment the subsystem is constructed. There is no hot-reload of CLI flags or env vars — restart the daemon to change any of them. Profile TOML files, by contrast, are watched and hot-reloaded with a 200 ms debounce (see [11_profiles_hid_telemetry.md](11_profiles_hid_telemetry.md) in the deep-dives).
 
 ## 6. Defaults summary (most-referenced constants)
 
