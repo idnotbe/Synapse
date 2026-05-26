@@ -23,6 +23,8 @@ pub enum HidError {
     FirmwareVersionMismatch { expected: u8, actual: u8 },
     #[error("HID command rejected: seq={seq}, command=0x{command:02X}, reason=0x{reason:02X}")]
     CommandRejected { seq: u32, command: u8, reason: u8 },
+    #[error("HID command queue full: outstanding={outstanding}, capacity={capacity}")]
+    QueueFull { outstanding: usize, capacity: usize },
     #[error("HID link timeout after {timeout_ms} ms while {operation}")]
     LinkTimeout {
         operation: &'static str,
@@ -41,6 +43,7 @@ impl HidError {
             Self::ProtocolHandshakeFailed { .. } => error_codes::HID_PROTOCOL_HANDSHAKE_FAILED,
             Self::FirmwareVersionMismatch { .. } => error_codes::HID_FIRMWARE_VERSION_MISMATCH,
             Self::CommandRejected { .. } => error_codes::HID_COMMAND_REJECTED,
+            Self::QueueFull { .. } => error_codes::ACTION_QUEUE_FULL,
             Self::LinkTimeout { .. } => error_codes::HID_LINK_TIMEOUT,
             Self::PortDisconnected { .. } => error_codes::ACTION_HID_PORT_DISCONNECTED,
         }

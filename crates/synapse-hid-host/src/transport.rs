@@ -88,6 +88,11 @@ impl HidGateway {
         self.port.as_mut()
     }
 
+    #[must_use]
+    pub const fn pending_inflight_len(&self) -> usize {
+        self.pipeline.pending_inflight_len()
+    }
+
     /// Sends one ACK/NAK command through the HID serial pipeline.
     ///
     /// # Errors
@@ -109,6 +114,26 @@ impl HidGateway {
     /// a malformed/rejected response.
     pub fn send_commands(&mut self, commands: &[HostCommandRequest<'_>]) -> HidResult<Vec<u32>> {
         self.pipeline.send_commands(self.port.as_mut(), commands)
+    }
+
+    /// Sends one command without waiting for ACK/NAK completion.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`HidError::QueueFull`] immediately when the 16-frame hardware
+    /// window is full, or the underlying serial/protocol error.
+    pub fn try_send_command(&mut self, command: u8, payload: &[u8]) -> HidResult<u32> {
+        self.pipeline
+            .try_send_command(self.port.as_mut(), command, payload)
+    }
+
+    /// Polls one ACK/NAK response and drains the hardware send window.
+    ///
+    /// # Errors
+    ///
+    /// Returns the underlying serial/protocol error.
+    pub fn poll_response(&mut self) -> HidResult<Option<crate::pipeline::PipelineResponse>> {
+        self.pipeline.poll_response(self.port.as_mut())
     }
 }
 

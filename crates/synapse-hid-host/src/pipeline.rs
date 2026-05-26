@@ -75,6 +75,7 @@ pub struct HidPipeline {
     next_seq: u32,
     config: PipelineConfig,
     rx: Vec<u8>,
+    inflight: Vec<PendingFrame>,
 }
 
 impl HidPipeline {
@@ -89,6 +90,7 @@ impl HidPipeline {
             next_seq: FIRST_PIPELINE_SEQUENCE,
             config,
             rx: Vec::new(),
+            inflight: Vec::new(),
         }
     }
 
@@ -112,13 +114,88 @@ impl HidPipeline {
         self.rx.capacity()
     }
 
+    #[must_use]
+    pub const fn pending_inflight_len(&self) -> usize {
+        self.inflight.len()
+    }
+
+    #[must_use]
+    pub const fn window_capacity(&self) -> usize {
+        let configured = self.config.max_outstanding;
+        if configured == 0 {
+            1
+        } else if configured > MAX_OUTSTANDING_FRAMES {
+            MAX_OUTSTANDING_FRAMES
+        } else {
+            configured
+        }
+    }
+
+    /// Sends one command frame without waiting for ACK/NAK completion.
+    ///
+    /// # Errors
+    ///
+    /// Returns queue-full, command-rejected, or serial write failure errors.
+    pub fn try_send_command<T>(
+        &mut self,
+        transport: &mut T,
+        command: u8,
+        payload: &[u8],
+    ) -> HidResult<u32>
+    where
+        T: Write + ?Sized,
+    {
+        let capacity = self.window_capacity();
+        if self.inflight.len() >= capacity {
+            return Err(HidError::QueueFull {
+                outstanding: self.inflight.len(),
+                capacity,
+            });
+        }
+
+        let seq = self.next_seq;
+        let frame = encode_pending_frame(seq, command, payload)?;
+        self.next_seq = self.next_seq.wrapping_add(1);
+        let mut pending = PendingFrame::new(seq, frame);
+        send_pending(transport, &mut pending)?;
+        self.inflight.push(pending);
+        Ok(seq)
+    }
+
+    /// Polls one ACK/NAK response and updates the in-flight window.
+    ///
+    /// # Errors
+    ///
+    /// Returns ACK timeout, command rejection, or serial I/O errors.
+    pub fn poll_response<T>(&mut self, transport: &mut T) -> HidResult<Option<PipelineResponse>>
+    where
+        T: Read + Write + ?Sized,
+    {
+        match self.read_response(transport)? {
+            Some(response @ PipelineResponse::Ack { seq }) => {
+                let _removed = remove_inflight(&mut self.inflight, seq);
+                Ok(Some(response))
+            }
+            Some(response @ PipelineResponse::Nak { seq, reason: _ }) => {
+                if let Some(index) = find_inflight_index(&self.inflight, seq) {
+                    self.retry_inflight(transport, index)?;
+                }
+                Ok(Some(response))
+            }
+            None => {
+                if let Some(index) = oldest_expired_index(&self.inflight, self.config) {
+                    self.retry_inflight(transport, index)?;
+                }
+                Ok(None)
+            }
+        }
+    }
+
     /// Sends one ACK/NAK command and waits until the firmware accepts it.
     ///
     /// # Errors
     ///
-    /// Returns [`HidError::LinkTimeout`] after the configured retry budget is
-    /// exhausted, [`HidError::CommandRejected`] for malformed NAK/ACK payloads,
-    /// or a serial write/read error mapped to the closest HID link failure.
+    /// Returns ACK timeout, command rejection, or serial I/O errors.
     pub fn send_command<T>(
         &mut self,
         transport: &mut T,
@@ -135,14 +212,9 @@ impl HidPipeline {
 
     /// Sends ACK/NAK commands with a bounded sliding window.
     ///
-    /// The pipeline writes up to [`MAX_OUTSTANDING_FRAMES`] unacknowledged
-    /// frames before waiting for responses. Retries resend the same sequence.
-    ///
     /// # Errors
     ///
-    /// Returns [`HidError::LinkTimeout`] after the configured retry budget is
-    /// exhausted, [`HidError::CommandRejected`] for malformed NAK/ACK payloads,
-    /// or a serial write/read error mapped to the closest HID link failure.
+    /// Returns ACK timeout, command rejection, or serial I/O errors.
     pub fn send_commands<T>(
         &mut self,
         transport: &mut T,
@@ -155,64 +227,33 @@ impl HidPipeline {
             return Ok(Vec::new());
         }
 
-        let mut queued = VecDeque::with_capacity(commands.len());
+        let mut queued = commands.iter().copied().collect::<VecDeque<_>>();
         let mut seqs = Vec::with_capacity(commands.len());
-        for request in commands {
-            let seq = self.next_seq;
-            let frame = encode_pending_frame(seq, request.command, request.payload)?;
-            self.next_seq = self.next_seq.wrapping_add(1);
-            seqs.push(seq);
-            queued.push_back(PendingFrame::new(seq, frame));
-        }
+        let mut accepted = Vec::with_capacity(commands.len());
+        while accepted.len() < seqs.len() || !queued.is_empty() {
+            while self.inflight.len() < self.window_capacity() {
+                let Some(request) = queued.pop_front() else {
+                    break;
+                };
+                let seq = self.try_send_command(transport, request.command, request.payload)?;
+                seqs.push(seq);
+            }
 
-        let mut inflight = Vec::<PendingFrame>::new();
-        let mut accepted = 0usize;
-        while accepted < seqs.len() {
-            self.fill_window(transport, &mut queued, &mut inflight)?;
+            if accepted.len() == seqs.len() && queued.is_empty() {
+                break;
+            }
 
-            match self.read_response(transport)? {
+            match self.poll_response(transport)? {
                 Some(PipelineResponse::Ack { seq }) => {
-                    if remove_inflight(&mut inflight, seq).is_some() {
-                        accepted += 1;
+                    if seqs.contains(&seq) && !accepted.contains(&seq) {
+                        accepted.push(seq);
                     }
                 }
-                Some(PipelineResponse::Nak {
-                    seq,
-                    reason: _reason,
-                }) => {
-                    if let Some(pending) = find_inflight_mut(&mut inflight, seq) {
-                        retry_pending(transport, pending, self.config)?;
-                    }
-                }
-                None => {
-                    if let Some(pending) = oldest_expired_mut(&mut inflight, self.config) {
-                        retry_pending(transport, pending, self.config)?;
-                    }
-                }
+                Some(PipelineResponse::Nak { .. }) | None => {}
             }
         }
 
         Ok(seqs)
-    }
-
-    fn fill_window<T>(
-        &self,
-        transport: &mut T,
-        queued: &mut VecDeque<PendingFrame>,
-        inflight: &mut Vec<PendingFrame>,
-    ) -> HidResult<()>
-    where
-        T: Write + ?Sized,
-    {
-        let max_outstanding = self.config.max_outstanding.clamp(1, MAX_OUTSTANDING_FRAMES);
-        while inflight.len() < max_outstanding {
-            let Some(mut pending) = queued.pop_front() else {
-                break;
-            };
-            send_pending(transport, &mut pending)?;
-            inflight.push(pending);
-        }
-        Ok(())
     }
 
     fn read_response<T>(&mut self, transport: &mut T) -> HidResult<Option<PipelineResponse>>
@@ -277,6 +318,17 @@ impl HidPipeline {
                 }
             }
         }
+    }
+
+    fn retry_inflight<T>(&mut self, transport: &mut T, index: usize) -> HidResult<()>
+    where
+        T: Write + ?Sized,
+    {
+        let result = retry_pending(transport, &mut self.inflight[index], self.config);
+        if result.is_err() {
+            self.inflight.remove(index);
+        }
+        result
     }
 }
 
@@ -374,15 +426,12 @@ where
     send_pending(transport, pending)
 }
 
-fn oldest_expired_mut(
-    inflight: &mut [PendingFrame],
-    config: PipelineConfig,
-) -> Option<&mut PendingFrame> {
+fn oldest_expired_index(inflight: &[PendingFrame], config: PipelineConfig) -> Option<usize> {
     let timeout = Duration::from_millis(config.ack_timeout_ms);
     let now = Instant::now();
     inflight
-        .iter_mut()
-        .find(|pending| now.duration_since(pending.last_sent_at) >= timeout)
+        .iter()
+        .position(|pending| now.duration_since(pending.last_sent_at) >= timeout)
 }
 
 fn remove_inflight(inflight: &mut Vec<PendingFrame>, seq: u32) -> Option<PendingFrame> {
@@ -390,8 +439,8 @@ fn remove_inflight(inflight: &mut Vec<PendingFrame>, seq: u32) -> Option<Pending
     Some(inflight.remove(index))
 }
 
-fn find_inflight_mut(inflight: &mut [PendingFrame], seq: u32) -> Option<&mut PendingFrame> {
-    inflight.iter_mut().find(|pending| pending.seq == seq)
+fn find_inflight_index(inflight: &[PendingFrame], seq: u32) -> Option<usize> {
+    inflight.iter().position(|pending| pending.seq == seq)
 }
 
 fn decode_pipeline_response(seq: u32, command: u8, payload: &[u8]) -> HidResult<PipelineResponse> {

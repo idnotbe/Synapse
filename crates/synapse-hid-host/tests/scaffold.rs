@@ -41,6 +41,13 @@ fn hid_error_code_mapping_covers_m4_contract() {
             error_codes::HID_COMMAND_REJECTED,
         ),
         (
+            HidError::QueueFull {
+                outstanding: 16,
+                capacity: 16,
+            },
+            error_codes::ACTION_QUEUE_FULL,
+        ),
+        (
             HidError::LinkTimeout {
                 operation: "waiting for ACK",
                 timeout_ms: DEFAULT_READ_TIMEOUT_MS,
