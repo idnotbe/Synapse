@@ -362,22 +362,22 @@ gate. GitHub Actions/CI, automated scripts, and missing-dependency
 portability tests are not release gates. A missing configured-host prerequisite
 is an acquisition/setup task, not a reason to mark the issue blocked by itself:
 figure out where the thing must come from, where it must physically appear, and
-make it happen on this configured host. Treat Synapse/local computer control as
-the operator-equivalent host control surface: if the operator could download,
-install, connect, configure, generate, flash, launch, or inspect it from this
-host, the agent must attempt those reversible local steps using Synapse plus
-host OS, shell, browser, package-manager, and device-management workflows. Do
-not ask the operator to download or install something while reversible local
-acquisition/setup remains possible. Read the authoritative SoT directly before
-shipping.
+make it happen on this configured host. Treat Synapse/local control as the
+operator-equivalent host control surface with full local computer-control
+responsibility: if the operator could download, install, connect, configure,
+generate, flash, launch, or inspect it from this host, the agent must attempt
+those reversible local steps using Synapse plus host OS, shell, browser,
+package-manager, and device-management workflows. Do not ask the operator to
+download or install something while reversible local acquisition/setup remains
+possible. Read the authoritative SoT directly before shipping.
 Do not stop at "missing." If the operator could make the prerequisite real from
 this computer, the agent must do the reversible local work through Synapse and
 host workflows, then inspect the physical SoT.
 Browser downloads, GUI installers, Device Manager checks, package-manager
-installs, model/file generation, firmware flashing, app launching, and UI
-inspection count as that reversible local work. They are agent-owned on the
-configured host and must not be handed back to the operator while Synapse/local
-control can perform them.
+installs, model/file generation, firmware flashing, app launching, USB/COM
+inspection, and UI inspection count as that reversible local work. They are
+agent-owned on the configured host and must not be handed back to the operator
+while Synapse/local control can perform them.
 Only hard-to-reverse external actions such as spending money, private
 credentials, billing, or external account changes require narrow operator
 approval, and every reversible local step must be complete before asking.

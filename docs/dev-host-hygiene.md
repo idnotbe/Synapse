@@ -8,11 +8,12 @@ If a required host prerequisite is absent, treat that as setup/acquisition work,
 not as completion evidence, a portability gate, or a reason to mark the issue
 blocked by itself. Missing means: figure out where the thing must come from,
 where it must physically appear, and make it happen on this configured host.
-Synapse gives the agent local computer control, so treat Synapse/local control
-as the operator-equivalent host control surface. If the operator could download,
-install, connect, configure, generate, flash, launch, or inspect it from this
-host, the agent must attempt those reversible local steps using Synapse plus
-normal OS, shell, browser, package-manager, and device-management workflows.
+Synapse gives the agent full local computer-control responsibility, so treat
+Synapse/local control as the operator-equivalent host control surface. If the
+operator could download, install, connect, configure, generate, flash, launch,
+or inspect it from this host, the agent must attempt those reversible local
+steps using Synapse plus normal OS, shell, browser, package-manager, and
+device-management workflows.
 Do not ask the operator to download or install something while reversible local
 acquisition/setup remains possible.
 Do not stop at "missing." If the operator could make it happen from this
@@ -21,8 +22,9 @@ reversible work, then inspect the resulting source of truth. Missing
 configured-host state is never a blocker by itself.
 That includes browser downloads, GUI installers, Device Manager checks,
 package-manager installs, model/file generation, firmware flashing, app
-launching, and UI inspection through Synapse. Treat those as agent-owned work,
-not operator errands.
+launching, USB/COM inspection, and UI inspection through Synapse. Treat those
+as agent-owned work, not operator errands. Do not hand local prerequisite work
+back to the operator while it remains reversible from this computer.
 Then read the physical source of truth where the prerequisite must appear:
 package inventory, driver/service list, `Get-PnpDevice`, registry Enum key,
 firmware volume, config file, model path plus hash, or equivalent.

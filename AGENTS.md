@@ -43,11 +43,12 @@ installer, hardware surface, or other prerequisite is missing, do not treat the
 absence as a stopping point or mark the issue blocked for that reason alone.
 Missing means: figure out where the thing must come from, where it must
 physically appear, and make it happen on this configured host. Synapse gives the
-agent local computer control; treat those Synapse/local control surfaces as the
-operator-equivalent host control surface. If the operator could download,
-install, connect, configure, generate, flash, launch, or inspect it from this
-host, the agent must attempt those reversible local steps using Synapse plus
-normal OS, shell, browser, package-manager, and device-management workflows.
+agent full local computer-control responsibility; treat those Synapse/local
+control surfaces as the operator-equivalent host control surface. If the
+operator could download, install, connect, configure, generate, flash, launch,
+or inspect it from this host, the agent must attempt those reversible local
+steps using Synapse plus normal OS, shell, browser, package-manager, and
+device-management workflows.
 Do not ask the operator to download or install something while reversible local
 acquisition/setup remains possible.
 
@@ -56,12 +57,14 @@ operator has through Synapse. If it can be done from this computer, do it and
 then inspect the resulting source of truth. Missing configured-host state is
 never a blocker by itself.
 
-Every reversible host action the operator could perform from this computer is
-agent-owned work: browser downloads, GUI installers, Device Manager checks,
-package-manager installs, model/file generation, firmware flashing, launching
-apps, and UI inspection through Synapse. "Blocked" is reserved for the exact
-operator-only external action that remains after those local steps are
-exhausted.
+Synapse gives the agent full local computer-control responsibility for this
+host. Do not hand local work back to the operator just because a prerequisite is
+absent. Every reversible host action the operator could perform from this
+computer is agent-owned work: browser downloads, GUI installers, Device Manager
+checks, package-manager installs, model/file generation, firmware flashing,
+launching apps, USB/COM inspection, and UI inspection through Synapse.
+"Blocked" is reserved for the exact operator-only external action that remains
+after those local steps are exhausted.
 
 Missing prerequisites become concrete work items with source-of-truth readback:
 identify what is missing, identify the authoritative place it should appear,

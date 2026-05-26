@@ -25,12 +25,14 @@ Comprehensive technical reference for the Synapse MCP server, produced by readin
 - `AGENTS.md` and `docs/impplan/00_methodology.md` are the operating doctrine.
   Manual FSV is the shipping gate; this systemspec is descriptive only.
   Missing configured-host prerequisites are acquisition/setup work: agents use
-  Synapse/local control as the operator-equivalent host control surface to make
-  reversible local prerequisites real, then read the physical source of truth.
+  Synapse/local control as the operator-equivalent host control surface with
+  full local computer-control responsibility to make reversible local
+  prerequisites real, then read the physical source of truth.
   Do not stop at "missing"; if the operator could do it from this computer,
   the agent must do it through Synapse/local host workflows and inspect the SoT.
   Browser downloads, GUI installers, Device Manager checks, package-manager
-  installs, model/file generation, firmware flashing, app launching, and UI
-  inspection are agent-owned work when reversible on this host.
+  installs, model/file generation, firmware flashing, app launching, USB/COM
+  inspection, and UI inspection are agent-owned work when reversible on this
+  host.
 - For the contract-level PRD, see `docs/computergames/` (numbered 00–17).
 - For the per-milestone work-item ledger, see `docs/impplan/` (numbered 00–07).

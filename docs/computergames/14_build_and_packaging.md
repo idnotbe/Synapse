@@ -44,8 +44,9 @@ Firmware (`firmware/pico-hid`) is excluded because it targets `thumbv6m-none-eab
 
 Missing build, firmware, packaging, driver, signing, or release prerequisites
 are acquisition/setup work, not blockers by themselves. Agents must use
-Synapse/local computer control as the operator-equivalent host control surface,
-plus normal OS, shell, browser, package-manager, and device-management
+Synapse/local control as the operator-equivalent host control surface with full
+local computer-control responsibility, plus normal OS, shell, browser,
+package-manager, and device-management
 workflows, to download, install, connect, configure, generate, flash, launch,
 or inspect the missing prerequisite when those steps are reversible and local to
 the configured host. Do not ask the operator to download or install something
@@ -54,8 +55,8 @@ Do not stop at "missing." If the operator could do it from this computer, the
 agent must use Synapse and host workflows to make it happen, then inspect the
 physical source of truth.
 Browser downloads, GUI installers, Device Manager checks, package-manager
-installs, model/file generation, firmware flashing, app launching, and UI
-inspection are agent-owned work when reversible on this host.
+installs, model/file generation, firmware flashing, app launching, USB/COM
+inspection, and UI inspection are agent-owned work when reversible on this host.
 
 The source of truth is the physical place the prerequisite should appear:
 package inventory, Rust target list, driver/service list, `Get-PnpDevice`,

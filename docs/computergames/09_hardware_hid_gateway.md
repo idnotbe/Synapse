@@ -41,8 +41,9 @@ Hardware sourcing and BOOTSEL setup details live in
 If any M4 hardware, cable, driver, firmware artifact, build tool, serial port,
 or host surface is missing, the agent must make the real prerequisite happen on
 this configured host when reversible local steps exist. Do not stop at
-"missing"; use Synapse and local OS/browser/package/device workflows, then read
-the physical source of truth (`RPI-RP2` volume, `Get-PnpDevice`, COM port,
+"missing"; Synapse gives the agent full local computer-control responsibility,
+so use Synapse and local OS/browser/package/device workflows, then read the
+physical source of truth (`RPI-RP2` volume, `Get-PnpDevice`, COM port,
 driver/service inventory, artifact hash, or equivalent).
 
 ---
@@ -366,10 +367,10 @@ If any build, flash, driver, cable, board, or firmware artifact prerequisite is
 missing, the agent must make the real prerequisite exist on this configured host
 before declaring the issue blocked: install the tool, acquire or connect the
 device when locally reversible, put the board in BOOTSEL, inspect Device Manager
-or `Get-PnpDevice`, copy the UF2, and then read the physical source of truth
-that proves the prerequisite or flashed firmware is present. Ask the operator
-only for hard-to-reverse external actions such as spending money or using
-private credentials.
+or `Get-PnpDevice`, copy the UF2, inspect USB/COM state, and then read the
+physical source of truth that proves the prerequisite or flashed firmware is
+present. Ask the operator only for hard-to-reverse external actions such as
+spending money or using private credentials.
 
 Helper: `synapse-mcp hid flash --port COM7`:
 

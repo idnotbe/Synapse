@@ -5,6 +5,10 @@ HID path. Missing hardware is acquisition/setup work, not a reason to mark a
 work item blocked by absence alone. Complete every reversible local step first:
 verify the toolchain, build the UF2, inspect USB/device state, and only then ask
 for narrow approval if buying hardware or using an external account is required.
+Synapse gives the agent full local computer-control responsibility on this
+host, so browser sourcing, installer downloads, tool installs, BOOTSEL/USB/COM
+inspection, firmware flashing, and UI inspection are agent-owned while they are
+locally reversible.
 
 ## Recommended board
 
