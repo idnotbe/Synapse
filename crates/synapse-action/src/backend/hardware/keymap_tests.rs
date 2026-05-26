@@ -1,6 +1,6 @@
 use synapse_core::{Key, KeyCode};
 
-use super::keymap::{hid_usage, hid_usage_for_text_char};
+use super::keymap::{hid_key, hid_text_key, hid_usage, hid_usage_for_text_char};
 
 #[test]
 fn raw_hid_codes_cover_usb_keyboard_keypad_defined_ranges() {
@@ -52,6 +52,41 @@ fn key_codes_map_to_expected_hid_usage_samples() {
 }
 
 #[test]
+fn key_codes_map_to_expected_boot_modifier_and_usage_fields() {
+    let cases = [
+        (symbol('a'), 0x00, Some(0x04)),
+        (symbol('A'), 0x02, Some(0x04)),
+        (symbol('!'), 0x02, Some(0x1E)),
+        (symbol('?'), 0x02, Some(0x38)),
+        (named("ctrl"), 0x01, None),
+        (named("shift"), 0x02, None),
+        (named("alt"), 0x04, None),
+        (named("super"), 0x08, None),
+        (named("right shift"), 0x20, None),
+        (named("F12"), 0x00, Some(0x45)),
+        (hid(0xE7), 0x80, None),
+    ];
+
+    for (key, expected_modifiers, expected_usage) in cases {
+        let actual = hid_key(&key).unwrap_or_else(|error| panic!("key should map: {error}"));
+        assert_eq!(actual.modifiers, expected_modifiers);
+        assert_eq!(actual.key_usage, expected_usage);
+    }
+}
+
+#[test]
+fn text_chars_apply_left_shift_for_us_layout_shifted_characters() {
+    let cases = [('A', 0x02, 0x04), ('!', 0x02, 0x1E), ('a', 0x00, 0x04)];
+
+    for (ch, expected_modifiers, expected_usage) in cases {
+        let actual = hid_text_key(ch).unwrap_or_else(|error| panic!("char should map: {error}"));
+        assert_eq!(actual.modifiers, expected_modifiers);
+        assert_eq!(actual.key_usage, Some(expected_usage));
+        assert_eq!(hid_usage_for_text_char(ch), Ok(expected_usage));
+    }
+}
+
+#[test]
 fn unsupported_keys_fail_closed() {
     for key in [
         symbol('€'),
@@ -71,16 +106,15 @@ fn unsupported_keys_fail_closed() {
         );
     }
 
-    for ch in ['€', 'A', '!'] {
-        let text_error = match hid_usage_for_text_char(ch) {
-            Ok(usage) => panic!("{ch:?} should fail closed, got usage 0x{usage:02X}"),
-            Err(error) => error,
-        };
-        assert_eq!(
-            text_error.code(),
-            synapse_core::error_codes::ACTION_UNSUPPORTED_KEY
-        );
-    }
+    let ch = '€';
+    let text_error = match hid_usage_for_text_char(ch) {
+        Ok(usage) => panic!("{ch:?} should fail closed, got usage 0x{usage:02X}"),
+        Err(error) => error,
+    };
+    assert_eq!(
+        text_error.code(),
+        synapse_core::error_codes::ACTION_UNSUPPORTED_KEY
+    );
 }
 
 fn symbol(value: char) -> Key {

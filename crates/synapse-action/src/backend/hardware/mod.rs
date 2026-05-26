@@ -3,7 +3,8 @@ use std::time::Duration;
 
 use synapse_core::{Action, ComboInput, Key, KeystrokeDynamics};
 use synapse_hid_host::{
-    HOST_COMMAND_KEY_DOWN, HOST_COMMAND_KEY_UP, HOST_COMMAND_RELEASE_ALL, HidError, HidGateway,
+    HOST_COMMAND_KEY_DOWN, HOST_COMMAND_KEY_MODS, HOST_COMMAND_KEY_UP, HOST_COMMAND_RELEASE_ALL,
+    HidError, HidGateway,
 };
 
 use crate::{ActionBackend, ActionError, EmitState};
@@ -17,6 +18,8 @@ mod pad;
 
 #[cfg(test)]
 mod tests;
+
+const BOOT_KEYBOARD_KEY_LIMIT: usize = 6;
 
 pub trait HardwareGateway: Send {
     /// Sends one firmware command and waits for the Pico ACK/NAK result.
@@ -146,8 +149,18 @@ fn key_down<G>(gateway: &mut G, key: &Key, state: &mut EmitState) -> Result<(), 
 where
     G: HardwareGateway,
 {
-    let payload = [keyboard::hid_key_code(key)?];
-    gateway.send_command(HOST_COMMAND_KEY_DOWN, &payload)?;
+    let current = held_keyboard_report(state, None)?;
+    let mapped = keyboard::hid_key(key)?;
+    let after = current.with_added(mapped)?;
+
+    send_key_mods_if_changed(gateway, current.modifiers, after.modifiers)?;
+    if let Some(usage) = mapped.key_usage {
+        let payload = [usage];
+        if let Err(error) = gateway.send_command(HOST_COMMAND_KEY_DOWN, &payload) {
+            let _ = send_key_mods_if_changed(gateway, after.modifiers, current.modifiers);
+            return Err(error);
+        }
+    }
     state.hold_key(key);
     Ok(())
 }
@@ -156,8 +169,15 @@ fn key_up<G>(gateway: &mut G, key: &Key, state: &mut EmitState) -> Result<(), Ac
 where
     G: HardwareGateway,
 {
-    let payload = [keyboard::hid_key_code(key)?];
-    gateway.send_command(HOST_COMMAND_KEY_UP, &payload)?;
+    let current = held_keyboard_report(state, None)?;
+    let after = held_keyboard_report(state, Some(key))?;
+    let mapped = keyboard::hid_key(key)?;
+
+    if let Some(usage) = mapped.key_usage {
+        let payload = [usage];
+        gateway.send_command(HOST_COMMAND_KEY_UP, &payload)?;
+    }
+    send_key_mods_if_changed(gateway, current.modifiers, after.modifiers)?;
     state.release_key(key);
     Ok(())
 }
@@ -171,6 +191,7 @@ fn key_chord<G>(
 where
     G: HardwareGateway,
 {
+    validate_chord_6kro(keys, state)?;
     for key in keys {
         key_down(gateway, key, state)?;
     }
@@ -185,20 +206,15 @@ fn type_text<G>(
     gateway: &mut G,
     text: &str,
     dynamics: &KeystrokeDynamics,
-    state: &mut EmitState,
+    state: &EmitState,
 ) -> Result<(), ActionError>
 where
     G: HardwareGateway,
 {
     for event in crate::sample_typing_schedule(text, dynamics, None) {
         sleep_ms(event.iki_ms_before);
-        let key = Key {
-            code: synapse_core::KeyCode::HidCode {
-                value: keyboard::hid_text_key_code(event.r#char)?,
-            },
-            use_scancode: true,
-        };
-        key_press(gateway, &key, 0, state)?;
+        let key = keyboard::hid_text_key(event.r#char)?;
+        mapped_key_press(gateway, key, 0, state)?;
     }
     Ok(())
 }
@@ -246,6 +262,110 @@ where
 
 fn send_empty_if_zero(command: u8, payload: &[u8]) -> Option<(u8, &[u8])> {
     (!payload.iter().all(|byte| *byte == 0)).then_some((command, payload))
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct KeyboardReportState {
+    modifiers: u8,
+    keycodes: [u8; BOOT_KEYBOARD_KEY_LIMIT],
+    key_count: usize,
+}
+
+impl KeyboardReportState {
+    const fn neutral() -> Self {
+        Self {
+            modifiers: 0,
+            keycodes: [0; BOOT_KEYBOARD_KEY_LIMIT],
+            key_count: 0,
+        }
+    }
+
+    fn with_added(mut self, key: keyboard::HidKeyboardKey) -> Result<Self, ActionError> {
+        self.modifiers |= key.modifiers;
+        if let Some(usage) = key.key_usage {
+            self.add_key_usage(usage)?;
+        }
+        Ok(self)
+    }
+
+    fn add_key_usage(&mut self, usage: u8) -> Result<(), ActionError> {
+        if self.keycodes[..self.key_count].contains(&usage) {
+            return Ok(());
+        }
+        if self.key_count >= BOOT_KEYBOARD_KEY_LIMIT {
+            return Err(ActionError::UnsupportedKey {
+                detail:
+                    "hardware keyboard 6KRO limit exceeded: at most 6 non-modifier keys can be held"
+                        .to_owned(),
+            });
+        }
+        self.keycodes[self.key_count] = usage;
+        self.key_count += 1;
+        Ok(())
+    }
+}
+
+fn held_keyboard_report(
+    state: &EmitState,
+    excluded_key: Option<&Key>,
+) -> Result<KeyboardReportState, ActionError> {
+    let mut report = KeyboardReportState::neutral();
+    for key in state.snapshot().held_keys {
+        if excluded_key.is_some_and(|excluded| excluded == &key) {
+            continue;
+        }
+        report = report.with_added(keyboard::hid_key(&key)?)?;
+    }
+    Ok(report)
+}
+
+fn validate_chord_6kro(keys: &[Key], state: &EmitState) -> Result<(), ActionError> {
+    let mut report = held_keyboard_report(state, None)?;
+    for key in keys {
+        report = report.with_added(keyboard::hid_key(key)?)?;
+    }
+    Ok(())
+}
+
+fn mapped_key_press<G>(
+    gateway: &mut G,
+    key: keyboard::HidKeyboardKey,
+    hold_ms: u32,
+    state: &EmitState,
+) -> Result<(), ActionError>
+where
+    G: HardwareGateway,
+{
+    let current = held_keyboard_report(state, None)?;
+    let after = current.with_added(key)?;
+
+    send_key_mods_if_changed(gateway, current.modifiers, after.modifiers)?;
+    if let Some(usage) = key.key_usage {
+        let payload = [usage];
+        if let Err(error) = gateway.send_command(HOST_COMMAND_KEY_DOWN, &payload) {
+            let _ = send_key_mods_if_changed(gateway, after.modifiers, current.modifiers);
+            return Err(error);
+        }
+        sleep_ms(hold_ms);
+        if let Err(error) = gateway.send_command(HOST_COMMAND_KEY_UP, &payload) {
+            let _ = send_key_mods_if_changed(gateway, after.modifiers, current.modifiers);
+            return Err(error);
+        }
+    } else {
+        sleep_ms(hold_ms);
+    }
+    send_key_mods_if_changed(gateway, after.modifiers, current.modifiers)
+}
+
+fn send_key_mods_if_changed<G>(gateway: &mut G, before: u8, after: u8) -> Result<(), ActionError>
+where
+    G: HardwareGateway,
+{
+    if before == after {
+        return Ok(());
+    }
+    gateway.send_command(HOST_COMMAND_KEY_MODS, &[after])?;
+    Ok(())
 }
 
 fn sleep_ms(ms: u32) {

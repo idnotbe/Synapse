@@ -2,6 +2,15 @@ use synapse_core::{Key, KeyCode};
 
 use crate::ActionError;
 
+const LEFT_SHIFT_MODIFIER: u8 = 1 << 1;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct HidKeyboardKey {
+    pub(super) modifiers: u8,
+    pub(super) key_usage: Option<u8>,
+}
+
+#[cfg(test)]
 pub(super) fn hid_usage(key: &Key) -> Result<u8, ActionError> {
     match &key.code {
         KeyCode::HidCode { value } => hid_code_usage(*value),
@@ -10,8 +19,25 @@ pub(super) fn hid_usage(key: &Key) -> Result<u8, ActionError> {
     }
 }
 
+pub(super) fn hid_key(key: &Key) -> Result<HidKeyboardKey, ActionError> {
+    match &key.code {
+        KeyCode::HidCode { value } => hid_code_key(*value),
+        KeyCode::Symbol { value } => symbol_key(*value).ok_or_else(|| unsupported_key(key)),
+        KeyCode::Named { value } => named_key(value).ok_or_else(|| unsupported_key(key)),
+    }
+}
+
+#[cfg(test)]
 pub(super) fn hid_usage_for_text_char(ch: char) -> Result<u8, ActionError> {
-    unmodified_text_usage(ch).ok_or_else(|| ActionError::UnsupportedKey {
+    hid_text_key(ch).and_then(|mapped| {
+        mapped.key_usage.ok_or_else(|| ActionError::UnsupportedKey {
+            detail: format!("hardware backend cannot type modifier-only character {ch:?}"),
+        })
+    })
+}
+
+pub(super) fn hid_text_key(ch: char) -> Result<HidKeyboardKey, ActionError> {
+    symbol_key(ch).ok_or_else(|| ActionError::UnsupportedKey {
         detail: format!("hardware backend cannot type non-US-layout character {ch:?}"),
     })
 }
@@ -28,6 +54,10 @@ fn hid_code_usage(value: u8) -> Result<u8, ActionError> {
     }
 }
 
+fn hid_code_key(value: u8) -> Result<HidKeyboardKey, ActionError> {
+    hid_code_usage(value).map(usage_key)
+}
+
 fn named_usage(value: &str) -> Option<u8> {
     let trimmed = value.trim();
     let mut chars = trimmed.chars();
@@ -41,6 +71,82 @@ fn named_usage(value: &str) -> Option<u8> {
     alias_usage(&normalized)
         .or_else(|| generated_name_usage(&normalized))
         .or_else(|| table_name_usage(&normalized))
+}
+
+fn named_key(value: &str) -> Option<HidKeyboardKey> {
+    let trimmed = value.trim();
+    let mut chars = trimmed.chars();
+    if let Some(ch) = chars.next()
+        && chars.next().is_none()
+    {
+        return symbol_key(ch);
+    }
+
+    named_usage(trimmed).map(usage_key)
+}
+
+fn symbol_key(value: char) -> Option<HidKeyboardKey> {
+    symbol_usage(value).map(|usage| HidKeyboardKey {
+        modifiers: shifted_symbol_modifier(value),
+        key_usage: Some(usage),
+    })
+}
+
+const fn usage_key(usage: u8) -> HidKeyboardKey {
+    if let Some(modifier) = modifier_bit_for_usage(usage) {
+        HidKeyboardKey {
+            modifiers: modifier,
+            key_usage: None,
+        }
+    } else {
+        HidKeyboardKey {
+            modifiers: 0,
+            key_usage: Some(usage),
+        }
+    }
+}
+
+const fn modifier_bit_for_usage(usage: u8) -> Option<u8> {
+    match usage {
+        0xE0..=0xE7 => Some(1 << (usage - 0xE0)),
+        _ => None,
+    }
+}
+
+const fn shifted_symbol_modifier(value: char) -> u8 {
+    if is_shifted_symbol(value) {
+        LEFT_SHIFT_MODIFIER
+    } else {
+        0
+    }
+}
+
+const fn is_shifted_symbol(value: char) -> bool {
+    matches!(
+        value,
+        'A'..='Z'
+            | '!'
+            | '@'
+            | '#'
+            | '$'
+            | '%'
+            | '^'
+            | '&'
+            | '*'
+            | '('
+            | ')'
+            | '_'
+            | '+'
+            | '{'
+            | '}'
+            | '|'
+            | ':'
+            | '"'
+            | '~'
+            | '<'
+            | '>'
+            | '?'
+    )
 }
 
 const fn symbol_usage(value: char) -> Option<u8> {
@@ -96,34 +202,6 @@ const fn symbol_usage(value: char) -> Option<u8> {
         '.' | '>' => Some(0x37),
         '/' | '?' => Some(0x38),
         _ => None,
-    }
-}
-
-const fn unmodified_text_usage(value: char) -> Option<u8> {
-    match value {
-        'A'..='Z'
-        | '!'
-        | '@'
-        | '#'
-        | '$'
-        | '%'
-        | '^'
-        | '&'
-        | '*'
-        | '('
-        | ')'
-        | '_'
-        | '+'
-        | '{'
-        | '}'
-        | '|'
-        | ':'
-        | '"'
-        | '~'
-        | '<'
-        | '>'
-        | '?' => None,
-        _ => symbol_usage(value),
     }
 }
 

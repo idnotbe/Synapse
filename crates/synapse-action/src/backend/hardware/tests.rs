@@ -6,7 +6,7 @@ use synapse_core::{
     Stick, Trigger,
 };
 use synapse_hid_host::{
-    HOST_COMMAND_KEY_DOWN, HOST_COMMAND_KEY_UP, HOST_COMMAND_MOUSE_BUTTON,
+    HOST_COMMAND_KEY_DOWN, HOST_COMMAND_KEY_MODS, HOST_COMMAND_KEY_UP, HOST_COMMAND_MOUSE_BUTTON,
     HOST_COMMAND_MOUSE_MOVE_REL, HOST_COMMAND_MOUSE_WHEEL, HOST_COMMAND_PAD_REPORT,
     HOST_COMMAND_RELEASE_ALL,
 };
@@ -350,7 +350,7 @@ fn named_symbol_and_text_keys_emit_hid_usage_payloads() {
     backend
         .execute(
             &Action::TypeText {
-                text: "az0- ".to_owned(),
+                text: "A!az0- ".to_owned(),
                 dynamics: synapse_core::KeystrokeDynamics::Burst,
                 backend: Backend::Hardware,
             },
@@ -363,8 +363,18 @@ fn named_symbol_and_text_keys_emit_hid_usage_payloads() {
         vec![
             (HOST_COMMAND_KEY_DOWN, vec![0x4F]),
             (HOST_COMMAND_KEY_UP, vec![0x4F]),
+            (HOST_COMMAND_KEY_MODS, vec![0x02]),
             (HOST_COMMAND_KEY_DOWN, vec![0x38]),
             (HOST_COMMAND_KEY_UP, vec![0x38]),
+            (HOST_COMMAND_KEY_MODS, vec![0x00]),
+            (HOST_COMMAND_KEY_MODS, vec![0x02]),
+            (HOST_COMMAND_KEY_DOWN, vec![0x04]),
+            (HOST_COMMAND_KEY_UP, vec![0x04]),
+            (HOST_COMMAND_KEY_MODS, vec![0x00]),
+            (HOST_COMMAND_KEY_MODS, vec![0x02]),
+            (HOST_COMMAND_KEY_DOWN, vec![0x1E]),
+            (HOST_COMMAND_KEY_UP, vec![0x1E]),
+            (HOST_COMMAND_KEY_MODS, vec![0x00]),
             (HOST_COMMAND_KEY_DOWN, vec![0x04]),
             (HOST_COMMAND_KEY_UP, vec![0x04]),
             (HOST_COMMAND_KEY_DOWN, vec![0x1D]),
@@ -377,6 +387,136 @@ fn named_symbol_and_text_keys_emit_hid_usage_payloads() {
             (HOST_COMMAND_KEY_UP, vec![0x2C]),
         ]
     );
+}
+
+#[test]
+fn modifier_chords_emit_mod_bits_before_and_after_key_usage() {
+    let gateway = StubGateway::default();
+    let records = gateway.clone();
+    let backend = HardwareBackend::with_gateway(gateway);
+    let mut state = EmitState::new();
+
+    backend
+        .execute(
+            &Action::KeyChord {
+                keys: vec![
+                    named_key("ctrl"),
+                    named_key("shift"),
+                    named_key("alt"),
+                    named_key("f12"),
+                ],
+                hold_ms: 0,
+                backend: Backend::Hardware,
+            },
+            &mut state,
+        )
+        .unwrap_or_else(|error| panic!("modifier chord should emit: {error}"));
+
+    let commands = records.commands();
+    assert_eq!(
+        commands,
+        vec![
+            (HOST_COMMAND_KEY_MODS, vec![0x01]),
+            (HOST_COMMAND_KEY_MODS, vec![0x03]),
+            (HOST_COMMAND_KEY_MODS, vec![0x07]),
+            (HOST_COMMAND_KEY_DOWN, vec![0x45]),
+            (HOST_COMMAND_KEY_UP, vec![0x45]),
+            (HOST_COMMAND_KEY_MODS, vec![0x03]),
+            (HOST_COMMAND_KEY_MODS, vec![0x01]),
+            (HOST_COMMAND_KEY_MODS, vec![0x00]),
+        ]
+    );
+    assert!(state.snapshot().held_keys.is_empty());
+    assert_eq!(payload_array::<1>(&commands[2].1), [0x07]);
+    assert_eq!(payload_array::<1>(&commands[3].1), [0x45]);
+}
+
+#[test]
+fn pure_modifier_key_down_up_uses_modifier_byte_only() {
+    let gateway = StubGateway::default();
+    let records = gateway.clone();
+    let backend = HardwareBackend::with_gateway(gateway);
+    let mut state = EmitState::new();
+
+    backend
+        .execute(
+            &Action::KeyDown {
+                key: named_key("shift"),
+                backend: Backend::Hardware,
+            },
+            &mut state,
+        )
+        .unwrap_or_else(|error| panic!("shift down should emit modifier byte: {error}"));
+    let after_down_snapshot = state.snapshot();
+    backend
+        .execute(
+            &Action::KeyUp {
+                key: named_key("shift"),
+                backend: Backend::Hardware,
+            },
+            &mut state,
+        )
+        .unwrap_or_else(|error| panic!("shift up should clear modifier byte: {error}"));
+
+    assert_eq!(
+        records.commands(),
+        vec![
+            (HOST_COMMAND_KEY_MODS, vec![0x02]),
+            (HOST_COMMAND_KEY_MODS, vec![0x00]),
+        ]
+    );
+    assert_eq!(after_down_snapshot.held_keys, vec![named_key("shift")]);
+    assert!(state.snapshot().held_keys.is_empty());
+}
+
+#[test]
+fn seventh_non_modifier_key_fails_closed_without_extra_command() {
+    let gateway = StubGateway::default();
+    let records = gateway.clone();
+    let backend = HardwareBackend::with_gateway(gateway);
+    let mut state = EmitState::new();
+
+    for usage in 0x04..=0x09 {
+        backend
+            .execute(
+                &Action::KeyDown {
+                    key: hid_key(usage),
+                    backend: Backend::Hardware,
+                },
+                &mut state,
+            )
+            .unwrap_or_else(|error| panic!("first six keys should hold: {error}"));
+    }
+
+    let before_commands = records.commands();
+    let before_snapshot = state.snapshot();
+    let result = backend.execute(
+        &Action::KeyDown {
+            key: hid_key(0x0A),
+            backend: Backend::Hardware,
+        },
+        &mut state,
+    );
+    let after_commands = records.commands();
+    let after_snapshot = state.snapshot();
+
+    let error = match result {
+        Ok(()) => panic!("seventh non-modifier key should fail closed"),
+        Err(error) => error,
+    };
+    assert_eq!(
+        error.code(),
+        synapse_core::error_codes::ACTION_UNSUPPORTED_KEY
+    );
+    assert!(
+        error.detail().contains("6KRO limit"),
+        "unexpected detail: {}",
+        error.detail()
+    );
+    assert_eq!(before_commands.len(), 6);
+    assert_eq!(after_commands, before_commands);
+    assert_eq!(before_snapshot.held_keys.len(), 6);
+    assert_eq!(after_snapshot, before_snapshot);
 }
 
 #[test]
