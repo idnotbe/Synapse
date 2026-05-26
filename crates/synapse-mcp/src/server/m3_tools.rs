@@ -32,6 +32,9 @@ impl SynapseService {
             "subscribe",
             &crate::m3::subscribe::required_permissions(&params.0),
         )?;
+        if crate::m3::subscribe::requires_a11y_event_bridge(&params.0) {
+            self.ensure_a11y_event_bridge()?;
+        }
         let sse_state = self.sse_state()?;
         subscribe_to_events(&sse_state, &params.0).map(Json)
     }
@@ -69,6 +72,9 @@ impl SynapseService {
         );
         let required = crate::m3::reflex::required_permissions_register(&params.0)?;
         self.require_m3_permissions("reflex_register", &required)?;
+        if crate::m3::reflex::requires_a11y_event_bridge(&params.0) {
+            self.ensure_a11y_event_bridge()?;
+        }
         let runtime = self.reflex_runtime()?;
         register_reflex(&runtime, params.0).map(Json)
     }

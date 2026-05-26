@@ -22,6 +22,10 @@ synapse-capture = { version = "0.1.0", path = "../synapse-capture" }
 vigem-client = { workspace = true, features = ["unstable_ds4"] }
 windows.workspace = true
 
+[target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
+arboard.workspace = true
+enigo = { workspace = true, features = ["x11rb"] }
+
 [dev-dependencies]
 criterion.workspace = true
 insta.workspace = true

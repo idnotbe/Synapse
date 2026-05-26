@@ -17,7 +17,7 @@ pub fn default_provider_order() -> Vec<ModelBackend> {
 }
 
 #[cfg(feature = "ort")]
-pub(crate) fn create_ort_session(
+pub fn create_ort_session(
     descriptor: &crate::ModelDescriptor,
     provider: ModelBackend,
 ) -> crate::ModelResult<ort::session::Session> {

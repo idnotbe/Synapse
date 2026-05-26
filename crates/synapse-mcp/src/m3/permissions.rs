@@ -1,7 +1,7 @@
 use std::{
     collections::BTreeSet,
     fmt,
-    path::{Component, Path, PathBuf},
+    path::{Path, PathBuf},
 };
 
 use anyhow::{Context, Result, bail};
@@ -258,6 +258,8 @@ fn default_grants(audio_enabled: bool) -> RequiredPermissions {
         Permission::ReadProfile,
         Permission::WriteProfileActive,
         Permission::WriteReplay,
+        Permission::ReadStorage,
+        Permission::WriteStorage,
         Permission::InputKeyboard,
         Permission::InputMouse,
         Permission::InputPad,
@@ -301,19 +303,45 @@ fn default_replay_path(root: &Path) -> PathBuf {
 }
 
 fn lexical_normalize(path: &Path) -> PathBuf {
-    let mut normalized = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::CurDir => {}
-            Component::ParentDir => {
-                normalized.pop();
+    let raw = path.to_string_lossy().replace('\\', "/");
+    let (prefix, rest) = split_windows_drive_prefix(&raw);
+    let rooted = rest.starts_with('/');
+    let mut parts = Vec::new();
+
+    for part in rest.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                if parts.last().is_some_and(|last| *last != "..") {
+                    parts.pop();
+                } else if !rooted && prefix.is_empty() {
+                    parts.push(part);
+                }
             }
-            Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
-            Component::RootDir => normalized.push(component.as_os_str()),
-            Component::Normal(part) => normalized.push(part),
+            _ => parts.push(part),
         }
     }
-    normalized
+
+    let separator = if prefix.is_empty() { "/" } else { "\\" };
+    let mut normalized = String::new();
+    if !prefix.is_empty() {
+        normalized.push_str(prefix);
+        if rooted {
+            normalized.push('\\');
+        }
+    } else if rooted {
+        normalized.push('/');
+    }
+    normalized.push_str(&parts.join(separator));
+    PathBuf::from(normalized)
+}
+
+fn split_windows_drive_prefix(raw: &str) -> (&str, &str) {
+    if raw.len() >= 2 && raw.as_bytes()[1] == b':' && raw.as_bytes()[0].is_ascii_alphabetic() {
+        raw.split_at(2)
+    } else {
+        ("", raw)
+    }
 }
 
 fn is_under_root(path: &Path, root: &Path) -> bool {

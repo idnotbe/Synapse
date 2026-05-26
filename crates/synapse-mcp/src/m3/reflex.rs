@@ -16,6 +16,7 @@ pub use history::{
 pub use list::{ReflexListParams, ReflexListResponse, list_reflexes, required_permissions_list};
 pub use register::{
     ReflexRegisterParams, ReflexRegisterResponse, register_reflex, required_permissions_register,
+    requires_a11y_event_bridge,
 };
 
 use super::M3ToolStub;

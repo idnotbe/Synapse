@@ -37,6 +37,21 @@ async fn m3_permissions_refuse_ungranted_tool_calls_and_replay_path_escape() -> 
             .await?,
         "READ_AUDIO",
     );
+    assert_missing_permission(
+        &client
+            .tools_call_error("storage_inspect", json!({}))
+            .await?,
+        "READ_STORAGE",
+    );
+    assert_missing_permission(
+        &client
+            .tools_call_error(
+                "storage_put_probe_rows",
+                json!({"cf_name": "events", "key_prefix": "deny", "rows": 1, "value_bytes": 1}),
+            )
+            .await?,
+        "WRITE_STORAGE",
+    );
 
     let status = client.shutdown().await?;
     assert!(status.success());

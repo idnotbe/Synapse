@@ -6,7 +6,7 @@ use synapse_core::{EventFilter, error_codes};
 use crate::{http::sse::SseState, m1::mcp_error};
 
 use super::{
-    M3ToolStub,
+    M3ToolStub, a11y_events,
     permissions::{Permission, RequiredPermissions, required},
 };
 
@@ -94,6 +94,15 @@ pub fn required_permissions(_params: &SubscribeParams) -> RequiredPermissions {
 #[must_use]
 pub fn required_permissions_cancel(_params: &SubscribeCancelParams) -> RequiredPermissions {
     required([Permission::ReadEvents])
+}
+
+#[must_use]
+pub fn requires_a11y_event_bridge(params: &SubscribeParams) -> bool {
+    a11y_events::kinds_require_a11y_bridge(&params.kinds)
+        || params
+            .filter
+            .as_ref()
+            .is_some_and(a11y_events::event_filter_requires_a11y_bridge)
 }
 
 pub fn subscribe_to_events(

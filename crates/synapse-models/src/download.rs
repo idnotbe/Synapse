@@ -47,7 +47,7 @@ pub fn model_download_failed(source: &str) -> ModelError {
 }
 
 #[cfg(feature = "ort")]
-pub(crate) fn local_ort_extensions_library() -> Option<PathBuf> {
+pub fn local_ort_extensions_library() -> Option<PathBuf> {
     let dir = default_model_dir()
         .join("ort-extensions")
         .join("wheel")

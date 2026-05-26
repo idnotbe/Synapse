@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use synapse_core::error_codes;
 use tokio::{net::TcpStream, time::timeout};
 
+#[cfg(windows)]
 use crate::{A11yError, A11yResult};
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]

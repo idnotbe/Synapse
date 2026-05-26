@@ -6,7 +6,10 @@ use synapse_core::{
 };
 use synapse_reflex::ReflexError;
 
-use crate::m2::{ActPressParams, ActTypeParams, action_from_press_params, action_from_type_params};
+use crate::{
+    m2::{ActPressParams, ActTypeParams, action_from_press_params, action_from_type_params},
+    m3::a11y_events,
+};
 
 pub(super) fn reflex_kind_schema(_: &mut SchemaGenerator) -> Schema {
     json_schema!({
@@ -165,6 +168,13 @@ pub(super) fn combo_steps_from_params(
 }
 
 impl ReflexWhenParam {
+    pub(super) fn requires_a11y_event_bridge(&self) -> bool {
+        match self {
+            Self::Filter(filter) => a11y_events::event_filter_requires_a11y_bridge(filter),
+            Self::WindowEvent(_) => true,
+        }
+    }
+
     pub(super) fn into_event_filter(self) -> Result<EventFilter, ReflexError> {
         match self {
             Self::Filter(filter) => Ok(filter),

@@ -1,20 +1,19 @@
+#[cfg(windows)]
+use std::{fmt, sync::mpsc, thread, time::Duration};
 use std::{
-    fmt,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicU64, Ordering},
-        mpsc,
     },
-    thread::{self, JoinHandle},
-    time::Duration,
+    thread::JoinHandle,
 };
 
 use serde::{Deserialize, Serialize};
 
+#[cfg(windows)]
+use crate::ring::{AudioFormat, DEFAULT_SAMPLE_RATE_HZ, STEREO_CHANNELS};
 use crate::{
-    AudioError, AudioResult, MAX_RING_SECONDS,
-    detectors::DetectorProcessor,
-    ring::{AudioFormat, AudioRing, DEFAULT_SAMPLE_RATE_HZ, STEREO_CHANNELS},
+    AudioError, AudioResult, MAX_RING_SECONDS, detectors::DetectorProcessor, ring::AudioRing,
 };
 
 pub const AUDIO_LOOPBACK_FRAMES_TOTAL: &str = "audio_loopback_frames_total";
@@ -43,6 +42,7 @@ struct LoopbackStats {
 }
 
 impl LoopbackStats {
+    #[cfg(windows)]
     const fn new() -> Self {
         Self {
             running: AtomicBool::new(false),
@@ -51,6 +51,7 @@ impl LoopbackStats {
         }
     }
 
+    #[cfg(windows)]
     fn set_error(&self, error: &AudioError) {
         let mut last = match self.last_error_code.lock() {
             Ok(guard) => guard,

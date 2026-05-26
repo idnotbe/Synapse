@@ -14,7 +14,7 @@ use rmcp::{
     tool, tool_handler, tool_router,
 };
 use synapse_action::{ActionStateSnapshot, RecordingBackend};
-use synapse_core::{ForegroundContext, Health, SubsystemHealth, error_codes};
+use synapse_core::{Health, SubsystemHealth, error_codes};
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 

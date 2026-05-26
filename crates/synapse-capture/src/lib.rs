@@ -12,6 +12,7 @@ mod platform;
 mod stats;
 
 pub use backend::{CaptureBackend, CaptureBackendPreference};
+#[cfg(windows)]
 pub use bitmap::*;
 pub use config::{CaptureConfig, CaptureTarget, ResolvedCaptureTarget};
 pub use controller::{

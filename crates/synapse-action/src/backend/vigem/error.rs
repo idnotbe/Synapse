@@ -1,8 +1,11 @@
 #[cfg(windows)]
 use std::time::{Duration, Instant};
 
-use synapse_core::{Action, PadId};
+use synapse_core::Action;
+#[cfg(windows)]
+use synapse_core::PadId;
 
+#[cfg(windows)]
 use crate::ActionError;
 
 #[cfg(windows)]

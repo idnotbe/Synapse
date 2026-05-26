@@ -1,6 +1,8 @@
+#[cfg(windows)]
+use synapse_core::ElementId;
+use synapse_core::MouseButton;
 #[cfg(any(test, windows))]
 use synapse_core::{Action, AimCurve, AimNaturalParams, Backend, ButtonAction, MouseTarget};
-use synapse_core::{ElementId, MouseButton};
 
 #[cfg(windows)]
 use synapse_a11y::{UIElement, uiautomation::patterns::UIInvokePattern};

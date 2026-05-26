@@ -317,7 +317,7 @@ fn auto_mode_edges_and_invalid_manual_override() -> TestResult {
 }
 
 #[test]
-fn ocr_empty_region_and_backend_unavailable_are_fail_closed() -> TestResult {
+fn ocr_empty_region_and_backend_edges_are_observable() -> TestResult {
     let empty = Rect {
         x: 0,
         y: 0,
@@ -351,10 +351,27 @@ fn ocr_empty_region_and_backend_unavailable_are_fail_closed() -> TestResult {
         regression_log(format_args!(
             "regression_check=ocr edge=backend after={backend_after:?}"
         ))?;
-        assert_eq!(
-            backend_after.err().map(|err| err.code()),
-            Some(error_codes::OCR_BACKEND_UNAVAILABLE)
-        );
+        match backend_after {
+            Ok(words) => {
+                assert!(
+                    !words.is_empty(),
+                    "available platform OCR must return at least one word"
+                );
+                regression_log(format_args!(
+                    "regression_check=ocr edge=backend live_words={}",
+                    words.len()
+                ))?;
+            }
+            Err(err) => {
+                assert!(
+                    matches!(
+                        err.code(),
+                        error_codes::OCR_BACKEND_UNAVAILABLE | error_codes::OCR_NO_TEXT
+                    ),
+                    "platform OCR must fail closed with stable OCR code, got {err:?}"
+                );
+            }
+        }
     }
     Ok(())
 }

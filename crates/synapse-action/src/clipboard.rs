@@ -43,7 +43,81 @@ pub fn clear() -> ActionResult<()> {
     platform::clear()
 }
 
-#[cfg(not(windows))]
+#[cfg(all(unix, not(target_os = "macos")))]
+mod platform {
+    use std::sync::{Mutex, MutexGuard, OnceLock, PoisonError};
+
+    use arboard::Clipboard;
+
+    use super::{ActionError, ActionResult, ClipboardFormat};
+
+    static CLIPBOARD: OnceLock<Mutex<Option<Clipboard>>> = OnceLock::new();
+
+    pub fn read_text(_format: ClipboardFormat) -> ActionResult<String> {
+        let mut guard = clipboard_guard("read")?;
+        match clipboard(&mut guard, "read")?.get_text() {
+            Ok(text) => Ok(text),
+            Err(arboard::Error::ContentNotAvailable) => Ok(String::new()),
+            Err(err) => Err(arboard_error("read", &err)),
+        }
+    }
+
+    pub fn write_text(_format: ClipboardFormat, text: &str) -> ActionResult<()> {
+        let mut guard = clipboard_guard("write")?;
+        clipboard(&mut guard, "write")?
+            .set_text(text.to_owned())
+            .map_err(|err| arboard_error("write", &err))
+    }
+
+    pub fn clear() -> ActionResult<()> {
+        let mut guard = clipboard_guard("clear")?;
+        clipboard(&mut guard, "clear")?
+            .clear()
+            .map_err(|err| arboard_error("clear", &err))
+    }
+
+    fn clipboard_guard(
+        context: &'static str,
+    ) -> ActionResult<MutexGuard<'static, Option<Clipboard>>> {
+        CLIPBOARD
+            .get_or_init(|| Mutex::new(None))
+            .lock()
+            .map_err(|err| poisoned_error(context, err))
+    }
+
+    fn clipboard<'a>(
+        guard: &'a mut MutexGuard<'_, Option<Clipboard>>,
+        context: &'static str,
+    ) -> ActionResult<&'a mut Clipboard> {
+        if guard.is_none() {
+            **guard = Some(Clipboard::new().map_err(|err| arboard_error(context, &err))?);
+        }
+        guard
+            .as_mut()
+            .ok_or_else(|| ActionError::BackendUnavailable {
+                detail: format!(
+                    "Linux clipboard {context} could not initialize a clipboard handle"
+                ),
+            })
+    }
+
+    fn poisoned_error<T>(
+        context: &'static str,
+        _err: PoisonError<MutexGuard<'static, T>>,
+    ) -> ActionError {
+        ActionError::BackendUnavailable {
+            detail: format!("Linux clipboard {context} lock is poisoned"),
+        }
+    }
+
+    fn arboard_error(context: &'static str, err: &arboard::Error) -> ActionError {
+        ActionError::BackendUnavailable {
+            detail: format!("Linux clipboard {context} failed: {err}"),
+        }
+    }
+}
+
+#[cfg(not(any(windows, all(unix, not(target_os = "macos")))))]
 mod platform {
     use super::{ActionError, ActionResult, ClipboardFormat};
 
@@ -61,7 +135,7 @@ mod platform {
 
     fn unavailable(verb: &'static str) -> ActionError {
         ActionError::BackendUnavailable {
-            detail: format!("act_clipboard {verb} requires Windows clipboard APIs"),
+            detail: format!("act_clipboard {verb} is implemented on Windows and Linux/X11 only"),
         }
     }
 }

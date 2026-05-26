@@ -7,6 +7,7 @@ use synapse_a11y::{UIElement, uiautomation::types::Rect as UiaRect};
 
 use crate::{ActionError, ActionResult};
 
+#[cfg(windows)]
 use super::CoordinateFallbackPlan;
 
 #[cfg(windows)]

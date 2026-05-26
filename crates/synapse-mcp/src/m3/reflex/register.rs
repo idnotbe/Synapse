@@ -92,6 +92,15 @@ pub fn required_permissions_register(
     Ok(permissions)
 }
 
+#[must_use]
+pub fn requires_a11y_event_bridge(params: &ReflexRegisterParams) -> bool {
+    params.kind == "on_event"
+        && params
+            .when
+            .as_ref()
+            .is_some_and(ReflexWhenParam::requires_a11y_event_bridge)
+}
+
 pub fn register_reflex(
     runtime: &Arc<Mutex<ReflexRuntime>>,
     params: ReflexRegisterParams,

@@ -1,7 +1,7 @@
 use super::{
-    Arc, CancellationToken, ErrorData, ForegroundContext, M1State, Mutex, MutexGuard,
-    ProfileActivateParams, ProfileActivateResponse, RecordingBackend, RequiredPermissions,
-    SseState, SynapseService, activate_profile, authorization_error, error_codes, mcp_error,
+    Arc, CancellationToken, ErrorData, M1State, Mutex, MutexGuard, ProfileActivateParams,
+    ProfileActivateResponse, RecordingBackend, RequiredPermissions, SseState, SynapseService,
+    activate_profile, authorization_error, error_codes, mcp_error,
 };
 
 type M2ActionContext = (
@@ -177,16 +177,24 @@ impl SynapseService {
             )
         })?;
         let runtime = state
-            .ensure_reflex_runtime(action_handle, event_bus.clone())
+            .ensure_reflex_runtime(action_handle, event_bus)
             .map_err(|error| m3_state_error(&error))?;
-        state.ensure_a11y_event_bridge(event_bus).map_err(|error| {
-            mcp_error(
-                synapse_core::error_codes::TOOL_INTERNAL_ERROR,
-                error.to_string(),
-            )
-        })?;
         drop(state);
         Ok(runtime)
+    }
+
+    pub(super) fn ensure_a11y_event_bridge(&self) -> Result<(), ErrorData> {
+        let event_bus = self.sse_state()?.event_bus();
+        self.m3_state
+            .lock()
+            .map_err(|_err| {
+                mcp_error(
+                    synapse_core::error_codes::TOOL_INTERNAL_ERROR,
+                    "M3 service state lock poisoned",
+                )
+            })?
+            .ensure_a11y_event_bridge(event_bus)
+            .map_err(|error| mcp_error(error.code(), error.to_string()))
     }
 
     #[allow(clippy::significant_drop_tightening)]
@@ -208,26 +216,20 @@ impl SynapseService {
         activate_profile(&runtime, params, allow_unknown_profile)
     }
 
-    pub(super) fn last_observed_foreground(&self) -> Result<Option<ForegroundContext>, ErrorData> {
-        self.m1_state
-            .lock()
-            .map(|state| state.last_observed_foreground.clone())
-            .map_err(|_err| {
-                mcp_error(
-                    error_codes::OBSERVE_INTERNAL,
-                    "M1 service state lock poisoned",
-                )
-            })
-    }
-
     pub(super) fn ensure_act_type_foreground(
         &self,
         recording: Option<&Arc<RecordingBackend>>,
     ) -> Result<(), ErrorData> {
-        let Some(expected) = self.last_observed_foreground()? else {
-            return Ok(());
+        let (expected, actual) = {
+            let state = self.m1_state()?;
+            let Some(expected) = state.last_observed_foreground.clone() else {
+                return Ok(());
+            };
+            let actual = crate::m1::current_input(&state, 1).map(|input| input.foreground);
+            drop(state);
+            (expected, actual)
         };
-        let actual = synapse_a11y::current_foreground_context().map_err(|error| {
+        let actual = actual.map_err(|error| {
             mcp_error(
                 error_codes::ACTION_FOREGROUND_LOST,
                 format!(

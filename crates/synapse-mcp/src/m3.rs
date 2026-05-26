@@ -350,14 +350,14 @@ impl M3State {
         Ok(runtime)
     }
 
-    pub fn ensure_a11y_event_bridge(&mut self, event_bus: EventBus) -> Result<()> {
+    pub fn ensure_a11y_event_bridge(
+        &mut self,
+        event_bus: EventBus,
+    ) -> synapse_a11y::A11yResult<()> {
         if self.a11y_event_bridge.is_some() {
             return Ok(());
         }
-        let bridge =
-            A11yEventBridge::start(event_bus).map_err(|error| ReflexError::ParamsInvalid {
-                detail: format!("a11y event bridge start failed: {error}"),
-            })?;
+        let bridge = A11yEventBridge::start(event_bus)?;
         self.a11y_event_bridge = Some(bridge);
         Ok(())
     }

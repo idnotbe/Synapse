@@ -1,3 +1,4 @@
+#[cfg(any(windows, test))]
 use synapse_core::{GamepadReport, PadButton};
 
 #[cfg(any(windows, test))]

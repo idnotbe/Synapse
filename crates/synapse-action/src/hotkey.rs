@@ -14,6 +14,7 @@ pub fn operator_release_requested_since(epoch: u64) -> bool {
     OPERATOR_RELEASE_EPOCH.load(Ordering::Acquire) != epoch
 }
 
+#[cfg(windows)]
 fn request_operator_release_interrupt() {
     OPERATOR_RELEASE_EPOCH.fetch_add(1, Ordering::AcqRel);
 }
@@ -184,6 +185,7 @@ mod platform {
 
     pub struct OperatorHotkeyGuard;
 
+    #[allow(clippy::unnecessary_wraps)]
     pub fn install_operator_hotkey<F>(_handler: F) -> ActionResult<OperatorHotkeyGuard>
     where
         F: Fn() + Send + 'static,

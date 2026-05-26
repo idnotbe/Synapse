@@ -1,4 +1,5 @@
 #![cfg(not(windows))]
+#![cfg_attr(all(unix, not(target_os = "macos")), allow(dead_code, unused_imports))]
 
 use synapse_action::{
     ActionBackend, ActionError, EmitState, RecordingBackend,
@@ -11,6 +12,7 @@ use synapse_core::{
 };
 
 #[test]
+#[cfg(not(all(unix, not(target_os = "macos"))))]
 fn software_backend_returns_unavailable_for_every_action_variant_on_non_windows() {
     let backend = SoftwareBackend::new();
 
@@ -54,6 +56,7 @@ fn software_backend_returns_unavailable_for_every_action_variant_on_non_windows(
 }
 
 #[test]
+#[cfg(not(all(unix, not(target_os = "macos"))))]
 fn non_windows_software_backend_release_all_on_non_empty_state_fails_closed() {
     let mut state = EmitState::new();
     // Drive the recording backend to seed `state.held_keys` without leaning
@@ -90,6 +93,7 @@ fn non_windows_software_backend_release_all_on_non_empty_state_fails_closed() {
 }
 
 #[test]
+#[cfg(not(all(unix, not(target_os = "macos"))))]
 fn cursor_position_fails_closed_on_non_windows() {
     println!("readback=software_cursor_linux edge=read before=platform:not_windows");
     let error = match cursor_position() {
@@ -103,6 +107,70 @@ fn cursor_position_fails_closed_on_non_windows() {
     );
     assert_eq!(error.code(), error_codes::ACTION_BACKEND_UNAVAILABLE);
     assert!(error.detail().contains("requires Windows"));
+}
+
+#[test]
+#[cfg(all(unix, not(target_os = "macos")))]
+fn linux_software_backend_zero_io_edges_succeed_without_emitting_input() {
+    let backend = SoftwareBackend::new();
+    for (edge, action) in [
+        (
+            "type_text_empty",
+            Action::TypeText {
+                text: String::new(),
+                dynamics: KeystrokeDynamics::Burst,
+                backend: Backend::Software,
+            },
+        ),
+        (
+            "mouse_move_relative_zero",
+            Action::MouseMoveRelative {
+                dx: 0.0,
+                dy: 0.0,
+                backend: Backend::Software,
+            },
+        ),
+        (
+            "mouse_scroll_zero",
+            Action::MouseScroll {
+                dy: 0,
+                dx: 0,
+                at: None,
+                backend: Backend::Software,
+            },
+        ),
+        ("release_all_empty", Action::ReleaseAll),
+    ] {
+        let mut state = EmitState::new();
+        let before = state.snapshot();
+        backend
+            .execute(&action, &mut state)
+            .unwrap_or_else(|error| panic!("{edge} should succeed without I/O: {error}"));
+        let after = state.snapshot();
+        assert_eq!(before, after);
+        println!("readback=software_linux_x11 edge={edge} before={before:?} after={after:?}");
+    }
+}
+
+#[test]
+#[cfg(all(unix, not(target_os = "macos")))]
+fn linux_software_backend_keeps_gamepad_fail_closed() {
+    let backend = SoftwareBackend::new();
+    for (edge, action) in pad_actions() {
+        let mut state = EmitState::new();
+        let before = state.snapshot();
+        let error = match backend.execute(&action, &mut state) {
+            Ok(()) => panic!("software backend must not emit gamepad action {edge}"),
+            Err(error) => error,
+        };
+        let after = state.snapshot();
+        assert_eq!(error.code(), error_codes::ACTION_BACKEND_UNAVAILABLE);
+        assert_eq!(before, after);
+        println!(
+            "readback=software_linux_x11 edge={edge} before={before:?} after={after:?} after_code={}",
+            error.code()
+        );
+    }
 }
 
 fn action_cases() -> Vec<(&'static str, Action)> {

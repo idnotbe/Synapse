@@ -3,13 +3,52 @@ use std::fmt;
 use chrono::Utc;
 use serde_json::json;
 use synapse_a11y::{AccessibleEvent, AccessibleEventKind, WinEventSubscription};
-use synapse_core::{Event, EventSource, ForegroundContext};
+use synapse_core::{Event, EventFilter, EventSource, ForegroundContext};
 use synapse_reflex::EventBus;
 use tokio::{sync::mpsc::UnboundedReceiver, task::JoinHandle};
 
 pub struct A11yEventBridge {
     _subscription: WinEventSubscription,
     task: JoinHandle<()>,
+}
+
+const A11Y_EVENT_KINDS: [&str; 10] = [
+    "foreground-changed",
+    "focus-changed",
+    "value-changed",
+    "name-changed",
+    "element-appeared",
+    "element-disappeared",
+    "selection-changed",
+    "menustart",
+    "menuend",
+    "alert",
+];
+
+pub fn kinds_require_a11y_bridge(kinds: &[String]) -> bool {
+    kinds.iter().any(|kind| is_a11y_event_kind(kind))
+}
+
+pub fn event_filter_requires_a11y_bridge(filter: &EventFilter) -> bool {
+    match filter {
+        EventFilter::Source { source } => matches!(
+            source,
+            EventSource::A11yUia | EventSource::A11yWinEvent | EventSource::A11yCdp
+        ),
+        EventFilter::Kind { kind } => is_a11y_event_kind(kind),
+        EventFilter::And { args } | EventFilter::Or { args } => {
+            args.iter().any(event_filter_requires_a11y_bridge)
+        }
+        EventFilter::All
+        | EventFilter::None
+        | EventFilter::Not { .. }
+        | EventFilter::Data { .. } => false,
+    }
+}
+
+pub fn is_a11y_event_kind(kind: &str) -> bool {
+    let normalized = kind.trim().replace('_', "-").to_ascii_lowercase();
+    A11Y_EVENT_KINDS.contains(&normalized.as_str())
 }
 
 impl A11yEventBridge {

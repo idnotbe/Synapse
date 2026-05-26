@@ -1,9 +1,11 @@
 #![allow(clippy::redundant_pub_crate)]
 
+#[cfg(any(windows, test))]
 use synapse_core::{
     ButtonAction, GamepadController, GamepadReport, PadButton, PadId, Stick, Trigger,
 };
 
+#[cfg(any(windows, test))]
 use crate::EmitState;
 
 #[cfg(windows)]
