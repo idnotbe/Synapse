@@ -16,23 +16,27 @@ This doc specifies firmware design, host-side serial driver in `synapse-hid-host
 
 ## 2. Hardware choices
 
-Three reference platforms. All firmware is Rust, embedded async via `embassy`.
+M4's reference platform is the RP2040 Raspberry Pi Pico family. All M4 firmware
+is Rust, embedded async via `embassy`, and targets `thumbv6m-none-eabi`.
 
 | Board | Cost | Why |
 |---|---|---|
-| **Raspberry Pi Pico (RP2040)** | ~$4 | Default. Cheap. Easy to source. Stable USB stack via `embassy-usb`. PIO blocks enable USB host later. |
-| **Raspberry Pi Pico 2 (RP2350)** | ~$5 | Drop-in newer chip; same firmware with feature flag. |
-| **Arduino Pro Micro / Leonardo (ATmega32u4)** | ~$10 | Legacy. Slower. Smaller flash. Stripped subset firmware. |
+| **Raspberry Pi Pico / Pico H / Pico WH (RP2040)** | ~$4-6 | M4 default. Cheap. Easy to source. Stable USB stack via `embassy-usb`. Pico H/WH avoid soldering headers for future lab work. |
+| **Raspberry Pi Pico 2 / Pico 2 H (RP2350)** | ~$5-7 | Out of M4. Requires an explicit RP2350 port/feature flag before it can be a supported first board. |
+| **Arduino Pro Micro / Leonardo (ATmega32u4)** | ~$10 | Out of M4. Would be a later stripped firmware port, not the Synapse M4 acceptance path. |
 
 Default and primary: **Raspberry Pi Pico (RP2040)**. Rest of doc assumes RP2040.
 
 ### Bill of materials (minimum viable)
 
-- 1× Raspberry Pi Pico (RP2040, with castellated pads)
-- 1× USB-A cable (or USB-A → USB-C) to host PC
+- 1x Raspberry Pi Pico / Pico H / Pico WH (RP2040)
+- 1x data-capable micro-USB cable to the host PC
 - Optional: small project box
 
 No external components. Power and data over the same USB.
+
+Hardware sourcing and BOOTSEL setup details live in
+[`../hardware/procurement.md`](../hardware/procurement.md).
 
 ---
 
@@ -72,6 +76,11 @@ Before broad public distribution, Synapse should complete the Raspberry Pi
 `usb-pid` application/PR for the chosen PID or update ADR-0008 if Raspberry Pi
 assigns a replacement.
 
+Source notes: USB identity is locked by
+[`../adr/0008-usb-vid-pid-pico-hid.md`](../adr/0008-usb-vid-pid-pico-hid.md);
+the gamepad-vs-XInput decision is locked by
+[`../adr/0009-hid-gamepad-vs-xinput.md`](../adr/0009-hid-gamepad-vs-xinput.md).
+
 ---
 
 ## 4. Firmware architecture (RP2040, Rust, embassy)
@@ -80,45 +89,51 @@ assigns a replacement.
 firmware/pico-hid/
 ├── Cargo.toml
 ├── memory.x                    # RP2040 linker
+├── build.rs                    # copies memory.x into OUT_DIR and passes linker args
 ├── src/
-│   ├── main.rs                 # entry point, embassy executor
-│   ├── usb.rs                  # composite device descriptor builder
+│   ├── main.rs                 # entry point, embassy executor, LED heartbeat
+│   ├── usb.rs                  # imports canonical Synapse USB identity
 │   ├── hid_descriptors.rs      # report descriptors (mouse, kbd, pad)
-│   ├── reports.rs              # report structs
-│   ├── serial.rs               # CDC ACM serial channel
-│   ├── protocol.rs             # parser for serial command frames
-│   ├── pad_state.rs            # accumulates pad report
-│   ├── safety.rs               # watchdog, release_all on link timeout
+│   ├── reports.rs              # boot mouse, boot keyboard, 14-byte gamepad structs
+│   ├── serial.rs               # USB composite builder, CDC ACM parser, HID writers
+│   ├── protocol.rs             # frame parser/encoder and command constants
+│   ├── dispatch.rs             # command dispatcher, identify, telemetry, report state
+│   ├── safety.rs               # watchdog helper and release_all-on-timeout behavior
 │   └── led.rs                  # status LED feedback
-├── build.rs                    # builds .uf2 image
 └── tests/
-    └── protocol_roundtrip.rs   # off-board host-side parser tests
+    ├── led_patterns.rs
+    ├── loopback_dispatch.rs
+    ├── protocol_roundtrip.rs
+    └── safety_watchdog.rs
 ```
+
+UF2 conversion is performed after `cargo build` with `elf2uf2-rs`; `build.rs`
+does not create the UF2 by itself.
 
 ### 4.1 Embassy executor
 
 ```rust
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
-    let p = embassy_rp::init(Default::default());
-    let driver = embassy_rp::usb::Driver::new(p.USB, Irqs);
+    let peripherals = embassy_rp::init(Default::default());
+    let usb_ready = serial::spawn_usb(peripherals.USB, &spawner);
+    let mut led = Output::new(peripherals.PIN_25, Level::Low);
 
-    let mut builder = embassy_usb::Builder::new(driver, /* descriptors */);
-    let mouse_handle  = mouse::register(&mut builder);
-    let kbd_handle    = keyboard::register(&mut builder);
-    let pad_handle    = pad::register(&mut builder);
-    let serial_handle = serial::register(&mut builder);
-
-    let mut device = builder.build();
-    let (cmd_tx, cmd_rx) = embassy_sync::channel::Channel::new();
-
-    spawner.spawn(device_task(device)).unwrap();
-    spawner.spawn(serial_task(serial_handle, cmd_tx)).unwrap();
-    spawner.spawn(command_dispatcher(cmd_rx, mouse_handle, kbd_handle, pad_handle)).unwrap();
-    spawner.spawn(safety_watchdog()).unwrap();
-    spawner.spawn(led_indicator()).unwrap();
+    loop {
+        // LED state is derived from USB task startup and later command/watchdog inputs.
+        let output = led_output(/* LedInputs */);
+        if output.on { led.set_high(); } else { led.set_low(); }
+        Timer::after_millis(LED_TICK_MS).await;
+    }
 }
 ```
+
+Implementation checkpoint: current `main.rs` calls `serial::spawn_usb(...)`,
+then runs the LED loop. `serial.rs` builds the USB device, CDC ACM serial class,
+and three HID writers, parses CDC frames, and dispatches through `dispatch.rs`.
+The present HID writer tasks emit neutral reports every second; issue
+#374/#397/#393 own routing dispatched report state into live HID writes, and
+issue #375 owns polling `safety::Watchdog` in the hardware loop.
 
 ### 4.2 Cooperative loops
 
@@ -127,7 +142,7 @@ async fn main(spawner: Spawner) {
 | `device_task` | USB stack background pump | n/a; embassy-driven |
 | `serial_task` | Reads framed bytes from CDC, parses commands, dispatches | ≤ 0.5 ms per command |
 | `command_dispatcher` | Applies command to relevant HID interface | ≤ 1 ms host→USB-on-wire |
-| `safety_watchdog` | Releases all inputs if no host command in N ms | resolution 50 ms |
+| `watchdog helper` | `safety::Watchdog` releases all inputs when polled after timeout; issue #375 wires polling into the hardware loop | resolution 50 ms target |
 | `led_indicator` | Blinks status (idle / active / error) | n/a |
 
 ### 4.3 HID descriptors
@@ -208,11 +223,24 @@ Same frame layout, `MAGIC = 0xA5` (mirror byte) to distinguish direction.
 | 0x84 | `TELEMETRY_RESP` | (see above) |
 | 0x90 | `EVENT_BUTTON_PRESS_LOCAL` | (reserved; future: physical buttons on the board) |
 
+Source note: host and firmware constants are mirrored in
+`firmware/pico-hid/src/protocol.rs` and
+`crates/synapse-hid-host/src/protocol.rs`.
+
 ### 5.4 Sequence numbers and ack semantics
 
-Host assigns monotonic `SEQ`. Firmware acks every accepted frame within ≤ 200 µs. Host considers a frame failed if no ACK within 5 ms; resends with same `SEQ`. After 3 retries, host raises `HID_LINK_TIMEOUT`; surfaces `ACTION_HID_PORT_DISCONNECTED` to caller.
+Host assigns monotonic `SEQ`. Firmware replies with `ACK` for each accepted
+frame and `NAK` for parser/dispatcher rejection. The current host pipeline
+waits 5 ms for an ACK/NAK and retries the same `SEQ` up to 3 times; after the
+retry budget is exhausted, host raises `HID_LINK_TIMEOUT` and surfaces
+`ACTION_HID_PORT_DISCONNECTED` to caller.
 
-For volume input (e.g., a curve emitting 50 small mouse moves), host can pipeline up to 16 outstanding unacked frames. Firmware buffers up to 64 frames; overflow returns `NAK { reason: BUFFER_FULL }`.
+For volume input (e.g., a curve emitting 50 small mouse moves), host writes up
+to 16 outstanding unacked frames through `HidPipeline`. Firmware currently reads
+CDC packets into a `MAX_FRAME_LEN` receive buffer, parses complete frames
+synchronously, and dispatches each parsed frame immediately. `NAK_BUFFER_FULL`
+is currently emitted when command state cannot accept more data, such as the
+6-key boot-keyboard rollover slots already being full.
 
 ### 5.5 NAK reason codes
 
@@ -222,7 +250,7 @@ For volume input (e.g., a curve emitting 50 small mouse moves), host can pipelin
 0x03 NAK_UNKNOWN_CMD
 0x04 NAK_PAYLOAD_INVALID
 0x05 NAK_BUFFER_FULL
-0x06 NAK_WATCHDOG_EXPIRED       // firmware refused; watchdog had already released all
+0x06 NAK_WATCHDOG_EXPIRED       // defined for watchdog refusal; issue #375 wires emission into the hardware loop
 ```
 
 ### 5.6 Frame loss handling
@@ -233,7 +261,9 @@ USB CDC ACM is reliable in practice. CRC + ack detects protocol bugs and link-le
 
 ## 6. Safety: the watchdog
 
-Firmware enforces a watchdog. If no command received within `WATCHDOG_TIMEOUT_MS` (default 1000 ms):
+M4 watchdog contract: if no command is received within
+`WATCHDOG_TIMEOUT_MS`/`DEFAULT_WATCHDOG_TIMEOUT_MS` (default 1000 ms), firmware
+must:
 
 1. Log event internally (telemetry counter increments)
 2. Issue internal `RELEASE_ALL` — all mouse buttons up, all keys up, gamepad neutral
@@ -241,7 +271,14 @@ Firmware enforces a watchdog. If no command received within `WATCHDOG_TIMEOUT_MS
 
 Prevents stuck inputs if the host process crashes or USB link freezes mid-action.
 
-Host can: tune timeout via `WATCHDOG_KICK`; disable by setting timeout to 0 (not recommended; safety machinery); receive a `link_state_changed` event from `synapse-hid-host` on watchdog fire.
+Current implementation note: `firmware/pico-hid/src/safety.rs` implements
+`Watchdog::poll`, `DEFAULT_WATCHDOG_TIMEOUT_MS = 1000`, and
+`WATCHDOG_DISABLED_TIMEOUT_MS = 0`. `Watchdog::poll` calls
+`DispatchState::release_all()` and records watchdog telemetry when it fires.
+Host timeout tuning is carried by `WATCHDOG_KICK`; disabling by setting timeout
+to `0` is defined but not recommended because it removes stuck-input safety.
+Issue #375 closes the remaining hardware-loop polling and manual telemetry
+evidence.
 
 ---
 
@@ -249,51 +286,50 @@ Host can: tune timeout via `WATCHDOG_KICK`; disable by setting timeout to 0 (not
 
 ```rust
 pub struct HidGateway {
-    port: SerialPort,         // serialport crate handle
-    seq: AtomicU32,
-    inflight: Mutex<HashMap<u32, oneshot::Sender<Result<Ack>>>>,
-    rx_task: JoinHandle<()>,
+    port_name: String,
+    baud_rate: u32,
+    read_timeout: Duration,
+    identity: FirmwareIdentity,
+    pipeline: HidPipeline,
+    port: Box<dyn SerialPort>,
 }
 
 impl HidGateway {
-    pub fn connect(port_name: &str) -> Result<Self> {
-        let port = serialport::new(port_name, 1_000_000)
-            .timeout(Duration::from_millis(5))
-            .data_bits(serialport::DataBits::Eight)
-            .stop_bits(serialport::StopBits::One)
-            .parity(serialport::Parity::None)
-            .open()?;
-        // Identity handshake
-        let identity = handshake(&mut port)?;
-        validate_fw_version(&identity)?;
-        // Spawn rx task
-        let rx_task = tokio::task::spawn_blocking(move || rx_loop(/* ... */));
-        Ok(HidGateway { port, /* ... */ })
+    pub fn connect(port_name: impl Into<String>) -> HidResult<Self> {
+        // Verifies the port is present, opens serialport at 1_000_000 baud
+        // with a 5 ms read timeout, then runs IDENTIFY.
     }
 
-    pub async fn mouse_move(&self, dx: i16, dy: i16) -> Result<()> {
-        self.send_command(Cmd::MouseMoveRel { dx, dy }).await
+    pub fn send_command(&mut self, command: u8, payload: &[u8]) -> HidResult<u32> {
+        self.pipeline.send_command(self.port.as_mut(), command, payload)
     }
 
-    pub async fn key_press(&self, hid_code: u8, hold: Duration) -> Result<()> {
-        self.send_command(Cmd::KeyDown { hid_code }).await?;
-        tokio::time::sleep(hold).await;
-        self.send_command(Cmd::KeyUp { hid_code }).await
+    pub fn send_commands(&mut self, commands: &[HostCommandRequest<'_>])
+        -> HidResult<Vec<u32>>
+    {
+        self.pipeline.send_commands(self.port.as_mut(), commands)
     }
-
-    // ...
 }
 ```
 
-Threading: one blocking I/O thread for serial reads (`serialport` is sync); pushes parsed responses through a channel into tokio. Writes are async-from-tokio with a small `Mutex<SerialPort>` to serialize.
+The current host driver is synchronous around `serialport`. `HidPipeline`
+provides the bounded sliding window, ACK/NAK parsing, and retry budget.
+`ReconnectGateway` wraps a connected link in a worker thread for reconnect
+attempts.
 
 ### 7.1 Auto-detect
 
-`synapse-mcp` at startup with `--hardware-hid auto` enumerates COM ports, sends `IDENTIFY` to each, finds Synapse firmware by `IDENTIFY_RESP` payload. First match wins; error if none.
+`synapse-mcp` at startup with `--hardware-hid auto` enumerates COM ports,
+filters USB serial candidates by the Synapse VID/PID from ADR-0008, sends
+`IDENTIFY` through `HidGateway::connect`, and uses the first candidate whose
+identity handshake succeeds. Error if none succeeds.
 
 ### 7.2 Reconnection
 
-On serial error (port closed, USB unplugged), driver retries every 500 ms. While disconnected, all action calls using `Backend::Hardware` return `ACTION_HID_PORT_DISCONNECTED` immediately (no queueing).
+On serial error (port closed, USB unplugged), `ReconnectGateway` enters a
+disconnected/connecting state and retries every 500 ms. While disconnected, all
+action calls using `Backend::Hardware` return `ACTION_HID_PORT_DISCONNECTED`
+immediately (no queueing).
 
 ### 7.3 Firmware version handshake
 
@@ -310,7 +346,7 @@ cargo install elf2uf2-rs
 
 # Build
 cd firmware/pico-hid
-cargo build --release --target thumbv6m-none-eabi
+cargo build --release
 elf2uf2-rs target/thumbv6m-none-eabi/release/pico-hid pico-hid.uf2
 
 # Flash
@@ -318,6 +354,15 @@ elf2uf2-rs target/thumbv6m-none-eabi/release/pico-hid pico-hid.uf2
 # 2. Pico appears as a USB mass storage device "RPI-RP2"
 # 3. Copy pico-hid.uf2 to it; Pico reboots into Synapse firmware
 ```
+
+If any build, flash, driver, cable, board, or firmware artifact prerequisite is
+missing, the agent must make the real prerequisite exist on this configured host
+before declaring the issue blocked: install the tool, acquire or connect the
+device when locally reversible, put the board in BOOTSEL, inspect Device Manager
+or `Get-PnpDevice`, copy the UF2, and then read the physical source of truth
+that proves the prerequisite or flashed firmware is present. Ask the operator
+only for hard-to-reverse external actions such as spending money or using
+private credentials.
 
 Helper: `synapse-mcp hid flash --port COM7`:
 
@@ -367,13 +412,17 @@ Status LED:
 
 | Test | How |
 |---|---|
-| Protocol roundtrip | `cargo test -p pico-hid --tests` (host-side parser tests with hand-crafted frames) |
+| Protocol roundtrip | `cd firmware/pico-hid; cargo test --tests` (host-side parser tests with hand-crafted frames) |
 | Firmware loopback | Build with `--features loopback`; firmware echoes every command back as `PONG`. Host driver sends 1000 commands, asserts all return. |
 | Watchdog | Connect, send commands, stop >1s, observe `RELEASE_ALL` via internal telemetry. |
 | Stress | Send 10,000 mouse-move-rel commands at full rate; assert no drops, all acked. |
 | Re-enumeration | Trigger `RESET_TO_BOOTLOADER`, observe device drops, mass storage appears, reflash, reconnect. |
 
-Local protocol roundtrip checks run without hardware. Firmware-loopback is a configured-host hardware check with a Pico attached; it is supporting evidence, not FSV.
+Local protocol roundtrip checks run without hardware. Firmware-loopback,
+watchdog, stress, and re-enumeration rows require the configured host and real
+hardware when they are used as supporting evidence. They are not FSV by
+themselves; manual FSV still triggers the real runtime surface and separately
+reads the physical source of truth after each action.
 
 ---
 
