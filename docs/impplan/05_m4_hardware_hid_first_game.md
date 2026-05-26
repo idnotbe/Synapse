@@ -54,11 +54,11 @@ firmware/pico-hid/
 ├── src/
 │   ├── main.rs                 (embassy executor; spawns device/serial/dispatch/watchdog/led)
 │   ├── usb.rs                  (composite descriptor builder)
-│   ├── hid_descriptors.rs      (mouse boot+ext / kbd boot / xinput-like pad)
+│   ├── hid_descriptors.rs      (mouse boot+ext / kbd boot / standard HID pad)
 │   ├── reports.rs              (report structs)
 │   ├── serial.rs               (CDC ACM)
 │   ├── protocol.rs             (frame parser: MAGIC=0x5A, LEN u16, SEQ u32, CMD u8, payload, CRC16/CCITT-FALSE)
-│   ├── pad_state.rs            (14-byte XInput-like report accumulator)
+│   ├── pad_state.rs            (14-byte standard HID gamepad report accumulator)
 │   ├── safety.rs               (watchdog default 1000 ms ⇒ RELEASE_ALL internal)
 │   └── led.rs                  (idle slow blink / active steady / watchdog fast / error SOS)
 └── tests/protocol_roundtrip.rs (host-side parser; runs as a local supporting check)
@@ -160,7 +160,7 @@ SAFETY_OPERATOR_HOTKEY_FIRED
 |---|---|---|
 | 1 | `feat(firmware): cargo project + memory.x + embassy-rp init + LED hello-world` | flash to Pico, LED blinks per `09 §9` idle pattern |
 | 2 | `feat(firmware): USB CDC ACM serial channel` | host sees COM port; loopback echo test works (10k bytes round-trip lossless) |
-| 3 | `feat(firmware): HID composite descriptor (mouse boot+ext / kbd boot / pad XInput-like)` | Windows enumerates all 3 interfaces; `devmgmt.msc` shows HID-compliant devices |
+| 3 | `feat(firmware): HID composite descriptor (mouse boot+ext / kbd boot / standard HID pad)` | Windows enumerates all 3 interfaces; `devmgmt.msc` shows HID-compliant devices |
 | 4 | `feat(firmware): protocol parser (MAGIC, LEN, SEQ, CMD, payload, CRC) + ACK/NAK` | `tests/protocol_roundtrip.rs` x86 host-parser tests pass; sample frame → cmd dispatch table |
 | 5 | `feat(firmware): command dispatcher (MOUSE_*, KEY_*, PAD_REPORT, RELEASE_ALL, WATCHDOG_KICK, IDENTIFY, GET_TELEMETRY)` | host-tested commands all yield matching HID reports on the wire |
 | 6 | `feat(firmware): watchdog default 1000 ms ⇒ RELEASE_ALL + telemetry counter` | stop sending for 1.2 s ⇒ telemetry shows watchdog fires + all inputs released |

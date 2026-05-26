@@ -44,7 +44,7 @@ Board enumerates as a **USB HID composite device** with three interfaces:
 |---|---|---|---|---|
 | 0 | HID (3) | Boot (1) | Mouse (2) | Boot-protocol mouse — works in BIOS, Windows native |
 | 1 | HID (3) | Boot (1) | Keyboard (1) | Boot-protocol keyboard |
-| 2 | HID (3) | None (0) | None (0) | Vendor-defined gamepad (X-input-compatible report) |
+| 2 | HID (3) | None (0) | None (0) | Standard HID gamepad (DirectInput-visible, Xbox-like 14-byte report; ADR-0009) |
 
 Plus a fourth control interface:
 
@@ -134,10 +134,10 @@ async fn main(spawner: Spawner) {
 
 **Keyboard (boot-protocol superset).** 8-byte boot keyboard report: modifiers byte + reserved + 6 keycodes. Reports HID Usage IDs directly.
 
-**Gamepad.** XInput-compatible custom HID report:
+**Gamepad.** Standard HID gamepad report, not XInput/XUSB emulation (ADR-0009):
 
 ```
-buttons: u16,        // bitfield: A,B,X,Y, LB,RB, Back,Start, LS,RS, DUp,DDown,DLeft,DRight, Guide, Reserved
+buttons: u16,        // standard Button page bitfield: A,B,X,Y, LB,RB, Back,Start, LS,RS, DUp,DDown,DLeft,DRight, Guide, Reserved
 left_trigger: u8,
 right_trigger: u8,
 thumb_lx: i16,
@@ -146,7 +146,9 @@ thumb_rx: i16,
 thumb_ry: i16,
 ```
 
-Total 14 bytes. Sent at up to 1000 Hz (matches XInput poll rate).
+Total 14 bytes. Sent at up to 1000 Hz. Games that require XInput/XUSB should
+use the ViGEm backend; the hardware pad is a real HID/DirectInput-visible
+peripheral.
 
 ---
 
@@ -377,6 +379,8 @@ Local protocol roundtrip checks run without hardware. Firmware-loopback is a con
 
 - **Full-speed USB only.** No high-speed USB 2.0 on the Pico. Fine for HID; insufficient for video streaming, but we don't.
 - **Single boot-mouse / boot-keyboard** at a time. Windows accepts one of each composite device. Don't plug in multiple Synapse boards.
+- **Gamepad compatibility.** The Pico exposes a standard HID gamepad, not an
+  XInput device. Use ViGEm for XInput-only games.
 - **Mouse resolution.** 16-bit signed delta per axis. Large moves split into many small reports anyway.
 - **Latency stable on Win11 22H2+.** Older Windows builds may have USB poll jitter (1 ms poll effectively 1-3 ms). Not Synapse's problem to fix.
 - **PIO USB host (advanced).** The Pico's PIO blocks can run a second USB host port (see `vynxc/VBox`). Synapse v1 doesn't ship this; v2 option for "pass through a real mouse and inject corrections."
