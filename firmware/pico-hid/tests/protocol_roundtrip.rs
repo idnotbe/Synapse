@@ -195,7 +195,7 @@ fn dispatcher_returns_query_responses_and_updates_telemetry() {
     let telemetry = frame(13, HostCommand::GetTelemetry, &[]);
     let telemetry_outcome = dispatch_frame(&mut state, telemetry, identify);
     assert_eq!(telemetry_outcome.command, DeviceCommand::TelemetryResp);
-    assert_eq!(telemetry_outcome.payload_len, 24);
+    assert_eq!(telemetry_outcome.payload_len, 28);
     assert_eq!(
         u32::from_le_bytes([
             telemetry_outcome.payload[0],
@@ -205,6 +205,61 @@ fn dispatcher_returns_query_responses_and_updates_telemetry() {
         ]),
         1234
     );
+}
+
+#[test]
+fn telemetry_response_contains_all_counter_fields() {
+    let identify = IdentifyInfo::new(*b"TESTHASH", 0x2E8A, 0x1F50);
+    let mut state = DispatchState::new();
+    state.telemetry.uptime_ms = 1;
+    state.telemetry.frames_received = 10;
+    state.telemetry.frames_dropped = 2;
+    state.telemetry.link_errors = 3;
+    state.telemetry.commands_executed = 4;
+    state.telemetry.watchdog_fires = 5;
+    state.telemetry.crc_errors = 6;
+
+    let telemetry = dispatch_frame(
+        &mut state,
+        frame(14, HostCommand::GetTelemetry, &[]),
+        identify,
+    );
+    assert_eq!(telemetry.command, DeviceCommand::TelemetryResp);
+    assert_eq!(telemetry.payload_len, 28);
+    assert_eq!(payload_u32(&telemetry, 0), 1);
+    assert_eq!(payload_u32(&telemetry, 4), 11);
+    assert_eq!(payload_u32(&telemetry, 8), 2);
+    assert_eq!(payload_u32(&telemetry, 12), 3);
+    assert_eq!(payload_u32(&telemetry, 16), 4);
+    assert_eq!(payload_u32(&telemetry, 20), 5);
+    assert_eq!(payload_u32(&telemetry, 24), 6);
+    assert_eq!(state.telemetry.commands_executed, 5);
+}
+
+#[test]
+fn release_all_does_not_reset_telemetry_counters() {
+    let identify = IdentifyInfo::new(*b"TESTHASH", 0x2E8A, 0x1F50);
+    let mut state = DispatchState::new();
+    state.telemetry.frames_dropped = 9;
+    state.telemetry.link_errors = 8;
+    state.telemetry.commands_executed = 7;
+    state.telemetry.watchdog_fires = 6;
+    state.telemetry.crc_errors = 5;
+
+    assert_eq!(
+        dispatch_frame(
+            &mut state,
+            frame(15, HostCommand::ReleaseAll, &[]),
+            identify
+        ),
+        ack(15)
+    );
+
+    assert_eq!(state.telemetry.frames_dropped, 9);
+    assert_eq!(state.telemetry.link_errors, 8);
+    assert_eq!(state.telemetry.commands_executed, 8);
+    assert_eq!(state.telemetry.watchdog_fires, 6);
+    assert_eq!(state.telemetry.crc_errors, 5);
 }
 
 #[test]
@@ -279,4 +334,13 @@ fn nak(seq: u32, reason: NakReason) -> DispatchOutcome {
         payload,
         payload_len: 5,
     }
+}
+
+fn payload_u32(outcome: &DispatchOutcome, start: usize) -> u32 {
+    u32::from_le_bytes([
+        outcome.payload[start],
+        outcome.payload[start + 1],
+        outcome.payload[start + 2],
+        outcome.payload[start + 3],
+    ])
 }

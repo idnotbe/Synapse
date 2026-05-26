@@ -95,6 +95,7 @@ pub struct Telemetry {
     pub link_errors: u32,
     pub commands_executed: u32,
     pub watchdog_fires: u32,
+    pub crc_errors: u32,
 }
 
 impl Telemetry {
@@ -106,6 +107,7 @@ impl Telemetry {
             link_errors: 0,
             commands_executed: 0,
             watchdog_fires: 0,
+            crc_errors: 0,
         }
     }
 
@@ -116,7 +118,33 @@ impl Telemetry {
         out[12..16].copy_from_slice(&self.link_errors.to_le_bytes());
         out[16..20].copy_from_slice(&self.commands_executed.to_le_bytes());
         out[20..24].copy_from_slice(&self.watchdog_fires.to_le_bytes());
-        24
+        out[24..28].copy_from_slice(&self.crc_errors.to_le_bytes());
+        28
+    }
+
+    pub fn record_frame_received(&mut self) {
+        self.frames_received = self.frames_received.wrapping_add(1);
+    }
+
+    pub fn record_frame_dropped(&mut self) {
+        self.frames_dropped = self.frames_dropped.wrapping_add(1);
+    }
+
+    pub fn record_link_error(&mut self) {
+        self.link_errors = self.link_errors.wrapping_add(1);
+    }
+
+    pub fn record_crc_error(&mut self) {
+        self.crc_errors = self.crc_errors.wrapping_add(1);
+        self.record_link_error();
+    }
+
+    pub fn record_command_executed(&mut self) {
+        self.commands_executed = self.commands_executed.wrapping_add(1);
+    }
+
+    pub fn record_watchdog_fire(&mut self) {
+        self.watchdog_fires = self.watchdog_fires.wrapping_add(1);
     }
 }
 
@@ -176,7 +204,7 @@ pub fn dispatch_frame(
         None => return DispatchOutcome::nak(frame.seq, NakReason::UnknownCommand),
     };
 
-    state.telemetry.frames_received = state.telemetry.frames_received.wrapping_add(1);
+    state.telemetry.record_frame_received();
 
     let outcome = match command {
         HostCommand::Ping => dispatch_ping(frame),
@@ -195,9 +223,9 @@ pub fn dispatch_frame(
     };
 
     if outcome.command == DeviceCommand::Nak {
-        state.telemetry.link_errors = state.telemetry.link_errors.wrapping_add(1);
+        state.telemetry.record_link_error();
     } else {
-        state.telemetry.commands_executed = state.telemetry.commands_executed.wrapping_add(1);
+        state.telemetry.record_command_executed();
     }
 
     outcome

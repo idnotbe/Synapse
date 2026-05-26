@@ -46,7 +46,7 @@ impl Watchdog {
         }
 
         state.release_all();
-        state.telemetry.watchdog_fires = state.telemetry.watchdog_fires.wrapping_add(1);
+        state.telemetry.record_watchdog_fire();
         self.fired = true;
         WatchdogPoll::Fired
     }
