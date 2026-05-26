@@ -7,7 +7,7 @@ Discipline applied across M0-M5. PRD authority: `docs/computergames/README.md` Â
 1. **No backwards compatibility (pre-v1).** Schema/API changes break callers. No fallbacks, no compatibility shims, no silent error swallowing. Fail fast with a structured `synapse_core::error_codes::*` code and a `tracing` line carrying that code so the failure is debuggable.
 2. **No mocks gate completion.** Unit fakes are fine for isolation. An OS-bound work-item is **not done** until a real-OS integration test exercises it and a separate source-of-truth read confirms the side effect landed.
 3. **Manual configured-host FSV is the shipping gate, not GitHub Actions** (issues #246/#247/#350/#351, operator decision 2026-05-24). Use local checks for supporting evidence. Do not dispatch, wait on, or block a tag on GitHub Actions/CI. FSV must never be delegated to scripts, automated tests, benchmarks, harnesses, CI jobs, or any other automated substitute.
-4. **Missing prerequisites are acquisition work, not a stopping point.** If a local tool, driver, model, device, file, service, account state, or other prerequisite is absent, use Synapse computer-control surfaces plus normal OS, shell, browser, package-manager, and device-management workflows to make it real on the configured host. Identify the authoritative SoT where it should appear, perform the setup/acquisition step, then read that SoT directly. Ask only for narrow approval before hard-to-reverse external actions such as spending money, using private credentials, changing billing, or modifying an external account.
+4. **Missing prerequisites are acquisition work, not a stopping point.** If a local tool, driver, model, device, file, service, account state, or other prerequisite is absent, do not mark the issue blocked for that reason alone. Use Synapse computer-control surfaces as the same practical control surface the operator has on this configured host, plus normal OS, shell, browser, package-manager, and device-management workflows, to make it real. Identify the authoritative SoT where it should appear, perform the setup/acquisition step, then read that SoT directly. Ask only for narrow approval before hard-to-reverse external actions such as spending money, using private credentials, changing billing, or modifying an external account, and complete every reversible local step before asking.
 
 ---
 
@@ -108,12 +108,14 @@ A change that asserts only on return values is **not done**; review fails the PR
 Missing prerequisite handling is part of this same gate. If a driver, model,
 tool, firmware device, config file, or service is required for the configured
 host, the agent must create an explicit setup action and verify the real
-source of truth where that prerequisite should appear. Examples: `rustup target
-list --installed` for an embedded target, `Get-PnpDevice` / `HKLM` for an
-attached hardware device, `%APPDATA%\synapse\config.toml` for setup output, or
-the model file path plus hash for a downloaded model. Do not replace this with
-absent-dependency portability testing, scripts, or CI; acquire or configure the
-real thing and then inspect it.
+source of truth where that prerequisite should appear. Missing hardware,
+drivers, tools, services, models, and files are work to acquire or configure,
+not terminal blockers by themselves. Examples: `rustup target list --installed`
+for an embedded target, `Get-PnpDevice` / `HKLM` for an attached hardware
+device, `%APPDATA%\synapse\config.toml` for setup output, or the model file path
+plus hash for a downloaded model. Do not replace this with absent-dependency
+portability testing, scripts, or CI; acquire or configure the real thing and
+then inspect it.
 
 ---
 

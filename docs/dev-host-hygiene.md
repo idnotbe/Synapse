@@ -5,16 +5,19 @@ Recommendations for keeping a long-lived synapse development host (Windows or Li
 ## Missing configured-host prerequisites
 
 If a required host prerequisite is absent, treat that as setup/acquisition work,
-not as completion evidence or a portability gate. Use normal OS, shell,
-browser, package-manager, device-manager, and Synapse computer-control surfaces
-to install, connect, download, configure, or generate the real prerequisite on
-this host. Then read the physical source of truth where the prerequisite must
-appear: package inventory, driver/service list, `Get-PnpDevice`, registry Enum
-key, firmware volume, config file, model path plus hash, or equivalent.
+not as completion evidence, a portability gate, or a reason to mark the issue
+blocked by itself. Use Synapse computer-control surfaces as the same practical
+control surface the operator has on this configured host, plus normal OS,
+shell, browser, package-manager, and device-manager workflows, to install,
+connect, download, configure, or generate the real prerequisite on this host.
+Then read the physical source of truth where the prerequisite must appear:
+package inventory, driver/service list, `Get-PnpDevice`, registry Enum key,
+firmware volume, config file, model path plus hash, or equivalent.
 
 Ask for narrow operator approval only before hard-to-reverse external actions:
 spending money, using private credentials, changing billing, modifying an
 external account, or irreversible shared-state changes.
+Complete every reversible local step before asking for that approval.
 
 ## Coordinates: `act_aim` / `act_click({x,y})` / `act_drag` / `act_scroll`
 
