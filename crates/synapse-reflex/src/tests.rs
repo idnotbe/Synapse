@@ -1,0 +1,202 @@
+use std::{error::Error, sync::Arc};
+
+use synapse_action::ActionHandle;
+use synapse_core::{Action, EventFilter, ReflexState, StoredReflexAudit};
+use synapse_storage::{Db, cf, decode_json};
+use tempfile::tempdir;
+use tokio::sync::mpsc;
+
+use crate::{
+    EventBus, REFLEX_CANCELLED_KIND, REFLEX_DISABLED_KIND, REFLEX_REGISTERED_KIND,
+    ReflexCancelOutcome, ReflexRuntime, ScheduledReflex,
+};
+
+const TEST_SCHEMA_VERSION: u32 = 7;
+
+#[test]
+fn spawn_retains_runtime_inputs_and_action_handle() -> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let db = Arc::new(Db::open(&temp.path().join("db"), TEST_SCHEMA_VERSION)?);
+    let (action_handle, mut action_rx) = ActionHandle::channel();
+    assert!(matches!(
+        action_rx.try_recv(),
+        Err(mpsc::error::TryRecvError::Empty)
+    ));
+
+    let runtime = ReflexRuntime::spawn(Arc::clone(&db), action_handle, EventBus::default())?;
+    runtime.action_handle().try_execute(Action::ReleaseAll)?;
+    let (queued_action, _ack) = action_rx.try_recv()?;
+
+    assert_eq!(runtime.schema_version(), TEST_SCHEMA_VERSION);
+    assert_eq!(queued_action, Action::ReleaseAll);
+    Ok(())
+}
+
+#[test]
+fn cancel_registered_reflex_marks_status_and_writes_audit() -> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let db = Arc::new(Db::open(&temp.path().join("db"), TEST_SCHEMA_VERSION)?);
+    let (action_handle, _action_rx) = ActionHandle::channel();
+    let mut runtime = ReflexRuntime::spawn(Arc::clone(&db), action_handle, EventBus::default())?;
+    let reflex = ScheduledReflex::on_event(
+        "reflex-runtime-cancel",
+        EventFilter::Kind {
+            kind: "support-cancel".to_owned(),
+        },
+        vec![Action::ReleaseAll],
+    );
+    let registered = runtime.register(&reflex)?;
+    assert_eq!(registered.state, ReflexState::Active);
+
+    let outcome = runtime.cancel("reflex-runtime-cancel")?;
+    let ReflexCancelOutcome::Cancelled { status } = outcome else {
+        panic!("registered reflex should cancel");
+    };
+    assert_eq!(status.state, ReflexState::Cancelled);
+    assert_eq!(
+        runtime
+            .statuses()
+            .into_iter()
+            .find(|status| status.id == "reflex-runtime-cancel")
+            .map(|status| status.state),
+        Some(ReflexState::Cancelled)
+    );
+    assert!(runtime.list(false)?.is_empty());
+    let visible_with_expired = runtime.list(true)?;
+    assert_eq!(visible_with_expired.len(), 1);
+    assert_eq!(visible_with_expired[0].state, ReflexState::Cancelled);
+
+    let audits = db
+        .scan_cf(cf::CF_REFLEX_AUDIT)?
+        .iter()
+        .map(|(_key, value)| decode_json::<StoredReflexAudit>(value))
+        .collect::<Result<Vec<_>, _>>()?;
+    let kinds = audits
+        .iter()
+        .map(|audit| audit.details["kind"].as_str())
+        .collect::<Vec<_>>();
+    assert!(kinds.contains(&Some(REFLEX_REGISTERED_KIND)));
+    assert!(kinds.contains(&Some(REFLEX_CANCELLED_KIND)));
+    assert!(
+        audits
+            .iter()
+            .any(|audit| audit.status == ReflexState::Cancelled)
+    );
+    drop(runtime);
+
+    let (action_handle, _action_rx) = ActionHandle::channel();
+    let restarted = ReflexRuntime::spawn(Arc::clone(&db), action_handle, EventBus::default())?;
+    let restored = restarted.list(true)?;
+    assert_eq!(restored.len(), 1);
+    assert_eq!(restored[0].id, "reflex-runtime-cancel");
+    assert_eq!(restored[0].state, ReflexState::Cancelled);
+    assert_eq!(restored[0].kind_summary, "on_event:1 actions");
+    Ok(())
+}
+
+#[test]
+fn cancelled_reflex_does_not_resurrect_on_later_registration() -> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let db = Arc::new(Db::open(&temp.path().join("db"), TEST_SCHEMA_VERSION)?);
+    let (action_handle, _action_rx) = ActionHandle::channel();
+    let mut runtime = ReflexRuntime::spawn(Arc::clone(&db), action_handle, EventBus::default())?;
+    let cancelled_reflex = ScheduledReflex::on_event(
+        "reflex-runtime-cancelled-first",
+        EventFilter::Kind {
+            kind: "support-cancelled-first".to_owned(),
+        },
+        vec![Action::ReleaseAll],
+    );
+    let active_reflex = ScheduledReflex::on_event(
+        "reflex-runtime-active-second",
+        EventFilter::Kind {
+            kind: "support-active-second".to_owned(),
+        },
+        vec![Action::ReleaseAll],
+    );
+
+    runtime.register(&cancelled_reflex)?;
+    assert!(matches!(
+        runtime.cancel("reflex-runtime-cancelled-first")?,
+        ReflexCancelOutcome::Cancelled { .. }
+    ));
+    runtime.register(&active_reflex)?;
+
+    let active_statuses = runtime.list(false)?;
+    assert_eq!(active_statuses.len(), 1);
+    assert_eq!(active_statuses[0].id, "reflex-runtime-active-second");
+    assert_eq!(active_statuses[0].state, ReflexState::Active);
+
+    let visible_with_expired = runtime.list(true)?;
+    assert!(visible_with_expired.iter().any(|status| {
+        status.id == "reflex-runtime-cancelled-first" && status.state == ReflexState::Cancelled
+    }));
+    assert!(visible_with_expired.iter().any(|status| {
+        status.id == "reflex-runtime-active-second" && status.state == ReflexState::Active
+    }));
+    assert_eq!(
+        runtime
+            .statuses()
+            .into_iter()
+            .find(|status| status.id == "reflex-runtime-cancelled-first")
+            .map(|status| status.state),
+        None
+    );
+    Ok(())
+}
+
+#[test]
+fn disable_all_by_operator_marks_statuses_and_writes_audit() -> Result<(), Box<dyn Error>> {
+    let temp = tempdir()?;
+    let db = Arc::new(Db::open(&temp.path().join("db"), TEST_SCHEMA_VERSION)?);
+    let (action_handle, _action_rx) = ActionHandle::channel();
+    let mut runtime = ReflexRuntime::spawn(Arc::clone(&db), action_handle, EventBus::default())?;
+    let first = ScheduledReflex::on_event(
+        "reflex-runtime-disable-a",
+        EventFilter::Kind {
+            kind: "support-disable-a".to_owned(),
+        },
+        vec![Action::ReleaseAll],
+    );
+    let second = ScheduledReflex::on_event(
+        "reflex-runtime-disable-b",
+        EventFilter::Kind {
+            kind: "support-disable-b".to_owned(),
+        },
+        vec![Action::ReleaseAll],
+    );
+    runtime.register(&first)?;
+    runtime.register(&second)?;
+
+    let disabled = runtime.disable_all_by_operator()?;
+    assert_eq!(disabled.len(), 2);
+    assert!(
+        disabled
+            .iter()
+            .all(|status| status.state == ReflexState::Disabled)
+    );
+    assert!(
+        runtime
+            .list(false)?
+            .iter()
+            .all(|status| status.state == ReflexState::Disabled)
+    );
+    assert!(runtime.disable_all_by_operator()?.is_empty());
+
+    let audits = db
+        .scan_cf(cf::CF_REFLEX_AUDIT)?
+        .iter()
+        .map(|(_key, value)| decode_json::<StoredReflexAudit>(value))
+        .collect::<Result<Vec<_>, _>>()?;
+    let disabled_audits = audits
+        .iter()
+        .filter(|audit| audit.details["kind"].as_str() == Some(REFLEX_DISABLED_KIND))
+        .collect::<Vec<_>>();
+    assert_eq!(disabled_audits.len(), 2);
+    assert!(disabled_audits.iter().all(|audit| {
+        audit.status == ReflexState::Disabled
+            && audit.error_code.as_deref()
+                == Some(synapse_core::error_codes::REFLEX_DISABLED_BY_OPERATOR)
+    }));
+    Ok(())
+}
