@@ -49,6 +49,61 @@ target/release/synapse-mcp
 
 On Windows the binary name is `synapse-mcp.exe`.
 
+## Hardware HID Setup
+
+Hardware HID is optional unless you are exercising the M4 hardware backend. Use
+an RP2040 Raspberry Pi Pico board, preferably Pico H (`SC0917`) or Pico WH
+(`SC0919`), plus a data-capable micro-USB cable. Buying and source details live
+in [docs/hardware/procurement.md](docs/hardware/procurement.md); failure-mode
+readbacks live in
+[docs/hardware/troubleshooting.md](docs/hardware/troubleshooting.md).
+
+Install the firmware build prerequisites:
+
+```powershell
+rustup target add thumbv6m-none-eabi
+cargo install elf2uf2-rs
+```
+
+Build the UF2 from the standalone firmware project:
+
+```powershell
+cd C:\code\Synapse\firmware\pico-hid
+cargo build --release
+elf2uf2-rs target\thumbv6m-none-eabi\release\pico-hid pico-hid.uf2
+Get-Item .\pico-hid.uf2
+```
+
+Hold `BOOTSEL`, plug in the Pico, verify the `RPI-RP2` volume, then copy the
+UF2 to that drive:
+
+```powershell
+Get-CimInstance Win32_LogicalDisk |
+  Where-Object VolumeName -eq 'RPI-RP2' |
+  Select-Object DeviceID,VolumeName
+
+Copy-Item .\pico-hid.uf2 E:\
+```
+
+Replace `E:` with the actual `DeviceID` from the readback. After the copy,
+Windows should dismount `RPI-RP2` and the firmware should re-enumerate. Read
+the physical source of truth before using hardware actions:
+
+```powershell
+Get-PnpDevice -PresentOnly |
+  Where-Object { $_.FriendlyName -match 'Pico|RP2040|Synapse|USB Serial|HID' } |
+  Select-Object Status,Class,FriendlyName,InstanceId
+
+Get-CimInstance Win32_SerialPort |
+  Select-Object DeviceID,Name,PNPDeviceID
+```
+
+Start Synapse with explicit hardware enablement, for example
+`synapse-mcp --mode stdio --hardware-hid auto --allow-hardware-hid`.
+First-run supported-use acknowledgment is recorded in
+`%APPDATA%\synapse\agreement.json`; if it is missing, complete the local
+prompt/setup flow and then read that file directly.
+
 ## Run
 
 For MCP clients, run stdio mode:
