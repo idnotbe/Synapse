@@ -3,6 +3,7 @@
 pub mod discover;
 pub mod error;
 pub mod handshake;
+pub mod loopback;
 pub mod pipeline;
 pub mod protocol;
 pub mod reconnect;
@@ -14,6 +15,10 @@ pub use handshake::{
     FirmwareIdentity, HandshakeError, IDENTIFY_RESP_LEN, IDENTIFY_TIMEOUT_MS,
     expected_version_triplet, parse_and_validate_identify_response, parse_identify_response,
     perform_identify_handshake, validate_expected_major,
+};
+pub use loopback::{
+    LOOPBACK_FIRST_SEQUENCE, LOOPBACK_RESPONSE_TIMEOUT_MS, LoopbackPong, LoopbackProbeConfig,
+    perform_loopback_probe, perform_loopback_probe_with_config,
 };
 pub use pipeline::{
     ACK_RETRY_BACKOFF_MS, ACK_TIMEOUT_MS, FIRST_PIPELINE_SEQUENCE, HidPipeline, HostCommandRequest,
@@ -35,4 +40,6 @@ pub use reconnect::{
     HidReconnectGateway, HidReconnectTarget, RECONNECT_INTERVAL_MS, ReconnectConnector,
     ReconnectGateway, ReconnectLink, ReconnectSnapshot, ReconnectStateKind,
 };
-pub use transport::{DEFAULT_BAUD_RATE, DEFAULT_READ_TIMEOUT_MS, HidGateway};
+pub use transport::{
+    DEFAULT_BAUD_RATE, DEFAULT_READ_TIMEOUT_MS, HidGateway, perform_loopback_probe_on_port,
+};

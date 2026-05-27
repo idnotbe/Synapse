@@ -6,10 +6,42 @@ use tracing::debug;
 
 use crate::error::{HidError, HidResult};
 use crate::handshake::{FirmwareIdentity, IDENTIFY_TIMEOUT_MS, perform_identify_handshake};
+use crate::loopback::{LoopbackPong, perform_loopback_probe};
 use crate::pipeline::{HidPipeline, HostCommandRequest};
 
 pub const DEFAULT_BAUD_RATE: u32 = 1_000_000;
 pub const DEFAULT_READ_TIMEOUT_MS: u64 = 5;
+
+/// Opens a CDC ACM serial port in loopback-debug mode and reads `PONG`s.
+///
+/// This bypasses the normal `IDENTIFY_RESP` handshake because firmware built
+/// with `--features loopback` echoes every command as `DEVICE_COMMAND_PONG`.
+///
+/// # Errors
+///
+/// Returns [`HidError::PortNotFound`] when the requested port is absent,
+/// [`HidError::PortOpenFailed`] when the OS cannot open it, or the underlying
+/// loopback probe link/protocol error.
+pub fn perform_loopback_probe_on_port(
+    port_name: impl Into<String>,
+    commands: &[HostCommandRequest<'_>],
+) -> HidResult<Vec<LoopbackPong>> {
+    let port_name = port_name.into();
+    if !port_is_present(&port_name) {
+        return Err(HidError::PortNotFound { port_name });
+    }
+
+    let mut port = serialport::new(&port_name, DEFAULT_BAUD_RATE)
+        .timeout(Duration::from_millis(DEFAULT_READ_TIMEOUT_MS))
+        .data_bits(DataBits::Eight)
+        .flow_control(FlowControl::None)
+        .parity(Parity::None)
+        .stop_bits(StopBits::One)
+        .open()
+        .map_err(|error| port_open_failed(port_name, error))?;
+
+    perform_loopback_probe(port.as_mut(), commands)
+}
 
 pub struct HidGateway {
     port_name: String,
