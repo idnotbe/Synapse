@@ -20,6 +20,7 @@ impl SynapseService {
             kind = "act_click",
             "tool.invocation kind=act_click"
         );
+        self.ensure_supported_use_allows_action("act_click")?;
         let (handle, recording, _connection_closed_cancel) = self.m2_action_context()?;
         act_click_with_handle(handle, recording, params.0)
             .await
@@ -36,6 +37,7 @@ impl SynapseService {
             kind = "act_type",
             "tool.invocation kind=act_type"
         );
+        self.ensure_supported_use_allows_action("act_type")?;
         let (handle, recording, _connection_closed_cancel) = self.m2_action_context()?;
         self.ensure_act_type_foreground(recording.as_ref())?;
         act_type_with_handle(handle, recording, params.0)
@@ -54,6 +56,7 @@ impl SynapseService {
             "tool.invocation kind=act_press"
         );
         super::context::maybe_force_panic_during_act("act_press");
+        self.ensure_supported_use_allows_action("act_press")?;
         let (handle, recording, connection_closed_cancel) = self.m2_action_context()?;
         act_press_with_handle(handle, recording, connection_closed_cancel, params.0)
             .await
@@ -70,6 +73,7 @@ impl SynapseService {
             kind = "act_aim",
             "tool.invocation kind=act_aim"
         );
+        self.ensure_supported_use_allows_action("act_aim")?;
         let (handle, recording, _connection_closed_cancel) = self.m2_action_context()?;
         act_aim_with_handle(handle, recording, params.0)
             .await
@@ -86,6 +90,7 @@ impl SynapseService {
             kind = "act_drag",
             "tool.invocation kind=act_drag"
         );
+        self.ensure_supported_use_allows_action("act_drag")?;
         let (handle, recording, _connection_closed_cancel) = self.m2_action_context()?;
         act_drag_with_handle(handle, recording, params.0)
             .await
@@ -104,6 +109,7 @@ impl SynapseService {
             kind = "act_scroll",
             "tool.invocation kind=act_scroll"
         );
+        self.ensure_supported_use_allows_action("act_scroll")?;
         let (handle, recording, _connection_closed_cancel) = self.m2_action_context()?;
         act_scroll_with_handle(handle, recording, params.0)
             .await
@@ -120,6 +126,7 @@ impl SynapseService {
             kind = "act_pad",
             "tool.invocation kind=act_pad"
         );
+        self.ensure_supported_use_allows_action("act_pad")?;
         let (handle, recording, _connection_closed_cancel) = self.m2_action_context()?;
         act_pad_with_handle(handle, recording, params.0)
             .await

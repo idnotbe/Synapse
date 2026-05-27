@@ -25,6 +25,7 @@ triggered action.
 | World identity | `world.mt`, `map_meta.txt`, and fixture file hashes |
 | Runtime world state | `map.sqlite`, `auth.sqlite`, `players.sqlite`, `mod_storage.sqlite` |
 | Game session | `synapse_benchmark_mtg.log` lines for world path, gameid, player join |
+| Supported-use target policy | Foreground process command line plus `world.mt` plus latest Luanti log session |
 | Action/reflex/audit state | MCP `storage_inspect`, `CF_ACTION_LOG`, `CF_REFLEX_AUDIT`, and tool logs |
 | Visual/HUD state | `observe` pixel/a11y payload plus any HUD/perception readback added by #475 |
 
@@ -32,7 +33,7 @@ If a surface is not implemented yet, record the missing physical SoT and keep
 or open the implementation issue. Current known follow-ups:
 
 - #475 covers HUD/perception/action capability readback.
-- #477 covers supported-use target-policy refusal before action/reflex dispatch.
+- #476 covers registry/audit quality scoring from benchmark outcomes.
 
 ---
 
@@ -109,6 +110,9 @@ After trigger:
 Before trigger:
 
 - Read foreground PID/HWND and active/observed profile.
+- Read foreground process command line and confirm it contains the configured
+  `--world`, `--gameid`, and `--logfile` values.
+- Read `world.mt` for `world_name=synapse_benchmark_mtg` and `gameid=minetest`.
 - Read world log tail and any available action/audit CF counts.
 
 Trigger one harmless visible action through real MCP action tools. Preferred
@@ -127,6 +131,9 @@ request; connection shutdown can trigger `release_all` cleanup and produce an
 After trigger:
 
 - Read foreground still belongs to Luanti.
+- Read supported-use policy log data: allowed runs must include
+  `SAFETY_PROFILE_TARGET_ALLOWED` with the foreground PID, command line, world
+  path, world name, gameid, and logfile path.
 - Read action/audit/log SoT. If there is no physical action/audit SoT yet,
   record that as a current capability gap and link #475/#476.
 - Run `release_all` and read no held input state if the runtime exposes it.
@@ -149,7 +156,7 @@ for these edges.
 |---|---|---|
 | Failed launch policy | Call `act_launch` without matching `--allow-launch` | `SAFETY_LAUNCH_DENIED_BY_POLICY`, unchanged process table, no Luanti log/session |
 | Wrong window/profile match | Focus a non-Luanti or fake-title `luanti.exe` window, then `observe` | no `foreground.profile_id=luanti.minetest`; log `PROFILE_FOREGROUND_UNMATCHED` |
-| Supported-use denied | Try action/reflex against remote or unapproved target | fail closed before dispatch, no action/reflex side effect, safety log/audit row (#477 owns implementation) |
+| Supported-use denied | Try action/reflex against remote or unapproved target | `SAFETY_PROFILE_ACTION_DENIED` before dispatch, no action/reflex side effect, error data names the reason and physical SoT |
 | HUD/perception absent | Hide HUD with F1, open inventory/menu, or minimize/unfocus window | `observe`/HUD state records absence or wrong mode; no invented HUD result (#475 owns baseline) |
 
 ---

@@ -118,6 +118,20 @@ impl SynapseService {
             })
     }
 
+    pub(super) fn ensure_supported_use_allows_action(
+        &self,
+        tool: &'static str,
+    ) -> Result<(), ErrorData> {
+        let foreground = {
+            let state = self.m1_state()?;
+            let input = crate::m1::current_input(&state, 1)?;
+            drop(state);
+            input.foreground
+        };
+        let runtime = self.profile_runtime()?;
+        super::target_policy::ensure_supported_use_allows(&runtime, &foreground, tool)
+    }
+
     pub(super) fn m2_release_all_context(
         &self,
     ) -> Result<

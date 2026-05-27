@@ -19,6 +19,7 @@ impl SynapseService {
         );
         let required = required_combo_permissions(&params.0)?;
         self.require_m3_permissions("act_combo", &required)?;
+        self.ensure_supported_use_allows_action("act_combo")?;
         let runtime = self.reflex_runtime()?;
         execute_combo(runtime, params.0).await.map(Json)
     }

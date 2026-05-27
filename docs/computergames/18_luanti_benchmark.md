@@ -27,7 +27,11 @@ All Luanti benchmark state lives under `%LOCALAPPDATA%\synapse\benchmarks\luanti
 | Synapse profile | `crates/synapse-profiles/profiles/luanti.minetest.toml` |
 
 The bundled profile exposes these same paths through `[metadata]` so
-`profile_list` can read them at runtime.
+`profile_list` can read them at runtime. Runtime action/reflex supported-use
+enforcement also reads these paths: the foreground Luanti process command line
+must contain the configured `--world`, `--gameid`, and `--logfile` values, and
+the latest benchmark log session must prove the same local world/gameid before
+dispatch is allowed.
 
 ---
 
@@ -108,6 +112,8 @@ Expected runtime readback:
 - Window title: `Luanti 5.16.1 [Singleplayer] ...` or
   `Luanti 5.16.1 [Multiplayer] ...`
 - Profile match: `luanti.minetest`
+- Foreground process command line includes the canonical `--world`,
+  `--gameid minetest`, and `--logfile` values.
 - Log join address for the configured local run: loopback
   `::ffff:127.0.0.1`
 
