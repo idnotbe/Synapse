@@ -280,9 +280,10 @@ For developers extending Synapse:
 10. **Verify storage through live MCP readbacks.** Manual configured-host FSV
     uses `storage_inspect`, `storage_put_probe_rows`, `storage_gc_once`, and
     `storage_pressure_sample` against the running daemon, then reads row counts,
-    pressure transition codes, and daemon logs after each trigger. A constrained
-    DB target or low-volume setup may support investigation, but it is not a
-    substitute for the live MCP trigger plus separate source-of-truth readback.
+    bounded row samples, pressure transition codes, and daemon logs after each
+    trigger. A constrained DB target or low-volume setup may support
+    investigation, but it is not a substitute for the live MCP trigger plus
+    separate source-of-truth readback.
 
 ---
 
@@ -304,7 +305,7 @@ FSV:
 
 | MCP tool | Effect |
 |---|---|
-| `storage_inspect` | Reads schema version, pressure level, transition codes, per-CF row counts, and logical bytes |
+| `storage_inspect` | Reads schema version, pressure level, transition codes, per-CF row counts, logical bytes, and bounded newest-row samples |
 | `storage_put_probe_rows` | Writes bounded synthetic rows to `CF_EVENTS`, `CF_OBSERVATIONS`, `CF_SESSIONS`, or `CF_KV` and flushes |
 | `storage_gc_once` | Runs one row-cap GC pass for a diagnostic CF |
 | `storage_pressure_sample` | Applies one synthetic free-byte sample through the production disk-pressure responder |
@@ -312,6 +313,11 @@ FSV:
 These tools are operator diagnostics for direct state verification. They are not
 FSV automation, and their responses must be followed by separate SoT reads when
 used as acceptance evidence.
+
+Real action tools write minimal JSON rows to `CF_ACTION_LOG`. For manual action
+FSV, read `storage_inspect.cf_row_counts.CF_ACTION_LOG` before and after the
+action, then read `storage_inspect.cf_row_samples.CF_ACTION_LOG` and record the
+actual sampled JSON row. A count delta alone is not enough evidence.
 
 ---
 

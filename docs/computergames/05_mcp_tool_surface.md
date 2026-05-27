@@ -922,8 +922,8 @@ M3 subsystem status strings are `initializing`, `ok`, `degraded_latency`,
 ### 3.31 `storage_inspect`
 
 Operator-facing storage readback for manual FSV. This reads exact row counts,
-logical byte sizes, schema version, and in-process disk-pressure transition
-codes from the live RocksDB-backed runtime.
+logical byte sizes, bounded newest-row samples, schema version, and in-process
+disk-pressure transition codes from the live RocksDB-backed runtime.
 
 ```json
 {"name": "storage_inspect", "input_schema": {"type": "object", "additionalProperties": false}}
@@ -937,9 +937,24 @@ Returns:
   "pressure_level": {"name": "Normal", "value": 0},
   "pressure_transition_codes": [],
   "cf_row_counts": {"CF_EVENTS": 4},
-  "cf_sizes": {"CF_EVENTS": 248}
+  "cf_sizes": {"CF_EVENTS": 248},
+  "cf_row_samples": {
+    "CF_ACTION_LOG": [
+      {
+        "key_hex": "1870e8a94f2b000000000001",
+        "value_len_bytes": 512,
+        "value_utf8_prefix": "{\"tool\":\"act_press\",\"status\":\"ok\"",
+        "value_truncated": true
+      }
+    ]
+  }
 }
 ```
+
+`cf_row_samples` is a bounded newest-row readback for manual FSV. It is not an
+automation substitute; agents still define the Source of Truth, trigger the
+real runtime surface, then read and record the physical row data they expect to
+change.
 
 ### 3.32 `storage_put_probe_rows`
 

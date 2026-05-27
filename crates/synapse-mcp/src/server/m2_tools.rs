@@ -20,11 +20,15 @@ impl SynapseService {
             kind = "act_click",
             "tool.invocation kind=act_click"
         );
-        self.ensure_supported_use_allows_action("act_click")?;
+        if let Err(error) = self.ensure_supported_use_allows_action("act_click") {
+            self.audit_action_denied("act_click", &error);
+            return Err(error);
+        }
+        self.audit_action_started("act_click")?;
         let (handle, recording, _connection_closed_cancel) = self.m2_action_context()?;
-        act_click_with_handle(handle, recording, params.0)
-            .await
-            .map(Json)
+        let result = act_click_with_handle(handle, recording, params.0).await;
+        self.audit_action_result("act_click", &result)?;
+        result.map(Json)
     }
 
     #[tool(description = "Type text through the active keyboard backend")]
@@ -37,12 +41,20 @@ impl SynapseService {
             kind = "act_type",
             "tool.invocation kind=act_type"
         );
-        self.ensure_supported_use_allows_action("act_type")?;
+        if let Err(error) = self.ensure_supported_use_allows_action("act_type") {
+            self.audit_action_denied("act_type", &error);
+            return Err(error);
+        }
+        self.audit_action_started("act_type")?;
         let (handle, recording, _connection_closed_cancel) = self.m2_action_context()?;
-        self.ensure_act_type_foreground(recording.as_ref())?;
-        act_type_with_handle(handle, recording, params.0)
-            .await
-            .map(Json)
+        if let Err(error) = self.ensure_act_type_foreground(recording.as_ref()) {
+            let result: Result<ActTypeResponse, ErrorData> = Err(error);
+            self.audit_action_result("act_type", &result)?;
+            return result.map(Json);
+        }
+        let result = act_type_with_handle(handle, recording, params.0).await;
+        self.audit_action_result("act_type", &result)?;
+        result.map(Json)
     }
 
     #[tool(description = "Press a keyboard key or ordered chord")]
@@ -56,11 +68,16 @@ impl SynapseService {
             "tool.invocation kind=act_press"
         );
         super::context::maybe_force_panic_during_act("act_press");
-        self.ensure_supported_use_allows_action("act_press")?;
+        if let Err(error) = self.ensure_supported_use_allows_action("act_press") {
+            self.audit_action_denied("act_press", &error);
+            return Err(error);
+        }
+        self.audit_action_started("act_press")?;
         let (handle, recording, connection_closed_cancel) = self.m2_action_context()?;
-        act_press_with_handle(handle, recording, connection_closed_cancel, params.0)
-            .await
-            .map(Json)
+        let result =
+            act_press_with_handle(handle, recording, connection_closed_cancel, params.0).await;
+        self.audit_action_result("act_press", &result)?;
+        result.map(Json)
     }
 
     #[tool(description = "Move the pointer toward a screen, element, or track target")]
@@ -73,11 +90,15 @@ impl SynapseService {
             kind = "act_aim",
             "tool.invocation kind=act_aim"
         );
-        self.ensure_supported_use_allows_action("act_aim")?;
+        if let Err(error) = self.ensure_supported_use_allows_action("act_aim") {
+            self.audit_action_denied("act_aim", &error);
+            return Err(error);
+        }
+        self.audit_action_started("act_aim")?;
         let (handle, recording, _connection_closed_cancel) = self.m2_action_context()?;
-        act_aim_with_handle(handle, recording, params.0)
-            .await
-            .map(Json)
+        let result = act_aim_with_handle(handle, recording, params.0).await;
+        self.audit_action_result("act_aim", &result)?;
+        result.map(Json)
     }
 
     #[tool(description = "Drag between screen coordinates or element centers")]
@@ -90,11 +111,15 @@ impl SynapseService {
             kind = "act_drag",
             "tool.invocation kind=act_drag"
         );
-        self.ensure_supported_use_allows_action("act_drag")?;
+        if let Err(error) = self.ensure_supported_use_allows_action("act_drag") {
+            self.audit_action_denied("act_drag", &error);
+            return Err(error);
+        }
+        self.audit_action_started("act_drag")?;
         let (handle, recording, _connection_closed_cancel) = self.m2_action_context()?;
-        act_drag_with_handle(handle, recording, params.0)
-            .await
-            .map(Json)
+        let result = act_drag_with_handle(handle, recording, params.0).await;
+        self.audit_action_result("act_drag", &result)?;
+        result.map(Json)
     }
 
     #[tool(
@@ -109,11 +134,15 @@ impl SynapseService {
             kind = "act_scroll",
             "tool.invocation kind=act_scroll"
         );
-        self.ensure_supported_use_allows_action("act_scroll")?;
+        if let Err(error) = self.ensure_supported_use_allows_action("act_scroll") {
+            self.audit_action_denied("act_scroll", &error);
+            return Err(error);
+        }
+        self.audit_action_started("act_scroll")?;
         let (handle, recording, _connection_closed_cancel) = self.m2_action_context()?;
-        act_scroll_with_handle(handle, recording, params.0)
-            .await
-            .map(Json)
+        let result = act_scroll_with_handle(handle, recording, params.0).await;
+        self.audit_action_result("act_scroll", &result)?;
+        result.map(Json)
     }
 
     #[tool(description = "Apply a virtual gamepad report and optionally return it to neutral")]
@@ -126,11 +155,15 @@ impl SynapseService {
             kind = "act_pad",
             "tool.invocation kind=act_pad"
         );
-        self.ensure_supported_use_allows_action("act_pad")?;
+        if let Err(error) = self.ensure_supported_use_allows_action("act_pad") {
+            self.audit_action_denied("act_pad", &error);
+            return Err(error);
+        }
+        self.audit_action_started("act_pad")?;
         let (handle, recording, _connection_closed_cancel) = self.m2_action_context()?;
-        act_pad_with_handle(handle, recording, params.0)
-            .await
-            .map(Json)
+        let result = act_pad_with_handle(handle, recording, params.0).await;
+        self.audit_action_result("act_pad", &result)?;
+        result.map(Json)
     }
 
     #[tool(description = "Read, write, or clear the system clipboard")]
@@ -157,8 +190,8 @@ impl SynapseService {
             "tool.invocation kind=release_all"
         );
         let (handle, snapshot_handle) = self.m2_release_all_context()?;
-        release_all_with_handles(handle, snapshot_handle, params.0)
-            .await
-            .map(Json)
+        let result = release_all_with_handles(handle, snapshot_handle, params.0).await;
+        self.audit_action_result_best_effort("release_all", &result);
+        result.map(Json)
     }
 }

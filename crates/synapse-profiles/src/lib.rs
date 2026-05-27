@@ -10,4 +10,4 @@ pub use parser::{
     parse_profile_file, parse_profile_file_with_bounds,
 };
 pub use resolver::{ForegroundWindow, ProfileMatchResolution, resolve_active_profile};
-pub use watcher::{ProfileRuntime, ProfileStatus};
+pub use watcher::{ProfileEventExtensionStatus, ProfileRuntime, ProfileStatus};

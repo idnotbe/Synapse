@@ -1,6 +1,6 @@
 use std::{fs, time::UNIX_EPOCH};
 
-use synapse_core::{Backend, error_codes};
+use synapse_core::{Backend, HudExtractor, HudRegion, error_codes};
 use synapse_profiles::{
     ProfileError, ScreenBounds, bundled_profiles_dir, parse_profile_bytes, parse_profile_file,
 };
@@ -212,6 +212,63 @@ benchmark_id = "luanti.minetest"
     assert_eq!(
         loaded.profile.metadata["supported_use.local_world_only"],
         "true"
+    );
+}
+
+#[test]
+fn parser_accepts_nested_hud_fields_and_event_extensions() {
+    let toml = r#"
+id = "luanti_nested"
+label = "Luanti Nested"
+schema_version = 1
+use_scope = "operator_owned_test"
+mode = "pixel_only"
+mouse_curve_default = "natural"
+keyboard_dynamics_default = "natural"
+
+[[matches]]
+exe = "luanti.exe"
+
+[[hud]]
+name = "luanti.crosshair_contrast"
+extractor = { kind = "color_ratio", sample_points = [[0, 0], [24, 24]], mapping = "luma_stddev_0_1" }
+parser = { kind = "number" }
+region = { kind = "fraction_of_window", x = 0.48, y = 0.48, w = 0.04, h = 0.04 }
+
+[[event_extensions]]
+name = "luanti_hud_observed"
+from_filter = { op = "and", args = [
+    { op = "source", source = "perception_hud" },
+    { op = "kind", kind = "perception.hud_observed" }
+] }
+emits_kind = "benchmark.luanti.hud_observed"
+"#;
+
+    let loaded = parse_profile_bytes(
+        "luanti_nested.toml",
+        toml.as_bytes(),
+        UNIX_EPOCH,
+        ScreenBounds {
+            width: 1920,
+            height: 1080,
+        },
+    )
+    .unwrap_or_else(|error| panic!("nested HUD/event profile should parse: {error}"));
+
+    assert_eq!(loaded.profile.hud.len(), 1);
+    assert_eq!(loaded.profile.hud[0].name, "luanti.crosshair_contrast");
+    assert!(matches!(
+        loaded.profile.hud[0].region,
+        HudRegion::FractionOfWindow { .. }
+    ));
+    assert!(matches!(
+        loaded.profile.hud[0].extractor,
+        HudExtractor::ColorRatio { .. }
+    ));
+    assert_eq!(loaded.profile.event_extensions.len(), 1);
+    assert_eq!(
+        loaded.profile.event_extensions[0].emits_kind,
+        "benchmark.luanti.hud_observed"
     );
 }
 

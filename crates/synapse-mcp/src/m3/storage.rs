@@ -20,6 +20,8 @@ const MAX_PROBE_ROWS: u32 = 10_000;
 const MAX_PROBE_VALUE_BYTES: u32 = 65_536;
 const MAX_KEY_PREFIX_BYTES: usize = 128;
 const MAX_ROW_CAP: u64 = 1_000_000;
+const MAX_INSPECT_SAMPLE_ROWS_PER_CF: usize = 3;
+const MAX_INSPECT_SAMPLE_VALUE_CHARS: usize = 512;
 const PROBE_WRITABLE_CFS: [&str; 4] = [
     cf::CF_EVENTS,
     cf::CF_OBSERVATIONS,
@@ -66,6 +68,16 @@ pub struct StorageInspectResponse {
     pub pressure_transition_codes: Vec<String>,
     pub cf_sizes: BTreeMap<String, u64>,
     pub cf_row_counts: BTreeMap<String, u64>,
+    pub cf_row_samples: BTreeMap<String, Vec<StorageRowSample>>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct StorageRowSample {
+    pub key_hex: String,
+    pub value_len_bytes: u64,
+    pub value_utf8_prefix: String,
+    pub value_truncated: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, JsonSchema)]
@@ -284,7 +296,49 @@ fn inspect_locked(runtime: &ReflexRuntime) -> Result<StorageInspectResponse, Err
         cf_row_counts: runtime
             .storage_cf_row_counts()
             .map_err(|error| mcp_error(error.code(), error.to_string()))?,
+        cf_row_samples: cf_row_samples(runtime)?,
     })
+}
+
+fn cf_row_samples(
+    runtime: &ReflexRuntime,
+) -> Result<BTreeMap<String, Vec<StorageRowSample>>, ErrorData> {
+    let mut samples = BTreeMap::new();
+    for cf_name in cf::ALL_COLUMN_FAMILIES {
+        let rows = runtime
+            .storage_cf_tail_rows(cf_name, MAX_INSPECT_SAMPLE_ROWS_PER_CF)
+            .map_err(|error| mcp_error(error.code(), error.to_string()))?;
+        samples.insert(
+            cf_name.to_owned(),
+            rows.into_iter()
+                .map(|(key, value)| StorageRowSample {
+                    key_hex: hex_encode(&key),
+                    value_len_bytes: value.len() as u64,
+                    value_utf8_prefix: utf8_prefix(&value, MAX_INSPECT_SAMPLE_VALUE_CHARS),
+                    value_truncated: String::from_utf8_lossy(&value).chars().count()
+                        > MAX_INSPECT_SAMPLE_VALUE_CHARS,
+                })
+                .collect(),
+        );
+    }
+    Ok(samples)
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut output = String::with_capacity(bytes.len().saturating_mul(2));
+    for byte in bytes {
+        output.push(char::from(HEX[usize::from(byte >> 4)]));
+        output.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    output
+}
+
+fn utf8_prefix(bytes: &[u8], max_chars: usize) -> String {
+    String::from_utf8_lossy(bytes)
+        .chars()
+        .take(max_chars)
+        .collect()
 }
 
 fn validate_probe_params(params: &StoragePutProbeRowsParams) -> Result<(), ErrorData> {

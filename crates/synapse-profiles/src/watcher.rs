@@ -10,7 +10,9 @@ use std::{
 };
 
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
-use synapse_core::{Profile, ProfileId, ProfileMatch, ProfileUseScope};
+use synapse_core::{
+    PerceptionMode, Profile, ProfileBackends, ProfileId, ProfileMatch, ProfileUseScope,
+};
 use tracing::{instrument, warn};
 
 use crate::{
@@ -26,11 +28,23 @@ pub struct ProfileStatus {
     pub id: ProfileId,
     pub label: String,
     pub use_scope: ProfileUseScope,
+    pub mode: PerceptionMode,
+    pub detection_classes: Vec<String>,
+    pub hud_fields: Vec<String>,
+    pub keymap_actions: Vec<String>,
+    pub backends: ProfileBackends,
+    pub event_extensions: Vec<ProfileEventExtensionStatus>,
     pub active: bool,
     pub schema_version: u32,
     pub matches: Vec<ProfileMatch>,
     pub metadata: BTreeMap<String, String>,
     pub source_path: PathBuf,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProfileEventExtensionStatus {
+    pub name: String,
+    pub emits_kind: String,
 }
 
 #[derive(Debug, Default)]
@@ -225,6 +239,25 @@ fn profile_statuses(state: &ProfileState, include_inactive: bool) -> Vec<Profile
                 id: loaded.profile.id.clone(),
                 label: loaded.profile.label.clone(),
                 use_scope: loaded.profile.use_scope,
+                mode: loaded.profile.mode,
+                detection_classes: loaded.profile.detection.classes_of_interest.clone(),
+                hud_fields: loaded
+                    .profile
+                    .hud
+                    .iter()
+                    .map(|field| field.name.clone())
+                    .collect(),
+                keymap_actions: loaded.profile.keymap.keys().cloned().collect(),
+                backends: loaded.profile.backends,
+                event_extensions: loaded
+                    .profile
+                    .event_extensions
+                    .iter()
+                    .map(|extension| ProfileEventExtensionStatus {
+                        name: extension.name.clone(),
+                        emits_kind: extension.emits_kind.clone(),
+                    })
+                    .collect(),
                 active,
                 schema_version: loaded.schema_version,
                 matches: loaded.profile.matches.clone(),

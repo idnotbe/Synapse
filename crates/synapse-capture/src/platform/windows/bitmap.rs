@@ -18,7 +18,7 @@ use windows::{
     core::Interface as _,
 };
 
-use crate::{CaptureError, CapturedFrame, CapturedSoftwareBitmap, DxgiFormat};
+use crate::{CaptureError, CapturedBgraBitmap, CapturedFrame, CapturedSoftwareBitmap, DxgiFormat};
 
 use super::common::capture_unsupported;
 
@@ -43,6 +43,17 @@ pub fn screen_region_to_software_bitmap(
     let bytes = copy_screen_region_bgra(region)?;
     let bitmap = software_bitmap_from_bgra(&bytes, region.w, region.h)?;
     Ok(CapturedSoftwareBitmap { region, bitmap })
+}
+
+pub fn screen_region_to_bgra_bitmap(region: Rect) -> Result<CapturedBgraBitmap, CaptureError> {
+    validate_bitmap_region(region)?;
+    let bytes = copy_screen_region_bgra(region)?;
+    Ok(CapturedBgraBitmap {
+        region,
+        width: u32::try_from(region.w).unwrap_or_default(),
+        height: u32::try_from(region.h).unwrap_or_default(),
+        bytes,
+    })
 }
 
 fn software_bitmap_from_bgra(

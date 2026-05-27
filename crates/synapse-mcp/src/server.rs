@@ -72,6 +72,7 @@ use crate::{
     },
 };
 
+mod action_audit;
 mod context;
 mod handler;
 mod health;

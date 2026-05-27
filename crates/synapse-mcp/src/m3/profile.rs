@@ -6,7 +6,9 @@ use super::{
 };
 use rmcp::{ErrorData, schemars::JsonSchema};
 use serde::{Deserialize, Serialize};
-use synapse_core::{ProfileId, ProfileUseScope, error_codes};
+use synapse_core::{
+    Backend, PerceptionMode, ProfileBackends, ProfileId, ProfileUseScope, error_codes,
+};
 use synapse_profiles::{ProfileError, ProfileRuntime};
 
 use crate::m1::mcp_error;
@@ -42,10 +44,32 @@ pub struct ProfileStatus {
     pub id: ProfileId,
     pub label: String,
     pub use_scope: ProfileUseScope,
+    pub mode: PerceptionMode,
+    pub detection_classes: Vec<String>,
+    pub hud_fields: Vec<String>,
+    pub keymap_actions: Vec<String>,
+    pub backends: ProfileBackendsStatus,
+    pub event_extensions: Vec<ProfileEventExtensionStatus>,
     pub matches: Vec<ProfileMatchStatus>,
     pub metadata: BTreeMap<String, String>,
     pub active: bool,
     pub schema_version: u32,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ProfileBackendsStatus {
+    pub default: Backend,
+    pub keyboard_default: Backend,
+    pub mouse_default: Backend,
+    pub pad_default: Backend,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ProfileEventExtensionStatus {
+    pub name: String,
+    pub emits_kind: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, JsonSchema)]
@@ -164,6 +188,16 @@ impl From<synapse_profiles::ProfileStatus> for ProfileStatus {
             id: value.id,
             label: value.label,
             use_scope: value.use_scope,
+            mode: value.mode,
+            detection_classes: value.detection_classes,
+            hud_fields: value.hud_fields,
+            keymap_actions: value.keymap_actions,
+            backends: ProfileBackendsStatus::from(value.backends),
+            event_extensions: value
+                .event_extensions
+                .into_iter()
+                .map(ProfileEventExtensionStatus::from)
+                .collect(),
             matches: value
                 .matches
                 .into_iter()
@@ -172,6 +206,26 @@ impl From<synapse_profiles::ProfileStatus> for ProfileStatus {
             metadata: value.metadata,
             active: value.active,
             schema_version: value.schema_version,
+        }
+    }
+}
+
+impl From<ProfileBackends> for ProfileBackendsStatus {
+    fn from(value: ProfileBackends) -> Self {
+        Self {
+            default: value.default,
+            keyboard_default: value.keyboard_default,
+            mouse_default: value.mouse_default,
+            pad_default: value.pad_default,
+        }
+    }
+}
+
+impl From<synapse_profiles::ProfileEventExtensionStatus> for ProfileEventExtensionStatus {
+    fn from(value: synapse_profiles::ProfileEventExtensionStatus) -> Self {
+        Self {
+            name: value.name,
+            emits_kind: value.emits_kind,
         }
     }
 }

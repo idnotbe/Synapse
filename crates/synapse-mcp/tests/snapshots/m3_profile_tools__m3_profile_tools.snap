@@ -64,6 +64,64 @@ expression: profile_tool_shapes
     "name": "profile_list",
     "outputSchema": {
       "$defs": {
+        "Backend": {
+          "enum": [
+            "software",
+            "vigem",
+            "hardware",
+            "auto"
+          ],
+          "type": "string"
+        },
+        "PerceptionMode": {
+          "enum": [
+            "a11y_only",
+            "pixel_only",
+            "hybrid",
+            "auto"
+          ],
+          "type": "string"
+        },
+        "ProfileBackendsStatus": {
+          "additionalProperties": false,
+          "properties": {
+            "default": {
+              "$ref": "#/$defs/Backend"
+            },
+            "keyboard_default": {
+              "$ref": "#/$defs/Backend"
+            },
+            "mouse_default": {
+              "$ref": "#/$defs/Backend"
+            },
+            "pad_default": {
+              "$ref": "#/$defs/Backend"
+            }
+          },
+          "required": [
+            "default",
+            "keyboard_default",
+            "mouse_default",
+            "pad_default"
+          ],
+          "type": "object"
+        },
+        "ProfileEventExtensionStatus": {
+          "additionalProperties": false,
+          "properties": {
+            "emits_kind": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "name",
+            "emits_kind"
+          ],
+          "type": "object"
+        },
         "ProfileMatchStatus": {
           "additionalProperties": false,
           "properties": {
@@ -88,8 +146,35 @@ expression: profile_tool_shapes
             "active": {
               "type": "boolean"
             },
+            "backends": {
+              "$ref": "#/$defs/ProfileBackendsStatus"
+            },
+            "detection_classes": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "event_extensions": {
+              "items": {
+                "$ref": "#/$defs/ProfileEventExtensionStatus"
+              },
+              "type": "array"
+            },
+            "hud_fields": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
             "id": {
               "type": "string"
+            },
+            "keymap_actions": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
             },
             "label": {
               "type": "string"
@@ -106,6 +191,9 @@ expression: profile_tool_shapes
               },
               "type": "object"
             },
+            "mode": {
+              "$ref": "#/$defs/PerceptionMode"
+            },
             "schema_version": {
               "format": "uint32",
               "minimum": 0,
@@ -119,6 +207,12 @@ expression: profile_tool_shapes
             "id",
             "label",
             "use_scope",
+            "mode",
+            "detection_classes",
+            "hud_fields",
+            "keymap_actions",
+            "backends",
+            "event_extensions",
             "matches",
             "metadata",
             "active",

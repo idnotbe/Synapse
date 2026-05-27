@@ -49,6 +49,9 @@ impl SynapseService {
             target = %params.0.target,
             "tool.invocation kind=act_launch"
         );
-        launch(&self.m4_config, params.0).await.map(Json)
+        self.audit_action_started("act_launch")?;
+        let result = launch(&self.m4_config, params.0).await;
+        self.audit_action_result("act_launch", &result)?;
+        result.map(Json)
     }
 }

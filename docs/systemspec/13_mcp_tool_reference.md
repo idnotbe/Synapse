@@ -343,7 +343,7 @@ Default error response shape (all tools): `ErrorData { code: rmcp::ErrorCode(-32
 |---|---|---|---|---|
 | `include_inactive` | `bool` | no | `true` | When false, only the active profile is returned |
 
-**Returns:** `ProfileListResponse { profiles: Vec<ProfileStatus>, active_profile_id: Option<String> }`. Each `ProfileStatus` carries `id`, `label`, `use_scope`, `matches: Vec<ProfileMatchStatus>`, `metadata: BTreeMap<String, String>`, `active: bool`, `schema_version: u32`.
+**Returns:** `ProfileListResponse { profiles: Vec<ProfileStatus>, active_profile_id: Option<String> }`. Each `ProfileStatus` carries `id`, `label`, `use_scope`, `mode`, `detection_classes`, `hud_fields`, `keymap_actions`, `backends`, `event_extensions`, `matches: Vec<ProfileMatchStatus>`, `metadata: BTreeMap<String, String>`, `active: bool`, `schema_version: u32`.
 
 ## 23. `profile_activate`
 
@@ -408,15 +408,15 @@ Recording cadence: observations sampled every `OBSERVATION_SAMPLE_INTERVAL = 250
 
 ## 27. `storage_inspect`
 
-**Description:** "Inspect RocksDB column families: row counts and byte sizes"
+**Description:** "Inspect RocksDB column families: row counts, byte sizes, and bounded newest-row samples"
 **Permissions:** none gated at the M3 layer (operator-only tool surface; not in the agent-facing 30-tool PRD list)
-**Side effects:** none; reads `Db::cf_sizes` and per-CF scan counts
+**Side effects:** none; reads `Db::cf_sizes`, per-CF scan counts, and bounded newest-row samples
 
 | Parameter | Type | Required | Default | Description |
 |---|---|---|---|---|
 | `cf` | `Option<String>` | no | — | When set, restricts the report to one CF (must match one of `ALL_COLUMN_FAMILIES`); otherwise all 11 CFs |
 
-**Returns:** `StorageInspectResponse { db_path: String, schema_version: u32, pressure_level: String, cfs: Vec<StorageCfInspectRow { name, row_count, bytes }> }`.
+**Returns:** `StorageInspectResponse { schema_version: u32, pressure_level, pressure_transition_codes, cf_sizes, cf_row_counts, cf_row_samples }`. Each `cf_row_samples` value is a bounded newest-row list with `key_hex`, `value_len_bytes`, `value_utf8_prefix`, and `value_truncated`.
 **Errors:** `STORAGE_OPEN_FAILED`, `TOOL_PARAMS_INVALID` (unknown CF name).
 
 ## 28. `storage_put_probe_rows`

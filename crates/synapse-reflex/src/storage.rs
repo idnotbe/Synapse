@@ -49,6 +49,22 @@ impl ReflexRuntime {
         self.db.cf_row_counts()
     }
 
+    /// Returns the newest rows in one storage column family.
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage error when the column family cannot be scanned.
+    #[tracing::instrument(skip_all, fields(component = "reflex_runtime", cf_name, limit))]
+    pub fn storage_cf_tail_rows(
+        &self,
+        cf_name: &str,
+        limit: usize,
+    ) -> StorageResult<Vec<(Vec<u8>, Vec<u8>)>> {
+        let mut rows = self.db.scan_cf(cf_name)?;
+        let keep_from = rows.len().saturating_sub(limit);
+        Ok(rows.split_off(keep_from))
+    }
+
     /// Writes a bounded diagnostic batch to storage and flushes it immediately.
     ///
     /// # Errors
@@ -61,6 +77,17 @@ impl ReflexRuntime {
         rows: Vec<(Vec<u8>, Vec<u8>)>,
     ) -> StorageResult<()> {
         self.db.put_batch(cf_name, rows)?;
+        self.db.flush()
+    }
+
+    /// Writes action audit rows and flushes them immediately.
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage error when the write or flush fails.
+    #[tracing::instrument(skip_all, fields(component = "reflex_runtime", row_count = rows.len()))]
+    pub fn storage_put_action_log_rows(&self, rows: Vec<(Vec<u8>, Vec<u8>)>) -> StorageResult<()> {
+        self.db.put_batch(cf::CF_ACTION_LOG, rows)?;
         self.db.flush()
     }
 

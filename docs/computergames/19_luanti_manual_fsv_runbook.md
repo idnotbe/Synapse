@@ -26,13 +26,12 @@ triggered action.
 | Runtime world state | `map.sqlite`, `auth.sqlite`, `players.sqlite`, `mod_storage.sqlite` |
 | Game session | `synapse_benchmark_mtg.log` lines for world path, gameid, player join |
 | Supported-use target policy | Foreground process command line plus `world.mt` plus latest Luanti log session |
-| Action/reflex/audit state | MCP `storage_inspect`, `CF_ACTION_LOG`, `CF_REFLEX_AUDIT`, and tool logs |
-| Visual/HUD state | `observe` pixel/a11y payload plus any HUD/perception readback added by #475 |
+| Action/reflex/audit state | MCP `storage_inspect`, `CF_ACTION_LOG`, `CF_REFLEX_AUDIT`, `cf_row_samples`, and tool logs |
+| Visual/HUD state | `observe` pixel/a11y payload, `luanti.crosshair_contrast`, and `luanti.hotbar_contrast` |
 
 If a surface is not implemented yet, record the missing physical SoT and keep
 or open the implementation issue. Current known follow-ups:
 
-- #475 covers HUD/perception/action capability readback.
 - #476 covers registry/audit quality scoring from benchmark outcomes.
 
 ---
@@ -46,6 +45,10 @@ or open the implementation issue. Current known follow-ups:
    `benchmark_id=luanti.minetest`, `benchmark_world_name=synapse_benchmark_mtg`,
    `benchmark_world_seed=3222739075906153741`, and
    `supported_use.remote_server_allowed=false`.
+   Also confirm `hud_fields` contains `luanti.crosshair_contrast` and
+   `luanti.hotbar_contrast`, `event_extensions` contains the Luanti benchmark
+   outcome names, and `metadata.capability.audit.action_log` names
+   `CF_ACTION_LOG`.
 4. Read the physical install:
    - engine zip SHA256
    - `luanti.exe` SHA256
@@ -101,9 +104,12 @@ Trigger MCP `observe` with the Luanti window foreground.
 After trigger:
 
 - Read `foreground.profile_id=luanti.minetest`.
-- Read diagnostics for `a11y_status` and pixel/capture/perception status.
-- If HUD/perception fields are absent, record that state and continue under
-  #475 rather than inventing a pass.
+- Read diagnostics for `a11y_status`, pixel/capture/perception status, and
+  capture latency.
+- Read `hud.by_name.luanti.crosshair_contrast` and
+  `hud.by_name.luanti.hotbar_contrast`; record the numeric contrast values and
+  region strings.
+- Read `entities` for `luanti_crosshair_region` and `luanti_hotbar_region`.
 
 ### 3.3 Action
 
@@ -135,7 +141,11 @@ After trigger:
   `SAFETY_PROFILE_TARGET_ALLOWED` with the foreground PID, command line, world
   path, world name, gameid, and logfile path.
 - Read action/audit/log SoT. If there is no physical action/audit SoT yet,
-  record that as a current capability gap and link #475/#476.
+  record that as a current capability gap and link #476.
+- Read `storage_inspect.cf_row_counts.CF_ACTION_LOG` before and after the
+  action. Then read `storage_inspect.cf_row_samples.CF_ACTION_LOG` and record
+  the sampled JSON row showing the actual action audit data that resides in
+  RocksDB.
 - Run `release_all` and read no held input state if the runtime exposes it.
 
 ### 3.4 Reflex
@@ -157,7 +167,10 @@ for these edges.
 | Failed launch policy | Call `act_launch` without matching `--allow-launch` | `SAFETY_LAUNCH_DENIED_BY_POLICY`, unchanged process table, no Luanti log/session |
 | Wrong window/profile match | Focus a non-Luanti or fake-title `luanti.exe` window, then `observe` | no `foreground.profile_id=luanti.minetest`; log `PROFILE_FOREGROUND_UNMATCHED` |
 | Supported-use denied | Try action/reflex against remote or unapproved target | `SAFETY_PROFILE_ACTION_DENIED` before dispatch, no action/reflex side effect, error data names the reason and physical SoT |
-| HUD/perception absent | Hide HUD with F1, open inventory/menu, or minimize/unfocus window | `observe`/HUD state records absence or wrong mode; no invented HUD result (#475 owns baseline) |
+| HUD hidden | Press F1, then `observe` | crosshair/hotbar contrast values change or degrade; record before/after HUD readings and restore F1 |
+| Inventory/menu open | Press `i` or `esc`, then `observe` | foreground remains Luanti; HUD/entity readings reflect menu/world-view change; restore with `esc` |
+| Unfocused/minimized | Focus another window or minimize Luanti, then `observe` | foreground/profile changes or capture reports degraded/disabled; no invented Luanti HUD pass |
+| Backend unavailable or denied | Request unavailable backend or denied supported-use target | action response/log names the denial/unavailable reason; `CF_ACTION_LOG` sample records the attempted/failed action when dispatch path reached audit |
 
 ---
 
@@ -195,7 +208,7 @@ Edges:
    before:
    trigger:
    after:
-4. HUD/perception absent
+4. HUD hidden / menu / unfocused / backend denied
    before:
    trigger:
    after:

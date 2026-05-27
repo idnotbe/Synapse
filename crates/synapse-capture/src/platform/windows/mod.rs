@@ -5,7 +5,10 @@ mod coords;
 mod dpi;
 mod target;
 
-pub use bitmap::{captured_frame_region_to_software_bitmap, screen_region_to_software_bitmap};
+pub use bitmap::{
+    captured_frame_region_to_software_bitmap, screen_region_to_bgra_bitmap,
+    screen_region_to_software_bitmap,
+};
 pub use capture::{run_dxgi_capture, run_graphics_capture};
 pub use coords::{
     screen_to_window as screen_to_window_impl, window_to_screen as window_to_screen_impl,

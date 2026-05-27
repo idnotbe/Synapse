@@ -233,7 +233,7 @@ All 30 live tools live in `crates/synapse-mcp/src/server.rs` (declared via `#[to
 | `replay_record` | Stream observations and/or events to a JSONL file under `%LOCALAPPDATA%/synapse/replays` | `server.rs::replay_record`, `m3/replay.rs` |
 | `audio_tail` | Return the most-recent loopback audio tail as PCM s16le bytes (max 5 s; `synapse_audio::MAX_RING_SECONDS`) | `server.rs::audio_tail`, `m3/audio.rs` |
 | `audio_transcribe` | Transcribe the loopback tail via Whisper-tiny (language pinned to `"en"`) | `server.rs::audio_transcribe`, `m3/audio.rs` |
-| `storage_inspect` | Return per-CF row counts and byte sizes from RocksDB for the operator-visible CFs | `server.rs::storage_inspect`, `m3/storage.rs` |
+| `storage_inspect` | Return per-CF row counts, byte sizes, and bounded newest-row samples from RocksDB for the operator-visible CFs | `server.rs::storage_inspect`, `m3/storage.rs` |
 | `storage_put_probe_rows` | Insert bounded probe rows into a chosen CF so manual FSV can trigger storage writes, then separately read the RocksDB/log SoT | `server.rs::storage_put_probe_rows`, `m3/storage.rs` |
 | `storage_gc_once` | Run one synchronous GC pass and return the per-CF before/after sizes | `server.rs::storage_gc_once`, `m3/storage.rs` |
 | `storage_pressure_sample` | Apply one synthetic free-byte sample to drive the disk-pressure responder | `server.rs::storage_pressure_sample`, `m3/storage.rs` |
@@ -3280,6 +3280,12 @@ pub struct ProfileStatus {
     pub id: ProfileId,
     pub label: String,
     pub use_scope: ProfileUseScope,
+    pub mode: PerceptionMode,
+    pub detection_classes: Vec<String>,
+    pub hud_fields: Vec<String>,
+    pub keymap_actions: Vec<String>,
+    pub backends: ProfileBackends,
+    pub event_extensions: Vec<ProfileEventExtensionStatus>,
     pub active: bool,
     pub schema_version: u32,
     pub matches: Vec<ProfileMatch>,
@@ -3607,7 +3613,7 @@ PRD `docs/computergames/05_mcp_tool_surface.md` defines a 30-tool surface cap fo
 | 24 | `replay_record` | M3 | live | JSONL only |
 | 25 | `audio_tail` | M3 | live | |
 | 26 | `audio_transcribe` | M3 | live (en only) | |
-| 27 | `storage_inspect` | M3 (operator) | live | per-CF row+byte size readback |
+| 27 | `storage_inspect` | M3 (operator) | live | per-CF row+byte size and bounded row-sample readback |
 | 28 | `storage_put_probe_rows` | M3 (operator) | live | manual storage write/readback support tool |
 | 29 | `storage_gc_once` | M3 (operator) | live | synchronous GC pass with before/after sizes |
 | 30 | `storage_pressure_sample` | M3 (operator) | live | synthetic disk-pressure trigger |
@@ -4118,7 +4124,7 @@ Default error response shape (all tools): `ErrorData { code: rmcp::ErrorCode(-32
 |---|---|---|---|---|
 | `include_inactive` | `bool` | no | `true` | When false, only the active profile is returned |
 
-**Returns:** `ProfileListResponse { profiles: Vec<ProfileStatus>, active_profile_id: Option<String> }`. Each `ProfileStatus` carries `id`, `label`, `use_scope`, `matches: Vec<ProfileMatchStatus>`, `metadata: BTreeMap<String, String>`, `active: bool`, `schema_version: u32`.
+**Returns:** `ProfileListResponse { profiles: Vec<ProfileStatus>, active_profile_id: Option<String> }`. Each `ProfileStatus` carries `id`, `label`, `use_scope`, `mode`, `detection_classes`, `hud_fields`, `keymap_actions`, `backends`, `event_extensions`, `matches: Vec<ProfileMatchStatus>`, `metadata: BTreeMap<String, String>`, `active: bool`, `schema_version: u32`.
 
 ## 23. `profile_activate`
 
@@ -4183,15 +4189,15 @@ Recording cadence: observations sampled every `OBSERVATION_SAMPLE_INTERVAL = 250
 
 ## 27. `storage_inspect`
 
-**Description:** "Inspect RocksDB column families: row counts and byte sizes"
+**Description:** "Inspect RocksDB column families: row counts, byte sizes, and bounded newest-row samples"
 **Permissions:** none gated at the M3 layer (operator-only tool surface; not in the agent-facing 30-tool PRD list)
-**Side effects:** none; reads `Db::cf_sizes` and per-CF scan counts
+**Side effects:** none; reads `Db::cf_sizes`, per-CF scan counts, and bounded newest-row samples
 
 | Parameter | Type | Required | Default | Description |
 |---|---|---|---|---|
 | `cf` | `Option<String>` | no | — | When set, restricts the report to one CF (must match one of `ALL_COLUMN_FAMILIES`); otherwise all 11 CFs |
 
-**Returns:** `StorageInspectResponse { db_path: String, schema_version: u32, pressure_level: String, cfs: Vec<StorageCfInspectRow { name, row_count, bytes }> }`.
+**Returns:** `StorageInspectResponse { schema_version: u32, pressure_level, pressure_transition_codes, cf_sizes, cf_row_counts, cf_row_samples }`. Each `cf_row_samples` value is a bounded newest-row list with `key_hex`, `value_len_bytes`, `value_utf8_prefix`, and `value_truncated`.
 **Errors:** `STORAGE_OPEN_FAILED`, `TOOL_PARAMS_INVALID` (unknown CF name).
 
 ## 28. `storage_put_probe_rows`

@@ -35,7 +35,37 @@ dispatch is allowed.
 
 ---
 
-## 2. Provenance
+## 2. Capability Matrix
+
+The bundled `luanti.minetest` profile is the benchmark capability matrix.
+`profile_list` must read the loaded matrix back at runtime instead of relying
+on the TOML file alone.
+
+| Capability | Runtime readback |
+|---|---|
+| Foreground/profile | `observe.foreground.profile_id = luanti.minetest` |
+| Pixel capture | `observe.diagnostics.capture_status = healthy` after the foreground-window probe |
+| HUD baseline | `observe.hud.by_name.luanti.crosshair_contrast` and `luanti.hotbar_contrast` |
+| Entity/target baseline | `observe.entities` contains `luanti_crosshair_region` and `luanti_hotbar_region` markers |
+| Software keyboard | `act_press` through `keyboard_default=auto/software` |
+| Software mouse | `act_click`, `act_aim`, `act_drag`, and `act_scroll` through `mouse_default=auto/software` |
+| Hardware HID parity | profile metadata marks keyboard/mouse hardware HID as the parity target when configured |
+| ViGEm pad | profile metadata marks pad support as available when the ViGEm backend is configured |
+| Action audit | `storage_inspect.cf_row_counts.CF_ACTION_LOG` plus `cf_row_samples.CF_ACTION_LOG` |
+
+The HUD baseline is deliberately a minimal visible-state extractor, not the
+full HUD template matcher. It samples raw foreground-window pixels and reports
+a 0..1 luma-contrast score over fixed crosshair and hotbar regions. Full
+template matching remains tracked separately by #410.
+
+Profile event extensions declare the benchmark outcomes that the profile/audit
+loop should learn from as the event-extension evaluator matures: launched,
+joined world, observed HUD, moved, dug/placed, inventory opened, and release-all
+applied.
+
+---
+
+## 3. Provenance
 
 | Artifact | Expected value |
 |---|---|
@@ -54,7 +84,7 @@ readback; other working directories can make duplicate search paths visible.
 
 ---
 
-## 3. Deterministic World Fixture
+## 4. Deterministic World Fixture
 
 The repository fixture is:
 
@@ -93,7 +123,7 @@ Runtime SoT after launch:
 
 ---
 
-## 4. Launch Contract
+## 5. Launch Contract
 
 Manual launch command, with paths expanded on the configured host:
 
@@ -123,7 +153,7 @@ the world path/log/session source of truth.
 
 ---
 
-## 5. Manual Reset
+## 6. Manual Reset
 
 Use this only as a host setup action. It is not FSV by itself.
 
@@ -143,7 +173,7 @@ physical SoT.
 
 ---
 
-## 6. Edge Cases For #473 FSV
+## 7. Edge Cases For #473 FSV
 
 For this benchmark fixture, the manual edge audit must cover:
 

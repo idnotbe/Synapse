@@ -17,12 +17,24 @@ cursor_visible = false
 
 [detection]
 model_id = "minecraft_like_local_world_v0"
-classes_of_interest = ["hotbar", "crosshair", "block", "inventory", "chat", "health"]
+classes_of_interest = ["hotbar", "crosshair", "crosshair_region", "hotbar_region", "block", "inventory", "chat", "health"]
 confidence_threshold = 0.45
 max_detections = 32
 
 [ocr]
 default_backend = "winrt"
+
+[[hud]]
+name = "luanti.crosshair_contrast"
+extractor = { kind = "color_ratio", sample_points = [[0, 0], [24, 24], [47, 47]], mapping = "luma_stddev_0_1" }
+parser = { kind = "number" }
+region = { kind = "fraction_of_window", x = 0.485, y = 0.485, w = 0.03, h = 0.03 }
+
+[[hud]]
+name = "luanti.hotbar_contrast"
+extractor = { kind = "color_ratio", sample_points = [[0, 0], [90, 24], [180, 47]], mapping = "luma_stddev_0_1" }
+parser = { kind = "number" }
+region = { kind = "fraction_of_window", x = 0.335, y = 0.875, w = 0.33, h = 0.09 }
 
 [keymap]
 forward = "w"
@@ -78,3 +90,82 @@ benchmark_player = "synapsebench"
 "registry.family" = "profile-registry/audit-data"
 "registry.quality_signal" = "profile_quality.luanti.minetest"
 "audit.tags" = "benchmark:luanti,game:minetest,moat:profile-audit"
+"capability.observe.foreground" = "profile_list+observe foreground profile_id"
+"capability.observe.capture" = "foreground_window_gdi_probe"
+"capability.observe.hud" = "luanti.crosshair_contrast,luanti.hotbar_contrast"
+"capability.observe.entities" = "luanti_crosshair_region,luanti_hotbar_region"
+"capability.action.keyboard.software" = "act_press supported"
+"capability.action.mouse.software" = "act_click,act_aim,act_drag,act_scroll supported"
+"capability.action.keyboard.hardware_hid" = "parity target through hardware backend when configured"
+"capability.action.mouse.hardware_hid" = "parity target through hardware backend when configured"
+"capability.action.pad.vigem" = "available when ViGEm backend is configured"
+"capability.audit.action_log" = "CF_ACTION_LOG via storage_inspect samples"
+"capability.edge.hud_hidden" = "F1"
+"capability.edge.inventory_menu" = "i/esc"
+"capability.edge.unfocused_minimized" = "foreground/profile mismatch or capture failure"
+
+[[event_extensions]]
+name = "luanti_launched"
+from_filter = { op = "and", args = [
+    { op = "source", source = "process" },
+    { op = "kind", kind = "process.launched" },
+    { op = "data", path = "/profile_id", predicate = { op = "eq", value = "luanti.minetest" } }
+] }
+emits_kind = "benchmark.luanti.launched"
+
+[[event_extensions]]
+name = "luanti_joined_world"
+from_filter = { op = "and", args = [
+    { op = "source", source = "process" },
+    { op = "kind", kind = "process.log_observed" },
+    { op = "data", path = "/world_name", predicate = { op = "eq", value = "synapse_benchmark_mtg" } }
+] }
+emits_kind = "benchmark.luanti.joined_world"
+
+[[event_extensions]]
+name = "luanti_hud_observed"
+from_filter = { op = "and", args = [
+    { op = "source", source = "perception_hud" },
+    { op = "kind", kind = "perception.hud_observed" },
+    { op = "data", path = "/profile_id", predicate = { op = "eq", value = "luanti.minetest" } }
+] }
+emits_kind = "benchmark.luanti.hud_observed"
+
+[[event_extensions]]
+name = "luanti_moved"
+from_filter = { op = "and", args = [
+    { op = "source", source = "action_emitter" },
+    { op = "kind", kind = "action.dispatched" },
+    { op = "data", path = "/tool", predicate = { op = "eq", value = "act_press" } },
+    { op = "data", path = "/keymap_action", predicate = { op = "in_set", values = ["forward", "back", "left", "right", "jump"] } }
+] }
+emits_kind = "benchmark.luanti.moved"
+
+[[event_extensions]]
+name = "luanti_dug_or_placed"
+from_filter = { op = "and", args = [
+    { op = "source", source = "action_emitter" },
+    { op = "kind", kind = "action.dispatched" },
+    { op = "data", path = "/tool", predicate = { op = "in_set", values = ["act_click", "act_drag"] } },
+    { op = "data", path = "/keymap_action", predicate = { op = "in_set", values = ["dig", "punch", "place", "use"] } }
+] }
+emits_kind = "benchmark.luanti.dug_or_placed"
+
+[[event_extensions]]
+name = "luanti_inventory_opened"
+from_filter = { op = "and", args = [
+    { op = "source", source = "action_emitter" },
+    { op = "kind", kind = "action.dispatched" },
+    { op = "data", path = "/tool", predicate = { op = "eq", value = "act_press" } },
+    { op = "data", path = "/keymap_action", predicate = { op = "eq", value = "inventory" } }
+] }
+emits_kind = "benchmark.luanti.inventory_opened"
+
+[[event_extensions]]
+name = "luanti_release_all_applied"
+from_filter = { op = "and", args = [
+    { op = "source", source = "action_emitter" },
+    { op = "kind", kind = "action.release_all" },
+    { op = "data", path = "/profile_id", predicate = { op = "eq", value = "luanti.minetest" } }
+] }
+emits_kind = "benchmark.luanti.release_all_applied"

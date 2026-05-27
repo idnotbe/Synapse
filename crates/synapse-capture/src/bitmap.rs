@@ -2,7 +2,7 @@
 use synapse_core::Rect;
 
 #[cfg(windows)]
-use crate::{CaptureError, CapturedFrame, CapturedSoftwareBitmap, platform};
+use crate::{CaptureError, CapturedBgraBitmap, CapturedFrame, CapturedSoftwareBitmap, platform};
 
 #[cfg(windows)]
 /// Copies a captured frame region into a `WinRT` `SoftwareBitmap`.
@@ -29,4 +29,14 @@ pub fn screen_region_to_software_bitmap(
     region: Rect,
 ) -> Result<CapturedSoftwareBitmap, CaptureError> {
     platform::screen_region_to_software_bitmap(region)
+}
+
+#[cfg(windows)]
+/// Captures a screen-coordinate region into raw BGRA bytes.
+///
+/// # Errors
+///
+/// Returns [`CaptureError`] when the region is empty or the `GDI` capture fails.
+pub fn screen_region_to_bgra_bitmap(region: Rect) -> Result<CapturedBgraBitmap, CaptureError> {
+    platform::screen_region_to_bgra_bitmap(region)
 }

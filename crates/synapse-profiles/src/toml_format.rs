@@ -2,8 +2,8 @@ use std::{collections::BTreeMap, path::Path, path::PathBuf, time::SystemTime};
 
 use serde::Deserialize;
 use synapse_core::{
-    HudExtractor, HudFieldSpec, HudParser, HudRegion, Profile, ProfileBackends, ProfileCapture,
-    ProfileDetection, ProfileId, ProfileMatch, ProfileOcr, SCHEMA_VERSION,
+    EventExtension, HudExtractor, HudFieldSpec, HudParser, HudRegion, Profile, ProfileBackends,
+    ProfileCapture, ProfileDetection, ProfileId, ProfileMatch, ProfileOcr, SCHEMA_VERSION,
 };
 
 use crate::{
@@ -44,6 +44,8 @@ pub struct RawProfile {
     backends: RawBackends,
     #[serde(default)]
     metadata: BTreeMap<String, String>,
+    #[serde(default)]
+    event_extensions: Vec<EventExtension>,
 }
 
 impl RawProfile {
@@ -75,6 +77,7 @@ impl RawProfile {
             validate_match(&path, profile_match)?;
         }
         validate_keymap(&path, &self.keymap)?;
+        validate_event_extensions(&path, &self.event_extensions)?;
 
         let hud = self
             .hud
@@ -96,7 +99,7 @@ impl RawProfile {
             keymap: self.keymap,
             backends: self.backends.into_backends(&path)?,
             metadata: self.metadata,
-            event_extensions: Vec::new(),
+            event_extensions: self.event_extensions,
         };
 
         Ok(LoadedProfile {
@@ -242,38 +245,103 @@ impl RawOcr {
 #[serde(deny_unknown_fields)]
 struct RawHudField {
     name: String,
-    #[serde(default = "default_hud_region_kind")]
-    region_kind: String,
-    x: i32,
-    y: i32,
-    w: i32,
-    h: i32,
+    #[serde(default)]
+    region: Option<HudRegion>,
+    #[serde(default)]
+    extractor: Option<HudExtractor>,
+    #[serde(default)]
+    parser: Option<HudParser>,
+    #[serde(default)]
+    region_kind: Option<String>,
+    #[serde(default)]
+    x: Option<i32>,
+    #[serde(default)]
+    y: Option<i32>,
+    #[serde(default)]
+    w: Option<i32>,
+    #[serde(default)]
+    h: Option<i32>,
 }
 
 impl RawHudField {
     fn into_spec(self, path: &Path, bounds: ScreenBounds) -> Result<HudFieldSpec, ProfileError> {
-        let region = match self.region_kind.as_str() {
-            "absolute" => HudRegion::Absolute {
-                x: self.x,
-                y: self.y,
-                w: self.w,
-                h: self.h,
-            },
-            other => {
-                return Err(ProfileError::Parse {
-                    path: path.to_path_buf(),
-                    message: format!("unknown HUD region_kind {other:?}"),
-                });
-            }
+        let region = match self.region {
+            Some(region) => region,
+            None => self.flat_region(path)?,
         };
         validate_hud_region(path, &self.name, &region, bounds)?;
         Ok(HudFieldSpec {
             name: self.name,
             region,
-            extractor: HudExtractor::WinrtOcr,
-            parser: HudParser::Number,
+            extractor: self.extractor.unwrap_or(HudExtractor::WinrtOcr),
+            parser: self.parser.unwrap_or(HudParser::Number),
         })
     }
+
+    fn flat_region(&self, path: &Path) -> Result<HudRegion, ProfileError> {
+        let region_kind = self
+            .region_kind
+            .clone()
+            .unwrap_or_else(default_hud_region_kind);
+        match region_kind.as_str() {
+            "absolute" => Ok(HudRegion::Absolute {
+                x: required_hud_coord(path, &self.name, "x", self.x)?,
+                y: required_hud_coord(path, &self.name, "y", self.y)?,
+                w: required_hud_coord(path, &self.name, "w", self.w)?,
+                h: required_hud_coord(path, &self.name, "h", self.h)?,
+            }),
+            other => Err(ProfileError::Parse {
+                path: path.to_path_buf(),
+                message: format!("unknown HUD region_kind {other:?}"),
+            }),
+        }
+    }
+}
+
+fn required_hud_coord(
+    path: &Path,
+    name: &str,
+    field: &'static str,
+    value: Option<i32>,
+) -> Result<i32, ProfileError> {
+    value.ok_or_else(|| ProfileError::Parse {
+        path: path.to_path_buf(),
+        message: format!("HUD field {name:?} is missing {field}"),
+    })
+}
+
+fn validate_event_extensions(
+    path: &Path,
+    extensions: &[EventExtension],
+) -> Result<(), ProfileError> {
+    for extension in extensions {
+        if extension.name.trim().is_empty() {
+            return Err(ProfileError::Parse {
+                path: path.to_path_buf(),
+                message: "event extension name must not be empty".to_owned(),
+            });
+        }
+        if extension.emits_kind.trim().is_empty() {
+            return Err(ProfileError::Parse {
+                path: path.to_path_buf(),
+                message: format!(
+                    "event extension {:?} emits_kind must not be empty",
+                    extension.name
+                ),
+            });
+        }
+        extension
+            .from_filter
+            .validate()
+            .map_err(|error| ProfileError::Parse {
+                path: path.to_path_buf(),
+                message: format!(
+                    "event extension {:?} filter invalid: {error}",
+                    extension.name
+                ),
+            })?;
+    }
+    Ok(())
 }
 
 #[derive(Debug, Deserialize)]

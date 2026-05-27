@@ -64,6 +64,15 @@ pub struct CapturedSoftwareBitmap {
     pub bitmap: windows::Graphics::Imaging::SoftwareBitmap,
 }
 
+#[cfg(windows)]
+#[derive(Clone, Debug)]
+pub struct CapturedBgraBitmap {
+    pub region: Rect,
+    pub width: u32,
+    pub height: u32,
+    pub bytes: Vec<u8>,
+}
+
 impl CapturedFrame {
     #[cfg(not(windows))]
     #[allow(clippy::default_constructed_unit_structs)]
