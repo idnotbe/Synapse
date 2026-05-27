@@ -14,6 +14,7 @@ required-features = ["firmware-bin"]
 cortex-m-rt = { version = "0.7.5", optional = true }
 embassy-executor = { version = "0.10.0", features = ["executor-thread", "platform-cortex-m"], optional = true }
 embassy-rp = { version = "0.10.0", features = ["critical-section-impl", "rp2040", "time-driver"], optional = true }
+embassy-sync = { version = "0.8.0", optional = true }
 embassy-time = { version = "0.5.1", optional = true }
 embassy-usb = { version = "0.6.0", default-features = false, optional = true }
 panic-halt = { version = "1.0.0", optional = true }
@@ -30,6 +31,7 @@ firmware-bin = [
     "dep:cortex-m-rt",
     "dep:embassy-executor",
     "dep:embassy-rp",
+    "dep:embassy-sync",
     "dep:embassy-time",
     "dep:embassy-usb",
     "dep:panic-halt",

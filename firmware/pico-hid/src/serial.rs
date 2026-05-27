@@ -1,8 +1,11 @@
+use core::cell::RefCell;
+
 use embassy_executor::Spawner;
 use embassy_rp::bind_interrupts;
 use embassy_rp::peripherals::USB;
 use embassy_rp::usb::{Driver, InterruptHandler};
-use embassy_time::Timer;
+use embassy_sync::blocking_mutex::{Mutex, raw::CriticalSectionRawMutex};
+use embassy_time::{Instant, Timer};
 use embassy_usb::class::cdc_acm::{CdcAcmClass, State};
 use embassy_usb::class::hid::{
     Config as HidConfig, HidBootProtocol, HidProtocolMode, HidSubclass, HidWriter, ReportId,
@@ -15,18 +18,18 @@ use static_cell::StaticCell;
 
 use crate::usb;
 use pico_hid::hid_descriptors;
+use pico_hid::led::{ERROR_CRC_THRESHOLD_PER_SEC, LedInputs};
 #[cfg(feature = "loopback")]
 use pico_hid::protocol::{
     DeviceCommand, MAX_FRAME_LEN, ParseResult, encode_device_frame, encode_nak,
     parse_host_frame_any_command,
 };
 use pico_hid::reports::{self, BootKeyboardReport, BootMouseReport, GamepadReport};
+use pico_hid::runtime::RuntimeState;
 #[cfg(not(feature = "loopback"))]
 use pico_hid::{
-    dispatch::{DispatchState, IdentifyInfo, dispatch_frame},
-    protocol::{
-        MAX_FRAME_LEN, NakReason, ParseResult, encode_device_frame, encode_nak, parse_host_frame,
-    },
+    dispatch::IdentifyInfo,
+    protocol::{MAX_FRAME_LEN, ParseResult, encode_device_frame, encode_nak, parse_host_frame},
 };
 
 const CDC_MAX_PACKET_SIZE: u16 = 64;
@@ -34,6 +37,8 @@ const HID_POLL_MS: u8 = 1;
 const CONFIG_DESCRIPTOR_LEN: usize = 512;
 const BOS_DESCRIPTOR_LEN: usize = 256;
 const CONTROL_BUF_LEN: usize = 64;
+const HID_REPORT_TICK_MS: u64 = 5;
+const WATCHDOG_TICK_MS: u64 = 10;
 
 bind_interrupts!(struct Irqs {
     USBCTRL_IRQ => InterruptHandler<USB>;
@@ -45,6 +50,7 @@ type PicoCdcAcmClass = CdcAcmClass<'static, UsbDriver>;
 type MouseWriter = HidWriter<'static, UsbDriver, { reports::BOOT_MOUSE_REPORT_LEN }>;
 type KeyboardWriter = HidWriter<'static, UsbDriver, { reports::BOOT_KEYBOARD_REPORT_LEN }>;
 type GamepadWriter = HidWriter<'static, UsbDriver, { reports::GAMEPAD_REPORT_LEN }>;
+type RuntimeShared = Mutex<CriticalSectionRawMutex, RefCell<RuntimeState>>;
 
 struct HidWriters {
     mouse: MouseWriter,
@@ -52,8 +58,29 @@ struct HidWriters {
     gamepad: GamepadWriter,
 }
 
-pub fn spawn_usb(usb_peripheral: embassy_rp::Peri<'static, USB>, spawner: &Spawner) -> bool {
-    let (usb_device, serial_class, hid_writers) = build_usb_serial(usb_peripheral);
+pub struct UsbStatus {
+    tasks_ready: bool,
+    runtime: &'static RuntimeShared,
+}
+
+impl UsbStatus {
+    pub fn led_inputs(&self, now_ms: u32) -> LedInputs {
+        if !self.tasks_ready {
+            return LedInputs {
+                now_ms,
+                ms_since_last_command: None,
+                ms_since_watchdog_fire: None,
+                crc_errors_last_second: ERROR_CRC_THRESHOLD_PER_SEC + 1,
+            };
+        }
+
+        self.runtime
+            .lock(|runtime| runtime.borrow().led_inputs(now_ms))
+    }
+}
+
+pub fn spawn_usb(usb_peripheral: embassy_rp::Peri<'static, USB>, spawner: &Spawner) -> UsbStatus {
+    let (usb_device, serial_class, hid_writers, runtime) = build_usb_serial(usb_peripheral);
 
     let device_spawned = match usb_task(usb_device) {
         Ok(token) => {
@@ -62,28 +89,35 @@ pub fn spawn_usb(usb_peripheral: embassy_rp::Peri<'static, USB>, spawner: &Spawn
         }
         Err(_) => false,
     };
-    let serial_spawned = match cdc_serial_task(serial_class) {
+    let serial_spawned = match cdc_serial_task(serial_class, runtime) {
         Ok(token) => {
             spawner.spawn(token);
             true
         }
         Err(_) => false,
     };
-    let mouse_spawned = match mouse_hid_task(hid_writers.mouse) {
+    let mouse_spawned = match mouse_hid_task(hid_writers.mouse, runtime) {
         Ok(token) => {
             spawner.spawn(token);
             true
         }
         Err(_) => false,
     };
-    let keyboard_spawned = match keyboard_hid_task(hid_writers.keyboard) {
+    let keyboard_spawned = match keyboard_hid_task(hid_writers.keyboard, runtime) {
         Ok(token) => {
             spawner.spawn(token);
             true
         }
         Err(_) => false,
     };
-    let gamepad_spawned = match gamepad_hid_task(hid_writers.gamepad) {
+    let gamepad_spawned = match gamepad_hid_task(hid_writers.gamepad, runtime) {
+        Ok(token) => {
+            spawner.spawn(token);
+            true
+        }
+        Err(_) => false,
+    };
+    let watchdog_spawned = match watchdog_task(runtime) {
         Ok(token) => {
             spawner.spawn(token);
             true
@@ -91,12 +125,25 @@ pub fn spawn_usb(usb_peripheral: embassy_rp::Peri<'static, USB>, spawner: &Spawn
         Err(_) => false,
     };
 
-    device_spawned && serial_spawned && mouse_spawned && keyboard_spawned && gamepad_spawned
+    UsbStatus {
+        tasks_ready: device_spawned
+            && serial_spawned
+            && mouse_spawned
+            && keyboard_spawned
+            && gamepad_spawned
+            && watchdog_spawned,
+        runtime,
+    }
 }
 
 fn build_usb_serial(
     usb_peripheral: embassy_rp::Peri<'static, USB>,
-) -> (PicoUsbDevice, PicoCdcAcmClass, HidWriters) {
+) -> (
+    PicoUsbDevice,
+    PicoCdcAcmClass,
+    HidWriters,
+    &'static RuntimeShared,
+) {
     let driver = Driver::new(usb_peripheral, Irqs);
     let identity = usb::identity();
 
@@ -117,6 +164,7 @@ fn build_usb_serial(
     static MOUSE_REQUESTS: StaticCell<HidRequestState> = StaticCell::new();
     static KEYBOARD_REQUESTS: StaticCell<HidRequestState> = StaticCell::new();
     static GAMEPAD_REQUESTS: StaticCell<HidRequestState> = StaticCell::new();
+    static RUNTIME: StaticCell<RuntimeShared> = StaticCell::new();
 
     let mut builder = Builder::new(
         driver,
@@ -173,6 +221,7 @@ fn build_usb_serial(
             keyboard,
             gamepad,
         },
+        RUNTIME.init(Mutex::new(RefCell::new(RuntimeState::new()))),
     )
 }
 
@@ -199,60 +248,87 @@ async fn usb_task(mut usb: PicoUsbDevice) -> ! {
 }
 
 #[embassy_executor::task]
-async fn cdc_serial_task(mut serial_class: PicoCdcAcmClass) -> ! {
+async fn cdc_serial_task(mut serial_class: PicoCdcAcmClass, runtime: &'static RuntimeShared) -> ! {
     loop {
         serial_class.wait_connection().await;
-        let _disconnected = serial_until_disconnect(&mut serial_class).await;
+        let _disconnected = serial_until_disconnect(&mut serial_class, runtime).await;
     }
 }
 
 #[embassy_executor::task]
-async fn mouse_hid_task(mut writer: MouseWriter) -> ! {
-    let neutral = BootMouseReport::neutral().to_bytes();
+async fn mouse_hid_task(mut writer: MouseWriter, runtime: &'static RuntimeShared) -> ! {
+    let mut last = BootMouseReport::neutral();
 
     loop {
-        writer.ready().await;
-        let _ = writer.write(&neutral).await;
-        Timer::after_secs(1).await;
+        let report = runtime.lock(|runtime| runtime.borrow_mut().mouse_report_for_hid());
+        if report != last {
+            writer.ready().await;
+            if writer.write(&report.to_bytes()).await.is_ok() {
+                last = report;
+            }
+        }
+        Timer::after_millis(HID_REPORT_TICK_MS).await;
     }
 }
 
 #[embassy_executor::task]
-async fn keyboard_hid_task(mut writer: KeyboardWriter) -> ! {
-    let neutral = BootKeyboardReport::neutral().to_bytes();
+async fn keyboard_hid_task(mut writer: KeyboardWriter, runtime: &'static RuntimeShared) -> ! {
+    let mut last = BootKeyboardReport::neutral();
 
     loop {
-        writer.ready().await;
-        let _ = writer.write(&neutral).await;
-        Timer::after_secs(1).await;
+        let report = runtime.lock(|runtime| runtime.borrow().keyboard_report_for_hid());
+        if report != last {
+            writer.ready().await;
+            if writer.write(&report.to_bytes()).await.is_ok() {
+                last = report;
+            }
+        }
+        Timer::after_millis(HID_REPORT_TICK_MS).await;
     }
 }
 
 #[embassy_executor::task]
-async fn gamepad_hid_task(mut writer: GamepadWriter) -> ! {
-    let neutral = GamepadReport::neutral().to_bytes();
+async fn gamepad_hid_task(mut writer: GamepadWriter, runtime: &'static RuntimeShared) -> ! {
+    let mut last = GamepadReport::neutral();
 
     loop {
-        writer.ready().await;
-        let _ = writer.write(&neutral).await;
-        Timer::after_secs(1).await;
+        let report = runtime.lock(|runtime| runtime.borrow().gamepad_report_for_hid());
+        if report != last {
+            writer.ready().await;
+            if writer.write(&report.to_bytes()).await.is_ok() {
+                last = report;
+            }
+        }
+        Timer::after_millis(HID_REPORT_TICK_MS).await;
+    }
+}
+
+#[embassy_executor::task]
+async fn watchdog_task(runtime: &'static RuntimeShared) -> ! {
+    loop {
+        runtime.lock(|runtime| {
+            runtime.borrow_mut().poll_watchdog(now_ms());
+        });
+        Timer::after_millis(WATCHDOG_TICK_MS).await;
     }
 }
 
 #[cfg(not(feature = "loopback"))]
-async fn serial_until_disconnect(serial_class: &mut PicoCdcAcmClass) -> Result<(), Disconnected> {
+async fn serial_until_disconnect(
+    serial_class: &mut PicoCdcAcmClass,
+    runtime: &'static RuntimeShared,
+) -> Result<(), Disconnected> {
     let mut packet = [0u8; CDC_MAX_PACKET_SIZE as usize];
     let mut rx = [0u8; MAX_FRAME_LEN];
     let mut rx_len = 0usize;
     let mut tx = [0u8; MAX_FRAME_LEN];
     let usb_identity = usb::identity();
     let identify = IdentifyInfo::new(*b"DEVBUILD", usb_identity.vid, usb_identity.pid);
-    let mut state = DispatchState::new();
 
     loop {
         let count = serial_class.read_packet(&mut packet).await?;
         if rx_len + count > rx.len() {
-            state.telemetry.record_frame_dropped();
+            runtime.lock(|runtime| runtime.borrow_mut().record_frame_dropped(now_ms()));
             rx_len = 0;
             continue;
         }
@@ -263,7 +339,11 @@ async fn serial_until_disconnect(serial_class: &mut PicoCdcAcmClass) -> Result<(
         loop {
             let consumed = match parse_host_frame(&rx[..rx_len]) {
                 ParseResult::Frame { frame, consumed } => {
-                    let outcome = dispatch_frame(&mut state, frame, identify);
+                    let outcome = runtime.lock(|runtime| {
+                        runtime
+                            .borrow_mut()
+                            .dispatch_frame_at(now_ms(), frame, identify)
+                    });
                     let tx_len = encode_device_frame(
                         frame.seq,
                         outcome.command,
@@ -275,18 +355,16 @@ async fn serial_until_disconnect(serial_class: &mut PicoCdcAcmClass) -> Result<(
                     consumed
                 }
                 ParseResult::Nak { nak, consumed } => {
-                    if matches!(nak.reason, NakReason::CrcInvalid) {
-                        state.telemetry.record_crc_error();
-                    } else {
-                        state.telemetry.record_link_error();
-                    }
+                    runtime.lock(|runtime| {
+                        runtime.borrow_mut().record_parser_nak(now_ms(), nak.reason);
+                    });
                     let tx_len = encode_nak(nak.seq, nak.reason, &mut tx)
                         .expect("NAK payload always fits in a device frame");
                     write_serial_bytes(serial_class, &tx[..tx_len]).await?;
                     consumed
                 }
                 ParseResult::Drop { consumed, .. } => {
-                    state.telemetry.record_frame_dropped();
+                    runtime.lock(|runtime| runtime.borrow_mut().record_frame_dropped(now_ms()));
                     consumed
                 }
                 ParseResult::NeedMore { .. } => break,
@@ -298,7 +376,10 @@ async fn serial_until_disconnect(serial_class: &mut PicoCdcAcmClass) -> Result<(
 }
 
 #[cfg(feature = "loopback")]
-async fn serial_until_disconnect(serial_class: &mut PicoCdcAcmClass) -> Result<(), Disconnected> {
+async fn serial_until_disconnect(
+    serial_class: &mut PicoCdcAcmClass,
+    _runtime: &'static RuntimeShared,
+) -> Result<(), Disconnected> {
     let mut packet = [0u8; CDC_MAX_PACKET_SIZE as usize];
     let mut rx = [0u8; MAX_FRAME_LEN];
     let mut rx_len = 0usize;
@@ -336,6 +417,10 @@ async fn serial_until_disconnect(serial_class: &mut PicoCdcAcmClass) -> Result<(
             consume_rx(&mut rx, &mut rx_len, consumed);
         }
     }
+}
+
+fn now_ms() -> u32 {
+    Instant::now().as_millis() as u32
 }
 
 async fn write_serial_bytes(
