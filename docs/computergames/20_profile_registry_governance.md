@@ -44,6 +44,9 @@ physical source-of-truth inspection.
 ## 3. Profile package manifest
 
 Every installable profile package must include a manifest with these fields:
+The canonical v1 package schema and parser behavior are defined in
+[`23_profile_package_manifest.md`](23_profile_package_manifest.md); this
+section defines the governance fields that schema must preserve.
 
 | Field | Rule |
 |---|---|

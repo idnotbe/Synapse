@@ -74,7 +74,7 @@ Comprehensive technical reference for the Synapse MCP server, produced by readin
   installs, model/file generation, firmware flashing, app launching, USB/COM
   inspection, and UI inspection are agent-owned work when reversible on this
   host.
-- For the contract-level PRD, see `docs/computergames/` (numbered 00-22).
+- For the contract-level PRD, see `docs/computergames/` (numbered 00-23).
 - For the per-milestone work-item ledger, see `docs/impplan/` (numbered 00–07).
 
 
@@ -700,6 +700,11 @@ crates/synapse-profiles/
 └── src/
     ├── lib.rs                      # Crate-level re-exports
     ├── error.rs                    # ProfileError + ProfileLoadError with .code() mapping to PROFILE_*
+    ├── package/
+    │   ├── mod.rs                  # Public package-manifest parse/validate entrypoints
+    │   ├── digest.rs               # SHA-256 digest helper and digest comparison
+    │   ├── types.rs                # ProfilePackageManifest and nested manifest data types
+    │   └── validation.rs           # Fail-closed package metadata validation rules
     ├── parser.rs                   # parse_profile_file, LoadedProfile, ProfileDefaults, ScreenBounds, bundled_profiles_dir
     ├── resolver.rs                 # ForegroundWindow + resolve_active_profile (regex matching against exe/title/steam_appid)
     ├── toml_format.rs              # RawProfile TOML schema (private)
@@ -777,7 +782,7 @@ crates/synapse-overlay/
 
 | Path | Description |
 |---|---|
-| `docs/computergames/` | Product Requirements Document (PRD) — 23 numbered files covering architecture, perception, action, reflex, MCP surface, schemas, storage, supported use, hardware HID, perf budget, security, observability, testing, build, roadmap, open questions, research appendix, Luanti benchmark/runbook, profile-registry governance, optional registry protocol, and local registry data model |
+| `docs/computergames/` | Product Requirements Document (PRD) — 24 numbered files covering architecture, perception, action, reflex, MCP surface, schemas, storage, supported use, hardware HID, perf budget, security, observability, testing, build, roadmap, open questions, research appendix, Luanti benchmark/runbook, profile-registry governance, optional registry protocol, local registry data model, and profile package manifests |
 | `docs/impplan/` | Implementation plan — methodology + per-milestone work-item ledger (M0 through M5) + cross-cutting concerns |
 | `docs/adr/0001-current-rust-and-dependencies.md` | ADR: pinned to current stable Rust, no MSRV downgrade |
 | `docs/adr/0002-rocksdb-primary-storage.md` | ADR: RocksDB chosen over LMDB/sled for primary storage |
@@ -3229,6 +3234,10 @@ See `tests/fixtures/audio/README.md` for the synthesis recipe.
 Source files covered:
 - `crates/synapse-profiles/src/lib.rs`
 - `crates/synapse-profiles/src/error.rs`
+- `crates/synapse-profiles/src/package/mod.rs`
+- `crates/synapse-profiles/src/package/digest.rs`
+- `crates/synapse-profiles/src/package/types.rs`
+- `crates/synapse-profiles/src/package/validation.rs`
 - `crates/synapse-profiles/src/parser.rs`
 - `crates/synapse-profiles/src/resolver.rs`
 - `crates/synapse-profiles/src/toml_format.rs`
@@ -3240,18 +3249,25 @@ Source files covered:
 - `crates/synapse-test-utils/src/fixtures.rs`
 - `crates/synapse-test-utils/src/stdio_mcp_client.rs`
 
-## 1. `synapse-profiles` — TOML profile loader + live reload
+## 1. `synapse-profiles` — TOML profile loader + package manifests + live reload
 
 ### 1.1 Public surface
 
 | Symbol | Source |
 |---|---|
 | `ProfileError`, `ProfileLoadError` | `error.rs` |
+| `ProfilePackageManifest`, `PackageAuthor`, `PackageSource`, `PackageTarget`, `PackageAssumptions`, `PackageInput`, `PackagePermissions`, `PackageExecutionPermissions`, `PackageContributionPermissions`, `PackageHashes`, `PackageFiles` | `package/types.rs` |
+| `PROFILE_PACKAGE_KIND`, `PROFILE_PACKAGE_SCHEMA_VERSION`, `parse_package_manifest_file`, `parse_package_manifest_bytes`, `parse_package_manifest_bytes_with_digest`, `package_manifest_digest` | `package/mod.rs` / `package/digest.rs` |
 | `LoadedProfile`, `ProfileDefaults`, `ScreenBounds`, `bundled_profiles_dir`, `parse_profile_bytes`, `parse_profile_file`, `parse_profile_file_with_bounds` | `parser.rs` |
 | `ForegroundWindow`, `ProfileMatchResolution`, `resolve_active_profile` | `resolver.rs` |
 | `ProfileRuntime`, `ProfileStatus` | `watcher.rs` |
 
 `toml_format.rs` is private (holds `RawProfile`, the TOML-shaped intermediate).
+`package/validation.rs` is private and enforces fail-closed package manifest
+rules for schema version, kind, id shape, semver, RFC3339 timestamps,
+provenance, compatibility targets, local assumptions, input backends,
+permissions, SPDX allow-list, SHA-256 digests, file paths, and manifest digest
+mismatch.
 
 ### 1.2 `ProfileDefaults` and `ScreenBounds`
 
@@ -3583,6 +3599,7 @@ Source files covered:
 - `docs/computergames/20_profile_registry_governance.md`
 - `docs/computergames/21_profile_registry_protocol.md`
 - `docs/computergames/22_profile_registry_data_model.md`
+- `docs/computergames/23_profile_package_manifest.md`
 - `docs/adr/0001..0007*.md`
 
 ## 1. Authority order
@@ -3631,6 +3648,12 @@ authoring from audit/replay evidence; #463 retention/dedupe/compaction/backfill;
 #466 curated seed registry; #467 roadmap/docs alignment; #468 inspector;
 #469 optional shared registry protocol and moderation; #470 contribution
 rights, licensing, revocation.
+
+The package-manifest baseline for #456 is
+`docs/computergames/23_profile_package_manifest.md`: it defines the
+`synapse-profiles` parser/validator API, package metadata/provenance,
+compatibility targets, local assumptions, permissions, and hash validation
+before runtime install/registry tools land.
 
 Registry/audit work must name the physical SoT in its acceptance evidence:
 profile TOML files, future registry index/package files, RocksDB `CF_ACTION_LOG`,
@@ -3826,6 +3849,7 @@ Open items remaining (PRD §16): OQ-003 (detection model default — YOLOv10n vs
 | `docs/computergames/20_profile_registry_governance.md` | Profile/audit contribution rights, licensing, attribution, provenance, and revocation governance |
 | `docs/computergames/21_profile_registry_protocol.md` | Optional shared registry protocol, source config, moderation state, update metadata, and contribution submission boundary |
 | `docs/computergames/22_profile_registry_data_model.md` | Local profile registry data model, `CF_PROFILES`/`CF_KV` row namespaces, and install/register edge rules |
+| `docs/computergames/23_profile_package_manifest.md` | Profile package manifest schema, provenance, compatibility targets, permissions, hashes, and fail-closed validation |
 | `docs/impplan/00_methodology.md` | Dev discipline, FSV protocol, work-item shape |
 | `docs/impplan/0{1..6}_m{0..5}_*.md` | Per-milestone work-item ledger |
 | `docs/impplan/07_cross_cutting.md` | Perf gates, security, observability, release |
@@ -4414,7 +4438,7 @@ Source files covered:
 | **Repo-level fixtures** | `tests/fixtures/audio/*.wav` | Shared WAV samples used by audio tests |
 | **Manual FSV (operator-driven)** | NOT in this repo as automated tests | Per `docs/impplan/00_methodology.md` §5, FSV is the shipping gate and is manual; "supporting evidence only" applies to everything else in this section |
 
-## 2. Integration-test inventory by crate (76 files)
+## 2. Integration-test inventory by crate (77 files)
 
 ### 2.1 `synapse-action` (21 files)
 - `auto_release_keyboard_hook.rs` — verifies `HELD_KEY_MAX_DURATION_MS` auto-release path
@@ -4479,7 +4503,8 @@ Source files covered:
 ### 2.6 `synapse-perception` (1 file)
 - `perception_regression.rs` — observe-assembly invariants + fixture-driven regression
 
-### 2.7 `synapse-profiles` (2 files)
+### 2.7 `synapse-profiles` (3 files)
+- `package_manifest.rs` — profile package manifest parser happy path plus missing-provenance, incompatible-target, and manifest-digest mismatch rejections
 - `parse_bundled.rs` — bundled profile TOML loads without error
 - `runtime_refresh.rs` — notify-driven refresh + `last_reload_at`
 
@@ -4506,7 +4531,7 @@ Source files covered:
 
 ## 3. Test method count
 
-`#[test]` + `#[tokio::test]` attributes across `crates/`: **381** (counted via `awk` on the tree; includes both unit `mod tests` blocks and integration test files).
+`#[test]` + `#[tokio::test]` attributes across `crates/`: **385** (counted via `awk` on the tree; includes both unit `mod tests` blocks and integration test files).
 
 ## 4. Bench inventory (13 files)
 

@@ -206,6 +206,10 @@ The local-first storage/data-model baseline is
 [`22_profile_registry_data_model.md`](22_profile_registry_data_model.md), which
 pins `CF_PROFILES` row namespaces and `CF_KV` head pointers before runtime
 registry tools land.
+The profile package manifest baseline is
+[`23_profile_package_manifest.md`](23_profile_package_manifest.md), which
+defines package metadata, provenance, compatibility targets, permissions,
+hashes, and fail-closed parser validation before install/registry tools land.
 
 Physical sources of truth for this track are registry index/package files,
 profile TOML files, RocksDB rows in `CF_ACTION_LOG`, `CF_REFLEX_AUDIT`,

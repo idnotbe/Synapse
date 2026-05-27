@@ -125,6 +125,7 @@ directly; scripts, tests, benchmarks, GitHub Actions, and CI are never FSV.
 | 20 | [`20_profile_registry_governance.md`](20_profile_registry_governance.md) | Profile/audit contribution rights, licenses, attribution, provenance, and revocation governance. |
 | 21 | [`21_profile_registry_protocol.md`](21_profile_registry_protocol.md) | Optional shared registry protocol, local source config, moderation state, update metadata, and contribution submission boundary. |
 | 22 | [`22_profile_registry_data_model.md`](22_profile_registry_data_model.md) | Local-first profile registry data model, `CF_PROFILES`/`CF_KV` row namespaces, and install/register edge rules. |
+| 23 | [`23_profile_package_manifest.md`](23_profile_package_manifest.md) | Profile package manifest schema, provenance, compatibility matrix, permissions, and fail-closed validation rules. |
 
 ---
 

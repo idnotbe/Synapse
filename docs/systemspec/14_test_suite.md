@@ -19,7 +19,7 @@ Source files covered:
 | **Repo-level fixtures** | `tests/fixtures/audio/*.wav` | Shared WAV samples used by audio tests |
 | **Manual FSV (operator-driven)** | NOT in this repo as automated tests | Per `docs/impplan/00_methodology.md` §5, FSV is the shipping gate and is manual; "supporting evidence only" applies to everything else in this section |
 
-## 2. Integration-test inventory by crate (76 files)
+## 2. Integration-test inventory by crate (77 files)
 
 ### 2.1 `synapse-action` (21 files)
 - `auto_release_keyboard_hook.rs` — verifies `HELD_KEY_MAX_DURATION_MS` auto-release path
@@ -84,7 +84,8 @@ Source files covered:
 ### 2.6 `synapse-perception` (1 file)
 - `perception_regression.rs` — observe-assembly invariants + fixture-driven regression
 
-### 2.7 `synapse-profiles` (2 files)
+### 2.7 `synapse-profiles` (3 files)
+- `package_manifest.rs` — profile package manifest parser happy path plus missing-provenance, incompatible-target, and manifest-digest mismatch rejections
 - `parse_bundled.rs` — bundled profile TOML loads without error
 - `runtime_refresh.rs` — notify-driven refresh + `last_reload_at`
 
@@ -111,7 +112,7 @@ Source files covered:
 
 ## 3. Test method count
 
-`#[test]` + `#[tokio::test]` attributes across `crates/`: **381** (counted via `awk` on the tree; includes both unit `mod tests` blocks and integration test files).
+`#[test]` + `#[tokio::test]` attributes across `crates/`: **385** (counted via `awk` on the tree; includes both unit `mod tests` blocks and integration test files).
 
 ## 4. Bench inventory (13 files)
 

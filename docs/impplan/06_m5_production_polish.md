@@ -51,6 +51,14 @@ package, profile-version, installed-profile, compatibility, and quality-link
 rows live under namespaced `CF_PROFILES` keys; `CF_KV` holds only tiny head
 pointers.
 
+Profile package manifest boundaries are governed by
+`docs/computergames/23_profile_package_manifest.md`. Package manifests carry
+id/version, provenance, compatibility targets, local assumptions,
+permissions/use scope, changelog, profile/package hashes, and file mappings.
+The `synapse-profiles` parser rejects missing provenance, incompatible target
+metadata, unsafe permissions, invalid semver, and manifest digest mismatches
+before a future registry install path can stage rows.
+
 ## Demo gate
 
 Fresh Windows 11 VM (no Synapse pre-installed) → operator runs `synapse-mcp setup` wizard → Claude Desktop completes the multi-app scenario per `15 §7`:

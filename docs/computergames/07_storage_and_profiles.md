@@ -354,6 +354,10 @@ is needed. `CF_KV` is reserved only for tiny registry head/pointer rows.
 
 The data model and synthetic row fixtures are defined in
 [`22_profile_registry_data_model.md`](22_profile_registry_data_model.md).
+Profile package manifest bytes and fail-closed parser validation are defined in
+[`23_profile_package_manifest.md`](23_profile_package_manifest.md). Successful
+runtime install tools must write the manifest path/digest into the package row
+and then read `CF_PROFILES` separately during manual FSV.
 
 ---
 

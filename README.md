@@ -51,6 +51,10 @@ local registry use stays offline-capable and account-free.
 The local registry storage model is governed by
 [docs/computergames/22_profile_registry_data_model.md](docs/computergames/22_profile_registry_data_model.md),
 using namespaced `CF_PROFILES` rows plus small `CF_KV` head pointers.
+Package manifests are governed by
+[docs/computergames/23_profile_package_manifest.md](docs/computergames/23_profile_package_manifest.md),
+which defines the transport metadata, provenance, compatibility matrix,
+permissions, and hash validation that registry/install tooling must enforce.
 
 ## Tools
 

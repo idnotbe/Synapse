@@ -87,6 +87,12 @@ The local storage/data-model baseline for #455 is
 `CF_PROFILES` namespaced JSON rows plus `CF_KV` head pointers; no new
 registry-specific CF migration is introduced by default.
 
+The package-manifest baseline for #456 is
+`docs/computergames/23_profile_package_manifest.md`. It defines the
+`synapse-profiles` parser/validator API, portable package manifest fields,
+provenance, compatibility matrix, permissions/use scope, hashes, and
+fail-closed edge policy.
+
 ---
 
 ## State-tracking — three sources, in order of authority

@@ -105,6 +105,11 @@ Required fields:
 - `quality_summary`
 - `compatibility`
 
+Package manifest payloads use the local manifest schema from
+[`23_profile_package_manifest.md`](23_profile_package_manifest.md). Registry
+metadata supplies the expected manifest digest; local tooling must compare it
+against manifest bytes before trusting the decoded fields.
+
 ### 5.3 ContributionSubmission
 
 Required fields:

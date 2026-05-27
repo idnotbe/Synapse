@@ -102,6 +102,9 @@ Required fields beyond the envelope:
 ### 5.2 Profile package
 
 Represents an installable package version.
+The manifest bytes are defined by
+[`23_profile_package_manifest.md`](23_profile_package_manifest.md); this row
+stores the manifest/package digests and registry state after validation.
 
 Required fields beyond the envelope:
 

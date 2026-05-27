@@ -3446,9 +3446,11 @@ dependencies = [
 name = "synapse-profiles"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "notify",
  "regex",
  "serde",
+ "sha2",
  "synapse-core",
  "tempfile",
  "thiserror",

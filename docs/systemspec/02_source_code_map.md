@@ -265,6 +265,11 @@ crates/synapse-profiles/
 └── src/
     ├── lib.rs                      # Crate-level re-exports
     ├── error.rs                    # ProfileError + ProfileLoadError with .code() mapping to PROFILE_*
+    ├── package/
+    │   ├── mod.rs                  # Public package-manifest parse/validate entrypoints
+    │   ├── digest.rs               # SHA-256 digest helper and digest comparison
+    │   ├── types.rs                # ProfilePackageManifest and nested manifest data types
+    │   └── validation.rs           # Fail-closed package metadata validation rules
     ├── parser.rs                   # parse_profile_file, LoadedProfile, ProfileDefaults, ScreenBounds, bundled_profiles_dir
     ├── resolver.rs                 # ForegroundWindow + resolve_active_profile (regex matching against exe/title/steam_appid)
     ├── toml_format.rs              # RawProfile TOML schema (private)
@@ -342,7 +347,7 @@ crates/synapse-overlay/
 
 | Path | Description |
 |---|---|
-| `docs/computergames/` | Product Requirements Document (PRD) — 23 numbered files covering architecture, perception, action, reflex, MCP surface, schemas, storage, supported use, hardware HID, perf budget, security, observability, testing, build, roadmap, open questions, research appendix, Luanti benchmark/runbook, profile-registry governance, optional registry protocol, and local registry data model |
+| `docs/computergames/` | Product Requirements Document (PRD) — 24 numbered files covering architecture, perception, action, reflex, MCP surface, schemas, storage, supported use, hardware HID, perf budget, security, observability, testing, build, roadmap, open questions, research appendix, Luanti benchmark/runbook, profile-registry governance, optional registry protocol, local registry data model, and profile package manifests |
 | `docs/impplan/` | Implementation plan — methodology + per-milestone work-item ledger (M0 through M5) + cross-cutting concerns |
 | `docs/adr/0001-current-rust-and-dependencies.md` | ADR: pinned to current stable Rust, no MSRV downgrade |
 | `docs/adr/0002-rocksdb-primary-storage.md` | ADR: RocksDB chosen over LMDB/sled for primary storage |

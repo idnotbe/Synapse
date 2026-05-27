@@ -20,6 +20,7 @@ Source files covered:
 - `docs/computergames/20_profile_registry_governance.md`
 - `docs/computergames/21_profile_registry_protocol.md`
 - `docs/computergames/22_profile_registry_data_model.md`
+- `docs/computergames/23_profile_package_manifest.md`
 - `docs/adr/0001..0007*.md`
 
 ## 1. Authority order
@@ -68,6 +69,12 @@ authoring from audit/replay evidence; #463 retention/dedupe/compaction/backfill;
 #466 curated seed registry; #467 roadmap/docs alignment; #468 inspector;
 #469 optional shared registry protocol and moderation; #470 contribution
 rights, licensing, revocation.
+
+The package-manifest baseline for #456 is
+`docs/computergames/23_profile_package_manifest.md`: it defines the
+`synapse-profiles` parser/validator API, package metadata/provenance,
+compatibility targets, local assumptions, permissions, and hash validation
+before runtime install/registry tools land.
 
 Registry/audit work must name the physical SoT in its acceptance evidence:
 profile TOML files, future registry index/package files, RocksDB `CF_ACTION_LOG`,
@@ -263,6 +270,7 @@ Open items remaining (PRD §16): OQ-003 (detection model default — YOLOv10n vs
 | `docs/computergames/20_profile_registry_governance.md` | Profile/audit contribution rights, licensing, attribution, provenance, and revocation governance |
 | `docs/computergames/21_profile_registry_protocol.md` | Optional shared registry protocol, source config, moderation state, update metadata, and contribution submission boundary |
 | `docs/computergames/22_profile_registry_data_model.md` | Local profile registry data model, `CF_PROFILES`/`CF_KV` row namespaces, and install/register edge rules |
+| `docs/computergames/23_profile_package_manifest.md` | Profile package manifest schema, provenance, compatibility targets, permissions, hashes, and fail-closed validation |
 | `docs/impplan/00_methodology.md` | Dev discipline, FSV protocol, work-item shape |
 | `docs/impplan/0{1..6}_m{0..5}_*.md` | Per-milestone work-item ledger |
 | `docs/impplan/07_cross_cutting.md` | Perf gates, security, observability, release |

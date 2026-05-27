@@ -3,6 +3,10 @@
 Source files covered:
 - `crates/synapse-profiles/src/lib.rs`
 - `crates/synapse-profiles/src/error.rs`
+- `crates/synapse-profiles/src/package/mod.rs`
+- `crates/synapse-profiles/src/package/digest.rs`
+- `crates/synapse-profiles/src/package/types.rs`
+- `crates/synapse-profiles/src/package/validation.rs`
 - `crates/synapse-profiles/src/parser.rs`
 - `crates/synapse-profiles/src/resolver.rs`
 - `crates/synapse-profiles/src/toml_format.rs`
@@ -14,18 +18,25 @@ Source files covered:
 - `crates/synapse-test-utils/src/fixtures.rs`
 - `crates/synapse-test-utils/src/stdio_mcp_client.rs`
 
-## 1. `synapse-profiles` — TOML profile loader + live reload
+## 1. `synapse-profiles` — TOML profile loader + package manifests + live reload
 
 ### 1.1 Public surface
 
 | Symbol | Source |
 |---|---|
 | `ProfileError`, `ProfileLoadError` | `error.rs` |
+| `ProfilePackageManifest`, `PackageAuthor`, `PackageSource`, `PackageTarget`, `PackageAssumptions`, `PackageInput`, `PackagePermissions`, `PackageExecutionPermissions`, `PackageContributionPermissions`, `PackageHashes`, `PackageFiles` | `package/types.rs` |
+| `PROFILE_PACKAGE_KIND`, `PROFILE_PACKAGE_SCHEMA_VERSION`, `parse_package_manifest_file`, `parse_package_manifest_bytes`, `parse_package_manifest_bytes_with_digest`, `package_manifest_digest` | `package/mod.rs` / `package/digest.rs` |
 | `LoadedProfile`, `ProfileDefaults`, `ScreenBounds`, `bundled_profiles_dir`, `parse_profile_bytes`, `parse_profile_file`, `parse_profile_file_with_bounds` | `parser.rs` |
 | `ForegroundWindow`, `ProfileMatchResolution`, `resolve_active_profile` | `resolver.rs` |
 | `ProfileRuntime`, `ProfileStatus` | `watcher.rs` |
 
 `toml_format.rs` is private (holds `RawProfile`, the TOML-shaped intermediate).
+`package/validation.rs` is private and enforces fail-closed package manifest
+rules for schema version, kind, id shape, semver, RFC3339 timestamps,
+provenance, compatibility targets, local assumptions, input backends,
+permissions, SPDX allow-list, SHA-256 digests, file paths, and manifest digest
+mismatch.
 
 ### 1.2 `ProfileDefaults` and `ScreenBounds`
 
