@@ -635,20 +635,20 @@ code exists; it is done only when the issue is closed with manual FSV evidence.
 
 | Issue | State | Work item |
 |---|---|---|
-| #368 | open | A-01 create `firmware/pico-hid` Cargo project, memory map, embassy init, LED hello world. |
-| #369 | open | A-02 ADR: USB VID/PID assignment for Synapse Pico HID. |
-| #370 | open | A-03 USB CDC ACM serial channel and 10k-byte loopback echo. |
-| #371 | open | A-04 HID composite descriptor: boot mouse, boot keyboard, HID gamepad. |
+| #368 | blocked | A-01 create `firmware/pico-hid` Cargo project, memory map, embassy init, LED hello world; waits on physical Pico flash/LED readback. |
+| #369 | blocked | A-02 ADR: USB VID/PID assignment for Synapse Pico HID; waits on physical Windows VID/PID enumeration readback. |
+| #370 | closed | A-03 USB CDC ACM serial channel and 10k-byte loopback echo. |
+| #371 | blocked | A-04 HID composite descriptor: boot mouse, boot keyboard, HID gamepad; waits on physical HIDClass/DirectInput readback. |
 | #372 | closed | A-05 ADR: HID gamepad vs raw XInput emulation and ViGEm interplay. |
 | #373 | closed | A-06 protocol parser: MAGIC/LEN/SEQ/CMD/payload/CRC16. |
-| #374 | open | A-07 command dispatcher for mouse, keyboard, pad, release, watchdog, identify, telemetry. |
-| #375 | open | A-08 watchdog default 1000 ms, internal RELEASE_ALL, telemetry counter. |
-| #376 | open | A-09 LED status patterns. |
-| #377 | open | A-10 telemetry counters. |
-| #378 | open | A-11 elf2uf2 build pipeline and release firmware path. |
-| #379 | open | A-12 `EXPECTED_FW_MAJOR` constant and version drift handshake. |
+| #374 | blocked | A-07 command dispatcher for mouse, keyboard, pad, release, watchdog, identify, telemetry; waits on physical CDC-to-HID readback. |
+| #375 | blocked | A-08 watchdog default 1000 ms, internal RELEASE_ALL, telemetry counter; waits on physical release/telemetry readback. |
+| #376 | blocked | A-09 LED status patterns; waits on physical LED observation. |
+| #377 | blocked | A-10 telemetry counters; waits on real-device counter readback. |
+| #378 | blocked | A-11 elf2uf2 build pipeline and release firmware path; waits on physical BOOTSEL flash/re-enumeration. |
+| #379 | closed | A-12 `EXPECTED_FW_MAJOR` constant and version drift handshake. |
 | #380 | closed | A-13 host-side protocol roundtrip tests. |
-| #381 | open | A-14 loopback firmware build for off-target debugging. |
+| #381 | blocked | A-14 loopback firmware build for off-target debugging; waits on real Pico loopback PONG run. |
 
 ### 6.3 Block B - host driver
 
