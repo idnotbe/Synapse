@@ -16,6 +16,18 @@ pub struct ActPressParams {
     pub backend: PressBackend,
 }
 
+#[derive(Clone, Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ActKeymapParams {
+    pub alias: String,
+    #[serde(default = "default_hold_ms")]
+    #[schemars(default = "default_hold_ms", range(min = 1, max = 30000))]
+    pub hold_ms: u32,
+    #[serde(default = "default_press_backend")]
+    #[schemars(default = "default_press_backend")]
+    pub backend: PressBackend,
+}
+
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum PressBackend {
@@ -28,6 +40,19 @@ pub enum PressBackend {
 #[serde(deny_unknown_fields)]
 pub struct ActPressResponse {
     pub ok: bool,
+    pub keys_pressed: u32,
+    pub elapsed_ms: u32,
+    pub backend_used: String,
+}
+
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ActKeymapResponse {
+    pub ok: bool,
+    pub alias: String,
+    pub resolved_binding: String,
+    pub resolved_keys: Vec<String>,
+    pub hold_ms: u32,
     pub keys_pressed: u32,
     pub elapsed_ms: u32,
     pub backend_used: String,

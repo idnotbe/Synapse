@@ -36,7 +36,7 @@ Comprehensive technical reference for the Synapse MCP server, produced by readin
 
 ## Read order
 
-1. [01_system_overview.md](#file-01) — architecture map, tech stack, 51-tool inventory, error hierarchy
+1. [01_system_overview.md](#file-01) — architecture map, tech stack, 52-tool inventory, error hierarchy
 2. [02_source_code_map.md](#file-02) — file tree with per-file descriptions, dep graph, entry-point traces
 3. [03_configuration.md](#file-03) — CLI flags, env vars, validation, all numeric defaults
 4. [04_storage_layer.md](#file-04) — RocksDB schema (11 CFs), schema sentinel, TTL filter, GC, disk pressure
@@ -192,7 +192,7 @@ Release profile: `opt-level=3`, `lto="thin"`, `codegen-units=16`, `panic="abort"
 
 ## 4. Public MCP tool surface (live)
 
-All 51 live tools live in `crates/synapse-mcp/src/server.rs` (declared via `#[tool_router]`). Grouped by milestone:
+All 52 live tools live in `crates/synapse-mcp/src/server.rs` (declared via `#[tool_router]`). Grouped by milestone:
 
 ### 4.1 M1 — perception (6 tools)
 
@@ -205,13 +205,14 @@ All 51 live tools live in `crates/synapse-mcp/src/server.rs` (declared via `#[to
 | `set_capture_target` | Switch active capture target between Primary / Monitor / Window / Element-window | `server.rs::set_capture_target` |
 | `set_perception_mode` | Override perception mode (auto, a11y_only, pixel_only, hybrid) | `server.rs::set_perception_mode` |
 
-### 4.2 M2 — action (9 tools)
+### 4.2 M2 — action (10 tools)
 
 | Tool | Description | Source |
 |---|---|---|
 | `act_click` | Click coord or UIA element (1–3 clicks, modifiers (not yet wired), invoke-pattern, natural/instant/linear/ease curve) | `server.rs::act_click`, `m2/click/*` |
 | `act_type` | Type Unicode text; burst / linear / natural dynamics; optional element focus + press_enter_after | `server.rs::act_type`, `m2/type_text.rs` |
 | `act_press` | Press a single key or ordered chord with hold duration | `server.rs::act_press`, `m2/press/*` |
+| `act_keymap` | Resolve an active-profile keymap alias to a reviewed key/chord, then press it through the foreground-gated keyboard path | `server.rs::act_keymap`, `m2/press/*` |
 | `act_aim` | Move pointer to point / element / track-id (snap / flick / natural / track) | `server.rs::act_aim`, `m2/aim.rs` |
 | `act_drag` | Drag between point/element points with chosen button and curve | `server.rs::act_drag`, `m2/drag.rs` |
 | `act_scroll` | Horizontal/vertical mouse-wheel scroll, optional smoothing | `server.rs::act_scroll`, `m2/scroll.rs` |
@@ -257,7 +258,7 @@ All 51 live tools live in `crates/synapse-mcp/src/server.rs` (declared via `#[to
 | `profile_authoring_accept` | Mark a candidate accepted without activating or mutating the active profile | `server.rs::profile_authoring_accept`, `m3/profile_authoring.rs` |
 | `profile_authoring_reject` | Mark a candidate rejected with an optional local reason | `server.rs::profile_authoring_reject`, `m3/profile_authoring.rs` |
 | `profile_authoring_export` | Export one candidate row to a local JSON bundle file and read the written file back | `server.rs::profile_authoring_export`, `m3/profile_authoring.rs` |
-| `profile_quality_refresh` | Refresh a local profile-quality snapshot from real `CF_ACTION_LOG`, `CF_OBSERVATIONS`, and `CF_EVENTS` rows and persist/read it in `CF_PROFILES` | `server.rs::profile_quality_refresh`, `m3/profile_quality.rs` |
+| `profile_quality_refresh` | Refresh a local profile-quality snapshot from real `CF_ACTION_LOG` rows and persist/read it in `CF_PROFILES` | `server.rs::profile_quality_refresh`, `m3/profile_quality.rs` |
 | `profile_registry_search` | Search local registry rows under `profile_registry/v1/` in `CF_PROFILES` | `server.rs::profile_registry_search`, `m3/profile_registry.rs` |
 | `profile_registry_inspect` | Inspect one registry row in `CF_PROFILES` or registry head row in `CF_KV` | `server.rs::profile_registry_inspect`, `m3/profile_registry.rs` |
 | `profile_registry_report` | Report installed registry packages, quarantine/rollback state, quality snapshots, consent/export status, recent audit evidence, and physical SoT pointers | `server.rs::profile_registry_report`, `m3/profile_registry.rs` |
@@ -504,7 +505,7 @@ crates/synapse-mcp/
 ├── Cargo.toml                      # Binary crate; depends on every other library crate
 └── src/
     ├── main.rs                     # Process entrypoint, clap CLI, telemetry init, stdio/http dispatch
-    ├── server.rs                   # SynapseService: ServerHandler + #[tool_router] declaring 50 MCP tools
+    ├── server.rs                   # SynapseService: ServerHandler + #[tool_router] declaring 52 MCP tools
     ├── server/
     │   ├── action_audit.rs         # CF_ACTION_LOG start/result audit rows with profile/session context
     │   ├── audit_context.rs        # Profile activation/session/event audit context persistence helpers
@@ -1410,8 +1411,9 @@ sensitive fields, and writes local bundle files (`manifest.json`, `rows.json`,
 
 `profile_registry_report` is read-only. It scans `CF_PROFILES` registry and
 quality prefixes, `CF_KV` registry-head and consent prefixes, and recent
-`CF_ACTION_LOG` rows, then returns exact CF/key/path pointers so the operator
-can verify the report with separate SoT reads.
+`CF_ACTION_LOG` rows plus quality snapshots populated from observations/events,
+then returns exact CF/key/path pointers so the operator can verify the report
+with separate SoT reads.
 
 `profile_registry_export bundle_kind="contribution"` writes a local JSON
 contribution bundle that combines registry rows, redacted action-audit evidence
@@ -2011,7 +2013,7 @@ pub struct SynapseService {
 }
 ```
 
-Implements `rmcp::ServerHandler` via `#[tool_handler(router = self.tool_router)]`. The 51 tools are declared on the same struct under the M1/M2/M3/M4 `#[tool_router]` impls; `#[tool(description = "...")]` annotations produce JSON-Schema entries for `tools/list` automatically.
+Implements `rmcp::ServerHandler` via `#[tool_handler(router = self.tool_router)]`. The 52 tools are declared on the same struct under the M1/M2/M3/M4 `#[tool_router]` impls; `#[tool(description = "...")]` annotations produce JSON-Schema entries for `tools/list` automatically.
 
 ### 1.1 Constructors
 
@@ -2277,7 +2279,7 @@ The disabling step persists `StoredReflexAudit` rows with `error_code = REFLEX_D
 
 ## 8. Tool list snapshot
 
-The full list of 51 declared tools is in [13_mcp_tool_reference.md](#file-13). They are: `health`, `observe`, `find`, `read_text`, `set_capture_target`, `set_perception_mode`, `act_click`, `act_type`, `act_press`, `act_aim`, `act_drag`, `act_scroll`, `act_pad`, `act_clipboard`, `release_all`, `subscribe`, `subscribe_cancel`, `reflex_register`, `reflex_cancel`, `reflex_list`, `reflex_history`, `profile_list`, `profile_activate`, `profile_authoring_generate`, `profile_authoring_list`, `profile_authoring_inspect`, `profile_authoring_accept`, `profile_authoring_reject`, `profile_authoring_export`, `profile_quality_refresh`, `profile_registry_search`, `profile_registry_inspect`, `profile_registry_report`, `profile_registry_install`, `profile_registry_disable`, `profile_registry_export`, `profile_registry_import`, `profile_registry_rollback`, `audit_intelligence_query`, `audit_export_consent_set`, `audit_export_bundle`, `replay_record`, `audio_tail`, `audio_transcribe`, `storage_inspect`, `storage_put_probe_rows`, `storage_gc_once`, `storage_pressure_sample`, `act_combo`, `act_run_shell`, `act_launch` — note the M3 module set lives in `m3_tool_stubs()` (length-asserted at 33 in `instructions()`).
+The full list of 52 declared tools is in [13_mcp_tool_reference.md](#file-13). They are: `health`, `observe`, `find`, `read_text`, `set_capture_target`, `set_perception_mode`, `act_click`, `act_type`, `act_press`, `act_keymap`, `act_aim`, `act_drag`, `act_scroll`, `act_pad`, `act_clipboard`, `release_all`, `subscribe`, `subscribe_cancel`, `reflex_register`, `reflex_cancel`, `reflex_list`, `reflex_history`, `profile_list`, `profile_activate`, `profile_authoring_generate`, `profile_authoring_list`, `profile_authoring_inspect`, `profile_authoring_accept`, `profile_authoring_reject`, `profile_authoring_export`, `profile_quality_refresh`, `profile_registry_search`, `profile_registry_inspect`, `profile_registry_report`, `profile_registry_install`, `profile_registry_disable`, `profile_registry_export`, `profile_registry_import`, `profile_registry_rollback`, `audit_intelligence_query`, `audit_export_consent_set`, `audit_export_bundle`, `replay_record`, `audio_tail`, `audio_transcribe`, `storage_inspect`, `storage_put_probe_rows`, `storage_gc_once`, `storage_pressure_sample`, `act_combo`, `act_run_shell`, `act_launch` — note the M3 module set lives in `m3_tool_stubs()` (length-asserted at 33 in `instructions()`).
 
 
 ---
@@ -3907,15 +3909,15 @@ Open M4 work (per `docs/impplan/05_m4_hardware_hid_first_game.md`):
 
 - `firmware/pico-hid/` — standalone RP2040 firmware project excluded from the root Cargo workspace; remaining firmware issues close only with real device evidence.
 - `synapse-hid-host` — serial driver with discovery, connect/IDENTIFY, CRC16 framing, pipeline/backpressure, and reconnect paths. `Backend::Hardware` uses `HardwareBackend` when `--hardware-hid <port|auto>` connects successfully, otherwise it fails closed through `HardwareUnavailableBackend`.
-- `act_combo`, `act_run_shell`, `act_launch` — three M4 tools that bring the live MCP tool count from 30 -> 33; M5 profile-registry/audit work adds `profile_quality_refresh`, six `profile_authoring_*` candidate tools, eight `profile_registry_*` tools including the report inspector and rollback, `audit_intelligence_query`, `audit_export_consent_set`, and `audit_export_bundle`, bringing the live surface to 51.
+- `act_combo`, `act_run_shell`, `act_launch` — three M4 tools that bring the live MCP tool count from 30 -> 33; #499 adds `act_keymap` for profile keymap aliases; M5 profile-registry/audit work adds `profile_quality_refresh`, six `profile_authoring_*` candidate tools, eight `profile_registry_*` tools including the report inspector and rollback, `audit_intelligence_query`, `audit_export_consent_set`, and `audit_export_bundle`, bringing the live surface to 52.
 - `minecraft.java` profile (the first game profile) — fifth bundled profile, validated against a single-player creative world per `15_roadmap_and_milestones.md` §6.
 - M3 hold-over items still open: per-subscriber `subscribe.buffer_size` (currently hard-pinned to 4096); persistent writers for `CF_EVENTS`/`CF_OBSERVATIONS`/`CF_SESSIONS`/`CF_TELEMETRY`/`CF_PROCESS_HISTORY`/`CF_KV` (`CF_REFLEX_AUDIT` and `CF_ACTION_LOG` have live writers); audio detector → SSE-bus sink integration. Profile HUD fields now run through `observe`; standalone `read_hud` remains deferred. VLM `describe` and Florence-2 remain M5.
 
 ## 3. Tools delivered vs planned
 
 PRD `docs/computergames/05_mcp_tool_surface.md` started from a 30-tool M3
-baseline and now records the approved 51-tool live surface after M4/M5
-expansion. Current build:
+baseline and now records the approved 52-tool live surface after M4/M5
+expansion plus the #499 profile-keymap action alias. Current build:
 
 | # | Tool | Milestone | Status | Note |
 |---|---|---|---|---|
@@ -3928,52 +3930,53 @@ expansion. Current build:
 | 7 | `act_click` | M2 | live | modifiers not yet wired |
 | 8 | `act_type` | M2 | live | |
 | 9 | `act_press` | M2 | live | |
-| 10 | `act_aim` | M2 | live | Element / Track targets return `ACTION_BACKEND_UNAVAILABLE` |
-| 11 | `act_drag` | M2 | live | |
-| 12 | `act_scroll` | M2 | live | |
-| 13 | `act_pad` | M2 | live | |
-| 14 | `act_clipboard` | M2 | live | |
-| 15 | `release_all` | M2 | live | |
-| 16 | `subscribe` | M3 | live | `buffer_size` pinned at 4096 |
-| 17 | `subscribe_cancel` | M3 | live | |
-| 18 | `reflex_register` | M3 | live | |
-| 19 | `reflex_cancel` | M3 | live | |
-| 20 | `reflex_list` | M3 | live | |
-| 21 | `reflex_history` | M3 | live | |
-| 22 | `profile_list` | M3 | live | |
-| 23 | `profile_activate` | M3 | live | use_scope=unknown requires `--allow-unknown-profile` |
-| 24 | `replay_record` | M3 | live | JSONL only |
-| 25 | `audio_tail` | M3 | live | |
-| 26 | `audio_transcribe` | M3 | live (en only) | |
-| 27 | `storage_inspect` | M3 (operator) | live | per-CF row+byte size readback |
-| 28 | `storage_put_probe_rows` | M3 (operator) | live | manual storage write/readback support tool |
-| 29 | `storage_gc_once` | M3/M5 (operator) | live | synchronous GC pass; `AUDIT_RETENTION` mode writes #463 retention/dedupe/backfill report rows |
-| 30 | `storage_pressure_sample` | M3 (operator) | live | synthetic disk-pressure trigger |
+| 10 | `act_keymap` | M2/#499 | live | resolves active-profile keymap aliases and audits alias plus resolved key/chord |
+| 11 | `act_aim` | M2 | live | Element / Track targets return `ACTION_BACKEND_UNAVAILABLE` |
+| 12 | `act_drag` | M2 | live | |
+| 13 | `act_scroll` | M2 | live | |
+| 14 | `act_pad` | M2 | live | |
+| 15 | `act_clipboard` | M2 | live | |
+| 16 | `release_all` | M2 | live | |
+| 17 | `subscribe` | M3 | live | `buffer_size` pinned at 4096 |
+| 18 | `subscribe_cancel` | M3 | live | |
+| 19 | `reflex_register` | M3 | live | |
+| 20 | `reflex_cancel` | M3 | live | |
+| 21 | `reflex_list` | M3 | live | |
+| 22 | `reflex_history` | M3 | live | |
+| 23 | `profile_list` | M3 | live | |
+| 24 | `profile_activate` | M3 | live | use_scope=unknown requires `--allow-unknown-profile` |
+| 25 | `replay_record` | M3 | live | JSONL only |
+| 26 | `audio_tail` | M3 | live | |
+| 27 | `audio_transcribe` | M3 | live (en only) | |
+| 28 | `storage_inspect` | M3 (operator) | live | per-CF row+byte size readback |
+| 29 | `storage_put_probe_rows` | M3 (operator) | live | manual storage write/readback support tool |
+| 30 | `storage_gc_once` | M3/M5 (operator) | live | synchronous GC pass; `AUDIT_RETENTION` mode writes #463 retention/dedupe/backfill report rows |
+| 31 | `storage_pressure_sample` | M3 (operator) | live | synthetic disk-pressure trigger |
 | — | `read_hud` | (deferred to M4) | not live | standalone tool deferred; profile HUD extraction is live through `observe` |
-| 31 | `act_combo` | M4 | live | one-shot timed action sequence |
-| 32 | `act_run_shell` | M4 (gated) | live | allowlisted local shell command |
-| 33 | `act_launch` | M4 (gated) | live | allowlisted local process launch |
-| 34 | `profile_authoring_generate` | M5 (registry/audit) | live | writes a profile-authoring candidate row from replay/audit evidence |
-| 35 | `profile_authoring_list` | M5 (registry/audit) | live | lists local authoring candidate rows |
-| 36 | `profile_authoring_inspect` | M5 (registry/audit) | live | reads one candidate row |
-| 37 | `profile_authoring_accept` | M5 (registry/audit) | live | marks a candidate accepted without activation |
-| 38 | `profile_authoring_reject` | M5 (registry/audit) | live | marks a candidate rejected |
-| 39 | `profile_authoring_export` | M5 (registry/audit) | live | exports one candidate bundle |
-| 40 | `profile_quality_refresh` | M5 (registry/audit) | live | writes `CF_PROFILES` quality snapshot from action, observation, and event rows |
-| 41 | `profile_registry_search` | M5 (registry/audit) | live | searches `CF_PROFILES` registry rows |
-| 42 | `profile_registry_inspect` | M5 (registry/audit) | live | reads one `CF_PROFILES`/`CF_KV` registry row |
-| 43 | `profile_registry_report` | M5 (registry/audit) | live | reports registry, quality, audit, consent, quarantine, and SoT pointers |
-| 44 | `profile_registry_install` | M5 (registry/audit) | live | validates package manifest/profile TOML and writes registry rows |
-| 45 | `profile_registry_disable` | M5 (registry/audit) | live | disables or removes an installed registry row |
-| 46 | `profile_registry_export` | M5 (registry/audit) | live | exports local registry or contribution bundle |
-| 47 | `profile_registry_import` | M5 (registry/audit) | live | imports validated registry/contribution bundle |
-| 48 | `profile_registry_rollback` | M5 (registry/audit) | live | restores installed profile to a prior trusted package |
-| 49 | `audit_intelligence_query` | M5 (registry/audit) | live | summarizes profile-linked audit outcomes |
-| 50 | `audit_export_consent_set` | M5 (registry/audit) | live | writes/reads local audit export consent |
-| 51 | `audit_export_bundle` | M5 (registry/audit) | live | exports consented redacted local audit bundle |
+| 32 | `act_combo` | M4 | live | one-shot timed action sequence |
+| 33 | `act_run_shell` | M4 (gated) | live | allowlisted local shell command |
+| 34 | `act_launch` | M4 (gated) | live | allowlisted local process launch |
+| 35 | `profile_authoring_generate` | M5 (registry/audit) | live | writes a profile-authoring candidate row from replay/audit evidence |
+| 36 | `profile_authoring_list` | M5 (registry/audit) | live | lists local authoring candidate rows |
+| 37 | `profile_authoring_inspect` | M5 (registry/audit) | live | reads one candidate row |
+| 38 | `profile_authoring_accept` | M5 (registry/audit) | live | marks a candidate accepted without activation |
+| 39 | `profile_authoring_reject` | M5 (registry/audit) | live | marks a candidate rejected |
+| 40 | `profile_authoring_export` | M5 (registry/audit) | live | exports one candidate bundle |
+| 41 | `profile_quality_refresh` | M5 (registry/audit) | live | writes `CF_PROFILES` quality snapshot from `CF_ACTION_LOG` |
+| 42 | `profile_registry_search` | M5 (registry/audit) | live | searches `CF_PROFILES` registry rows |
+| 43 | `profile_registry_inspect` | M5 (registry/audit) | live | reads one `CF_PROFILES`/`CF_KV` registry row |
+| 44 | `profile_registry_report` | M5 (registry/audit) | live | reports registry, quality, audit, consent, quarantine, and SoT pointers |
+| 45 | `profile_registry_install` | M5 (registry/audit) | live | validates package manifest/profile TOML and writes registry rows |
+| 46 | `profile_registry_disable` | M5 (registry/audit) | live | disables or removes an installed registry row |
+| 47 | `profile_registry_export` | M5 (registry/audit) | live | exports local registry or contribution bundle |
+| 48 | `profile_registry_import` | M5 (registry/audit) | live | imports validated registry/contribution bundle |
+| 49 | `profile_registry_rollback` | M5 (registry/audit) | live | restores installed profile to a prior trusted package |
+| 50 | `audit_intelligence_query` | M5 (registry/audit) | live | summarizes profile-linked audit outcomes |
+| 51 | `audit_export_consent_set` | M5 (registry/audit) | live | writes/reads local audit export consent |
+| 52 | `audit_export_bundle` | M5 (registry/audit) | live | exports consented redacted local audit bundle |
 | — | `describe` | M5 (VLM) | not live | Florence-2 |
 
-Live count in `crates/synapse-mcp/src/server.rs`: **51** (M1: 6, M2: 9,
+Live count in `crates/synapse-mcp/src/server.rs`: **52** (M1: 6, M2/action: 10,
 M3/M5 module stubs: 33 including `profile_quality_refresh`, six
 `profile_authoring_*` tools, eight `profile_registry_*` tools,
 `audit_intelligence_query`, `audit_export_consent_set`, `audit_export_bundle`,
@@ -4152,7 +4155,7 @@ Source files covered:
 - `crates/synapse-mcp/src/m3/{audio, audit_export, permissions, profile, profile_authoring, profile_quality, profile_registry, reflex, replay, subscribe}.rs`
 - `crates/synapse-core/src/types.rs`
 
-All 51 tools below are registered on `SynapseService` via `#[tool(description=...)]` in `server.rs`. Tool descriptions are taken verbatim from the source. Every tool returns through `Json<T>` so the response shape exactly matches the deserialized response struct.
+All 52 live tools are registered on `SynapseService` via `#[tool(description=...)]` in `server.rs`. Tool descriptions are taken verbatim from the source. Every tool returns through `Json<T>` so the response shape exactly matches the deserialized response struct.
 
 Default error response shape (all tools): `ErrorData { code: rmcp::ErrorCode(-32099), message, data: { "code": <SCREAMING_SNAKE_CASE> } }` via `crates/synapse-mcp/src/m1.rs::mcp_error`.
 
@@ -4299,6 +4302,20 @@ Default error response shape (all tools): `ErrorData { code: rmcp::ErrorCode(-32
 
 **Returns:** `ActPressResponse { ok, keys_pressed: u32, elapsed_ms: u32, backend_used: String }`.
 **Errors:** `ACTION_UNSUPPORTED_KEY`, `ACTION_RATE_LIMITED`, `ACTION_BACKEND_UNAVAILABLE` (`Hardware` until M4).
+
+## 9a. `act_keymap`
+
+**Description:** "Press a keyboard alias from the active profile keymap"
+**Side effects:** Resolves the active profile `[keymap]` alias, then emits the same keyboard action path as `act_press`.
+
+| Parameter | Type | Required | Default | Range | Description |
+|---|---|---|---|---|---|
+| `alias` | `String` | yes | — | non-empty after trim | Lowercased active-profile keymap alias, for example `inventory`, `target_nearest_npc`, `con`, `menu`, or `hotbar1` |
+| `hold_ms` | `u32` | no | `33` | `1..=30000` | Passed to the lowered `act_press` request |
+| `backend` | `PressBackend` | no | `Auto` | `Software`/`Hardware`/`Auto` | |
+
+**Returns:** `ActKeymapResponse { ok, alias, resolved_binding, resolved_keys, hold_ms, keys_pressed, elapsed_ms, backend_used }`.
+**Errors:** `PROFILE_NOT_FOUND`, `PROFILE_KEYMAP_INVALID`, `TOOL_PARAMS_INVALID`, `ACTION_UNSUPPORTED_KEY`, `ACTION_HOLD_EXCEEDED_MAX`, `ACTION_RATE_LIMITED`, `ACTION_BACKEND_UNAVAILABLE`, and supported-use foreground/policy denial errors. Action audit rows keep the requested alias plus result/error details so FSV can read the stored intent and resolved key/chord.
 
 ## 10. `act_aim`
 
@@ -5134,7 +5151,7 @@ Source files covered:
 - `m3_reflex_cancel_tool.rs`, `m3_reflex_history_tool.rs`, `m3_reflex_list_tool.rs`, `m3_reflex_register_tool.rs` — reflex CRUD
 - `m3_replay_record_tool.rs` — replay JSONL writer
 - `m3_subscribe_tool.rs` — subscribe + cancel
-- `m3_tools_list.rs` / `m4_tools_list.rs` — `tools/list` exposes the current 51-tool surface, including M5 profile-registry/audit tools, #462 `profile_authoring_*`, #468 `profile_registry_report`, `profile_registry_rollback`, and the #460 `audit_export_*` tools
+- `m3_tools_list.rs` / `m4_tools_list.rs` — `tools/list` exposes the current 52-tool surface, including #499 `act_keymap`, M5 profile-registry/audit tools, #462 `profile_authoring_*`, #468 `profile_registry_report`, `profile_registry_rollback`, and the #460 `audit_export_*` tools
 - `sigint_clean_exit.rs` — Ctrl-C / Ctrl-Break shuts the daemon down within deadline
 
 ### 2.5 `synapse-models` (1 file)
@@ -5351,8 +5368,8 @@ Counted by walking `crates/` and slicing by path. Comments, blank lines, and `mo
 | Total Rust source files (excluding tests/benches) | **149** |
 | Total Rust integration-test files | 76 |
 | Total Rust bench files | 13 |
-| MCP tools registered in `server.rs` | **51** (M1: 6, M2: 9, M3/M5 module stubs: 33 including `profile_quality_refresh`, six `profile_authoring_*` tools, eight `profile_registry_*` tools, `audit_intelligence_query`, `audit_export_consent_set`, and `audit_export_bundle`; M4: `act_combo`, `act_run_shell`, `act_launch`) |
-| MCP tools approved by `05_mcp_tool_surface.md` (agent surface cap) | 51 |
+| MCP tools registered in `server.rs` | **52** (M1: 6, M2/action: 10 including `act_keymap`, M3/M5 module stubs: 33 including `profile_quality_refresh`, six `profile_authoring_*` tools, eight `profile_registry_*` tools, `audit_intelligence_query`, `audit_export_consent_set`, and `audit_export_bundle`; M4: `act_combo`, `act_run_shell`, `act_launch`) |
+| MCP tools approved by `05_mcp_tool_surface.md` (agent surface cap) | 52 |
 | RocksDB column families | **11** (`ALL_COLUMN_FAMILIES.len() == 11`; excludes implicit `default` CF) |
 | Stable error-code constants in `synapse_core::error_codes` | **105** |
 | Reserved subsystem error enums (mapped to those codes) | 11 (`StorageError`, `ReflexError`, `ActionError`, `ProfileError`, `ProfileLoadError`, `AudioError`, `PerceptionError`, `CaptureError`, `ModelError`, `A11yError`, `TelemetryError` + parse errors `ElementIdParseError`/`EventFilterValidationError`) |

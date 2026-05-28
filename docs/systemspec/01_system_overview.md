@@ -106,7 +106,7 @@ Release profile: `opt-level=3`, `lto="thin"`, `codegen-units=16`, `panic="abort"
 
 ## 4. Public MCP tool surface (live)
 
-All 51 live tools live in `crates/synapse-mcp/src/server.rs` (declared via `#[tool_router]`). Grouped by milestone:
+All 52 live tools live in `crates/synapse-mcp/src/server.rs` (declared via `#[tool_router]`). Grouped by milestone:
 
 ### 4.1 M1 — perception (6 tools)
 
@@ -119,13 +119,14 @@ All 51 live tools live in `crates/synapse-mcp/src/server.rs` (declared via `#[to
 | `set_capture_target` | Switch active capture target between Primary / Monitor / Window / Element-window | `server.rs::set_capture_target` |
 | `set_perception_mode` | Override perception mode (auto, a11y_only, pixel_only, hybrid) | `server.rs::set_perception_mode` |
 
-### 4.2 M2 — action (9 tools)
+### 4.2 M2 — action (10 tools)
 
 | Tool | Description | Source |
 |---|---|---|
 | `act_click` | Click coord or UIA element (1–3 clicks, modifiers (not yet wired), invoke-pattern, natural/instant/linear/ease curve) | `server.rs::act_click`, `m2/click/*` |
 | `act_type` | Type Unicode text; burst / linear / natural dynamics; optional element focus + press_enter_after | `server.rs::act_type`, `m2/type_text.rs` |
 | `act_press` | Press a single key or ordered chord with hold duration | `server.rs::act_press`, `m2/press/*` |
+| `act_keymap` | Resolve an active-profile keymap alias to a reviewed key/chord, then press it through the foreground-gated keyboard path | `server.rs::act_keymap`, `m2/press/*` |
 | `act_aim` | Move pointer to point / element / track-id (snap / flick / natural / track) | `server.rs::act_aim`, `m2/aim.rs` |
 | `act_drag` | Drag between point/element points with chosen button and curve | `server.rs::act_drag`, `m2/drag.rs` |
 | `act_scroll` | Horizontal/vertical mouse-wheel scroll, optional smoothing | `server.rs::act_scroll`, `m2/scroll.rs` |

@@ -90,6 +90,25 @@ from the visible crop/screenshot unless OCR agrees with the crop. If OCR
 returns an ambiguous or contradictory XP percentage, the agent must treat the
 visible crop as the SoT and record the OCR mismatch on #495/#500.
 
+## Safe Input Aliases
+
+The EverQuest profile owns reviewed keyboard aliases in its `[keymap]` table:
+movement (`forward`, `back`, `left`, `right`, `turn_left`, `turn_right`),
+targeting/consider (`target_nearest_npc`, `target_self`, `con`, `consider`),
+UI recovery (`inventory`, `spellbook`, `menu`, `open_chat`, `sit`), and
+hotbar slots (`hotbar1` through `hotbar10`). Runtime action work should prefer
+`act_keymap` for those aliases so the action audit row records both the
+semantic alias and the resolved key/chord. Direct `act_press` remains valid for
+explicit edge checks, but the profile-keymap path is the normal EverQuest
+action surface for manual FSV.
+
+Before claiming an alias effect, manually read the visible UI/log/storage SoT
+before the trigger, call the real MCP `act_keymap` tool while `eqgame.exe` is
+foreground, then separately read the visible UI/log/storage state again. The
+`CF_ACTION_LOG` row must show `tool=act_keymap`, requested alias, resolved
+binding/key list, backend, hold duration, foreground `eqgame.exe`, and the
+allow/deny/error status.
+
 ## Log Pipeline
 
 EverQuest already creates local activity logs on this host. Current readback:

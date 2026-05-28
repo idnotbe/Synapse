@@ -1,15 +1,20 @@
-use std::{sync::Arc, time::Duration};
+use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
 use synapse_action::{ActionEmitter, RecordedInput, RecordingBackend};
-use synapse_core::{Action, Backend};
+use synapse_core::{
+    Action, Backend, OcrBackend, PerceptionMode, Profile, ProfileBackends, ProfileCapture,
+    ProfileCaptureTarget, ProfileDetection, ProfileOcr, ProfileUseScope, error_codes,
+};
 use tokio_util::sync::CancellationToken;
 
 use super::{
-    act_press_with_handle,
+    act_keymap_with_handle, act_press_with_handle,
     keys::{key, normalized_keys},
     live::execute_live_press_sequence,
     record::event_sequence,
-    schema::{ActPressParams, PressBackend, default_hold_ms, default_press_backend},
+    schema::{
+        ActKeymapParams, ActPressParams, PressBackend, default_hold_ms, default_press_backend,
+    },
 };
 
 #[tokio::test]
@@ -39,6 +44,69 @@ async fn recording_backend_readback_orders_chord_and_default_hold() {
     assert_eq!(
         sequence,
         "down:ctrl>down:shift>down:s>delay:33>up:s>up:shift>up:ctrl"
+    );
+}
+
+#[tokio::test]
+async fn keymap_alias_resolves_profile_binding_and_records_chord() {
+    let (handle, _snapshot_handle, _emitter) = ActionEmitter::channel();
+    let recording = Arc::new(RecordingBackend::new());
+    let profile = profile_with_keymap([("spellbook", "ctrl+b")]);
+    let params = ActKeymapParams {
+        alias: " SpellBook ".to_owned(),
+        hold_ms: default_hold_ms(),
+        backend: default_press_backend(),
+    };
+    let before = recording.events();
+    println!("readback=act_keymap_recording edge=alias_chord before={before:?}");
+
+    let response =
+        act_keymap_with_handle(handle, Some(Arc::clone(&recording)), None, &profile, params)
+            .await
+            .unwrap_or_else(|error| panic!("act_keymap recording should succeed: {error}"));
+    let after = recording.events();
+    let sequence = event_sequence(&after);
+    println!(
+        "readback=act_keymap_recording edge=alias_chord after={after:?} sequence={sequence} alias={} binding={} resolved={:?}",
+        response.alias, response.resolved_binding, response.resolved_keys
+    );
+
+    assert!(response.ok);
+    assert_eq!(response.alias, "spellbook");
+    assert_eq!(response.resolved_binding, "ctrl+b");
+    assert_eq!(response.resolved_keys, ["ctrl".to_owned(), "b".to_owned()]);
+    assert_eq!(response.keys_pressed, 2);
+    assert_eq!(response.backend_used, "software");
+    assert_eq!(sequence, "down:ctrl>down:b>delay:33>up:b>up:ctrl");
+}
+
+#[tokio::test]
+async fn keymap_alias_missing_fails_closed() {
+    let (handle, _snapshot_handle, _emitter) = ActionEmitter::channel();
+    let recording = Arc::new(RecordingBackend::new());
+    let profile = profile_with_keymap([("inventory", "i")]);
+    let params = ActKeymapParams {
+        alias: "target_nearest_npc".to_owned(),
+        hold_ms: default_hold_ms(),
+        backend: default_press_backend(),
+    };
+    let before = recording.events();
+    println!("readback=act_keymap_recording edge=missing_alias before={before:?}");
+
+    let error =
+        match act_keymap_with_handle(handle, Some(Arc::clone(&recording)), None, &profile, params)
+            .await
+        {
+            Ok(response) => panic!("missing keymap alias should fail closed: {response:?}"),
+            Err(error) => error,
+        };
+    let after = recording.events();
+    println!("readback=act_keymap_recording edge=missing_alias after={after:?} error={error}");
+
+    assert!(after.is_empty());
+    assert_eq!(
+        error.data.as_ref().and_then(|data| data.get("code")),
+        Some(&serde_json::json!(error_codes::PROFILE_KEYMAP_INVALID))
     );
 }
 
@@ -98,6 +166,47 @@ async fn live_press_sequence_leaves_actor_available_for_release_all_mid_hold() {
         .await
         .unwrap_or_else(|error| panic!("emitter should join: {error}"));
     assert!(final_snapshot.held_keys.is_empty());
+}
+
+fn profile_with_keymap<const N: usize>(entries: [(&str, &str); N]) -> Profile {
+    let mut keymap = BTreeMap::new();
+    for (alias, binding) in entries {
+        keymap.insert(alias.to_owned(), binding.to_owned());
+    }
+    Profile {
+        id: "test.profile".to_owned(),
+        label: "Test Profile".to_owned(),
+        version: "1.0.0".to_owned(),
+        use_scope: ProfileUseScope::OperatorOwnedTest,
+        matches: Vec::new(),
+        mode: PerceptionMode::Auto,
+        capture: ProfileCapture {
+            target: ProfileCaptureTarget::ForegroundWindow,
+            min_update_interval_ms: 16,
+            cursor_visible: true,
+        },
+        detection: ProfileDetection {
+            model_id: None,
+            classes_of_interest: Vec::new(),
+            confidence_threshold: 0.0,
+            max_detections: 0,
+        },
+        ocr: ProfileOcr {
+            default_backend: OcrBackend::Auto,
+            regions: Vec::new(),
+            parser_config: BTreeMap::new(),
+        },
+        hud: Vec::new(),
+        keymap,
+        backends: ProfileBackends {
+            default: Backend::Software,
+            keyboard_default: Backend::Software,
+            mouse_default: Backend::Software,
+            pad_default: Backend::Software,
+        },
+        metadata: BTreeMap::new(),
+        event_extensions: Vec::new(),
+    }
 }
 
 #[test]

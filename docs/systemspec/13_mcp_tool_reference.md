@@ -7,7 +7,7 @@ Source files covered:
 - `crates/synapse-mcp/src/m3/{audio, audit_export, permissions, profile, profile_authoring, profile_quality, profile_registry, reflex, replay, subscribe}.rs`
 - `crates/synapse-core/src/types.rs`
 
-All 51 tools below are registered on `SynapseService` via `#[tool(description=...)]` in `server.rs`. Tool descriptions are taken verbatim from the source. Every tool returns through `Json<T>` so the response shape exactly matches the deserialized response struct.
+All 52 live tools are registered on `SynapseService` via `#[tool(description=...)]` in `server.rs`. Tool descriptions are taken verbatim from the source. Every tool returns through `Json<T>` so the response shape exactly matches the deserialized response struct.
 
 Default error response shape (all tools): `ErrorData { code: rmcp::ErrorCode(-32099), message, data: { "code": <SCREAMING_SNAKE_CASE> } }` via `crates/synapse-mcp/src/m1.rs::mcp_error`.
 
@@ -154,6 +154,20 @@ Default error response shape (all tools): `ErrorData { code: rmcp::ErrorCode(-32
 
 **Returns:** `ActPressResponse { ok, keys_pressed: u32, elapsed_ms: u32, backend_used: String }`.
 **Errors:** `ACTION_UNSUPPORTED_KEY`, `ACTION_RATE_LIMITED`, `ACTION_BACKEND_UNAVAILABLE` (`Hardware` until M4).
+
+## 9a. `act_keymap`
+
+**Description:** "Press a keyboard alias from the active profile keymap"
+**Side effects:** Resolves the active profile `[keymap]` alias, then emits the same keyboard action path as `act_press`.
+
+| Parameter | Type | Required | Default | Range | Description |
+|---|---|---|---|---|---|
+| `alias` | `String` | yes | — | non-empty after trim | Lowercased active-profile keymap alias, for example `inventory`, `target_nearest_npc`, `con`, `menu`, or `hotbar1` |
+| `hold_ms` | `u32` | no | `33` | `1..=30000` | Passed to the lowered `act_press` request |
+| `backend` | `PressBackend` | no | `Auto` | `Software`/`Hardware`/`Auto` | |
+
+**Returns:** `ActKeymapResponse { ok, alias, resolved_binding, resolved_keys, hold_ms, keys_pressed, elapsed_ms, backend_used }`.
+**Errors:** `PROFILE_NOT_FOUND`, `PROFILE_KEYMAP_INVALID`, `TOOL_PARAMS_INVALID`, `ACTION_UNSUPPORTED_KEY`, `ACTION_HOLD_EXCEEDED_MAX`, `ACTION_RATE_LIMITED`, `ACTION_BACKEND_UNAVAILABLE`, and supported-use foreground/policy denial errors. Action audit rows keep the requested alias plus result/error details so FSV can read the stored intent and resolved key/chord.
 
 ## 10. `act_aim`
 

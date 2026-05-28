@@ -1,12 +1,16 @@
 use super::{
     ActAimParams, ActAimResponse, ActClickParams, ActClickResponse, ActClipboardParams,
-    ActClipboardResponse, ActClipboardVerb, ActDragParams, ActDragResponse, ActPadParams,
-    ActPadResponse, ActPressParams, ActPressResponse, ActScrollParams, ActScrollResponse,
-    ActTypeParams, ActTypeResponse, ErrorData, Json, Parameters, ReleaseAllParams,
-    ReleaseAllResponse, SynapseService, act_aim_with_handle, act_click_with_handle, act_clipboard,
-    act_drag_with_handle, act_pad_with_handle, act_press_with_handle, act_scroll_with_handle,
-    act_type_with_handle, release_all_with_handles, tool, tool_router,
+    ActClipboardResponse, ActClipboardVerb, ActDragParams, ActDragResponse, ActKeymapParams,
+    ActKeymapResponse, ActPadParams, ActPadResponse, ActPressParams, ActPressResponse,
+    ActScrollParams, ActScrollResponse, ActTypeParams, ActTypeResponse, ErrorData, Json,
+    Parameters, ReleaseAllParams, ReleaseAllResponse, SynapseService, act_aim_with_handle,
+    act_click_with_handle, act_clipboard, act_drag_with_handle, act_keymap_with_handle,
+    act_pad_with_handle, act_press_with_handle, act_scroll_with_handle, act_type_with_handle,
+    release_all_with_handles, tool, tool_router,
 };
+use crate::m1::mcp_error;
+use serde_json::json;
+use synapse_core::error_codes;
 
 #[tool_router(router = m2_tool_router, vis = "pub(super)")]
 impl SynapseService {
@@ -77,6 +81,67 @@ impl SynapseService {
         let result =
             act_press_with_handle(handle, recording, connection_closed_cancel, params.0).await;
         self.audit_action_result("act_press", &result)?;
+        result.map(Json)
+    }
+
+    #[tool(description = "Press a keyboard alias from the active profile keymap")]
+    pub async fn act_keymap(
+        &self,
+        params: Parameters<ActKeymapParams>,
+    ) -> Result<Json<ActKeymapResponse>, ErrorData> {
+        let params = params.0;
+        tracing::info!(
+            code = "MCP_TOOL_INVOCATION",
+            kind = "act_keymap",
+            alias = %params.alias,
+            "tool.invocation kind=act_keymap"
+        );
+        let request_details = json!({
+            "alias": params.alias.trim(),
+            "hold_ms": params.hold_ms,
+            "backend": params.backend,
+        });
+        if let Err(error) = self.ensure_supported_use_allows_action("act_keymap") {
+            self.audit_action_denied_with_details("act_keymap", &error, &request_details);
+            return Err(error);
+        }
+        self.audit_action_started_with_details(
+            "act_keymap",
+            &json!({
+                "request": request_details,
+            }),
+        )?;
+        let profile = {
+            let runtime = self.profile_runtime()?;
+            let active_profile_id = runtime
+                .active_profile_id()
+                .map_err(|error| mcp_error(error.code(), error.to_string()))?
+                .ok_or_else(|| {
+                    mcp_error(
+                        error_codes::PROFILE_NOT_FOUND,
+                        "act_keymap requires an active profile",
+                    )
+                })?;
+            runtime
+                .profile(&active_profile_id)
+                .map_err(|error| mcp_error(error.code(), error.to_string()))?
+                .ok_or_else(|| {
+                    mcp_error(
+                        error_codes::PROFILE_NOT_FOUND,
+                        format!("active profile {active_profile_id} was not found"),
+                    )
+                })?
+        };
+        let (handle, recording, connection_closed_cancel) = self.m2_action_context()?;
+        let result = act_keymap_with_handle(
+            handle,
+            recording,
+            connection_closed_cancel,
+            &profile,
+            params,
+        )
+        .await;
+        self.audit_action_result("act_keymap", &result)?;
         result.map(Json)
     }
 

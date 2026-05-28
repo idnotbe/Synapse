@@ -334,7 +334,8 @@ redaction spans. Profile-denied paths write `profile.activation_denied` events
 with the attempted profile id and current session context when one exists.
 
 For manual FSV of this linkage, trigger the real MCP tool (`profile_activate`,
-an action tool such as `act_press`/`act_combo`, and a reflex path), then read
+an action tool such as `act_keymap`/`act_press`/`act_combo`, and a reflex
+path), then read
 `storage_inspect.cf_row_counts` and the 4096-character `cf_row_samples` for
 `CF_SESSIONS`, `CF_EVENTS`, `CF_ACTION_LOG`, and `CF_REFLEX_AUDIT`. The row
 samples must show the same `session_id`/`profile_id` chain and the expected

@@ -17,7 +17,24 @@ impl SynapseService {
         self.write_action_audit_row(tool, "started", None, &json!({}))
     }
 
+    pub(super) fn audit_action_started_with_details(
+        &self,
+        tool: &'static str,
+        details: &Value,
+    ) -> Result<(), ErrorData> {
+        self.write_action_audit_row(tool, "started", None, details)
+    }
+
     pub(super) fn audit_action_denied(&self, tool: &'static str, error: &ErrorData) {
+        self.audit_action_denied_with_details(tool, error, &json!({}));
+    }
+
+    pub(super) fn audit_action_denied_with_details(
+        &self,
+        tool: &'static str,
+        error: &ErrorData,
+        details: &Value,
+    ) {
         if let Err(audit_error) = self.write_action_audit_row(
             tool,
             "denied",
@@ -25,6 +42,7 @@ impl SynapseService {
             &json!({
                 "message": error.message.to_string(),
                 "data": error.data.clone(),
+                "request": details,
             }),
         ) {
             tracing::warn!(

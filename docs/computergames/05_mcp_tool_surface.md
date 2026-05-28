@@ -8,8 +8,8 @@
    tool `profile_quality_refresh` plus the #458 local registry/intelligence
    tool set, #460 adds local audit-export consent/bundle tools, and #462 adds
    six local profile-authoring candidate tools, and #468 adds the read-only
-   registry/audit inspector, bringing the live surface to
-   51. Any further agent-facing tools require an
+   registry/audit inspector, and #499 adds a profile-keymap action alias tool,
+   bringing the live surface to 52. Any further agent-facing tools require an
    ADR-approved cap change. Overlapping tools merge. Profile and parameter
    knobs are the escape hatches.
 2. **One tool, one verb.** No `do_everything(action_kind, ...)` mega-tools.
@@ -19,8 +19,9 @@
 6. **Idempotency tokens where it matters.** `act_run_shell`, `act_launch`, and similar accept an optional `idempotency_key` for safe retries.
 7. **Stable identifiers.** `element_id`, `entity_id`, `track_id`, `reflex_id`, `session_id` are returned by tools and accepted unchanged by subsequent calls. Agent never invents these.
 
-The first 30 tools below are the live M3 baseline. M4 adds rows 31-33, and M5
-adds rows 34-51 for local profile-registry/audit quality scoring, authoring
+The first 30 tools below are the live M3 baseline. #499 adds `act_keymap` as a
+profile-keymap action alias. M4 adds `act_combo`, `act_run_shell`, and
+`act_launch`; M5 adds local profile-registry/audit quality scoring, authoring
 candidates, registry row operations, import/export, audit intelligence, and
 consented redacted audit export bundles.
 Schemas use abbreviated JSON Schema syntax; canonical schema is exported by the
@@ -46,52 +47,54 @@ future `tools/list` snapshots in #447/#448.
 | 10 | `act_click` | write | mouse click |
 | 11 | `act_type` | write | keyboard |
 | 12 | `act_press` | write | keyboard |
-| 13 | `act_aim` | write | mouse move |
-| 14 | `act_drag` | write | mouse drag |
-| 15 | `act_scroll` | write | mouse scroll |
-| 16 | `act_pad` | write | gamepad |
-| 17 | `act_clipboard` | write/read | clipboard |
-| 18 | `release_all` | write | releases all held inputs |
-| 19 | `reflex_register` | write | adds reflex |
-| 20 | `reflex_cancel` | write | removes reflex |
-| 21 | `reflex_list` | read | none |
-| 22 | `reflex_history` | read | none |
-| 23 | `profile_list` | read | none |
-| 24 | `profile_activate` | config | loads profile |
-| 25 | `health` | read | none |
-| 26 | `replay_record` | config | writes replay JSONL |
-| 27 | `storage_inspect` | read | none |
-| 28 | `storage_put_probe_rows` | write | writes bounded synthetic storage rows |
-| 29 | `storage_gc_once` | write | runs one GC pass |
-| 30 | `storage_pressure_sample` | write | applies one synthetic pressure sample |
-| 31 | `act_combo` | write | schedules a one-shot timed action sequence |
-| 32 | `act_run_shell` | write | runs an allowlisted local shell command |
-| 33 | `act_launch` | write | launches an allowlisted local process |
-| 34 | `profile_authoring_generate` | write/read | proposes a local profile patch from replay/audit evidence |
-| 35 | `profile_authoring_list` | read | lists local authoring candidate rows in `CF_PROFILES` |
-| 36 | `profile_authoring_inspect` | read | reads one authoring candidate row |
-| 37 | `profile_authoring_accept` | write/read | marks a candidate accepted without activating it |
-| 38 | `profile_authoring_reject` | write/read | marks a candidate rejected |
-| 39 | `profile_authoring_export` | read/write | writes a local candidate export bundle file |
-| 40 | `profile_quality_refresh` | write/read | refreshes local profile quality from action, observation, and event rows |
-| 41 | `profile_registry_search` | read | searches local registry rows in `CF_PROFILES` |
-| 42 | `profile_registry_inspect` | read | reads one registry row from `CF_PROFILES` or `CF_KV` |
-| 43 | `profile_registry_report` | read | reports registry, quality, audit, consent, quarantine, and SoT pointers |
-| 44 | `profile_registry_install` | write/read | validates a package manifest and writes registry rows |
-| 45 | `profile_registry_disable` | write/read | marks an installed profile disabled or removed |
-| 46 | `profile_registry_export` | read/write | writes local registry or contribution bundle JSON with deterministic hashes |
-| 47 | `profile_registry_import` | write/read | validates and imports registry/contribution bundles with duplicate/conflict handling |
-| 48 | `profile_registry_rollback` | write/read | rewrites an installed row to a prior trusted package |
-| 49 | `audit_intelligence_query` | read | summarizes profile-linked audit outcomes |
-| 50 | `audit_export_consent_set` | write/read | writes local consent state to `CF_KV` and reads it back |
-| 51 | `audit_export_bundle` | read/write | writes a local redacted audit bundle after consent verification |
+| 13 | `act_keymap` | write | profile-keymap keyboard alias |
+| 14 | `act_aim` | write | mouse move |
+| 15 | `act_drag` | write | mouse drag |
+| 16 | `act_scroll` | write | mouse scroll |
+| 17 | `act_pad` | write | gamepad |
+| 18 | `act_clipboard` | write/read | clipboard |
+| 19 | `release_all` | write | releases all held inputs |
+| 20 | `reflex_register` | write | adds reflex |
+| 21 | `reflex_cancel` | write | removes reflex |
+| 22 | `reflex_list` | read | none |
+| 23 | `reflex_history` | read | none |
+| 24 | `profile_list` | read | none |
+| 25 | `profile_activate` | config | loads profile |
+| 26 | `health` | read | none |
+| 27 | `replay_record` | config | writes replay JSONL |
+| 28 | `storage_inspect` | read | none |
+| 29 | `storage_put_probe_rows` | write | writes bounded synthetic storage rows |
+| 30 | `storage_gc_once` | write | runs one GC pass |
+| 31 | `storage_pressure_sample` | write | applies one synthetic pressure sample |
+| 32 | `act_combo` | write | schedules a one-shot timed action sequence |
+| 33 | `act_run_shell` | write | runs an allowlisted local shell command |
+| 34 | `act_launch` | write | launches an allowlisted local process |
+| 35 | `profile_authoring_generate` | write/read | proposes a local profile patch from replay/audit evidence |
+| 36 | `profile_authoring_list` | read | lists local authoring candidate rows in `CF_PROFILES` |
+| 37 | `profile_authoring_inspect` | read | reads one authoring candidate row |
+| 38 | `profile_authoring_accept` | write/read | marks a candidate accepted without activating it |
+| 39 | `profile_authoring_reject` | write/read | marks a candidate rejected |
+| 40 | `profile_authoring_export` | read/write | writes a local candidate export bundle file |
+| 41 | `profile_quality_refresh` | write/read | refreshes local profile quality from action, observation, and event rows |
+| 42 | `profile_registry_search` | read | searches local registry rows in `CF_PROFILES` |
+| 43 | `profile_registry_inspect` | read | reads one registry row from `CF_PROFILES` or `CF_KV` |
+| 44 | `profile_registry_report` | read | reports registry, quality, audit, consent, quarantine, and SoT pointers |
+| 45 | `profile_registry_install` | write/read | validates a package manifest and writes registry rows |
+| 46 | `profile_registry_disable` | write/read | marks an installed profile disabled or removed |
+| 47 | `profile_registry_export` | read/write | writes local registry or contribution bundle JSON with deterministic hashes |
+| 48 | `profile_registry_import` | write/read | validates and imports registry/contribution bundles with duplicate/conflict handling |
+| 49 | `profile_registry_rollback` | write/read | rewrites an installed row to a prior trusted package |
+| 50 | `audit_intelligence_query` | read | summarizes profile-linked audit outcomes |
+| 51 | `audit_export_consent_set` | write/read | writes local consent state to `CF_KV` and reads it back |
+| 52 | `audit_export_bundle` | read/write | writes a local redacted audit bundle after consent verification |
 
-M3 live count: 30 tools. M4 live count: 33 tools. Current M5 live count: 51
+M3 live count: 30 tools. Current live count: 52
 tools.
 
 Deferred ideas from earlier drafts (`describe` and `read_hud`) are still not
-live M3/M4 agent-facing tools. `act_combo`, `act_run_shell`, and `act_launch`
-are the only M4 additions approved by the phase plan.
+live M3/M4 agent-facing tools. `act_keymap` is the #499 profile-keymap alias
+addition; `act_combo`, `act_run_shell`, and `act_launch` remain the M4 phase
+plan additions.
 
 ---
 
@@ -495,6 +498,32 @@ that reason and the readback requirement visible.
 ```
 
 Key name vocabulary: standard symbolic names (`a`..`z`, `0`..`9`, `f1`..`f24`, `up`, `down`, `enter`, `space`, `tab`, `esc`, `ctrl`, `shift`, `alt`, `super`, `lmb`, `rmb`, `mmb`, etc.). Per-game profile may extend (e.g., `medkit` → bound to whatever key is configured in that game).
+
+### 3.13a `act_keymap`
+
+```json
+{
+  "name": "act_keymap",
+  "input_schema": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["alias"],
+    "properties": {
+      "alias": {"type": "string", "description": "Profile keymap alias such as inventory, target_nearest_npc, con, menu, or hotbar1"},
+      "hold_ms": {"type": "integer", "minimum": 1, "maximum": 30000, "default": 33},
+      "backend": {"enum": ["software","hardware","auto"], "default": "auto"}
+    }
+  }
+}
+```
+
+`act_keymap` resolves `alias` through the active profile's `[keymap]` table,
+then lowers the reviewed binding to the same foreground-gated keyboard path as
+`act_press`. The action audit rows must preserve the requested alias and the
+resolved binding/key list so manual FSV can read both the command intent and
+the physical input that was emitted. Unknown aliases, empty aliases, invalid
+bindings, unsupported foreground, and excessive holds fail closed and still
+write policy/error audit rows when the action gate is reached.
 
 ### 3.14 `act_aim`
 
@@ -1679,6 +1708,9 @@ profile-authoring and audit-export defaults below.
 
 | Tool | Field | Default | Source |
 |---|---|---|---|
+| `act_keymap` | `alias` | required; no default | #499 |
+| `act_keymap` | `hold_ms` | `33` | M2 action default reused by #499 |
+| `act_keymap` | `backend` | `"auto"` | M2 action default reused by #499 |
 | `act_combo` | `steps` | required; no default | M4 plan #444 |
 | `act_combo` | `steps[].backend` | inherits top-level `backend` | M4 plan #444 |
 | `act_combo` | `backend` | `"auto"` | M4 plan #444 |

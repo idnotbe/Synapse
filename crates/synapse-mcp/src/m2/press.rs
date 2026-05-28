@@ -2,7 +2,7 @@ use std::{sync::Arc, time::Instant};
 
 use rmcp::ErrorData;
 use synapse_action::{ActionError, ActionHandle, RecordingBackend};
-use synapse_core::{Action, Backend, error_codes};
+use synapse_core::{Action, Backend, Key, KeyCode, Profile, error_codes};
 use tokio_util::sync::CancellationToken;
 
 use crate::m1::mcp_error;
@@ -16,7 +16,7 @@ mod schema;
 #[cfg(test)]
 mod tests;
 
-pub use schema::{ActPressParams, ActPressResponse};
+pub use schema::{ActKeymapParams, ActKeymapResponse, ActPressParams, ActPressResponse};
 
 pub async fn act_press_with_handle(
     handle: ActionHandle,
@@ -57,6 +57,44 @@ pub async fn act_press_with_handle(
     })
 }
 
+pub async fn act_keymap_with_handle(
+    handle: ActionHandle,
+    recording: Option<Arc<RecordingBackend>>,
+    connection_closed_cancel: Option<CancellationToken>,
+    profile: &Profile,
+    params: ActKeymapParams,
+) -> Result<ActKeymapResponse, ErrorData> {
+    let alias = normalized_alias(&params.alias)?;
+    let resolved_binding = profile.keymap.get(&alias).cloned().ok_or_else(|| {
+        mcp_error(
+            error_codes::PROFILE_KEYMAP_INVALID,
+            format!(
+                "profile {} keymap alias {alias:?} was not found",
+                profile.id
+            ),
+        )
+    })?;
+    let resolved_keys = split_key_binding(&resolved_binding)?;
+    let press = ActPressParams {
+        keys: resolved_keys.clone(),
+        hold_ms: params.hold_ms,
+        backend: params.backend,
+    };
+    let response =
+        act_press_with_handle(handle, recording, connection_closed_cancel, press).await?;
+
+    Ok(ActKeymapResponse {
+        ok: response.ok,
+        alias,
+        resolved_binding,
+        resolved_keys,
+        hold_ms: params.hold_ms,
+        keys_pressed: response.keys_pressed,
+        elapsed_ms: response.elapsed_ms,
+        backend_used: response.backend_used,
+    })
+}
+
 pub fn action_from_press_params(params: &ActPressParams) -> Result<Action, ErrorData> {
     validate_hold_ms(params.hold_ms)?;
     let keys = keys::normalized_keys(&params.keys)?;
@@ -65,6 +103,36 @@ pub fn action_from_press_params(params: &ActPressParams) -> Result<Action, Error
         params.hold_ms,
         params.backend.to_backend(),
     ))
+}
+
+fn normalized_alias(alias: &str) -> Result<String, ErrorData> {
+    let alias = alias.trim();
+    if alias.is_empty() {
+        return Err(mcp_error(
+            error_codes::TOOL_PARAMS_INVALID,
+            "act_keymap alias must not be empty",
+        ));
+    }
+    Ok(alias.to_ascii_lowercase())
+}
+
+fn split_key_binding(binding: &str) -> Result<Vec<String>, ErrorData> {
+    let keys = binding
+        .split('+')
+        .map(str::trim)
+        .filter(|key| !key.is_empty())
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    let normalized = keys::normalized_keys(&keys)?;
+    Ok(normalized.iter().map(key_label).collect())
+}
+
+fn key_label(key: &Key) -> String {
+    match &key.code {
+        KeyCode::Named { value } => value.clone(),
+        KeyCode::Symbol { value } => value.to_string(),
+        KeyCode::HidCode { value } => format!("hid:{value}"),
+    }
 }
 
 fn validate_hold_ms(hold_ms: u32) -> Result<(), ErrorData> {

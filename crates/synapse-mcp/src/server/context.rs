@@ -698,10 +698,11 @@ mod scope_gate_tests {
         m4::M4ServiceConfig,
     };
 
-    const ACTION_WRITE_TOOLS: [&str; 12] = [
+    const ACTION_WRITE_TOOLS: [&str; 13] = [
         "act_click",
         "act_type",
         "act_press",
+        "act_keymap",
         "act_aim",
         "act_drag",
         "act_scroll",

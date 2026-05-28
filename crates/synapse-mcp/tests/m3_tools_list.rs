@@ -4,11 +4,12 @@ use anyhow::{Context, ensure};
 use serde_json::{Value, json};
 use synapse_test_utils::stdio_mcp_client::StdioMcpClient;
 
-const EXPECTED_TOOLS: [&str; 48] = [
+const EXPECTED_TOOLS: [&str; 49] = [
     "act_aim",
     "act_click",
     "act_clipboard",
     "act_drag",
+    "act_keymap",
     "act_pad",
     "act_press",
     "act_scroll",
@@ -152,6 +153,20 @@ fn m3_default_readbacks(tools: &[Value]) -> anyhow::Result<Vec<Value>> {
 
 #[allow(clippy::too_many_lines)]
 fn read_schema_defaults(readbacks: &mut Vec<Value>, tools: &[Value]) -> anyhow::Result<()> {
+    read_default(
+        readbacks,
+        tools,
+        "act_keymap",
+        "inputSchema.properties.hold_ms.default",
+        &json!(33),
+    )?;
+    read_default(
+        readbacks,
+        tools,
+        "act_keymap",
+        "inputSchema.properties.backend.default",
+        &json!("auto"),
+    )?;
     read_default(
         readbacks,
         tools,
@@ -380,6 +395,7 @@ fn read_schema_defaults(readbacks: &mut Vec<Value>, tools: &[Value]) -> anyhow::
 }
 
 fn read_required_fields(readbacks: &mut Vec<Value>, tools: &[Value]) -> anyhow::Result<()> {
+    read_required(readbacks, tools, "act_keymap", "alias")?;
     read_required(readbacks, tools, "subscribe_cancel", "subscription_id")?;
     read_required(readbacks, tools, "reflex_cancel", "reflex_id")?;
     read_required(readbacks, tools, "profile_activate", "profile_id")?;
