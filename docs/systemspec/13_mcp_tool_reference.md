@@ -5,12 +5,13 @@ Source files covered:
 - `crates/synapse-mcp/src/server/everquest_tools.rs`
 - `crates/synapse-mcp/src/server/everquest_log.rs`
 - `crates/synapse-mcp/src/server/everquest_state.rs`
+- `crates/synapse-mcp/src/server/everquest_scorecard.rs`
 - `crates/synapse-mcp/src/m1.rs` (+ `m1/{ocr, search, sources}.rs`)
 - `crates/synapse-mcp/src/m2/{aim, click, clipboard, drag, pad, press, release_all, scroll, type_text}.rs`
 - `crates/synapse-mcp/src/m3/{audio, audit_export, permissions, profile, profile_authoring, profile_quality, profile_registry, reflex, replay, subscribe}.rs`
 - `crates/synapse-core/src/types.rs`
 
-All 54 live tools are registered on `SynapseService` via `#[tool(description=...)]` in `server.rs`. Tool descriptions are taken verbatim from the source. Every tool returns through `Json<T>` so the response shape exactly matches the deserialized response struct.
+All 56 live tools are registered on `SynapseService` via `#[tool(description=...)]` in `server.rs`. Tool descriptions are taken verbatim from the source. Every tool returns through `Json<T>` so the response shape exactly matches the deserialized response struct.
 
 Default error response shape (all tools): `ErrorData { code: rmcp::ErrorCode(-32099), message, data: { "code": <SCREAMING_SNAKE_CASE> } }` via `crates/synapse-mcp/src/m1.rs::mcp_error`.
 
@@ -209,6 +210,47 @@ Manual FSV must read the physical EQ log byte offset, location count, and `You s
 **Errors:** `ACTION_TARGET_INVALID` for unavailable active log state or unresolved runtime inputs, `STORAGE_WRITE_FAILED` / `STORAGE_READ_FAILED` for the durable current-state row, and `TOOL_PARAMS_INVALID` for unknown parameters.
 
 Manual FSV must read the EQ log/config/map files and foreground state before the trigger, call the real MCP tool, then independently read `CF_KV/everquest/current_state/v1/everquest.live` through storage readback. The tool's internal row readback is supporting evidence, not the separate manual source-of-truth read required for shipping.
+
+## 9d. `everquest_action_prior_record`
+
+**Description:** "Persist one EverQuest action-prior prediction/outcome sample with computed correctness and exact CF_KV readback"
+**Side effects:** validates a redacted prediction/outcome sample, computes correctness, writes `CF_KV/everquest/action_prior_eval/v1/everquest.live/<sample_id>`, then reads that exact row back before returning.
+
+| Parameter | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `sample_id` | `String` | yes | - | ASCII id, used in the row key |
+| `profile_id` | `String` | no | `everquest.live` | EverQuest profile id; other ids fail closed |
+| `prediction_id` | `String` | yes | - | Prediction row/model id |
+| `actual_outcome_id` | `Option<String>` | no | - | Optional observed outcome id |
+| `prediction` | `EverQuestActionPriorPrediction` | yes | - | Predicted next action/top-3/zone/coord/hazard/confidence/abstention |
+| `actual` | `EverQuestActionPriorActual` | yes | - | Observed next action/zone/coord/hazard/surprise |
+| `source_episode_ids` | `Vec<String>` | no | `[]` | Source episode ids |
+| `source_refs` | `Vec<EverQuestActionPriorSourceRef>` | no | `[]` | Redacted storage/log/source pointers |
+| `limitations` | `Vec<String>` | no | `[]` | Known limits for this sample |
+
+**Returns:** `EverQuestActionPriorRecordResponse { ok, row_key, stored_value_len_bytes, sample }`. `sample.correctness.class` is one of `correct_top1`, `correct_top3`, `correct_context`, `wrong`, `abstained`, or `unknown_actual`; it also carries calibration bucket, useful flag, overconfident-wrong flag, and the evidence boundary that scorecards are not FSV.
+**Errors:** `TOOL_PARAMS_INVALID`, `STORAGE_WRITE_FAILED`, `STORAGE_READ_FAILED`, `STORAGE_CORRUPTED`, `TOOL_INTERNAL_ERROR`.
+
+## 9e. `everquest_action_prior_scorecard`
+
+**Description:** "Aggregate persisted EverQuest action-prior samples into a floor-not-ceiling competence scorecard with exact CF_KV readback"
+**Side effects:** reads named eval rows from `CF_KV`, writes `CF_KV/everquest/action_prior_scorecard/v1/everquest.live/<window_id>`, then reads that exact row back before returning.
+
+| Parameter | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `window_id` | `String` | yes | - | Scorecard window id |
+| `profile_id` | `String` | no | `everquest.live` | EverQuest profile id; other ids fail closed |
+| `sample_ids` | `Vec<String>` | no | `[]` | Eval sample ids to aggregate |
+| `min_samples` | `u32` | no | `3` | Tiny windows report insufficient evidence |
+| `min_confidence_for_action` | `f32` | no | `0.60` | Below this, action forcing is counted as low-confidence |
+| `competence_floor` | `f32` | no | `0.60` | Minimum useful supervised floor |
+| `stretch_target` | `f32` | no | `0.80` | Stretch target; must be >= floor |
+| `limitations` | `Vec<String>` | no | `[]` | Known scorecard limits |
+
+**Returns:** `EverQuestActionPriorScorecardResponse { ok, row_key, stored_value_len_bytes, scorecard }`. The scorecard includes sample-record-time window bounds, aggregate source episode ids, top-1/top-3, zone, coord-bucket, hazard-avoidance, useful-accuracy, abstention, surprise, low-confidence-action, overconfident-wrong, and calibration-bucket metrics. It records `minimum_is_floor_not_ceiling=true`; 60-80% is the minimum semi-competence threshold, not the optimization ceiling. A non-abstaining action below `min_confidence_for_action` records `low_confidence_action_forced` and does not meet the competence floor.
+**Errors:** `TOOL_PARAMS_INVALID`, `STORAGE_READ_FAILED`, `STORAGE_WRITE_FAILED`, `STORAGE_CORRUPTED`, `TOOL_INTERNAL_ERROR`.
+
+Manual FSV for both tools must read storage state before the trigger, call the real MCP tool with known synthetic prediction/outcome data, then separately inspect the durable `CF_KV` rows afterward. Scorecards support planning quality only and never replace runtime FSV against game UI/log/process/storage SoT.
 
 ## 10. `act_aim`
 

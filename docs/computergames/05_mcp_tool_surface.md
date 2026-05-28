@@ -9,8 +9,9 @@
    tool set, #460 adds local audit-export consent/bundle tools, and #462 adds
    six local profile-authoring candidate tools, and #468 adds the read-only
    registry/audit inspector, #499 adds a profile-keymap action alias tool,
-   #508 adds the narrow EverQuest `/loc` probe, and #510 adds the compact
-   EverQuest current-state estimator, bringing the live surface to 54. Any
+   #508 adds the narrow EverQuest `/loc` probe, #510 adds the compact
+   EverQuest current-state estimator, and #531 adds EverQuest action-prior
+   sample/scorecard tools, bringing the live surface to 56. Any
    further agent-facing tools require an ADR-approved cap change.
    Overlapping tools merge. Profile and parameter knobs are the escape hatches.
 2. **One tool, one verb.** No `do_everything(action_kind, ...)` mega-tools.
@@ -22,8 +23,9 @@
 
 The first 30 tools below are the live M3 baseline. #499 adds `act_keymap` as a
 profile-keymap action alias, #508 adds `everquest_loc_probe` as a literal
-EverQuest `/loc` readback tool, and #510 adds `everquest_current_state` as the
-compact world-state row writer/readback tool. M4 adds `act_combo`, `act_run_shell`, and
+EverQuest `/loc` readback tool, #510 adds `everquest_current_state` as the
+compact world-state row writer/readback tool, and #531 adds
+`everquest_action_prior_record` plus `everquest_action_prior_scorecard`. M4 adds `act_combo`, `act_run_shell`, and
 `act_launch`; M5 adds local profile-registry/audit quality scoring, authoring
 candidates, registry row operations, import/export, audit intelligence, and
 consented redacted audit export bundles.
@@ -92,14 +94,18 @@ future `tools/list` snapshots in #447/#448.
 | 52 | `audit_export_bundle` | read/write | writes a local redacted audit bundle after consent verification |
 | 53 | `everquest_loc_probe` | write/read | sends literal `/loc` to `everquest.live` and verifies the EQ log coordinate line |
 | 54 | `everquest_current_state` | write/read | fuses foreground, EQ log, map, HUD, and action audit into a compact `CF_KV` row and reads it back |
+| 55 | `everquest_action_prior_record` | write/read | stores one prediction/outcome sample under `CF_KV` with computed correctness and exact readback |
+| 56 | `everquest_action_prior_scorecard` | write/read | aggregates stored samples into a floor-not-ceiling competence scorecard row and reads it back |
 
-M3 live count: 30 tools. Current live count: 54
+M3 live count: 30 tools. Current live count: 56
 tools.
 
 Deferred ideas from earlier drafts (`describe` and `read_hud`) are still not
 live M3/M4 agent-facing tools. `act_keymap` is the #499 profile-keymap alias
 addition; `everquest_loc_probe` is the #508 literal `/loc` readback tool;
 `everquest_current_state` is the #510 current-state row writer/readback tool;
+`everquest_action_prior_record` and `everquest_action_prior_scorecard` are the
+#531 competence scorecard tools;
 `act_combo`, `act_run_shell`, and `act_launch` remain the M4 phase plan
 additions.
 
@@ -603,6 +609,105 @@ before the trigger, call the real MCP tool, then separately read the
 `CF_KV/everquest/current_state/v1/everquest.live` row through storage readback.
 The returned row readback is useful evidence, but it does not replace the
 separate source-of-truth read after the trigger.
+
+### 3.13d `everquest_action_prior_record`
+
+```json
+{
+  "name": "everquest_action_prior_record",
+  "input_schema": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["sample_id", "prediction_id", "prediction", "actual"],
+    "properties": {
+      "sample_id": {"type": "string"},
+      "profile_id": {"type": "string", "default": "everquest.live"},
+      "prediction_id": {"type": "string"},
+      "actual_outcome_id": {"type": "string"},
+      "prediction": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["confidence"],
+        "properties": {
+          "next_action": {"type": "string"},
+          "top3_actions": {"type": "array", "maxItems": 3, "items": {"type": "string"}},
+          "zone_short_name": {"type": "string"},
+          "coord_bucket": {"type": "string"},
+          "hazard_avoidance": {"type": "boolean"},
+          "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+          "abstain": {"type": "boolean", "default": false}
+        }
+      },
+      "actual": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "next_action": {"type": "string"},
+          "zone_short_name": {"type": "string"},
+          "coord_bucket": {"type": "string"},
+          "hazard_occurred": {"type": "boolean"},
+          "surprise": {"type": "boolean", "default": false}
+        }
+      },
+      "source_episode_ids": {"type": "array", "items": {"type": "string"}},
+      "source_refs": {"type": "array", "items": {"type": "object"}},
+      "limitations": {"type": "array", "items": {"type": "string"}}
+    }
+  }
+}
+```
+
+`everquest_action_prior_record` stores one redacted prediction/outcome sample
+at `CF_KV/everquest/action_prior_eval/v1/everquest.live/<sample_id>`. It
+computes correctness classes (`correct_top1`, `correct_top3`,
+`correct_context`, `wrong`, `abstained`, or `unknown_actual`), confidence
+bucket, overconfident-wrong flag, abstention flag, and source refs before
+writing the row. It then reads the exact key back before returning.
+
+The tool is a real runtime storage surface for planning-quality evaluation, not
+an FSV substitute. Manual FSV must still read storage state before the trigger,
+call the tool with known synthetic prediction/outcome inputs, and separately
+read `storage_inspect` or another physical storage readback after the write.
+
+### 3.13e `everquest_action_prior_scorecard`
+
+```json
+{
+  "name": "everquest_action_prior_scorecard",
+  "input_schema": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["window_id"],
+    "properties": {
+      "window_id": {"type": "string"},
+      "profile_id": {"type": "string", "default": "everquest.live"},
+      "sample_ids": {"type": "array", "items": {"type": "string"}, "default": []},
+      "min_samples": {"type": "integer", "minimum": 1, "default": 3},
+      "min_confidence_for_action": {"type": "number", "minimum": 0.0, "maximum": 1.0, "default": 0.6},
+      "competence_floor": {"type": "number", "minimum": 0.0, "maximum": 1.0, "default": 0.6},
+      "stretch_target": {"type": "number", "minimum": 0.0, "maximum": 1.0, "default": 0.8},
+      "limitations": {"type": "array", "items": {"type": "string"}}
+    }
+  }
+}
+```
+
+`everquest_action_prior_scorecard` reads the named eval rows, computes
+window bounds from sample record times, aggregates source episode ids, computes
+top-1, top-3, zone, coordinate-bucket, hazard-avoidance, useful-accuracy,
+abstention, surprise, low-confidence-action, overconfident-wrong, and
+calibration-bucket metrics, then writes
+`CF_KV/everquest/action_prior_scorecard/v1/everquest.live/<window_id>` and
+reads that exact row back.
+
+The default competence floor is `0.60` and the default stretch target is
+`0.80`. The row explicitly records `minimum_is_floor_not_ceiling=true`; hitting
+the floor means the AI is useful enough for supervised play, not that
+optimization stops. Empty or tiny sample windows produce `no_verified_trajectories`
+or `insufficient_samples` rather than a false competence claim. Low confidence
+must abstain instead of forcing game input; any non-abstaining action below
+`min_confidence_for_action` records `low_confidence_action_forced` and does not
+meet the competence floor.
 
 ### 3.14 `act_aim`
 
@@ -1834,6 +1939,21 @@ profile-authoring and audit-export defaults below.
 | `audit_export_bundle` | `redaction_policy` | runtime-required; omitted by schema | M5 issue #460 |
 | `audit_export_bundle` | `max_rows` | `100` | M5 issue #460 |
 | `audit_export_bundle` | `max_row_bytes` | `65536` | M5 issue #460 |
+| `everquest_action_prior_record` | `sample_id` | required; no default | #531 |
+| `everquest_action_prior_record` | `profile_id` | `"everquest.live"` | #531 |
+| `everquest_action_prior_record` | `prediction_id` | required; no default | #531 |
+| `everquest_action_prior_record` | `actual_outcome_id` | omitted | #531 |
+| `everquest_action_prior_record` | `source_episode_ids` | `[]` | #531 |
+| `everquest_action_prior_record` | `source_refs` | `[]` | #531 |
+| `everquest_action_prior_record` | `limitations` | `[]` | #531 |
+| `everquest_action_prior_scorecard` | `window_id` | required; no default | #531 |
+| `everquest_action_prior_scorecard` | `profile_id` | `"everquest.live"` | #531 |
+| `everquest_action_prior_scorecard` | `sample_ids` | `[]` | #531 |
+| `everquest_action_prior_scorecard` | `min_samples` | `3` | #531 |
+| `everquest_action_prior_scorecard` | `min_confidence_for_action` | `0.60` | #531 |
+| `everquest_action_prior_scorecard` | `competence_floor` | `0.60` | #531 |
+| `everquest_action_prior_scorecard` | `stretch_target` | `0.80` | #531 |
+| `everquest_action_prior_scorecard` | `limitations` | `[]` | #531 |
 
 All listed schemas must serialize as closed top-level JSON objects with
 `additionalProperties: false`. `act_combo.steps[]` also serializes as a closed

@@ -200,6 +200,36 @@ than loading full raw logs into the model context. Its durable row is
 world-model context injection, surprise detection, and scorecards should read
 that row or derived storage rows instead of rereading unbounded log text.
 
+## Action-Prior Scorecard Rows
+
+#531 adds the runtime storage surface for measuring whether the EverQuest world
+model is becoming useful during supervised play. The sample tool writes
+`CF_KV/everquest/action_prior_eval/v1/everquest.live/<sample_id>` and the
+scorecard tool writes
+`CF_KV/everquest/action_prior_scorecard/v1/everquest.live/<window_id>`.
+
+Each eval sample stores a redacted prediction, the actual observed outcome,
+source refs, limitations, confidence, abstention flag, and computed correctness
+class. The scorecard aggregates named samples into top-1, top-3, zone,
+coordinate-bucket, hazard-avoidance, useful-accuracy, abstention, surprise,
+overconfident-wrong, low-confidence-action, and calibration-bucket metrics. It
+also stores sample-record-time window bounds and the aggregate source episode
+ids from the eval rows.
+The default minimum competence floor is `0.60`; the default stretch target is
+`0.80`. These numbers are a floor, not a ceiling. The scorecard must continue
+reporting the best verified performance the system can honestly support as the
+profile registry, action audit, map memories, route planner, and ContextGraph
+exports accumulate better trajectories.
+
+Scorecards are planning-quality evidence only. They do not prove runtime game
+state, route success, level progress, or action safety. Manual FSV still reads
+the physical source of truth before and after the real trigger: visible game
+state, EQ logs, Windows foreground/process state, and Synapse storage rows.
+Empty or tiny windows must produce `no_verified_trajectories` or
+`insufficient_samples`, and low-confidence states should abstain instead of
+forcing input. A non-abstaining action below `min_confidence_for_action`
+records `low_confidence_action_forced` and does not meet the competence floor.
+
 ## Profile Registry / Audit Moat Rows
 
 `profile_quality_refresh` is the durable profile-registry/audit-data bridge for
