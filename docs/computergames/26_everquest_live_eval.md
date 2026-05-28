@@ -250,6 +250,29 @@ hazard returns `allow_with_safe_memory`; unknown candidate state returns
 gameplay. Manual FSV still reads physical EQ logs/UI/storage before and after
 the runtime trigger, and raw chat bodies must not be persisted.
 
+## Local Route-Plan Rows
+
+#527 adds a bounded local route planner for map-backed movement planning before
+any movement key is pressed. The planner reads the persisted current-state row
+from `CF_KV/everquest/current_state/v1/everquest.live`, builds the local map
+graph from the configured EverQuest install, resolves a target label or zone
+line in the current zone, and writes:
+
+- `CF_KV/everquest/route_plan/v1/everquest.live/<plan_id>` for the compact
+  route plan or abstain decision.
+
+Ready route rows contain the source state key, target label/zone, current and
+target map coordinates, nearest labels, distance, route confidence, source map
+line provenance, and guard requirements such as foreground verification,
+world-focus verification, `/loc` readback before each step, bounded step probes,
+and re-planning after zone changes or surprise. Unknown zone, missing `/loc`,
+absent target labels, stale state, or conflicting map calibration persist
+abstain rows instead of guessing movement.
+
+Manual FSV for route planning reads the physical map file line and current
+state before the trigger, calls the real MCP tool, then separately reads the
+route-plan row through storage readback. Route rows do not execute movement.
+
 ## Action-Prior Scorecard Rows
 
 #531 adds the runtime storage surface for measuring whether the EverQuest world

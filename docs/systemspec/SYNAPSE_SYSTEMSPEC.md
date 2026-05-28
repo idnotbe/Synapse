@@ -4155,13 +4155,14 @@ Source files covered:
 - `crates/synapse-mcp/src/server/everquest_state.rs`
 - `crates/synapse-mcp/src/server/everquest_memory.rs`
 - `crates/synapse-mcp/src/server/everquest_outcome.rs`
+- `crates/synapse-mcp/src/server/everquest_route.rs`
 - `crates/synapse-mcp/src/server/everquest_scorecard.rs`
 - `crates/synapse-mcp/src/m1.rs` (+ `m1/{ocr, search, sources}.rs`)
 - `crates/synapse-mcp/src/m2/{aim, click, clipboard, drag, pad, press, release_all, scroll, type_text}.rs`
 - `crates/synapse-mcp/src/m3/{audio, audit_export, permissions, profile, profile_authoring, profile_quality, profile_registry, reflex, replay, subscribe}.rs`
 - `crates/synapse-core/src/types.rs`
 
-All 59 live tools are registered on `SynapseService` via `#[tool(description=...)]` in `server.rs`. Tool descriptions are taken verbatim from the source. Every tool returns through `Json<T>` so the response shape exactly matches the deserialized response struct.
+All 60 live tools are registered on `SynapseService` via `#[tool(description=...)]` in `server.rs`. Tool descriptions are taken verbatim from the source. Every tool returns through `Json<T>` so the response shape exactly matches the deserialized response struct.
 
 Default error response shape (all tools): `ErrorData { code: rmcp::ErrorCode(-32099), message, data: { "code": <SCREAMING_SNAKE_CASE> } }` via `crates/synapse-mcp/src/m1.rs::mcp_error`.
 
@@ -4430,7 +4431,29 @@ Manual FSV must read the physical EQ log/UI/storage evidence first, call the rea
 **Returns:** `EverQuestMemoryConsultResponse { ok, row_key, stored_value_len_bytes, consult }`. The consult decision is `avoid`, `allow_with_safe_memory`, `allow_no_matching_hazard`, or `abstain_state_unknown`, with matched hazard/safe rows and match reasons.
 **Errors:** `TOOL_PARAMS_INVALID`, `STORAGE_READ_FAILED`, `STORAGE_WRITE_FAILED`, `STORAGE_CORRUPTED`, `TOOL_INTERNAL_ERROR`.
 
-## 9g. `everquest_action_prior_record`
+## 9g. `everquest_route_plan`
+
+**Description:** "Plan and persist one bounded EverQuest route from current state to a local map landmark or zone line without executing movement"
+**Side effects:** reads the persisted current-state row by default, builds the local map/zone graph from the configured EverQuest install root, writes `CF_KV/everquest/route_plan/v1/everquest.live/<plan_id>`, then reads the exact route-plan row back.
+
+| Parameter | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `plan_id` | `String` | yes | - | Route-plan id used in the row key |
+| `profile_id` | `String` | no | `everquest.live` | EverQuest profile id; other ids fail closed |
+| `target_label` | `Option<String>` | no | - | Map label such as `to_Nektulos_Forest` |
+| `target_zone_short_name` | `Option<String>` | no | - | Target zone short name such as `nektulos`; at least one target field is required |
+| `state_row_key` | `String` | no | `everquest/current_state/v1/everquest.live` | Current-state source row to read |
+| `state_override` | `Option<EverQuestRouteStateOverride>` | no | - | Synthetic/manual edge input with source refs |
+| `map_calibration` | `Option<EverQuestRouteMapCalibration>` | no | - | Optional map-window calibration used to detect conflicts |
+| `stale_after_seconds` | `u64` | no | `300` | Older current-state rows abstain |
+| `max_waypoints` | `usize` | no | `8` | Waypoint cap; allowed `2..=16` |
+
+**Returns:** `EverQuestRoutePlanResponse { ok, row_key, stored_value_len_bytes, plan }`. Ready plans carry current and target waypoints, map coordinates, distance, nearest labels, source map lines, confidence, guard requirements, and evidence-boundary flags. Unknown zone, missing `/loc`, absent target, stale state, or conflicting map calibration persist abstain rows instead of guessed movement.
+**Errors:** `TOOL_PARAMS_INVALID`, `ACTION_TARGET_INVALID`, `STORAGE_READ_FAILED`, `STORAGE_WRITE_FAILED`, `STORAGE_CORRUPTED`, `TOOL_INTERNAL_ERROR`.
+
+Manual FSV must read the physical map/current-state SoT before the trigger, call the real MCP tool, then separately inspect the persisted `CF_KV` route-plan row. This tool does not execute movement.
+
+## 9h. `everquest_action_prior_record`
 
 **Description:** "Persist one EverQuest action-prior prediction/outcome sample with computed correctness and exact CF_KV readback"
 **Side effects:** validates a redacted prediction/outcome sample, computes correctness, writes `CF_KV/everquest/action_prior_eval/v1/everquest.live/<sample_id>`, then reads that exact row back before returning.
@@ -4450,7 +4473,7 @@ Manual FSV must read the physical EQ log/UI/storage evidence first, call the rea
 **Returns:** `EverQuestActionPriorRecordResponse { ok, row_key, stored_value_len_bytes, sample }`. `sample.correctness.class` is one of `correct_top1`, `correct_top3`, `correct_context`, `wrong`, `abstained`, or `unknown_actual`; it also carries calibration bucket, useful flag, overconfident-wrong flag, and the evidence boundary that scorecards are not FSV.
 **Errors:** `TOOL_PARAMS_INVALID`, `STORAGE_WRITE_FAILED`, `STORAGE_READ_FAILED`, `STORAGE_CORRUPTED`, `TOOL_INTERNAL_ERROR`.
 
-## 9h. `everquest_action_prior_scorecard`
+## 9i. `everquest_action_prior_scorecard`
 
 **Description:** "Aggregate persisted EverQuest action-prior samples into a floor-not-ceiling competence scorecard with exact CF_KV readback"
 **Side effects:** reads named eval rows from `CF_KV`, writes `CF_KV/everquest/action_prior_scorecard/v1/everquest.live/<window_id>`, then reads that exact row back before returning.

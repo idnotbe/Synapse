@@ -17,7 +17,7 @@ use super::{
 use crate::m1::{current_input, mcp_error};
 
 const TOOL: &str = "everquest_current_state";
-const CURRENT_STATE_ROW_KEY: &str = "everquest/current_state/v1/everquest.live";
+pub(super) const CURRENT_STATE_ROW_KEY: &str = "everquest/current_state/v1/everquest.live";
 const MAX_STATE_LOG_BYTES: usize = 512 * 1024;
 const MAX_STATE_LOG_EVENTS: usize = 4096;
 const MAX_ACTION_ROWS: usize = 8;
