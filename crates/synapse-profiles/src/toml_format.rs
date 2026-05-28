@@ -274,11 +274,13 @@ impl RawHudField {
         };
         validate_hud_region(path, &self.name, &region, bounds)?;
         validate_hud_confidence_threshold(path, &self.name, self.confidence_threshold)?;
+        let parser = self.parser.unwrap_or(HudParser::Number);
+        validate_hud_parser(path, &self.name, &parser)?;
         Ok(HudFieldSpec {
             name: self.name,
             region,
             extractor: self.extractor.unwrap_or(HudExtractor::WinrtOcr),
-            parser: self.parser.unwrap_or(HudParser::Number),
+            parser,
             confidence_threshold: self.confidence_threshold,
         })
     }
@@ -315,6 +317,33 @@ fn validate_hud_confidence_threshold(
                 "HUD field {name:?} confidence_threshold must be finite and in 0..=1, got {confidence_threshold}"
             ),
         });
+    }
+    Ok(())
+}
+
+fn validate_hud_parser(path: &Path, name: &str, parser: &HudParser) -> Result<(), ProfileError> {
+    if let HudParser::BoundedInteger {
+        min,
+        max,
+        default_on_no_text,
+    } = parser
+    {
+        if min > max {
+            return Err(ProfileError::Parse {
+                path: path.to_path_buf(),
+                message: format!("HUD field {name:?} bounded_integer min {min} exceeds max {max}"),
+            });
+        }
+        if let Some(default) = default_on_no_text
+            && !(*min..=*max).contains(default)
+        {
+            return Err(ProfileError::Parse {
+                path: path.to_path_buf(),
+                message: format!(
+                    "HUD field {name:?} bounded_integer default_on_no_text {default} outside {min}..={max}"
+                ),
+            });
+        }
     }
     Ok(())
 }

@@ -10,6 +10,7 @@ pub enum HudAnchor {
     TopLeft,
     TopRight,
     BottomLeft,
+    BottomCenter,
     BottomRight,
     Center,
 }
@@ -66,6 +67,7 @@ impl From<WindowEdge> for HudAnchor {
             WindowEdge::TopLeft => Self::TopLeft,
             WindowEdge::TopRight => Self::TopRight,
             WindowEdge::BottomLeft => Self::BottomLeft,
+            WindowEdge::BottomCenter => Self::BottomCenter,
             WindowEdge::BottomRight => Self::BottomRight,
             WindowEdge::Center => Self::Center,
         }
@@ -183,6 +185,13 @@ fn anchor_point(anchor: HudAnchor, window_client: Rect) -> PerceptionResult<(i32
         HudAnchor::None | HudAnchor::TopLeft => Ok((window_client.x, window_client.y)),
         HudAnchor::TopRight => Ok((right, window_client.y)),
         HudAnchor::BottomLeft => Ok((window_client.x, bottom)),
+        HudAnchor::BottomCenter => {
+            let half_w = window_client.w / 2;
+            Ok((
+                checked_add(window_client.x, half_w, "window x plus half width")?,
+                bottom,
+            ))
+        }
         HudAnchor::BottomRight => Ok((right, bottom)),
         HudAnchor::Center => {
             let half_w = window_client.w / 2;

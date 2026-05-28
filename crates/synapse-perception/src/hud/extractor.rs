@@ -87,6 +87,9 @@ pub fn parse_hud_text(parser: &HudParser, raw_text: &str) -> PerceptionResult<Hu
 
     match parser {
         HudParser::Number => parse_number(text).map(HudValue::Number),
+        HudParser::BoundedInteger { min, max, .. } => {
+            parse_bounded_integer(text, *min, *max).map(HudValue::Number)
+        }
         HudParser::FractionNumerator => parse_fraction_part(text, "num").map(HudValue::Number),
         HudParser::FractionDenominator => parse_fraction_part(text, "den").map(HudValue::Number),
         HudParser::Regex { pattern, group } => parse_regex_group(pattern, *group, text),
@@ -182,14 +185,22 @@ fn ocr_reading(
     request: &FieldExtractionRequest<'_>,
     source: ExtractionSource,
 ) -> PerceptionResult<OcrReading> {
-    let regions =
-        read_text_with_provider(request.ocr_provider, request.screen_region).map_err(|error| {
-            hud_error(format!(
+    let regions = match read_text_with_provider(request.ocr_provider, request.screen_region) {
+        Ok(regions) => regions,
+        Err(PerceptionError::OcrNoText { .. }) => {
+            return default_ocr_reading_for_no_text(request);
+        }
+        Err(error) => {
+            return Err(hud_error(format!(
                 "HUD OCR provider failed for field {:?}: {error}",
                 request.field.name
-            ))
-        })?;
-    let text = joined_text(&regions)?;
+            )));
+        }
+    };
+    let text = match joined_text(&regions) {
+        Ok(text) => text,
+        Err(_error) => return default_ocr_reading_for_no_text(request),
+    };
     let confidence = min_word_confidence(&regions);
     if confidence < request.field.confidence_threshold {
         return Err(hud_error(format!(
@@ -211,6 +222,27 @@ fn ocr_reading(
             stale_ms: request.stale_ms,
         },
         ocr_text: text,
+    })
+}
+
+fn default_ocr_reading_for_no_text(
+    request: &FieldExtractionRequest<'_>,
+) -> PerceptionResult<OcrReading> {
+    let Some(parsed) = parser_no_text_default(&request.field.parser)? else {
+        return Err(hud_error(format!(
+            "HUD OCR returned no text for field {:?}",
+            request.field.name
+        )));
+    };
+
+    Ok(OcrReading {
+        reading: HudReading {
+            raw_text: String::new(),
+            parsed,
+            confidence: 0.0,
+            stale_ms: request.stale_ms,
+        },
+        ocr_text: String::new(),
     })
 }
 
@@ -253,6 +285,58 @@ fn parse_number(text: &str) -> PerceptionResult<f64> {
             "HUD number parser could not parse {value:?}: {err}"
         ))
     })
+}
+
+fn parse_bounded_integer(text: &str, min: u32, max: u32) -> PerceptionResult<f64> {
+    validate_bounded_integer_range(min, max)?;
+    let value = parse_number(text)?;
+    if !value.is_finite() || value.fract() != 0.0 {
+        return Err(hud_error(format!(
+            "HUD bounded_integer parser expected an integer in {min}..={max}, got {value}"
+        )));
+    }
+    if value < 0.0 || value > f64::from(u32::MAX) {
+        return Err(hud_error(format!(
+            "HUD bounded_integer parser value {value} is outside u32 range"
+        )));
+    }
+
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let integer = value as u32;
+    if !(min..=max).contains(&integer) {
+        return Err(hud_error(format!(
+            "HUD bounded_integer parser value {integer} outside {min}..={max}"
+        )));
+    }
+    Ok(f64::from(integer))
+}
+
+fn parser_no_text_default(parser: &HudParser) -> PerceptionResult<Option<HudValue>> {
+    match parser {
+        HudParser::BoundedInteger {
+            min,
+            max,
+            default_on_no_text: Some(default),
+        } => {
+            validate_bounded_integer_range(*min, *max)?;
+            if !(*min..=*max).contains(default) {
+                return Err(hud_error(format!(
+                    "HUD bounded_integer no-text default {default} outside {min}..={max}"
+                )));
+            }
+            Ok(Some(HudValue::Number(f64::from(*default))))
+        }
+        _ => Ok(None),
+    }
+}
+
+fn validate_bounded_integer_range(min: u32, max: u32) -> PerceptionResult<()> {
+    if min > max {
+        return Err(hud_error(format!(
+            "HUD bounded_integer parser min {min} exceeds max {max}"
+        )));
+    }
+    Ok(())
 }
 
 fn parse_fraction_part(text: &str, part: &'static str) -> PerceptionResult<f64> {

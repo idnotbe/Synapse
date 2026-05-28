@@ -17,11 +17,11 @@ use synapse_core::{HudFieldError, HudReadings, Profile};
 use synapse_perception::ObservationAssembler;
 
 #[cfg(windows)]
-use synapse_core::{HudExtractor, HudFieldSpec, HudReading, Rect};
+use synapse_core::{HudExtractor, HudFieldSpec, HudReading, Point, Rect};
 #[cfg(windows)]
 use synapse_perception::{
-    FieldExtractionRequest, HudTemplate, PerceptionError, PerceptionResult, SystemOcrProvider,
-    extract_field, parse_hud_text, resolve_hud_region_rect,
+    FieldExtractionRequest, HudTemplate, OcrProvider, PerceptionError, PerceptionResult,
+    SystemOcrProvider, TextRegion, extract_field, parse_hud_text, resolve_hud_region_rect,
 };
 
 #[tool_router(router = m1_tool_router, vis = "pub(super)")]
@@ -252,7 +252,7 @@ fn extract_profile_hud_field(
             .map(|extraction| extraction.reading)
         }
         HudExtractor::WinrtOcr | HudExtractor::Crnn { .. } => {
-            let provider = SystemOcrProvider;
+            let provider = HudTextProvider;
             extract_field(&FieldExtractionRequest {
                 field,
                 screen_region,
@@ -264,6 +264,86 @@ fn extract_profile_hud_field(
             .map(|extraction| extraction.reading)
         }
     }
+}
+
+#[cfg(windows)]
+struct HudTextProvider;
+
+#[cfg(windows)]
+impl OcrProvider for HudTextProvider {
+    fn read_text(&self, region: Rect) -> PerceptionResult<Vec<TextRegion>> {
+        if let Some(text_region) = bounded_uia_text_region(region) {
+            return Ok(vec![text_region]);
+        }
+        SystemOcrProvider.read_text(region)
+    }
+}
+
+#[cfg(windows)]
+fn bounded_uia_text_region(region: Rect) -> Option<TextRegion> {
+    let point = region_center(region)?;
+    let element = synapse_a11y::element_from_point(point).ok()?;
+    let name = element.get_cached_name().ok()?;
+    let name = name.trim();
+    if name.is_empty() {
+        return None;
+    }
+    let bbox = element
+        .get_cached_bounding_rectangle()
+        .ok()
+        .map(|rect| Rect {
+            x: rect.get_left(),
+            y: rect.get_top(),
+            w: rect.get_right().saturating_sub(rect.get_left()),
+            h: rect.get_bottom().saturating_sub(rect.get_top()),
+        })?;
+    if !uia_text_bbox_is_bound_to_hud_region(region, bbox) {
+        return None;
+    }
+    Some(TextRegion {
+        text: name.to_owned(),
+        bbox,
+        confidence: 1.0,
+    })
+}
+
+#[cfg(windows)]
+const fn region_center(region: Rect) -> Option<Point> {
+    if region.w <= 0 || region.h <= 0 {
+        return None;
+    }
+    Some(Point {
+        x: region.x.saturating_add(region.w / 2),
+        y: region.y.saturating_add(region.h / 2),
+    })
+}
+
+#[cfg(windows)]
+fn uia_text_bbox_is_bound_to_hud_region(region: Rect, bbox: Rect) -> bool {
+    if region.w <= 0 || region.h <= 0 || bbox.w <= 0 || bbox.h <= 0 {
+        return false;
+    }
+    let Some(region_area) = rect_area(region) else {
+        return false;
+    };
+    let Some(bbox_area) = rect_area(bbox) else {
+        return false;
+    };
+    bbox_area <= region_area.saturating_mul(4) && rects_intersect(region, bbox)
+}
+
+#[cfg(windows)]
+fn rect_area(rect: Rect) -> Option<i64> {
+    i64::from(rect.w).checked_mul(i64::from(rect.h))
+}
+
+#[cfg(windows)]
+const fn rects_intersect(a: Rect, b: Rect) -> bool {
+    let a_right = a.x.saturating_add(a.w);
+    let a_bottom = a.y.saturating_add(a.h);
+    let b_right = b.x.saturating_add(b.w);
+    let b_bottom = b.y.saturating_add(b.h);
+    a.x < b_right && a_right > b.x && a.y < b_bottom && a_bottom > b.y
 }
 
 #[cfg(windows)]

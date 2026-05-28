@@ -282,15 +282,29 @@ mod platform {
 mod platform {
     use std::sync::OnceLock;
 
-    use synapse_capture::screen_region_to_software_bitmap;
+    use image::{ImageBuffer, Rgba, imageops::FilterType};
+    use synapse_capture::screen_region_to_bgra_bitmap;
     use synapse_core::Rect;
-    use windows::Media::Ocr::{OcrEngine, OcrResult};
+    use windows::{
+        Graphics::Imaging::{BitmapAlphaMode, BitmapPixelFormat, SoftwareBitmap},
+        Media::Ocr::{OcrEngine, OcrResult},
+        Storage::Streams::DataWriter,
+    };
 
     use super::{PerceptionError, PerceptionResult, TextRegion};
 
+    const OCR_MIN_RECOGNITION_HEIGHT_PX: u32 = 64;
+    const OCR_MAX_UPSCALE: u32 = 6;
+
     pub fn read_text(region: Rect) -> PerceptionResult<Vec<TextRegion>> {
-        let captured = capture_region_bitmap(region)?;
-        read_text_from_software_bitmap(captured.region, &captured.bitmap)
+        let (bitmap, scale) = capture_region_ocr_bitmap(region)?;
+        let engine = ocr_engine()?;
+        let result = engine
+            .RecognizeAsync(&bitmap)
+            .map_err(|err| backend_unavailable(err.to_string()))?
+            .join()
+            .map_err(|err| backend_unavailable(err.to_string()))?;
+        text_regions_from_result(region, &result, f64::from(scale))
     }
 
     pub fn read_text_from_software_bitmap(
@@ -303,7 +317,7 @@ mod platform {
             .map_err(|err| backend_unavailable(err.to_string()))?
             .join()
             .map_err(|err| backend_unavailable(err.to_string()))?;
-        text_regions_from_result(region, &result)
+        text_regions_from_result(region, &result, 1.0)
     }
 
     fn ocr_engine() -> PerceptionResult<&'static OcrEngine> {
@@ -319,6 +333,7 @@ mod platform {
     fn text_regions_from_result(
         region: Rect,
         result: &OcrResult,
+        scale: f64,
     ) -> PerceptionResult<Vec<TextRegion>> {
         let lines = result
             .Lines()
@@ -350,10 +365,10 @@ mod platform {
                         .map_err(|err| backend_unavailable(err.to_string()))?
                         .to_string_lossy(),
                     bbox: Rect {
-                        x: region.x.saturating_add(round_to_i32(bbox.X)),
-                        y: region.y.saturating_add(round_to_i32(bbox.Y)),
-                        w: round_to_i32(bbox.Width),
-                        h: round_to_i32(bbox.Height),
+                        x: region.x.saturating_add(round_scaled_to_i32(bbox.X, scale)),
+                        y: region.y.saturating_add(round_scaled_to_i32(bbox.Y, scale)),
+                        w: round_scaled_to_i32(bbox.Width, scale).max(1),
+                        h: round_scaled_to_i32(bbox.Height, scale).max(1),
                     },
                     confidence: 1.0,
                 });
@@ -366,9 +381,17 @@ mod platform {
         }
     }
 
+    fn round_scaled_to_i32(value: f32, scale: f64) -> i32 {
+        let divisor = if scale.is_finite() && scale > 0.0 {
+            scale
+        } else {
+            1.0
+        };
+        round_to_i32(f64::from(value) / divisor)
+    }
+
     #[allow(clippy::cast_possible_truncation)]
-    fn round_to_i32(value: f32) -> i32 {
-        let value = f64::from(value);
+    fn round_to_i32(value: f64) -> i32 {
         if !value.is_finite() {
             0
         } else if value >= f64::from(i32::MAX) {
@@ -384,9 +407,104 @@ mod platform {
         PerceptionError::OcrBackendUnavailable { detail }
     }
 
-    fn capture_region_bitmap(
-        region: Rect,
-    ) -> PerceptionResult<synapse_capture::CapturedSoftwareBitmap> {
-        screen_region_to_software_bitmap(region).map_err(|err| backend_unavailable(err.to_string()))
+    fn capture_region_ocr_bitmap(region: Rect) -> PerceptionResult<(SoftwareBitmap, u32)> {
+        let captured = screen_region_to_bgra_bitmap(region)
+            .map_err(|err| backend_unavailable(err.to_string()))?;
+        let scale = recognition_upscale(captured.height);
+        let (width, height, bytes) = if scale > 1 {
+            let width = captured.width.checked_mul(scale).ok_or_else(|| {
+                backend_unavailable(format!(
+                    "scaled OCR width overflowed: {} * {scale}",
+                    captured.width
+                ))
+            })?;
+            let height = captured.height.checked_mul(scale).ok_or_else(|| {
+                backend_unavailable(format!(
+                    "scaled OCR height overflowed: {} * {scale}",
+                    captured.height
+                ))
+            })?;
+            (
+                width,
+                height,
+                upscale_bgra(&captured.bytes, captured.width, captured.height, scale)?,
+            )
+        } else {
+            (captured.width, captured.height, captured.bytes)
+        };
+        let bitmap = software_bitmap_from_bgra(&bytes, width, height)?;
+        Ok((bitmap, scale))
+    }
+
+    fn recognition_upscale(height: u32) -> u32 {
+        if height == 0 || height >= OCR_MIN_RECOGNITION_HEIGHT_PX {
+            1
+        } else {
+            OCR_MIN_RECOGNITION_HEIGHT_PX
+                .div_ceil(height)
+                .clamp(1, OCR_MAX_UPSCALE)
+        }
+    }
+
+    fn upscale_bgra(
+        bytes: &[u8],
+        width: u32,
+        height: u32,
+        scale: u32,
+    ) -> PerceptionResult<Vec<u8>> {
+        let image = ImageBuffer::<Rgba<u8>, _>::from_raw(width, height, bytes.to_vec())
+            .ok_or_else(|| {
+                backend_unavailable("captured OCR BGRA buffer size was invalid".to_owned())
+            })?;
+        let scaled_width = width.checked_mul(scale).ok_or_else(|| {
+            backend_unavailable(format!("scaled OCR width overflowed: {width} * {scale}"))
+        })?;
+        let scaled_height = height.checked_mul(scale).ok_or_else(|| {
+            backend_unavailable(format!("scaled OCR height overflowed: {height} * {scale}"))
+        })?;
+        Ok(
+            image::imageops::resize(&image, scaled_width, scaled_height, FilterType::Nearest)
+                .into_raw(),
+        )
+    }
+
+    fn software_bitmap_from_bgra(
+        bytes: &[u8],
+        width: u32,
+        height: u32,
+    ) -> PerceptionResult<SoftwareBitmap> {
+        let width = i32::try_from(width)
+            .map_err(|err| backend_unavailable(format!("OCR bitmap width was invalid: {err}")))?;
+        let height = i32::try_from(height)
+            .map_err(|err| backend_unavailable(format!("OCR bitmap height was invalid: {err}")))?;
+        let writer = DataWriter::new().map_err(|err| backend_unavailable(err.to_string()))?;
+        writer
+            .WriteBytes(bytes)
+            .map_err(|err| backend_unavailable(err.to_string()))?;
+        let buffer = writer
+            .DetachBuffer()
+            .map_err(|err| backend_unavailable(err.to_string()))?;
+        SoftwareBitmap::CreateCopyWithAlphaFromBuffer(
+            &buffer,
+            BitmapPixelFormat::Bgra8,
+            width,
+            height,
+            BitmapAlphaMode::Premultiplied,
+        )
+        .map_err(|err| backend_unavailable(err.to_string()))
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::{OCR_MAX_UPSCALE, recognition_upscale};
+
+        #[test]
+        fn small_screen_ocr_regions_are_upscaled_before_recognition() {
+            assert_eq!(recognition_upscale(16), 4);
+            assert_eq!(recognition_upscale(32), 2);
+            assert_eq!(recognition_upscale(64), 1);
+            assert_eq!(recognition_upscale(0), 1);
+            assert_eq!(recognition_upscale(1), OCR_MAX_UPSCALE);
+        }
     }
 }

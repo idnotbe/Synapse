@@ -141,6 +141,7 @@ pub enum WindowEdge {
     TopLeft,
     TopRight,
     BottomLeft,
+    BottomCenter,
     BottomRight,
     Center,
 }
@@ -165,10 +166,21 @@ pub enum HudExtractor {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum HudParser {
     Number,
+    BoundedInteger {
+        min: u32,
+        max: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        default_on_no_text: Option<u32>,
+    },
     FractionNumerator,
     FractionDenominator,
-    Regex { pattern: String, group: u32 },
-    Enum { mapping: BTreeMap<String, String> },
+    Regex {
+        pattern: String,
+        group: u32,
+    },
+    Enum {
+        mapping: BTreeMap<String, String>,
+    },
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]

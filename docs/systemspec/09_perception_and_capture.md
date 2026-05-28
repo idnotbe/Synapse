@@ -137,11 +137,11 @@ The crate ensures a per-thread COM apartment (`ComApartmentKind`) before any UIA
 | `evaluate_event_extensions`, `validate_event_extension`, `validate_event_extensions` | `event_extensions.rs` — profile `EventExtension` validation and synthetic event derivation using `synapse-core::EventFilter` |
 
 `HudAnchorRegion` accepts `none`, `top_left`, `top_right`, `bottom_left`,
-`bottom_right`, and `center`. Offsets locate the top-left point of the HUD crop
-relative to the selected client-rect anchor. For example, a `1920x1080` client
-rect plus `bottom_left`, offsets `(8, -32)`, and size `180x16` resolves to
-left/top/right/bottom `(8, 1048, 188, 1064)`. `none`/absolute regions ignore
-the window and use screen coordinates directly.
+`bottom_center`, `bottom_right`, and `center`. Offsets locate the top-left point
+of the HUD crop relative to the selected client-rect anchor. For example, a
+`1920x1080` client rect plus `bottom_left`, offsets `(8, -32)`, and size
+`180x16` resolves to left/top/right/bottom `(8, 1048, 188, 1064)`.
+`none`/absolute regions ignore the window and use screen coordinates directly.
 
 ### 4.2 `ObservationAssembler::assemble` algorithm
 
@@ -167,9 +167,11 @@ pub trait OcrProvider {
 `TextRegion` is `{ text, bbox: Rect, confidence }`. `is_empty_region(rect)` checks `w <= 0 || h <= 0`.
 
 `read_text(region)` picks the default OCR path. On Windows this captures the
-screen region to a `SoftwareBitmap` and calls WinRT `Windows.Media.Ocr`; on
-WSL/Linux it delegates to the configured Windows host PowerShell OCR bridge;
-other targets return `OCR_BACKEND_UNAVAILABLE`.
+screen region to a `SoftwareBitmap` and calls WinRT `Windows.Media.Ocr`. Small
+regions are upscaled before recognition and their word bounding boxes are mapped
+back to the requested source region. On WSL/Linux it delegates to the configured
+Windows host PowerShell OCR bridge; other targets return
+`OCR_BACKEND_UNAVAILABLE`.
 
 `read_text_with_provider(provider, region)` lets callers inject a provider for
 deterministic fallback-path verification.
@@ -195,9 +197,13 @@ the response. When the request includes the `hud` slot, `observe` loads that
 profile's `HudFieldSpec`s, resolves each region against the foreground window
 bounds, captures the cropped screen region, and dispatches the configured
 extractor. `ColorRatio` fields read the live pixels directly; `TemplateMatch`
-fields load profile template assets and use `SystemOcrProvider` for fallback;
-`WinrtOcr` fields use the same real platform OCR provider. Per-field failures
-are reported under `Observation.hud.errors[field_name]` with
+fields load profile template assets and fall back to platform OCR over the same
+crop; `WinrtOcr` fields use the live HUD text provider directly. On Windows the
+live HUD text provider first accepts a UIA element name only when the element
+bounds intersect and stay close to the HUD crop, then falls back to platform
+OCR. This keeps small text such as Minecraft XP readable without accepting the
+whole window title as HUD text or leaking UIA labels into template-only HUD
+fields. Per-field failures are reported under `Observation.hud.errors[field_name]` with
 `HUD_EXTRACTION_FAILED` instead of silently inventing readings.
 
 ## 5. `synapse-mcp/src/m1` glue

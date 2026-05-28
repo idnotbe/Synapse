@@ -226,11 +226,18 @@ Supporting types:
 | `ProfileOcr` | `{ default_backend: OcrBackend, regions: Vec<HudRegion>, parser_config: BTreeMap<String, String> }` |
 | `HudFieldSpec` | `{ name, region: HudRegion, extractor: HudExtractor, parser: HudParser, confidence_threshold: f32 }` |
 | `HudRegion` | `Absolute { x, y, w, h }` \| `FractionOfWindow { x, y, w, h }` (f32) \| `AnchoredToEdge { edge: WindowEdge, x_offset, y_offset, w, h }` |
-| `WindowEdge` | `TopLeft` / `TopRight` / `BottomLeft` / `BottomRight` / `Center` |
+| `WindowEdge` | `TopLeft` / `TopRight` / `BottomLeft` / `BottomCenter` / `BottomRight` / `Center` |
 | `HudExtractor` | `WinrtOcr` \| `Crnn { model_id }` \| `TemplateMatch { templates }` \| `ColorRatio { sample_points: Vec<(i32, i32)>, mapping }` |
-| `HudParser` | `Number` \| `FractionNumerator` \| `FractionDenominator` \| `Regex { pattern, group }` \| `Enum { mapping }` |
+| `HudParser` | `Number` \| `BoundedInteger { min, max, default_on_no_text }` \| `FractionNumerator` \| `FractionDenominator` \| `Regex { pattern, group }` \| `Enum { mapping }` |
 | `ProfileBackends` | `{ default, keyboard_default, mouse_default, pad_default: Backend }`; TOML accepts `default_backend` as an alias for `default` |
 | `EventExtension` | `{ name, from_filter: EventFilter, emits_kind }` |
+
+Live HUD text extraction treats the configured crop as the trust boundary. On
+Windows, `observe` accepts a UIA element name only when that element rectangle
+intersects and stays close to the crop, then falls back to WinRT OCR. Small OCR
+regions are upscaled before recognition. `BoundedInteger` rejects non-integer or
+out-of-range values and can declare an in-range `default_on_no_text` for empty
+HUD states that should parse to a known value.
 
 ### 5.6 Reflex
 

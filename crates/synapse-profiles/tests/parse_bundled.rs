@@ -79,6 +79,30 @@ fn bundled_minecraft_profile_carries_first_game_contract() -> Result<(), Box<dyn
         ["player", "zombie", "skeleton", "creeper", "villager"]
     );
     assert_eq!(profile.hud.len(), 3);
+    let xp = profile
+        .hud
+        .iter()
+        .find(|field| field.name == "minecraft.xp_level")
+        .ok_or("minecraft.xp_level HUD field missing")?;
+    assert!(matches!(xp.extractor, HudExtractor::WinrtOcr));
+    assert!(matches!(
+        xp.parser,
+        HudParser::BoundedInteger {
+            min: 0,
+            max: 30,
+            default_on_no_text: Some(0),
+        }
+    ));
+    assert!(matches!(
+        xp.region,
+        HudRegion::AnchoredToEdge {
+            edge: WindowEdge::BottomCenter,
+            x_offset: -32,
+            y_offset: -56,
+            w: 64,
+            h: 16,
+        }
+    ));
     assert_eq!(profile.keymap["attack"], "lmb");
     assert_eq!(profile.keymap["place"], "rmb");
     assert_eq!(profile.keymap["sneak"], "lshift");

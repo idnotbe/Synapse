@@ -200,6 +200,120 @@ fn extractor_fails_closed_for_invalid_threshold_and_empty_ocr() -> TestResult {
 }
 
 #[test]
+fn extractor_reads_bounded_integer_xp_and_defaults_no_text_to_zero() -> TestResult {
+    let field = xp_ocr_field();
+    let region = GrayImage::from_pixel(64, 16, Luma([0]));
+    let provider = FixedOcrProvider::new(vec![word("5", 0.99)]);
+
+    regression_log(format_args!(
+        "regression_check=hud_extractor edge=xp_level before=region:{:?} provider_text=5 provider_confidence=0.99",
+        xp_screen_region()
+    ))?;
+    let extraction = extract_field(&FieldExtractionRequest {
+        field: &field,
+        screen_region: xp_screen_region(),
+        region_image: &region,
+        templates: &[],
+        ocr_provider: &provider,
+        stale_ms: 11,
+    })?;
+    regression_log(format_args!(
+        "regression_check=hud_extractor edge=xp_level after=source:{:?} raw:{:?} parsed:{:?} confidence:{:.3} ocr_calls:{}",
+        extraction.source,
+        extraction.reading.raw_text,
+        extraction.reading.parsed,
+        extraction.reading.confidence,
+        provider.calls()
+    ))?;
+
+    assert_eq!(extraction.source, ExtractionSource::Ocr);
+    assert_eq!(extraction.reading.parsed, HudValue::Number(5.0));
+    assert_eq!(extraction.reading.raw_text, "5");
+    assert!((extraction.reading.confidence - 0.99).abs() <= f32::EPSILON);
+    assert_eq!(extraction.reading.stale_ms, 11);
+    assert_eq!(provider.calls(), 1);
+    assert_eq!(provider.last_region(), Some(xp_screen_region()));
+
+    let empty_provider = FixedOcrProvider::new(Vec::new());
+    regression_log(format_args!(
+        "regression_check=hud_extractor edge=xp_no_text before=words:0 default_on_no_text=0"
+    ))?;
+    let empty = extract_field(&FieldExtractionRequest {
+        field: &field,
+        screen_region: xp_screen_region(),
+        region_image: &region,
+        templates: &[],
+        ocr_provider: &empty_provider,
+        stale_ms: 0,
+    })?;
+    regression_log(format_args!(
+        "regression_check=hud_extractor edge=xp_no_text after=source:{:?} raw:{:?} parsed:{:?} confidence:{:.3} ocr_calls:{}",
+        empty.source,
+        empty.reading.raw_text,
+        empty.reading.parsed,
+        empty.reading.confidence,
+        empty_provider.calls()
+    ))?;
+
+    assert_eq!(empty.source, ExtractionSource::Ocr);
+    assert_eq!(empty.reading.parsed, HudValue::Number(0.0));
+    assert_eq!(empty.reading.raw_text, "");
+    assert!(empty.reading.confidence <= f32::EPSILON);
+    assert_eq!(empty_provider.calls(), 1);
+    assert_eq!(empty_provider.last_region(), Some(xp_screen_region()));
+    Ok(())
+}
+
+#[test]
+fn extractor_rejects_bounded_integer_xp_edges() -> TestResult {
+    let field = xp_ocr_field();
+    let region = GrayImage::from_pixel(64, 16, Luma([0]));
+
+    let out_of_range_provider = FixedOcrProvider::new(vec![word("31", 0.99)]);
+    regression_log(format_args!(
+        "regression_check=hud_extractor edge=xp_out_of_range before=provider_text=31 allowed=0..30"
+    ))?;
+    let out_of_range = extract_field(&FieldExtractionRequest {
+        field: &field,
+        screen_region: xp_screen_region(),
+        region_image: &region,
+        templates: &[],
+        ocr_provider: &out_of_range_provider,
+        stale_ms: 0,
+    });
+    regression_log(format_args!(
+        "regression_check=hud_extractor edge=xp_out_of_range after={out_of_range:?} ocr_calls:{}",
+        out_of_range_provider.calls()
+    ))?;
+    assert_eq!(
+        out_of_range.err().map(|error| error.code()),
+        Some(error_codes::HUD_EXTRACTION_FAILED)
+    );
+
+    let fractional_provider = FixedOcrProvider::new(vec![word("5.5", 0.99)]);
+    regression_log(format_args!(
+        "regression_check=hud_extractor edge=xp_fractional before=provider_text=5.5 allowed=integer"
+    ))?;
+    let fractional = extract_field(&FieldExtractionRequest {
+        field: &field,
+        screen_region: xp_screen_region(),
+        region_image: &region,
+        templates: &[],
+        ocr_provider: &fractional_provider,
+        stale_ms: 0,
+    });
+    regression_log(format_args!(
+        "regression_check=hud_extractor edge=xp_fractional after={fractional:?} ocr_calls:{}",
+        fractional_provider.calls()
+    ))?;
+    assert_eq!(
+        fractional.err().map(|error| error.code()),
+        Some(error_codes::HUD_EXTRACTION_FAILED)
+    );
+    Ok(())
+}
+
+#[test]
 fn extractor_fallback_path_p99_is_under_30ms_with_synthetic_provider() -> TestResult {
     let templates = status_templates()?;
     let region = degraded_region();
@@ -305,6 +419,25 @@ fn ocr_field(parser: HudParser, confidence_threshold: f32) -> HudFieldSpec {
     }
 }
 
+fn xp_ocr_field() -> HudFieldSpec {
+    HudFieldSpec {
+        name: "minecraft.xp_level".to_owned(),
+        region: HudRegion::Absolute {
+            x: xp_screen_region().x,
+            y: xp_screen_region().y,
+            w: xp_screen_region().w,
+            h: xp_screen_region().h,
+        },
+        extractor: HudExtractor::WinrtOcr,
+        parser: HudParser::BoundedInteger {
+            min: 0,
+            max: 30,
+            default_on_no_text: Some(0),
+        },
+        confidence_threshold: default_hud_confidence_threshold(),
+    }
+}
+
 fn word(text: &str, confidence: f32) -> TextRegion {
     TextRegion {
         text: text.to_owned(),
@@ -318,6 +451,15 @@ const fn screen_region() -> Rect {
         x: 100,
         y: 200,
         w: 180,
+        h: 16,
+    }
+}
+
+const fn xp_screen_region() -> Rect {
+    Rect {
+        x: 128,
+        y: 664,
+        w: 64,
         h: 16,
     }
 }

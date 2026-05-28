@@ -799,7 +799,7 @@ pub enum HudRegion {
 
 #[derive(Copy, Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum WindowEdge { TopLeft, TopRight, BottomLeft, BottomRight, Center }
+pub enum WindowEdge { TopLeft, TopRight, BottomLeft, BottomCenter, BottomRight, Center }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -814,6 +814,7 @@ pub enum HudExtractor {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum HudParser {
     Number,
+    BoundedInteger { min: u32, max: u32, default_on_no_text: Option<u32> },
     FractionNumerator,                          // "85/100" -> 85
     FractionDenominator,
     Regex { pattern: String, group: u32 },
@@ -838,6 +839,13 @@ pub struct EventExtension {
     pub emits_kind: String,
 }
 ```
+
+HUD text fields use the configured crop as the source of truth. On Windows the
+live MCP `observe` path first accepts bounded UIA text whose element rectangle
+intersects and stays close to that crop, then falls back to WinRT OCR. Very small
+OCR crops are upscaled before recognition. `BoundedInteger` rejects non-integer
+or out-of-range text and may declare an in-range `default_on_no_text` for
+intentional empty HUD states such as Minecraft XP level `0`.
 
 Serialized `use_scope` values and policy behavior:
 

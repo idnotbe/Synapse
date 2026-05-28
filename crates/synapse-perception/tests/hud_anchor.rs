@@ -138,6 +138,13 @@ fn hud_profile_regions_resolve_top_right_center_and_fractional() -> TestResult {
         w: 20,
         h: 10,
     };
+    let bottom_center = HudRegion::AnchoredToEdge {
+        edge: WindowEdge::BottomCenter,
+        x_offset: -32,
+        y_offset: -56,
+        w: 64,
+        h: 16,
+    };
     let center = HudRegion::AnchoredToEdge {
         edge: WindowEdge::Center,
         x_offset: -5,
@@ -152,19 +159,22 @@ fn hud_profile_regions_resolve_top_right_center_and_fractional() -> TestResult {
         h: 0.5,
     };
     readback_log(format_args!(
-        "readback=hud_anchor edge=profile_regions before=window:{window:?} top_right:{top_right:?} center:{center:?} fractional:{fractional:?}"
+        "readback=hud_anchor edge=profile_regions before=window:{window:?} top_right:{top_right:?} bottom_center:{bottom_center:?} center:{center:?} fractional:{fractional:?}"
     ))?;
 
     let top_right_resolved = resolve_hud_region(&top_right, window)?;
+    let bottom_center_resolved = resolve_hud_region(&bottom_center, window)?;
     let center_resolved = resolve_hud_region(&center, window)?;
     let fractional_rect = resolve_hud_region_rect(&fractional, window)?;
     readback_log(format_args!(
-        "readback=hud_anchor edge=profile_regions after_top_right={:?} after_center={:?} after_fractional_rect={fractional_rect:?}",
+        "readback=hud_anchor edge=profile_regions after_top_right={:?} after_bottom_center={:?} after_center={:?} after_fractional_rect={fractional_rect:?}",
         top_right_resolved.as_ltrb(),
+        bottom_center_resolved.as_ltrb(),
         center_resolved.as_ltrb()
     ))?;
 
     assert_eq!(top_right_resolved.as_ltrb(), (180, 25, 200, 35));
+    assert_eq!(bottom_center_resolved.as_ltrb(), (78, 64, 142, 80));
     assert_eq!(center_resolved.as_ltrb(), (105, 60, 125, 70));
     assert_eq!(
         fractional_rect,

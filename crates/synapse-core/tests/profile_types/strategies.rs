@@ -50,6 +50,7 @@ pub fn window_edge_strategy() -> impl Strategy<Value = WindowEdge> {
         Just(WindowEdge::TopLeft),
         Just(WindowEdge::TopRight),
         Just(WindowEdge::BottomLeft),
+        Just(WindowEdge::BottomCenter),
         Just(WindowEdge::BottomRight),
         Just(WindowEdge::Center),
     ]
@@ -156,6 +157,13 @@ pub fn hud_extractor_strategy() -> impl Strategy<Value = HudExtractor> {
 pub fn hud_parser_strategy() -> impl Strategy<Value = HudParser> {
     prop_oneof![
         Just(HudParser::Number),
+        (0_u32..30, 30_u32..100, prop::option::of(0_u32..30)).prop_map(
+            |(min, max, default_on_no_text)| HudParser::BoundedInteger {
+                min,
+                max,
+                default_on_no_text,
+            }
+        ),
         Just(HudParser::FractionNumerator),
         Just(HudParser::FractionDenominator),
         (small_string(), 0_u32..5).prop_map(|(pattern, group)| HudParser::Regex { pattern, group }),

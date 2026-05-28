@@ -43,8 +43,8 @@ region = { kind = "anchored_to_edge", edge = "bottom_right", x_offset = -400, y_
 [[hud]]
 name = "minecraft.xp_level"
 extractor = { kind = "winrt_ocr" }
-parser = { kind = "regex", pattern = "([0-9]{1,3})", group = 1 }
-region = { kind = "anchored_to_edge", edge = "bottom_left", x_offset = 420, y_offset = -76, w = 120, h = 28 }
+parser = { kind = "bounded_integer", min = 0, max = 30, default_on_no_text = 0 }
+region = { kind = "anchored_to_edge", edge = "bottom_center", x_offset = -32, y_offset = -56, w = 64, h = 16 }
 
 [keymap]
 attack = "lmb"
