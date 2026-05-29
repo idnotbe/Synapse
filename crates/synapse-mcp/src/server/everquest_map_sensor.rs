@@ -1547,6 +1547,7 @@ mod tests {
                 source_path: neriaka,
                 source_line_number: 2,
             }],
+            segments: Vec::new(),
             unresolved_edge_count: 0,
             skipped_maps: Vec::new(),
         };

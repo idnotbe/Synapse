@@ -15,6 +15,6 @@ pub use map::{
 };
 pub use zone_graph::{
     EverQuestNearestLandmark, EverQuestZoneEdge, EverQuestZoneEdgeResolution, EverQuestZoneGraph,
-    EverQuestZoneGraphError, EverQuestZoneLandmark, EverQuestZoneNode, EverQuestZoneSkippedMap,
-    build_zone_graph, build_zone_graph_from_root,
+    EverQuestZoneGraphError, EverQuestZoneLandmark, EverQuestZoneNode, EverQuestZoneSegment,
+    EverQuestZoneSkippedMap, build_zone_graph, build_zone_graph_from_root,
 };

@@ -1,10 +1,12 @@
+use std::collections::HashMap;
+
 use chrono::{DateTime, Utc};
 use rmcp::{ErrorData, schemars::JsonSchema};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use synapse_core::error_codes;
 use synapse_everquest::{
     EverQuestMapCoord, EverQuestZoneEdge, EverQuestZoneGraph, EverQuestZoneLandmark,
-    build_zone_graph_from_root,
+    EverQuestZoneSegment, build_zone_graph_from_root,
 };
 
 use super::{
@@ -20,12 +22,17 @@ const SCHEMA_VERSION: u32 = 1;
 const ROUTE_PLAN_PREFIX: &str = "everquest/route_plan/v1";
 const DEFAULT_STALE_AFTER_SECONDS: u64 = 300;
 const DEFAULT_MAX_WAYPOINTS: usize = 8;
-const MAX_WAYPOINTS: usize = 16;
+const MAX_WAYPOINTS: usize = 32;
 const MAX_ID_BYTES: usize = 128;
 const MAX_TEXT_BYTES: usize = 512;
 const MAX_SOURCE_REFS: usize = 32;
 const MIN_ROUTE_CONFIDENCE: f32 = 0.50;
 const CALIBRATION_CONFLICT_DISTANCE: f64 = 150.0;
+const FLOOR_ROUTE_MIN_Z_DELTA: f64 = 8.0;
+const FLOOR_ROUTE_CONNECT_RADIUS: f64 = 96.0;
+const FLOOR_ROUTE_NODE_PRECISION: f64 = 4.0;
+const MAX_GUIDANCE_STEP_DISTANCE: f64 = 64.0;
+const MIN_SEGMENT_LENGTH: f64 = 1.0;
 
 #[derive(Clone, Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -259,6 +266,13 @@ struct RouteSourceState {
 struct RouteTargetMatch {
     landmark: EverQuestRouteLandmark,
     confidence: f32,
+}
+
+#[derive(Clone, Debug)]
+struct MapRouteNode {
+    location: EverQuestMapCoord,
+    source_path: String,
+    source_line_number: usize,
 }
 
 #[tool_router(router = everquest_route_tool_router, vis = "pub(super)")]
@@ -624,45 +638,52 @@ fn route_plan_row(
     let confidence =
         (source.zone_confidence * source.location_confidence * target_match.confidence)
             .clamp(0.0, 1.0);
-    row.target_landmark = Some(target_match.landmark.clone());
-    row.total_distance = Some(distance_to_target);
+    let floor_route_required =
+        (current_location.map_z - target_match.landmark.map_z).abs() >= FLOOR_ROUTE_MIN_Z_DELTA;
+    let Some((waypoints, route_distance)) = route_waypoints(
+        params,
+        graph,
+        zone_short_name,
+        current_location,
+        &target_match.landmark,
+        (source.zone_confidence * source.location_confidence).clamp(0.0, 1.0),
+        target_match.confidence,
+        floor_route_required,
+    ) else {
+        row.hazards.push(EverQuestRouteHazard {
+            code: "floor_route_graph_missing".to_owned(),
+            severity: "high".to_owned(),
+            detail: format!(
+                "target requires a z-level route from {:.2} to {:.2}, but no connected map-line path was found",
+                current_location.map_z, target_match.landmark.map_z
+            ),
+        });
+        abstain(
+            &mut row,
+            "abstain_floor_route_graph_missing",
+            "floor/ramp route graph evidence is missing for this z-level route",
+        );
+        return row;
+    };
+    row.target_landmark = Some(target_match.landmark);
+    row.total_distance = Some(route_distance.unwrap_or(distance_to_target));
     row.confidence = confidence;
-    row.waypoints = vec![
-        EverQuestRouteWaypoint {
-            step_index: 0,
-            waypoint_kind: "current_state".to_owned(),
-            label: "current_location".to_owned(),
-            zone_short_name: zone_short_name.to_owned(),
-            map_x: current_location.map_x,
-            map_y: current_location.map_y,
-            map_z: current_location.map_z,
-            distance_from_previous: 0.0,
-            distance_from_start: 0.0,
-            confidence: (source.zone_confidence * source.location_confidence).clamp(0.0, 1.0),
-            guard_requirements: vec!["verify_loc_before_step".to_owned()],
-            source_path: None,
-            source_line_number: None,
-        },
-        EverQuestRouteWaypoint {
-            step_index: 1,
-            waypoint_kind: "target_landmark".to_owned(),
-            label: target_match.landmark.label.clone(),
-            zone_short_name: target_match.landmark.zone_short_name.clone(),
-            map_x: target_match.landmark.map_x,
-            map_y: target_match.landmark.map_y,
-            map_z: target_match.landmark.map_z,
-            distance_from_previous: distance_to_target,
-            distance_from_start: distance_to_target,
-            confidence: target_match.confidence,
-            guard_requirements: vec![
-                "bounded_step_probe".to_owned(),
-                "replan_after_zone_change_or_surprise".to_owned(),
-            ],
-            source_path: Some(target_match.landmark.source_path.clone()),
-            source_line_number: Some(target_match.landmark.source_line_number),
-        },
-    ];
-    row.waypoints.truncate(params.max_waypoints);
+    row.waypoints = waypoints;
+    if floor_route_required && waypoint_max_step(&row.waypoints) > MAX_GUIDANCE_STEP_DISTANCE {
+        row.hazards.push(EverQuestRouteHazard {
+            code: "floor_route_waypoint_budget_exceeded".to_owned(),
+            severity: "high".to_owned(),
+            detail: format!(
+                "floor route has a guidance step longer than {MAX_GUIDANCE_STEP_DISTANCE:.0} map units; increase max_waypoints"
+            ),
+        });
+        abstain(
+            &mut row,
+            "abstain_floor_route_waypoint_budget_exceeded",
+            "floor/ramp route needs more waypoint budget for bounded guidance steps",
+        );
+        return row;
+    }
     if confidence >= MIN_ROUTE_CONFIDENCE {
         "route_ready".clone_into(&mut row.decision);
     } else {
@@ -838,6 +859,349 @@ fn target_from_edge(
         },
         confidence: edge.confidence,
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn route_waypoints(
+    params: &NormalizedParams,
+    graph: &EverQuestZoneGraph,
+    zone_short_name: &str,
+    current_location: &EverQuestRouteLocation,
+    target_landmark: &EverQuestRouteLandmark,
+    current_confidence: f32,
+    target_confidence: f32,
+    floor_route_required: bool,
+) -> Option<(Vec<EverQuestRouteWaypoint>, Option<f64>)> {
+    let route_nodes = if floor_route_required {
+        Some(floor_route_nodes(
+            graph,
+            zone_short_name,
+            current_location,
+            target_landmark,
+        )?)
+    } else {
+        None
+    };
+    let max_guidance = params.max_waypoints.saturating_sub(2);
+    let guidance_nodes = route_nodes
+        .as_deref()
+        .map(|nodes| select_guidance_nodes(nodes, max_guidance))
+        .unwrap_or_default();
+    let mut waypoints = Vec::with_capacity(2 + guidance_nodes.len());
+    let mut previous = EverQuestMapCoord {
+        x: current_location.map_x,
+        y: current_location.map_y,
+        z: current_location.map_z,
+    };
+    let mut distance_from_start = 0.0;
+    waypoints.push(EverQuestRouteWaypoint {
+        step_index: 0,
+        waypoint_kind: "current_state".to_owned(),
+        label: "current_location".to_owned(),
+        zone_short_name: zone_short_name.to_owned(),
+        map_x: current_location.map_x,
+        map_y: current_location.map_y,
+        map_z: current_location.map_z,
+        distance_from_previous: 0.0,
+        distance_from_start: 0.0,
+        confidence: current_confidence,
+        guard_requirements: vec!["verify_loc_before_step".to_owned()],
+        source_path: None,
+        source_line_number: None,
+    });
+    for node in guidance_nodes {
+        let step_distance = distance(&previous, &node.location);
+        distance_from_start += step_distance;
+        waypoints.push(EverQuestRouteWaypoint {
+            step_index: waypoints.len(),
+            waypoint_kind: "map_line_guidance".to_owned(),
+            label: format!("map_line_{}", node.source_line_number),
+            zone_short_name: zone_short_name.to_owned(),
+            map_x: node.location.x,
+            map_y: node.location.y,
+            map_z: node.location.z,
+            distance_from_previous: step_distance,
+            distance_from_start,
+            confidence: 0.70,
+            guard_requirements: vec![
+                "bounded_step_probe".to_owned(),
+                "verify_loc_before_step".to_owned(),
+                "replan_after_guidance_waypoint".to_owned(),
+            ],
+            source_path: Some(node.source_path.clone()),
+            source_line_number: Some(node.source_line_number),
+        });
+        previous = node.location.clone();
+    }
+    let target_coord = EverQuestMapCoord {
+        x: target_landmark.map_x,
+        y: target_landmark.map_y,
+        z: target_landmark.map_z,
+    };
+    let target_step = distance(&previous, &target_coord);
+    distance_from_start += target_step;
+    waypoints.push(EverQuestRouteWaypoint {
+        step_index: waypoints.len(),
+        waypoint_kind: "target_landmark".to_owned(),
+        label: target_landmark.label.clone(),
+        zone_short_name: target_landmark.zone_short_name.clone(),
+        map_x: target_landmark.map_x,
+        map_y: target_landmark.map_y,
+        map_z: target_landmark.map_z,
+        distance_from_previous: target_step,
+        distance_from_start,
+        confidence: target_confidence,
+        guard_requirements: vec![
+            "bounded_step_probe".to_owned(),
+            "replan_after_zone_change_or_surprise".to_owned(),
+        ],
+        source_path: Some(target_landmark.source_path.clone()),
+        source_line_number: Some(target_landmark.source_line_number),
+    });
+    Some((waypoints, Some(distance_from_start)))
+}
+
+fn floor_route_nodes(
+    graph: &EverQuestZoneGraph,
+    zone_short_name: &str,
+    current_location: &EverQuestRouteLocation,
+    target_landmark: &EverQuestRouteLandmark,
+) -> Option<Vec<MapRouteNode>> {
+    let mut nodes = Vec::<MapRouteNode>::new();
+    let mut node_index = HashMap::<String, usize>::new();
+    let mut adjacency = Vec::<Vec<(usize, f64)>>::new();
+    for segment in graph.segments_for_zone(zone_short_name) {
+        if segment_length(&segment) < MIN_SEGMENT_LENGTH {
+            continue;
+        }
+        let start = insert_route_node(&mut nodes, &mut node_index, &mut adjacency, &segment, true);
+        let end = insert_route_node(&mut nodes, &mut node_index, &mut adjacency, &segment, false);
+        if start == end {
+            continue;
+        }
+        let weight = distance(&nodes[start].location, &nodes[end].location);
+        adjacency[start].push((end, weight));
+        adjacency[end].push((start, weight));
+    }
+    if nodes.is_empty() {
+        return None;
+    }
+    let start_coord = EverQuestMapCoord {
+        x: current_location.map_x,
+        y: current_location.map_y,
+        z: current_location.map_z,
+    };
+    let target_coord = EverQuestMapCoord {
+        x: target_landmark.map_x,
+        y: target_landmark.map_y,
+        z: target_landmark.map_z,
+    };
+    let start_index = nodes.len();
+    nodes.push(MapRouteNode {
+        location: start_coord.clone(),
+        source_path: String::new(),
+        source_line_number: 0,
+    });
+    adjacency.push(Vec::new());
+    let target_index = nodes.len();
+    nodes.push(MapRouteNode {
+        location: target_coord.clone(),
+        source_path: target_landmark.source_path.clone(),
+        source_line_number: target_landmark.source_line_number,
+    });
+    adjacency.push(Vec::new());
+    connect_nearest_route_nodes(start_index, &start_coord, &nodes, &mut adjacency)?;
+    connect_nearest_route_nodes(target_index, &target_coord, &nodes, &mut adjacency)?;
+    let route_indices = dijkstra_path(&adjacency, start_index, target_index)?;
+    let path_nodes = route_indices
+        .into_iter()
+        .filter(|index| *index != start_index && *index != target_index)
+        .map(|index| nodes[index].clone())
+        .collect::<Vec<_>>();
+    Some(expand_long_guidance_segments(&path_nodes))
+}
+
+fn insert_route_node(
+    nodes: &mut Vec<MapRouteNode>,
+    node_index: &mut HashMap<String, usize>,
+    adjacency: &mut Vec<Vec<(usize, f64)>>,
+    segment: &EverQuestZoneSegment,
+    start: bool,
+) -> usize {
+    let coord = if start { &segment.start } else { &segment.end };
+    let key = route_node_key(coord);
+    if let Some(index) = node_index.get(&key) {
+        return *index;
+    }
+    let index = nodes.len();
+    node_index.insert(key, index);
+    nodes.push(MapRouteNode {
+        location: coord.clone(),
+        source_path: segment.source_path.display().to_string(),
+        source_line_number: segment.source_line_number,
+    });
+    adjacency.push(Vec::new());
+    index
+}
+
+fn connect_nearest_route_nodes(
+    index: usize,
+    location: &EverQuestMapCoord,
+    nodes: &[MapRouteNode],
+    adjacency: &mut [Vec<(usize, f64)>],
+) -> Option<()> {
+    let mut candidates = nodes
+        .iter()
+        .enumerate()
+        .filter(|(candidate_index, _)| *candidate_index != index)
+        .map(|(candidate_index, node)| (candidate_index, distance(location, &node.location)))
+        .filter(|(_, candidate_distance)| *candidate_distance <= FLOOR_ROUTE_CONNECT_RADIUS)
+        .collect::<Vec<_>>();
+    candidates.sort_by(|left, right| left.1.total_cmp(&right.1));
+    candidates.truncate(8);
+    if candidates.is_empty() {
+        return None;
+    }
+    for (candidate_index, candidate_distance) in candidates {
+        adjacency[index].push((candidate_index, candidate_distance));
+        adjacency[candidate_index].push((index, candidate_distance));
+    }
+    Some(())
+}
+
+fn dijkstra_path(
+    adjacency: &[Vec<(usize, f64)>],
+    start: usize,
+    target: usize,
+) -> Option<Vec<usize>> {
+    let mut distance_from_start = vec![f64::INFINITY; adjacency.len()];
+    let mut previous = vec![None; adjacency.len()];
+    let mut visited = vec![false; adjacency.len()];
+    distance_from_start[start] = 0.0;
+    loop {
+        let current = (0..adjacency.len())
+            .filter(|index| !visited[*index])
+            .min_by(|left, right| {
+                distance_from_start[*left].total_cmp(&distance_from_start[*right])
+            })?;
+        if !distance_from_start[current].is_finite() {
+            return None;
+        }
+        if current == target {
+            break;
+        }
+        visited[current] = true;
+        for (next, weight) in &adjacency[current] {
+            let candidate = distance_from_start[current] + weight;
+            if candidate < distance_from_start[*next] {
+                distance_from_start[*next] = candidate;
+                previous[*next] = Some(current);
+            }
+        }
+    }
+    let mut path = vec![target];
+    let mut current = target;
+    while current != start {
+        current = previous[current]?;
+        path.push(current);
+    }
+    path.reverse();
+    Some(path)
+}
+
+fn select_guidance_nodes(nodes: &[MapRouteNode], max_guidance: usize) -> Vec<MapRouteNode> {
+    if nodes.len() <= max_guidance {
+        return nodes.to_vec();
+    }
+    if max_guidance == 0 {
+        return Vec::new();
+    }
+    if max_guidance == 1 {
+        return vec![nodes[nodes.len() - 1].clone()];
+    }
+    let last = nodes.len() - 1;
+    let slots = max_guidance - 1;
+    let mut selected = Vec::with_capacity(max_guidance);
+    let mut last_index = None;
+    for slot in 0..max_guidance {
+        let index = ((slot * last) + (slots / 2)) / slots;
+        if Some(index) != last_index {
+            selected.push(nodes[index].clone());
+            last_index = Some(index);
+        }
+    }
+    selected
+}
+
+fn expand_long_guidance_segments(nodes: &[MapRouteNode]) -> Vec<MapRouteNode> {
+    let Some(first) = nodes.first() else {
+        return Vec::new();
+    };
+    let mut expanded = vec![first.clone()];
+    for node in &nodes[1..] {
+        let previous_location = expanded
+            .last()
+            .unwrap_or_else(|| unreachable!("expanded always has first node"));
+        let previous_location = previous_location.location.clone();
+        let step = distance(&previous_location, &node.location);
+        if step > MAX_GUIDANCE_STEP_DISTANCE {
+            let insert_count = guidance_insert_count(step);
+            for index in 1..=insert_count {
+                let ratio = guidance_ratio(index, insert_count);
+                expanded.push(MapRouteNode {
+                    location: lerp_coord(&previous_location, &node.location, ratio),
+                    source_path: node.source_path.clone(),
+                    source_line_number: node.source_line_number,
+                });
+            }
+        }
+        expanded.push(node.clone());
+    }
+    expanded
+}
+
+fn lerp_coord(start: &EverQuestMapCoord, end: &EverQuestMapCoord, ratio: f64) -> EverQuestMapCoord {
+    EverQuestMapCoord {
+        x: (end.x - start.x).mul_add(ratio, start.x),
+        y: (end.y - start.y).mul_add(ratio, start.y),
+        z: (end.z - start.z).mul_add(ratio, start.z),
+    }
+}
+
+fn guidance_insert_count(step: f64) -> usize {
+    for segments in 1..=MAX_WAYPOINTS {
+        let denominator = u32::try_from(segments).unwrap_or(u32::MAX);
+        if step / f64::from(denominator) <= MAX_GUIDANCE_STEP_DISTANCE {
+            return segments.saturating_sub(1);
+        }
+    }
+    MAX_WAYPOINTS.saturating_sub(1)
+}
+
+fn guidance_ratio(index: usize, insert_count: usize) -> f64 {
+    let numerator = u32::try_from(index).unwrap_or(u32::MAX);
+    let denominator = u32::try_from(insert_count.saturating_add(1)).unwrap_or(u32::MAX);
+    f64::from(numerator) / f64::from(denominator)
+}
+
+fn waypoint_max_step(waypoints: &[EverQuestRouteWaypoint]) -> f64 {
+    waypoints
+        .iter()
+        .map(|waypoint| waypoint.distance_from_previous)
+        .fold(0.0, f64::max)
+}
+
+fn route_node_key(coord: &EverQuestMapCoord) -> String {
+    format!(
+        "{:.0}:{:.0}:{:.0}",
+        coord.x / FLOOR_ROUTE_NODE_PRECISION,
+        coord.y / FLOOR_ROUTE_NODE_PRECISION,
+        coord.z / FLOOR_ROUTE_NODE_PRECISION
+    )
+}
+
+fn segment_length(segment: &EverQuestZoneSegment) -> f64 {
+    distance(&segment.start, &segment.end)
 }
 
 fn landmark_from_zone_landmark(
@@ -1132,7 +1496,7 @@ mod tests {
 
     use synapse_everquest::{
         EverQuestMapCoord, EverQuestZoneEdge, EverQuestZoneEdgeResolution, EverQuestZoneGraph,
-        EverQuestZoneLandmark, EverQuestZoneNode,
+        EverQuestZoneLandmark, EverQuestZoneNode, EverQuestZoneSegment,
     };
 
     use super::*;
@@ -1151,6 +1515,51 @@ mod tests {
         assert_eq!(row.waypoints.len(), 2);
         assert!(row.confidence > 0.7);
         assert!(!row.evidence_boundary.movement_executed);
+    }
+
+    #[test]
+    fn z_level_route_inserts_map_line_guidance() {
+        let params = params("floor-route", Some("to_Nektulos_Forest"), Some("nektulos"));
+        let source = source_state(Some("neriaka"), Some(location(0.0, 0.0, 0.0)));
+        let row = route_plan_row(&params, &source, &floor_graph());
+
+        assert_eq!(row.decision, "route_ready");
+        assert!(
+            row.waypoints
+                .iter()
+                .any(|waypoint| waypoint.waypoint_kind == "map_line_guidance")
+        );
+        assert_eq!(row.waypoints.last().unwrap().label, "to_Nektulos_Forest");
+    }
+
+    #[test]
+    fn z_level_route_abstains_without_map_line_path() {
+        let params = params(
+            "floor-route-missing",
+            Some("to_Nektulos_Forest"),
+            Some("nektulos"),
+        );
+        let source = source_state(Some("neriaka"), Some(location(0.0, 0.0, 0.0)));
+        let row = route_plan_row(&params, &source, &graph());
+
+        assert_eq!(row.decision, "abstain_floor_route_graph_missing");
+        assert_eq!(row.hazards[0].code, "floor_route_graph_missing");
+        assert!(row.waypoints.is_empty());
+    }
+
+    #[test]
+    fn z_level_route_abstains_when_waypoint_budget_cannot_bound_steps() {
+        let mut params = params(
+            "floor-route-budget",
+            Some("to_Nektulos_Forest"),
+            Some("nektulos"),
+        );
+        params.max_waypoints = 4;
+        let source = source_state(Some("neriaka"), Some(location(0.0, 0.0, 0.0)));
+        let row = route_plan_row(&params, &source, &long_floor_graph());
+
+        assert_eq!(row.decision, "abstain_floor_route_waypoint_budget_exceeded");
+        assert_eq!(row.hazards[0].code, "floor_route_waypoint_budget_exceeded");
     }
 
     #[test]
@@ -1314,8 +1723,67 @@ mod tests {
                 source_path: PathBuf::from("neriaka.txt"),
                 source_line_number: 2983,
             }],
+            segments: Vec::new(),
             unresolved_edge_count: 0,
             skipped_maps: Vec::new(),
+        }
+    }
+
+    fn floor_graph() -> EverQuestZoneGraph {
+        let mut graph = graph();
+        graph.landmarks[1].location = EverQuestMapCoord {
+            x: 100.0,
+            y: 0.0,
+            z: 20.0,
+        };
+        graph.edges[0].location = graph.landmarks[1].location.clone();
+        graph.segments = vec![
+            segment(10.0, 0.0, 0.0, 50.0, 0.0, 10.0, 10),
+            segment(50.0, 0.0, 10.0, 90.0, 0.0, 20.0, 11),
+        ];
+        graph
+    }
+
+    fn long_floor_graph() -> EverQuestZoneGraph {
+        let mut graph = graph();
+        graph.landmarks[1].location = EverQuestMapCoord {
+            x: 280.0,
+            y: 0.0,
+            z: 20.0,
+        };
+        graph.edges[0].location = graph.landmarks[1].location.clone();
+        graph.segments = vec![segment(10.0, 0.0, 0.0, 270.0, 0.0, 20.0, 10)];
+        graph
+    }
+
+    fn segment(
+        start_x: f64,
+        start_y: f64,
+        start_z: f64,
+        end_x: f64,
+        end_y: f64,
+        end_z: f64,
+        source_line_number: usize,
+    ) -> EverQuestZoneSegment {
+        EverQuestZoneSegment {
+            zone_short_name: "neriaka".to_owned(),
+            start: EverQuestMapCoord {
+                x: start_x,
+                y: start_y,
+                z: start_z,
+            },
+            end: EverQuestMapCoord {
+                x: end_x,
+                y: end_y,
+                z: end_z,
+            },
+            color: synapse_everquest::EverQuestMapColor {
+                r: 64,
+                g: 64,
+                b: 64,
+            },
+            source_path: PathBuf::from("neriaka.txt"),
+            source_line_number,
         }
     }
 }

@@ -7,8 +7,8 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::map::{
-    EverQuestMapCoord, EverQuestMapError, EverQuestMapFile, EverQuestMapPoint, EverQuestMapRecord,
-    discover_map_files, parse_map_file,
+    EverQuestMapColor, EverQuestMapCoord, EverQuestMapError, EverQuestMapFile, EverQuestMapLine,
+    EverQuestMapPoint, EverQuestMapRecord, discover_map_files, parse_map_file,
 };
 
 #[derive(Debug, Error)]
@@ -22,6 +22,7 @@ pub struct EverQuestZoneGraph {
     pub nodes: Vec<EverQuestZoneNode>,
     pub landmarks: Vec<EverQuestZoneLandmark>,
     pub edges: Vec<EverQuestZoneEdge>,
+    pub segments: Vec<EverQuestZoneSegment>,
     pub unresolved_edge_count: usize,
     pub skipped_maps: Vec<EverQuestZoneSkippedMap>,
 }
@@ -57,6 +58,16 @@ pub struct EverQuestZoneEdge {
     pub location: EverQuestMapCoord,
     pub confidence: f32,
     pub resolution: EverQuestZoneEdgeResolution,
+    pub source_path: PathBuf,
+    pub source_line_number: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct EverQuestZoneSegment {
+    pub zone_short_name: String,
+    pub start: EverQuestMapCoord,
+    pub end: EverQuestMapCoord,
+    pub color: EverQuestMapColor,
     pub source_path: PathBuf,
     pub source_line_number: usize,
 }
@@ -116,6 +127,7 @@ pub fn build_zone_graph(maps: &[EverQuestMapFile]) -> EverQuestZoneGraph {
     let mut nodes = Vec::with_capacity(maps.len());
     let mut landmarks = Vec::new();
     let mut edges = Vec::new();
+    let mut segments = Vec::new();
 
     for map in maps {
         nodes.push(EverQuestZoneNode {
@@ -127,18 +139,22 @@ pub fn build_zone_graph(maps: &[EverQuestMapFile]) -> EverQuestZoneGraph {
         });
 
         for record in &map.records {
-            let EverQuestMapRecord::Point(point) = record else {
-                continue;
-            };
-            landmarks.push(landmark_from_point(&map.source.zone_short_name, point));
-            if let Some(target_hint) = transition_target_hint(&point.label) {
-                edges.push(edge_from_point(
-                    &map.source.zone_short_name,
-                    point,
-                    target_hint,
-                    &available_zones,
-                    &alias_index,
-                ));
+            match record {
+                EverQuestMapRecord::Line(line) => {
+                    segments.push(segment_from_line(&map.source.zone_short_name, line));
+                }
+                EverQuestMapRecord::Point(point) => {
+                    landmarks.push(landmark_from_point(&map.source.zone_short_name, point));
+                    if let Some(target_hint) = transition_target_hint(&point.label) {
+                        edges.push(edge_from_point(
+                            &map.source.zone_short_name,
+                            point,
+                            target_hint,
+                            &available_zones,
+                            &alias_index,
+                        ));
+                    }
+                }
             }
         }
     }
@@ -154,6 +170,11 @@ pub fn build_zone_graph(maps: &[EverQuestMapFile]) -> EverQuestZoneGraph {
             .cmp(&right.source_zone_short_name)
             .then(left.source_line_number.cmp(&right.source_line_number))
     });
+    segments.sort_by(|left, right| {
+        left.zone_short_name
+            .cmp(&right.zone_short_name)
+            .then(left.source_line_number.cmp(&right.source_line_number))
+    });
     let unresolved_edge_count = edges
         .iter()
         .filter(|edge| edge.resolution == EverQuestZoneEdgeResolution::Unresolved)
@@ -163,6 +184,7 @@ pub fn build_zone_graph(maps: &[EverQuestMapFile]) -> EverQuestZoneGraph {
         nodes,
         landmarks,
         edges,
+        segments,
         unresolved_edge_count,
         skipped_maps: Vec::new(),
     }
@@ -202,6 +224,19 @@ impl EverQuestZoneGraph {
     }
 
     #[must_use]
+    pub fn segments_for_zone(&self, zone_short_name: &str) -> Vec<EverQuestZoneSegment> {
+        self.segments
+            .iter()
+            .filter(|segment| {
+                segment
+                    .zone_short_name
+                    .eq_ignore_ascii_case(zone_short_name)
+            })
+            .cloned()
+            .collect()
+    }
+
+    #[must_use]
     pub fn nearest_landmarks(
         &self,
         zone_short_name: &str,
@@ -231,6 +266,17 @@ fn landmark_from_point(zone_short_name: &str, point: &EverQuestMapPoint) -> Ever
         layer: point.layer,
         source_path: point.source_path.clone(),
         source_line_number: point.source_line_number,
+    }
+}
+
+fn segment_from_line(zone_short_name: &str, line: &EverQuestMapLine) -> EverQuestZoneSegment {
+    EverQuestZoneSegment {
+        zone_short_name: zone_short_name.to_owned(),
+        start: line.start.clone(),
+        end: line.end.clone(),
+        color: line.color.clone(),
+        source_path: line.source_path.clone(),
+        source_line_number: line.source_line_number,
     }
 }
 
