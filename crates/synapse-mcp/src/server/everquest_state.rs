@@ -19,7 +19,7 @@ use crate::m1::{current_input, mcp_error};
 const TOOL: &str = "everquest_current_state";
 pub(super) const CURRENT_STATE_ROW_KEY: &str = "everquest/current_state/v1/everquest.live";
 const MAX_STATE_LOG_BYTES: usize = 512 * 1024;
-const MAX_STATE_LOG_EVENTS: usize = 4096;
+const MAX_STATE_LOG_EVENTS: usize = 65_536;
 const MAX_ACTION_ROWS: usize = 8;
 const MAX_LANDMARKS: usize = 3;
 
@@ -741,6 +741,38 @@ mod tests {
         assert_eq!(location.map_x, 154.0);
         assert_eq!(location.map_y, 50.94);
         assert_eq!(location.map_z, 31.19);
+        Ok(())
+    }
+
+    #[test]
+    fn location_uses_latest_loc_after_dense_log_window() -> anyhow::Result<()> {
+        use std::fmt::Write as _;
+
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("eqlog_Thenumberone_frostreaver.txt");
+        let mut log = String::new();
+        for index in 0..5000 {
+            writeln!(
+                log,
+                "[Thu May 28 14:00:{:02} 2026] Dense filler event {index}",
+                index % 60
+            )?;
+        }
+        log.push_str("[Thu May 28 14:05:24 2026] Your Location is 50.94, 154.00, 31.19\r\n");
+        log.push_str("[Thu May 28 14:06:24 2026] Your Location is 11.75, 146.88, 31.19\r\n");
+        std::fs::write(&path, log)?;
+
+        let batch = tail_log(&path, 0, MAX_STATE_LOG_BYTES, MAX_STATE_LOG_EVENTS)?;
+        let field = latest_location_field(&batch.events, &batch);
+        let location = field
+            .value
+            .as_ref()
+            .unwrap_or_else(|| panic!("expected latest location"));
+        assert_eq!(location.display_y, 11.75);
+        assert_eq!(location.display_x, 146.88);
+        assert_eq!(location.map_x, 146.88);
+        assert_eq!(location.map_y, 11.75);
+        assert_eq!(location.log_timestamp, "2026-05-28T14:06:24");
         Ok(())
     }
 
