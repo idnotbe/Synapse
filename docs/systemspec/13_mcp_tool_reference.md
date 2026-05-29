@@ -121,6 +121,13 @@ to_seq, deltas, cursor, baseline_required, rebase_required, reason,
 readback_rows, published_sse_events, size_bytes, size_estimate_tokens }`.
 Missing baseline, stale epoch, profile change, and overflow return explicit
 rebase guidance; future `since_seq` fails closed with `TOOL_PARAMS_INVALID`.
+Generated deltas use stable field-level JSON-pointer paths within the active
+epoch for foreground/focus, UIA elements, HUD values/errors, entity fields,
+audio, log/runtime action outcomes, clipboard, filesystem, and diagnostics.
+Delta `source_refs` are scoped to the changed physical surface instead of
+repeating the whole observation ref set on every row.
+Because the head comparison is against the latest compact state, rapid repeated
+changes coalesce into the final before/after pair persisted for that path.
 
 ## 2c. `reality_audit`
 

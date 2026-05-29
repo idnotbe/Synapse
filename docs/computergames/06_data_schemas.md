@@ -308,8 +308,10 @@ pub enum RealitySourceSurface {
     A11yUia,
     PixelFrame,
     Hud,
+    Audio,
     GameLog,
     File,
+    Clipboard,
     Process,
     ActionAudit,
     Storage,
@@ -386,6 +388,7 @@ pub struct RealityTargetRef {
 pub enum RealityTargetKind {
     Foreground,
     Focus,
+    UiElement,
     HudField,
     Entity,
     LogCursor,

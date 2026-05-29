@@ -210,9 +210,14 @@ pub struct CompactRealityState {
     pub profile_id: Option<String>,
     pub foreground: CompactForeground,
     pub focused: Option<CompactFocused>,
+    pub elements: Vec<CompactElement>,
     pub hud: BTreeMap<String, CompactHudReading>,
+    pub hud_errors: BTreeMap<String, CompactHudError>,
     pub entities: Vec<CompactEntity>,
+    pub audio: CompactAudio,
     pub events: CompactEventCursor,
+    pub clipboard: Option<CompactClipboard>,
+    pub fs: CompactFsRecent,
     pub diagnostics: CompactDiagnostics,
 }
 
@@ -239,6 +244,25 @@ pub struct CompactFocused {
     pub automation_id: Option<String>,
     pub bbox: Value,
     pub enabled: bool,
+    pub patterns: Vec<String>,
+    pub value_sha256: Option<String>,
+    pub selected_text_sha256: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CompactElement {
+    pub element_id: String,
+    pub parent: Option<String>,
+    pub name_sha256: Option<String>,
+    pub role: String,
+    pub automation_id: Option<String>,
+    pub bbox: Value,
+    pub enabled: bool,
+    pub focused: bool,
+    pub patterns: Vec<String>,
+    pub children_count: u32,
+    pub depth: u32,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -248,6 +272,13 @@ pub struct CompactHudReading {
     pub raw_text_sha256: Option<String>,
     pub confidence_milli: u32,
     pub stale_ms: u32,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CompactHudError {
+    pub code: String,
+    pub detail_sha256: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -262,13 +293,76 @@ pub struct CompactEntity {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+pub struct CompactAudio {
+    pub rms_db_milli: i32,
+    pub vad_speech_recent: bool,
+    pub recent_event_count: u32,
+    pub latest_event_kind: Option<String>,
+    pub latest_event_azimuth_milli: Option<i32>,
+    pub latest_event_confidence_milli: Option<u32>,
+    pub direction_azimuth_milli: Option<i32>,
+    pub direction_confidence_milli: Option<u32>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct CompactEventCursor {
     pub event_count: u32,
     pub latest_non_cursor_kind: Option<String>,
+    pub latest_non_cursor_seq: Option<u64>,
+    pub latest_non_cursor_source: Option<String>,
+    pub latest_non_cursor_data_sha256: Option<String>,
+    pub latest_action_seq: Option<u64>,
+    pub latest_action_kind: Option<String>,
+    pub latest_action_data_sha256: Option<String>,
     pub log_path_sha256: Option<String>,
     pub log_start_offset: Option<u64>,
     pub log_next_offset: Option<u64>,
     pub log_file_len_bytes: Option<u64>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+struct CompactLogCursorChange {
+    path_sha256: Option<String>,
+    start_offset: Option<u64>,
+    next_offset: Option<u64>,
+    file_len_bytes: Option<u64>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+struct CompactRuntimeEventChange {
+    event_count: u32,
+    latest_non_cursor_kind: Option<String>,
+    latest_non_cursor_seq: Option<u64>,
+    latest_non_cursor_source: Option<String>,
+    latest_non_cursor_data_sha256: Option<String>,
+    latest_action_seq: Option<u64>,
+    latest_action_kind: Option<String>,
+    latest_action_data_sha256: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CompactClipboard {
+    pub formats: Vec<String>,
+    pub text_len: Option<u32>,
+    pub text_excerpt_sha256: Option<String>,
+    pub redacted: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CompactFsRecent {
+    pub event_count: u32,
+    pub latest: Option<CompactFsEvent>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CompactFsEvent {
+    pub path_sha256: String,
+    pub kind: String,
+    pub size_bytes: Option<u64>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -305,6 +399,12 @@ struct RealityChange {
     target: RealityTargetRef,
     before: Value,
     after: Value,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct RectTranslation {
+    dx: i64,
+    dy: i64,
 }
 
 #[tool_router(router = reality_tool_router, vis = "pub(super)")]
@@ -466,29 +566,32 @@ impl SynapseService {
         &self,
         params: ObserveDeltaParams,
     ) -> Result<ObserveDeltaResponse, ErrorData> {
-        let profile_key = params
+        let requested_profile_key = params
             .profile_id
             .as_deref()
             .map(validate_key_segment)
-            .transpose()?
-            .unwrap_or_else(|| UNPROFILED_PROFILE_KEY.to_owned());
-        let Some(mut head) = self.read_reality_head(&profile_key)? else {
-            return Ok(ObserveDeltaResponse {
-                ok: true,
-                profile_key: Some(profile_key),
-                epoch_id: params.since_epoch,
-                from_seq: params.since_seq,
-                to_seq: params.since_seq,
-                deltas: Vec::new(),
-                cursor: None,
-                baseline_required: true,
-                rebase_required: true,
-                reason: Some("missing_baseline".to_owned()),
-                readback_rows: Vec::new(),
-                published_sse_events: 0,
-                size_bytes: 0,
-                size_estimate_tokens: 0,
-            });
+            .transpose()?;
+        let mut captured_before_head = None;
+        let head_profile_key = if let Some(profile_key) = requested_profile_key {
+            profile_key
+        } else {
+            let captured = self.capture_reality_observation(
+                &params.include,
+                params.depth,
+                params.max_elements,
+                "observe_delta",
+            )?;
+            let profile = select_profile(None, &captured.observation)?;
+            let profile_key = profile.profile_key.clone();
+            captured_before_head = Some((captured, profile));
+            profile_key
+        };
+        let Some(mut head) = self.read_reality_head(&head_profile_key)? else {
+            return Ok(missing_baseline_response(
+                head_profile_key,
+                params.since_epoch,
+                params.since_seq,
+            ));
         };
         if let Some(epoch) = params.since_epoch.as_deref()
             && epoch != head.epoch_id
@@ -506,13 +609,18 @@ impl SynapseService {
             ));
         }
 
-        let captured = self.capture_reality_observation(
-            &params.include,
-            params.depth,
-            params.max_elements,
-            "observe_delta",
-        )?;
-        let profile = select_profile(params.profile_id.as_deref(), &captured.observation)?;
+        let (captured, profile) = if let Some(captured) = captured_before_head {
+            captured
+        } else {
+            let captured = self.capture_reality_observation(
+                &params.include,
+                params.depth,
+                params.max_elements,
+                "observe_delta",
+            )?;
+            let profile = select_profile(params.profile_id.as_deref(), &captured.observation)?;
+            (captured, profile)
+        };
         if profile.profile_key != head.profile_key {
             return Ok(ObserveDeltaResponse {
                 ok: true,
@@ -565,6 +673,7 @@ impl SynapseService {
             let mut previous_hash = head.compact_state_hash.clone();
             for change in changes {
                 let seq = previous_seq.saturating_add(1);
+                let source_refs = source_refs_for_change(change.kind, &captured.source_refs);
                 let delta = RealityDelta {
                     epoch_id: head.epoch_id.clone(),
                     seq,
@@ -578,7 +687,7 @@ impl SynapseService {
                     after: change.after,
                     confidence: 0.95,
                     expected_previous_hash: Some(previous_hash.clone()),
-                    source_refs: captured.source_refs.clone(),
+                    source_refs,
                     correlations: Vec::new(),
                     conflict: None,
                     redaction: reality_redaction(),
@@ -1007,26 +1116,6 @@ fn compact_state(observation: &Observation) -> Result<CompactRealityState, Error
             },
         );
     }
-    let mut entities = observation
-        .entities
-        .iter()
-        .map(|entity| {
-            Ok(CompactEntity {
-                entity_id: entity.entity_id.clone(),
-                track_id: entity.track_id,
-                class_label: entity.class_label.clone(),
-                bbox: serde_json::to_value(entity.bbox)
-                    .map_err(|error| encode_value_error(&error))?,
-                confidence_milli: confidence_milli(entity.confidence),
-            })
-        })
-        .collect::<Result<Vec<_>, ErrorData>>()?;
-    entities.sort_by(|left, right| {
-        left.entity_id
-            .cmp(&right.entity_id)
-            .then_with(|| left.track_id.cmp(&right.track_id))
-            .then_with(|| left.class_label.cmp(&right.class_label))
-    });
     Ok(CompactRealityState {
         schema_version: SCHEMA_VERSION,
         profile_id: observation.foreground.profile_id.clone(),
@@ -1047,9 +1136,14 @@ fn compact_state(observation: &Observation) -> Result<CompactRealityState, Error
             .as_ref()
             .map(compact_focused)
             .transpose()?,
+        elements: compact_elements(observation)?,
         hud,
-        entities,
+        hud_errors: compact_hud_errors(observation),
+        entities: compact_entities(observation)?,
+        audio: compact_audio(observation),
         events: compact_events(observation),
+        clipboard: compact_clipboard(observation),
+        fs: compact_fs_recent(observation),
         diagnostics: CompactDiagnostics {
             a11y_status: sensor_status_name(&observation.diagnostics.a11y_status),
             capture_status: sensor_status_name(&observation.diagnostics.capture_status),
@@ -1069,11 +1163,155 @@ fn compact_focused(focused: &synapse_core::FocusedElement) -> Result<CompactFocu
         automation_id: focused.automation_id.clone(),
         bbox: serde_json::to_value(focused.bbox).map_err(|error| encode_value_error(&error))?,
         enabled: focused.enabled,
+        patterns: compact_patterns(&focused.patterns),
+        value_sha256: focused.value.as_deref().and_then(non_empty_hash),
+        selected_text_sha256: focused.selected_text.as_deref().and_then(non_empty_hash),
     })
+}
+
+fn compact_elements(observation: &Observation) -> Result<Vec<CompactElement>, ErrorData> {
+    let mut elements = observation
+        .elements
+        .iter()
+        .map(|element| {
+            Ok(CompactElement {
+                element_id: element.element_id.to_string(),
+                parent: element.parent.as_ref().map(ToString::to_string),
+                name_sha256: non_empty_hash(&element.name),
+                role: element.role.clone(),
+                automation_id: element.automation_id.clone(),
+                bbox: serde_json::to_value(element.bbox)
+                    .map_err(|error| encode_value_error(&error))?,
+                enabled: element.enabled,
+                focused: element.focused,
+                patterns: compact_patterns(&element.patterns),
+                children_count: element.children_count,
+                depth: element.depth,
+            })
+        })
+        .collect::<Result<Vec<_>, ErrorData>>()?;
+    elements.sort_by(|left, right| left.element_id.cmp(&right.element_id));
+    Ok(elements)
+}
+
+fn compact_hud_errors(observation: &Observation) -> BTreeMap<String, CompactHudError> {
+    observation
+        .hud
+        .errors
+        .iter()
+        .map(|(name, error)| {
+            (
+                name.clone(),
+                CompactHudError {
+                    code: error.code.clone(),
+                    detail_sha256: non_empty_hash(&error.detail),
+                },
+            )
+        })
+        .collect()
+}
+
+fn compact_entities(observation: &Observation) -> Result<Vec<CompactEntity>, ErrorData> {
+    let mut entities = observation
+        .entities
+        .iter()
+        .map(|entity| {
+            Ok(CompactEntity {
+                entity_id: entity.entity_id.clone(),
+                track_id: entity.track_id,
+                class_label: entity.class_label.clone(),
+                bbox: serde_json::to_value(entity.bbox)
+                    .map_err(|error| encode_value_error(&error))?,
+                confidence_milli: confidence_milli(entity.confidence),
+            })
+        })
+        .collect::<Result<Vec<_>, ErrorData>>()?;
+    entities.sort_by(|left, right| {
+        left.entity_id
+            .cmp(&right.entity_id)
+            .then_with(|| left.track_id.cmp(&right.track_id))
+            .then_with(|| left.class_label.cmp(&right.class_label))
+    });
+    Ok(entities)
+}
+
+fn compact_audio(observation: &Observation) -> CompactAudio {
+    let latest_event = observation
+        .audio
+        .recent_events
+        .iter()
+        .max_by(|left, right| {
+            left.at
+                .cmp(&right.at)
+                .then_with(|| left.kind.cmp(&right.kind))
+        });
+    CompactAudio {
+        rms_db_milli: signed_milli(observation.audio.rms_db),
+        vad_speech_recent: observation.audio.vad_speech_recent,
+        recent_event_count: len_to_u32(observation.audio.recent_events.len()),
+        latest_event_kind: latest_event.map(|event| event.kind.clone()),
+        latest_event_azimuth_milli: latest_event
+            .and_then(|event| event.azimuth_deg.map(signed_milli)),
+        latest_event_confidence_milli: latest_event.map(|event| confidence_milli(event.confidence)),
+        direction_azimuth_milli: observation
+            .audio
+            .direction_estimate
+            .map(|direction| signed_milli(direction.azimuth_deg)),
+        direction_confidence_milli: observation
+            .audio
+            .direction_estimate
+            .map(|direction| confidence_milli(direction.confidence)),
+    }
+}
+
+fn compact_clipboard(observation: &Observation) -> Option<CompactClipboard> {
+    observation.clipboard_summary.as_ref().map(|summary| {
+        let mut formats = summary.formats.clone();
+        formats.sort();
+        formats.dedup();
+        CompactClipboard {
+            formats,
+            text_len: summary.text_len,
+            text_excerpt_sha256: summary.text_excerpt.as_deref().and_then(non_empty_hash),
+            redacted: summary.redacted,
+        }
+    })
+}
+
+fn compact_fs_recent(observation: &Observation) -> CompactFsRecent {
+    let latest = observation.fs_recent.iter().max_by(|left, right| {
+        left.at
+            .cmp(&right.at)
+            .then_with(|| left.path.cmp(&right.path))
+            .then_with(|| fs_event_kind_name(left.kind).cmp(fs_event_kind_name(right.kind)))
+    });
+    CompactFsRecent {
+        event_count: len_to_u32(observation.fs_recent.len()),
+        latest: latest.map(|event| CompactFsEvent {
+            path_sha256: hash_bytes(event.path.as_bytes()),
+            kind: fs_event_kind_name(event.kind).to_owned(),
+            size_bytes: event.size_bytes,
+        }),
+    }
+}
+
+fn compact_patterns(patterns: &[synapse_core::UiaPattern]) -> Vec<String> {
+    let mut patterns = patterns
+        .iter()
+        .map(|pattern| format!("{pattern:?}"))
+        .collect::<Vec<_>>();
+    patterns.sort();
+    patterns
 }
 
 fn compact_events(observation: &Observation) -> CompactEventCursor {
     let mut latest_non_cursor_kind = None;
+    let mut latest_non_cursor_seq = None;
+    let mut latest_non_cursor_source = None;
+    let mut latest_non_cursor_data_sha256 = None;
+    let mut latest_action_seq = None;
+    let mut latest_action_kind = None;
+    let mut latest_action_data_sha256 = None;
     let mut log_path_sha256 = None;
     let mut log_start_offset = None;
     let mut log_next_offset = None;
@@ -1103,11 +1341,29 @@ fn compact_events(observation: &Observation) -> CompactEventCursor {
         if !event.kind.starts_with("everquest.log_cursor") {
             event_count = event_count.saturating_add(1);
             latest_non_cursor_kind = Some(event.kind.clone());
+            latest_non_cursor_seq = Some(event.seq);
+            latest_non_cursor_source = Some(event_source_name(event.source).to_owned());
+            latest_non_cursor_data_sha256 = hash_json(&event.data_excerpt).ok();
+        }
+        if matches!(
+            event.source,
+            EventSource::ActionEmitter | EventSource::Reflex | EventSource::System
+        ) && (event.kind.contains("action") || event.kind.contains("audit"))
+        {
+            latest_action_seq = Some(event.seq);
+            latest_action_kind = Some(event.kind.clone());
+            latest_action_data_sha256 = hash_json(&event.data_excerpt).ok();
         }
     }
     CompactEventCursor {
         event_count,
         latest_non_cursor_kind,
+        latest_non_cursor_seq,
+        latest_non_cursor_source,
+        latest_non_cursor_data_sha256,
+        latest_action_seq,
+        latest_action_kind,
+        latest_action_data_sha256,
         log_path_sha256,
         log_start_offset,
         log_next_offset,
@@ -1145,18 +1401,26 @@ fn source_refs_for_observation(observation: &Observation) -> Result<Vec<SourceRe
     if let Some(log_ref) = log_source_ref(observation)? {
         refs.push(log_ref);
     }
-    if !observation.hud.by_name.is_empty() || !observation.hud.errors.is_empty() {
-        refs.push(SourceRef {
-            surface: RealitySourceSurface::Hud,
-            path: "observation/hud".to_owned(),
-            offset: None,
-            hash: Some(hash_json(&observation.hud)?),
-            summary: format!(
-                "hud fields={} errors={}",
-                observation.hud.by_name.len(),
-                observation.hud.errors.len()
-            ),
-        });
+    if let Some(a11y_ref) = a11y_source_ref(observation)? {
+        refs.push(a11y_ref);
+    }
+    if let Some(entity_ref) = entity_source_ref(observation)? {
+        refs.push(entity_ref);
+    }
+    if let Some(hud_ref) = hud_source_ref(observation)? {
+        refs.push(hud_ref);
+    }
+    if let Some(audio_ref) = audio_source_ref(observation)? {
+        refs.push(audio_ref);
+    }
+    if let Some(clipboard_ref) = clipboard_source_ref(observation)? {
+        refs.push(clipboard_ref);
+    }
+    if let Some(fs_ref) = fs_source_ref(observation)? {
+        refs.push(fs_ref);
+    }
+    if let Some(action_ref) = action_audit_source_ref(observation)? {
+        refs.push(action_ref);
     }
     refs.push(SourceRef {
         surface: RealitySourceSurface::Storage,
@@ -1166,6 +1430,186 @@ fn source_refs_for_observation(observation: &Observation) -> Result<Vec<SourceRe
         summary: "full observation also persisted through the observation audit path".to_owned(),
     });
     Ok(refs)
+}
+
+fn source_refs_for_change(kind: &str, source_refs: &[SourceRef]) -> Vec<SourceRef> {
+    let scoped = source_refs
+        .iter()
+        .filter(|source| source_ref_matches_change(kind, source.surface))
+        .cloned()
+        .collect::<Vec<_>>();
+    if scoped.is_empty() {
+        source_refs.to_vec()
+    } else {
+        scoped
+    }
+}
+
+fn source_ref_matches_change(kind: &str, surface: RealitySourceSurface) -> bool {
+    match kind {
+        "foreground_changed" => matches!(
+            surface,
+            RealitySourceSurface::Window | RealitySourceSurface::Process
+        ),
+        "focus_changed"
+        | "uia_element_appeared"
+        | "uia_element_disappeared"
+        | "uia_element_name_changed"
+        | "uia_element_moved"
+        | "uia_element_changed" => matches!(surface, RealitySourceSurface::A11yUia),
+        "hud_field_changed" | "hud_error_changed" => {
+            matches!(surface, RealitySourceSurface::Hud)
+        }
+        "entity_appeared"
+        | "entity_disappeared"
+        | "entity_moved"
+        | "entity_class_changed"
+        | "entity_confidence_changed"
+        | "entity_track_changed" => matches!(surface, RealitySourceSurface::PixelFrame),
+        "audio_summary_changed" => matches!(surface, RealitySourceSurface::Audio),
+        "log_cursor_changed" => matches!(surface, RealitySourceSurface::GameLog),
+        "runtime_event_changed" => matches!(
+            surface,
+            RealitySourceSurface::ActionAudit | RealitySourceSurface::GameLog
+        ),
+        "clipboard_summary_changed" => matches!(surface, RealitySourceSurface::Clipboard),
+        "filesystem_summary_changed" => matches!(surface, RealitySourceSurface::File),
+        _ => true,
+    }
+}
+
+fn a11y_source_ref(observation: &Observation) -> Result<Option<SourceRef>, ErrorData> {
+    if !observation.elements.is_empty() || observation.focused.is_some() {
+        return Ok(Some(SourceRef {
+            surface: RealitySourceSurface::A11yUia,
+            path: "observation/a11y".to_owned(),
+            offset: None,
+            hash: Some(hash_json(&json!({
+                "focused": observation.focused,
+                "elements": observation.elements,
+                "elements_truncated": observation.diagnostics.elements_truncated,
+            }))?),
+            summary: format!(
+                "a11y elements={} focused={}",
+                observation.elements.len(),
+                observation.focused.is_some()
+            ),
+        }));
+    }
+    Ok(None)
+}
+
+fn entity_source_ref(observation: &Observation) -> Result<Option<SourceRef>, ErrorData> {
+    if !observation.entities.is_empty() {
+        return Ok(Some(SourceRef {
+            surface: RealitySourceSurface::PixelFrame,
+            path: "observation/entities".to_owned(),
+            offset: None,
+            hash: Some(hash_json(&json!({
+                "entities": observation.entities,
+                "entities_truncated": observation.diagnostics.entities_truncated,
+            }))?),
+            summary: format!("entities={}", observation.entities.len()),
+        }));
+    }
+    Ok(None)
+}
+
+fn hud_source_ref(observation: &Observation) -> Result<Option<SourceRef>, ErrorData> {
+    if !observation.hud.by_name.is_empty() || !observation.hud.errors.is_empty() {
+        return Ok(Some(SourceRef {
+            surface: RealitySourceSurface::Hud,
+            path: "observation/hud".to_owned(),
+            offset: None,
+            hash: Some(hash_json(&observation.hud)?),
+            summary: format!(
+                "hud fields={} errors={}",
+                observation.hud.by_name.len(),
+                observation.hud.errors.len()
+            ),
+        }));
+    }
+    Ok(None)
+}
+
+fn audio_source_ref(observation: &Observation) -> Result<Option<SourceRef>, ErrorData> {
+    if observation.diagnostics.audio_enabled
+        || !observation.audio.recent_events.is_empty()
+        || observation.audio.direction_estimate.is_some()
+        || observation.audio.vad_speech_recent
+    {
+        return Ok(Some(SourceRef {
+            surface: RealitySourceSurface::Audio,
+            path: "observation/audio".to_owned(),
+            offset: None,
+            hash: Some(hash_json(&observation.audio)?),
+            summary: format!(
+                "audio events={} vad={}",
+                observation.audio.recent_events.len(),
+                observation.audio.vad_speech_recent
+            ),
+        }));
+    }
+    Ok(None)
+}
+
+fn clipboard_source_ref(observation: &Observation) -> Result<Option<SourceRef>, ErrorData> {
+    if let Some(clipboard) = &observation.clipboard_summary {
+        return Ok(Some(SourceRef {
+            surface: RealitySourceSurface::Clipboard,
+            path: "observation/clipboard".to_owned(),
+            offset: None,
+            hash: Some(hash_json(&json!({
+                "formats": clipboard.formats,
+                "text_len": clipboard.text_len,
+                "text_excerpt_sha256": clipboard.text_excerpt.as_deref().and_then(non_empty_hash),
+                "redacted": clipboard.redacted,
+            }))?),
+            summary: format!(
+                "clipboard formats={} text_len={:?} redacted={}",
+                clipboard.formats.len(),
+                clipboard.text_len,
+                clipboard.redacted
+            ),
+        }));
+    }
+    Ok(None)
+}
+
+fn fs_source_ref(observation: &Observation) -> Result<Option<SourceRef>, ErrorData> {
+    if !observation.fs_recent.is_empty() {
+        return Ok(Some(SourceRef {
+            surface: RealitySourceSurface::File,
+            path: "observation/fs_recent".to_owned(),
+            offset: None,
+            hash: Some(hash_json(&compact_fs_recent(observation))?),
+            summary: format!("fs_recent events={}", observation.fs_recent.len()),
+        }));
+    }
+    Ok(None)
+}
+
+fn action_audit_source_ref(observation: &Observation) -> Result<Option<SourceRef>, ErrorData> {
+    let action_events = observation
+        .recent_events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event.source,
+                EventSource::ActionEmitter | EventSource::Reflex | EventSource::System
+            ) && (event.kind.contains("action") || event.kind.contains("audit"))
+        })
+        .collect::<Vec<_>>();
+    if !action_events.is_empty() {
+        return Ok(Some(SourceRef {
+            surface: RealitySourceSurface::ActionAudit,
+            path: "observation/events/action_audit".to_owned(),
+            offset: action_events.last().map(|event| event.seq),
+            hash: Some(hash_json(&action_events)?),
+            summary: format!("action/audit events={}", action_events.len()),
+        }));
+    }
+    Ok(None)
 }
 
 fn log_source_ref(observation: &Observation) -> Result<Option<SourceRef>, ErrorData> {
@@ -1200,86 +1644,23 @@ fn reality_changes(
     after: &CompactRealityState,
 ) -> Vec<RealityChange> {
     let mut changes = Vec::new();
-    push_change(
-        &mut changes,
-        before.foreground.clone(),
-        after.foreground.clone(),
-        "foreground_changed",
-        "/foreground".to_owned(),
-        RealityTargetRef {
-            kind: RealityTargetKind::Foreground,
-            entity_id: None,
-            field: None,
-        },
+    let foreground_translation = rect_translation(
+        &before.foreground.window_bounds,
+        &after.foreground.window_bounds,
     );
-    push_change(
+    push_foreground_changes(&mut changes, &before.foreground, &after.foreground);
+    push_focus_changes(
         &mut changes,
-        before.focused.clone(),
-        after.focused.clone(),
-        "focus_changed",
-        "/focused".to_owned(),
-        RealityTargetRef {
-            kind: RealityTargetKind::Focus,
-            entity_id: None,
-            field: None,
-        },
+        before.focused.as_ref(),
+        after.focused.as_ref(),
+        foreground_translation,
     );
-    let hud_keys = before
-        .hud
-        .keys()
-        .chain(after.hud.keys())
-        .cloned()
-        .collect::<BTreeSet<_>>();
-    for key in hud_keys {
-        push_change(
-            &mut changes,
-            before.hud.get(&key).cloned(),
-            after.hud.get(&key).cloned(),
-            "hud_field_changed",
-            format!("/hud/{}", json_pointer_segment(&key)),
-            RealityTargetRef {
-                kind: RealityTargetKind::HudField,
-                entity_id: None,
-                field: Some(key),
-            },
-        );
-    }
-    push_change(
-        &mut changes,
-        before.entities.clone(),
-        after.entities.clone(),
-        "entity_set_changed",
-        "/entities".to_owned(),
-        RealityTargetRef {
-            kind: RealityTargetKind::Entity,
-            entity_id: None,
-            field: None,
-        },
-    );
-    push_change(
-        &mut changes,
-        before.events.clone(),
-        after.events.clone(),
-        "log_cursor_changed",
-        "/events".to_owned(),
-        RealityTargetRef {
-            kind: RealityTargetKind::LogCursor,
-            entity_id: None,
-            field: None,
-        },
-    );
-    push_change(
-        &mut changes,
-        before.diagnostics.clone(),
-        after.diagnostics.clone(),
-        "diagnostics_changed",
-        "/diagnostics".to_owned(),
-        RealityTargetRef {
-            kind: RealityTargetKind::Other,
-            entity_id: None,
-            field: Some("diagnostics".to_owned()),
-        },
-    );
+    push_element_changes(&mut changes, before, after, foreground_translation);
+    push_hud_changes(&mut changes, before, after);
+    push_entity_changes(&mut changes, before, after);
+    push_sensor_summary_changes(&mut changes, before, after);
+    push_event_changes(&mut changes, before, after);
+    push_diagnostics_change(&mut changes, before, after);
     if changes.is_empty() && before != after {
         push_change(
             &mut changes,
@@ -1295,6 +1676,657 @@ fn reality_changes(
         );
     }
     changes
+}
+
+fn push_foreground_changes(
+    changes: &mut Vec<RealityChange>,
+    before: &CompactForeground,
+    after: &CompactForeground,
+) {
+    push_change(
+        changes,
+        before.hwnd,
+        after.hwnd,
+        "foreground_changed",
+        "/foreground/hwnd".to_owned(),
+        foreground_target("hwnd"),
+    );
+    push_change(
+        changes,
+        before.pid,
+        after.pid,
+        "foreground_changed",
+        "/foreground/pid".to_owned(),
+        foreground_target("pid"),
+    );
+    push_change(
+        changes,
+        before.process_name.clone(),
+        after.process_name.clone(),
+        "foreground_changed",
+        "/foreground/process_name".to_owned(),
+        foreground_target("process_name"),
+    );
+    push_change(
+        changes,
+        before.process_path_sha256.clone(),
+        after.process_path_sha256.clone(),
+        "foreground_changed",
+        "/foreground/process_path_sha256".to_owned(),
+        foreground_target("process_path_sha256"),
+    );
+    push_change(
+        changes,
+        before.window_title_sha256.clone(),
+        after.window_title_sha256.clone(),
+        "foreground_changed",
+        "/foreground/window_title_sha256".to_owned(),
+        foreground_target("window_title_sha256"),
+    );
+    push_change(
+        changes,
+        before.window_bounds.clone(),
+        after.window_bounds.clone(),
+        "foreground_changed",
+        "/foreground/window_bounds".to_owned(),
+        foreground_target("window_bounds"),
+    );
+    push_change(
+        changes,
+        before.monitor_index,
+        after.monitor_index,
+        "foreground_changed",
+        "/foreground/monitor_index".to_owned(),
+        foreground_target("monitor_index"),
+    );
+    push_change(
+        changes,
+        before.profile_id.clone(),
+        after.profile_id.clone(),
+        "foreground_changed",
+        "/foreground/profile_id".to_owned(),
+        foreground_target("profile_id"),
+    );
+    push_change(
+        changes,
+        before.is_fullscreen,
+        after.is_fullscreen,
+        "foreground_changed",
+        "/foreground/is_fullscreen".to_owned(),
+        foreground_target("is_fullscreen"),
+    );
+}
+
+fn push_focus_changes(
+    changes: &mut Vec<RealityChange>,
+    before: Option<&CompactFocused>,
+    after: Option<&CompactFocused>,
+    foreground_translation: Option<RectTranslation>,
+) {
+    match (before, after) {
+        (None, Some(after)) => push_change(
+            changes,
+            Option::<CompactFocused>::None,
+            Some(after.clone()),
+            "focus_changed",
+            "/focused".to_owned(),
+            focus_target("focused"),
+        ),
+        (Some(before), None) => push_change(
+            changes,
+            Some(before.clone()),
+            Option::<CompactFocused>::None,
+            "focus_changed",
+            "/focused".to_owned(),
+            focus_target("focused"),
+        ),
+        (Some(before), Some(after)) => {
+            push_change(
+                changes,
+                before.element_id.clone(),
+                after.element_id.clone(),
+                "focus_changed",
+                "/focused/element_id".to_owned(),
+                focus_target("element_id"),
+            );
+            push_change(
+                changes,
+                before.name_sha256.clone(),
+                after.name_sha256.clone(),
+                "focus_changed",
+                "/focused/name_sha256".to_owned(),
+                focus_target("name_sha256"),
+            );
+            push_change(
+                changes,
+                before.role.clone(),
+                after.role.clone(),
+                "focus_changed",
+                "/focused/role".to_owned(),
+                focus_target("role"),
+            );
+            push_change(
+                changes,
+                before.automation_id.clone(),
+                after.automation_id.clone(),
+                "focus_changed",
+                "/focused/automation_id".to_owned(),
+                focus_target("automation_id"),
+            );
+            if !same_rect_translation(&before.bbox, &after.bbox, foreground_translation) {
+                push_change(
+                    changes,
+                    before.bbox.clone(),
+                    after.bbox.clone(),
+                    "focus_changed",
+                    "/focused/bbox".to_owned(),
+                    focus_target("bbox"),
+                );
+            }
+            push_change(
+                changes,
+                before.enabled,
+                after.enabled,
+                "focus_changed",
+                "/focused/enabled".to_owned(),
+                focus_target("enabled"),
+            );
+            push_change(
+                changes,
+                before.patterns.clone(),
+                after.patterns.clone(),
+                "focus_changed",
+                "/focused/patterns".to_owned(),
+                focus_target("patterns"),
+            );
+            push_change(
+                changes,
+                before.value_sha256.clone(),
+                after.value_sha256.clone(),
+                "focus_changed",
+                "/focused/value_sha256".to_owned(),
+                focus_target("value_sha256"),
+            );
+            push_change(
+                changes,
+                before.selected_text_sha256.clone(),
+                after.selected_text_sha256.clone(),
+                "focus_changed",
+                "/focused/selected_text_sha256".to_owned(),
+                focus_target("selected_text_sha256"),
+            );
+        }
+        (None, None) => {}
+    }
+}
+
+fn push_hud_changes(
+    changes: &mut Vec<RealityChange>,
+    before: &CompactRealityState,
+    after: &CompactRealityState,
+) {
+    let hud_keys = before
+        .hud
+        .keys()
+        .chain(after.hud.keys())
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    for key in hud_keys {
+        push_change(
+            changes,
+            before.hud.get(&key).cloned(),
+            after.hud.get(&key).cloned(),
+            "hud_field_changed",
+            format!("/hud/{}", json_pointer_segment(&key)),
+            RealityTargetRef {
+                kind: RealityTargetKind::HudField,
+                entity_id: None,
+                field: Some(key),
+            },
+        );
+    }
+    let hud_error_keys = before
+        .hud_errors
+        .keys()
+        .chain(after.hud_errors.keys())
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    for key in hud_error_keys {
+        push_change(
+            changes,
+            before.hud_errors.get(&key).cloned(),
+            after.hud_errors.get(&key).cloned(),
+            "hud_error_changed",
+            format!("/hud_errors/{}", json_pointer_segment(&key)),
+            RealityTargetRef {
+                kind: RealityTargetKind::HudField,
+                entity_id: None,
+                field: Some(key),
+            },
+        );
+    }
+}
+
+fn push_sensor_summary_changes(
+    changes: &mut Vec<RealityChange>,
+    before: &CompactRealityState,
+    after: &CompactRealityState,
+) {
+    push_change(
+        changes,
+        before.audio.clone(),
+        after.audio.clone(),
+        "audio_summary_changed",
+        "/audio".to_owned(),
+        RealityTargetRef {
+            kind: RealityTargetKind::Other,
+            entity_id: None,
+            field: Some("audio".to_owned()),
+        },
+    );
+    push_change(
+        changes,
+        before.clipboard.clone(),
+        after.clipboard.clone(),
+        "clipboard_summary_changed",
+        "/clipboard".to_owned(),
+        RealityTargetRef {
+            kind: RealityTargetKind::Other,
+            entity_id: None,
+            field: Some("clipboard".to_owned()),
+        },
+    );
+    push_change(
+        changes,
+        before.fs.clone(),
+        after.fs.clone(),
+        "filesystem_summary_changed",
+        "/fs".to_owned(),
+        RealityTargetRef {
+            kind: RealityTargetKind::Other,
+            entity_id: None,
+            field: Some("fs_recent".to_owned()),
+        },
+    );
+}
+
+fn push_event_changes(
+    changes: &mut Vec<RealityChange>,
+    before: &CompactRealityState,
+    after: &CompactRealityState,
+) {
+    push_change(
+        changes,
+        log_cursor_change(&before.events),
+        log_cursor_change(&after.events),
+        "log_cursor_changed",
+        "/events/log_cursor".to_owned(),
+        RealityTargetRef {
+            kind: RealityTargetKind::LogCursor,
+            entity_id: None,
+            field: None,
+        },
+    );
+    push_change(
+        changes,
+        runtime_event_change(&before.events),
+        runtime_event_change(&after.events),
+        "runtime_event_changed",
+        "/events/runtime".to_owned(),
+        RealityTargetRef {
+            kind: RealityTargetKind::Action,
+            entity_id: None,
+            field: Some("runtime_events".to_owned()),
+        },
+    );
+}
+
+fn push_diagnostics_change(
+    changes: &mut Vec<RealityChange>,
+    before: &CompactRealityState,
+    after: &CompactRealityState,
+) {
+    push_change(
+        changes,
+        before.diagnostics.clone(),
+        after.diagnostics.clone(),
+        "diagnostics_changed",
+        "/diagnostics".to_owned(),
+        RealityTargetRef {
+            kind: RealityTargetKind::Other,
+            entity_id: None,
+            field: Some("diagnostics".to_owned()),
+        },
+    );
+}
+
+fn push_element_changes(
+    changes: &mut Vec<RealityChange>,
+    before: &CompactRealityState,
+    after: &CompactRealityState,
+    foreground_translation: Option<RectTranslation>,
+) {
+    let before_by_id = before
+        .elements
+        .iter()
+        .map(|element| (element.element_id.clone(), element.clone()))
+        .collect::<BTreeMap<_, _>>();
+    let after_by_id = after
+        .elements
+        .iter()
+        .map(|element| (element.element_id.clone(), element.clone()))
+        .collect::<BTreeMap<_, _>>();
+    let element_ids = before_by_id
+        .keys()
+        .chain(after_by_id.keys())
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    for element_id in element_ids {
+        let before_element = before_by_id.get(&element_id);
+        let after_element = after_by_id.get(&element_id);
+        match (before_element, after_element) {
+            (None, Some(after_element)) => push_change(
+                changes,
+                Option::<CompactElement>::None,
+                Some(after_element.clone()),
+                "uia_element_appeared",
+                format!("/elements/{}", json_pointer_segment(&element_id)),
+                ui_element_target(&element_id, "element"),
+            ),
+            (Some(before_element), None) => push_change(
+                changes,
+                Some(before_element.clone()),
+                Option::<CompactElement>::None,
+                "uia_element_disappeared",
+                format!("/elements/{}", json_pointer_segment(&element_id)),
+                ui_element_target(&element_id, "element"),
+            ),
+            (Some(before_element), Some(after_element)) => {
+                push_element_field_changes(
+                    changes,
+                    &element_id,
+                    before_element,
+                    after_element,
+                    foreground_translation,
+                );
+            }
+            (None, None) => {}
+        }
+    }
+}
+
+fn push_element_field_changes(
+    changes: &mut Vec<RealityChange>,
+    element_id: &str,
+    before: &CompactElement,
+    after: &CompactElement,
+    foreground_translation: Option<RectTranslation>,
+) {
+    let base = format!("/elements/{}", json_pointer_segment(element_id));
+    push_change(
+        changes,
+        before.name_sha256.clone(),
+        after.name_sha256.clone(),
+        "uia_element_name_changed",
+        format!("{base}/name_sha256"),
+        ui_element_target(element_id, "name_sha256"),
+    );
+    if !same_rect_translation(&before.bbox, &after.bbox, foreground_translation) {
+        push_change(
+            changes,
+            before.bbox.clone(),
+            after.bbox.clone(),
+            "uia_element_moved",
+            format!("{base}/bbox"),
+            ui_element_target(element_id, "bbox"),
+        );
+    }
+    push_change(
+        changes,
+        before.parent.clone(),
+        after.parent.clone(),
+        "uia_element_changed",
+        format!("{base}/parent"),
+        ui_element_target(element_id, "parent"),
+    );
+    push_change(
+        changes,
+        before.role.clone(),
+        after.role.clone(),
+        "uia_element_changed",
+        format!("{base}/role"),
+        ui_element_target(element_id, "role"),
+    );
+    push_change(
+        changes,
+        before.automation_id.clone(),
+        after.automation_id.clone(),
+        "uia_element_changed",
+        format!("{base}/automation_id"),
+        ui_element_target(element_id, "automation_id"),
+    );
+    push_change(
+        changes,
+        before.enabled,
+        after.enabled,
+        "uia_element_changed",
+        format!("{base}/enabled"),
+        ui_element_target(element_id, "enabled"),
+    );
+    push_change(
+        changes,
+        before.focused,
+        after.focused,
+        "uia_element_changed",
+        format!("{base}/focused"),
+        ui_element_target(element_id, "focused"),
+    );
+    push_change(
+        changes,
+        before.patterns.clone(),
+        after.patterns.clone(),
+        "uia_element_changed",
+        format!("{base}/patterns"),
+        ui_element_target(element_id, "patterns"),
+    );
+    push_change(
+        changes,
+        before.children_count,
+        after.children_count,
+        "uia_element_changed",
+        format!("{base}/children_count"),
+        ui_element_target(element_id, "children_count"),
+    );
+    push_change(
+        changes,
+        before.depth,
+        after.depth,
+        "uia_element_changed",
+        format!("{base}/depth"),
+        ui_element_target(element_id, "depth"),
+    );
+}
+
+fn push_entity_changes(
+    changes: &mut Vec<RealityChange>,
+    before: &CompactRealityState,
+    after: &CompactRealityState,
+) {
+    let before_by_id = before
+        .entities
+        .iter()
+        .map(|entity| (entity.entity_id.clone(), entity.clone()))
+        .collect::<BTreeMap<_, _>>();
+    let after_by_id = after
+        .entities
+        .iter()
+        .map(|entity| (entity.entity_id.clone(), entity.clone()))
+        .collect::<BTreeMap<_, _>>();
+    let entity_ids = before_by_id
+        .keys()
+        .chain(after_by_id.keys())
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    for entity_id in entity_ids {
+        match (before_by_id.get(&entity_id), after_by_id.get(&entity_id)) {
+            (None, Some(after_entity)) => push_change(
+                changes,
+                Option::<CompactEntity>::None,
+                Some(after_entity.clone()),
+                "entity_appeared",
+                format!("/entities/{}", json_pointer_segment(&entity_id)),
+                entity_target(&entity_id, "entity"),
+            ),
+            (Some(before_entity), None) => push_change(
+                changes,
+                Some(before_entity.clone()),
+                Option::<CompactEntity>::None,
+                "entity_disappeared",
+                format!("/entities/{}", json_pointer_segment(&entity_id)),
+                entity_target(&entity_id, "entity"),
+            ),
+            (Some(before_entity), Some(after_entity)) => {
+                push_change(
+                    changes,
+                    before_entity.bbox.clone(),
+                    after_entity.bbox.clone(),
+                    "entity_moved",
+                    format!("/entities/{}/bbox", json_pointer_segment(&entity_id)),
+                    entity_target(&entity_id, "bbox"),
+                );
+                push_change(
+                    changes,
+                    before_entity.class_label.clone(),
+                    after_entity.class_label.clone(),
+                    "entity_class_changed",
+                    format!("/entities/{}/class_label", json_pointer_segment(&entity_id)),
+                    entity_target(&entity_id, "class_label"),
+                );
+                push_change(
+                    changes,
+                    before_entity.confidence_milli,
+                    after_entity.confidence_milli,
+                    "entity_confidence_changed",
+                    format!("/entities/{}/confidence", json_pointer_segment(&entity_id)),
+                    entity_target(&entity_id, "confidence"),
+                );
+                push_change(
+                    changes,
+                    before_entity.track_id,
+                    after_entity.track_id,
+                    "entity_track_changed",
+                    format!("/entities/{}/track_id", json_pointer_segment(&entity_id)),
+                    entity_target(&entity_id, "track_id"),
+                );
+            }
+            (None, None) => {}
+        }
+    }
+}
+
+fn entity_target(entity_id: &str, field: &str) -> RealityTargetRef {
+    RealityTargetRef {
+        kind: RealityTargetKind::Entity,
+        entity_id: Some(entity_id.to_owned()),
+        field: Some(field.to_owned()),
+    }
+}
+
+fn foreground_target(field: &str) -> RealityTargetRef {
+    RealityTargetRef {
+        kind: RealityTargetKind::Foreground,
+        entity_id: None,
+        field: Some(field.to_owned()),
+    }
+}
+
+fn focus_target(field: &str) -> RealityTargetRef {
+    RealityTargetRef {
+        kind: RealityTargetKind::Focus,
+        entity_id: None,
+        field: Some(field.to_owned()),
+    }
+}
+
+fn ui_element_target(element_id: &str, field: &str) -> RealityTargetRef {
+    RealityTargetRef {
+        kind: RealityTargetKind::UiElement,
+        entity_id: Some(element_id.to_owned()),
+        field: Some(field.to_owned()),
+    }
+}
+
+fn log_cursor_change(events: &CompactEventCursor) -> CompactLogCursorChange {
+    CompactLogCursorChange {
+        path_sha256: events.log_path_sha256.clone(),
+        start_offset: events.log_start_offset,
+        next_offset: events.log_next_offset,
+        file_len_bytes: events.log_file_len_bytes,
+    }
+}
+
+fn runtime_event_change(events: &CompactEventCursor) -> CompactRuntimeEventChange {
+    CompactRuntimeEventChange {
+        event_count: events.event_count,
+        latest_non_cursor_kind: events.latest_non_cursor_kind.clone(),
+        latest_non_cursor_seq: events.latest_non_cursor_seq,
+        latest_non_cursor_source: events.latest_non_cursor_source.clone(),
+        latest_non_cursor_data_sha256: events.latest_non_cursor_data_sha256.clone(),
+        latest_action_seq: events.latest_action_seq,
+        latest_action_kind: events.latest_action_kind.clone(),
+        latest_action_data_sha256: events.latest_action_data_sha256.clone(),
+    }
+}
+
+fn rect_translation(before: &Value, after: &Value) -> Option<RectTranslation> {
+    let before_rect = compact_rect(before)?;
+    let after_rect = compact_rect(after)?;
+    if before_rect.w != after_rect.w || before_rect.h != after_rect.h {
+        return None;
+    }
+    let dx = after_rect.x.checked_sub(before_rect.x)?;
+    let dy = after_rect.y.checked_sub(before_rect.y)?;
+    if dx == 0 && dy == 0 {
+        return None;
+    }
+    Some(RectTranslation { dx, dy })
+}
+
+fn same_rect_translation(
+    before: &Value,
+    after: &Value,
+    translation: Option<RectTranslation>,
+) -> bool {
+    let Some(translation) = translation else {
+        return false;
+    };
+    let Some(before_rect) = compact_rect(before) else {
+        return false;
+    };
+    let Some(after_rect) = compact_rect(after) else {
+        return false;
+    };
+    before_rect.w == after_rect.w
+        && before_rect.h == after_rect.h
+        && before_rect.x.checked_add(translation.dx) == Some(after_rect.x)
+        && before_rect.y.checked_add(translation.dy) == Some(after_rect.y)
+}
+
+#[derive(Clone, Copy)]
+struct CompactRectParts {
+    x: i64,
+    y: i64,
+    w: i64,
+    h: i64,
+}
+
+fn compact_rect(value: &Value) -> Option<CompactRectParts> {
+    Some(CompactRectParts {
+        x: value.get("x")?.as_i64()?,
+        y: value.get("y")?.as_i64()?,
+        w: value.get("w")?.as_i64()?,
+        h: value.get("h")?.as_i64()?,
+    })
 }
 
 fn push_change<T>(
@@ -1338,6 +2370,29 @@ fn stale_epoch_response(
             "stale_epoch: requested {requested_epoch}, current {}",
             head.epoch_id
         )),
+        readback_rows: Vec::new(),
+        published_sse_events: 0,
+        size_bytes: 0,
+        size_estimate_tokens: 0,
+    }
+}
+
+fn missing_baseline_response(
+    profile_key: String,
+    since_epoch: Option<String>,
+    since_seq: Option<u64>,
+) -> ObserveDeltaResponse {
+    ObserveDeltaResponse {
+        ok: true,
+        profile_key: Some(profile_key),
+        epoch_id: since_epoch,
+        from_seq: since_seq,
+        to_seq: since_seq,
+        deltas: Vec::new(),
+        cursor: None,
+        baseline_required: true,
+        rebase_required: true,
+        reason: Some("missing_baseline".to_owned()),
         readback_rows: Vec::new(),
         published_sse_events: 0,
         size_bytes: 0,
@@ -1440,7 +2495,13 @@ fn reality_redaction() -> RedactionSummary {
         "foreground.process_path".to_owned(),
         "foreground.window_title".to_owned(),
         "focused.name".to_owned(),
+        "focused.value".to_owned(),
+        "focused.selected_text".to_owned(),
+        "elements.name".to_owned(),
         "hud.raw_text".to_owned(),
+        "hud.errors.detail".to_owned(),
+        "clipboard.text_excerpt".to_owned(),
+        "fs_recent.path".to_owned(),
         "event.data_excerpt.raw_body".to_owned(),
     ];
     redaction.forbidden_raw_kinds = vec![
@@ -1487,6 +2548,45 @@ fn sensor_status_name(status: &synapse_core::SensorStatus) -> String {
     }
 }
 
+const fn event_source_name(source: EventSource) -> &'static str {
+    match source {
+        EventSource::A11yUia => "a11y_uia",
+        EventSource::A11yWinEvent => "a11y_win_event",
+        EventSource::A11yCdp => "a11y_cdp",
+        EventSource::Perception => "perception",
+        EventSource::PerceptionDetection => "perception_detection",
+        EventSource::PerceptionHud => "perception_hud",
+        EventSource::PerceptionAudio => "perception_audio",
+        EventSource::Filesystem => "filesystem",
+        EventSource::Process => "process",
+        EventSource::Clipboard => "clipboard",
+        EventSource::ActionEmitter => "action_emitter",
+        EventSource::Reflex => "reflex",
+        EventSource::System => "system",
+    }
+}
+
+const fn fs_event_kind_name(kind: synapse_core::FsEventKind) -> &'static str {
+    match kind {
+        synapse_core::FsEventKind::Created => "created",
+        synapse_core::FsEventKind::Modified => "modified",
+        synapse_core::FsEventKind::Deleted => "deleted",
+        synapse_core::FsEventKind::Renamed => "renamed",
+    }
+}
+
+fn signed_milli(value: f32) -> i32 {
+    if !value.is_finite() {
+        return 0;
+    }
+    let scaled = (value * 1000.0).round();
+    match format!("{scaled:.0}").parse::<i32>() {
+        Ok(value) => value,
+        Err(_) if scaled.is_sign_negative() => i32::MIN,
+        Err(_) => i32::MAX,
+    }
+}
+
 fn confidence_milli(value: f32) -> u32 {
     if !value.is_finite() {
         return 0;
@@ -1499,6 +2599,10 @@ fn confidence_milli(value: f32) -> u32 {
     } else {
         format!("{scaled:.0}").parse::<u32>().unwrap_or(0)
     }
+}
+
+fn len_to_u32(value: usize) -> u32 {
+    u32::try_from(value).unwrap_or(u32::MAX)
 }
 
 fn non_empty_hash(value: &str) -> Option<String> {
@@ -1642,14 +2746,19 @@ const fn default_include() -> Vec<ObserveSlot> {
 
 #[cfg(test)]
 mod tests {
-    use std::{num::NonZeroUsize, path::Path};
+    use std::{fs, num::NonZeroUsize, path::Path};
 
     use tempfile::TempDir;
     use tokio_util::sync::CancellationToken;
 
     use super::*;
     use crate::{m1::M1State, m2::M2ServiceConfig, m3::M3ServiceConfig, m4::M4ServiceConfig};
-    use synapse_core::{ForegroundContext, HudReadings, Rect, SensorStatus};
+    use chrono::Utc;
+    use synapse_core::{
+        AccessibleNode, AudioContext, AudioEvent, ClipboardSummary, DetectedEntity, ElementId,
+        EventSource, EventSummary, FocusedElement, ForegroundContext, FsEvent, FsEventKind,
+        HudFieldError, HudReading, HudReadings, HudValue, Rect, SensorStatus, UiaPattern,
+    };
     use synapse_perception::ObservationInput;
     use synapse_reflex::DEFAULT_MAX_SUBSCRIPTIONS_NONZERO;
 
@@ -1782,6 +2891,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn observe_delta_uses_observed_profile_when_profile_id_is_omitted() -> anyhow::Result<()>
+    {
+        let temp = TempDir::new()?;
+        let profile_dir = temp.path().join("profiles");
+        fs::create_dir_all(&profile_dir)?;
+        write_profile(
+            &profile_dir.join("synthetic.toml"),
+            "synthetic",
+            "single_player",
+        )?;
+        let service = service_with_profile_dir(temp.path(), &profile_dir)?;
+        install_synthetic_input(&service, synthetic_input("Window A"))?;
+        let baseline = service
+            .reality_baseline(Parameters(RealityBaselineParams {
+                profile_id: None,
+                epoch_id: Some("observed-profile-epoch".to_owned()),
+                force_new_epoch: true,
+                include: Vec::new(),
+                depth: DEFAULT_DEPTH,
+                max_elements: DEFAULT_MAX_ELEMENTS,
+            }))
+            .await?;
+        assert_eq!(baseline.0.profile_key, "synthetic");
+
+        install_synthetic_input(&service, synthetic_input("Window B"))?;
+        let deltas = service
+            .observe_delta(Parameters(ObserveDeltaParams {
+                profile_id: None,
+                since_epoch: Some("observed-profile-epoch".to_owned()),
+                since_seq: Some(0),
+                include: Vec::new(),
+                depth: DEFAULT_DEPTH,
+                max_elements: DEFAULT_MAX_ELEMENTS,
+                max_deltas: DEFAULT_MAX_DELTAS,
+            }))
+            .await?;
+        assert!(!deltas.0.baseline_required);
+        assert_eq!(deltas.0.profile_key.as_deref(), Some("synthetic"));
+        assert_eq!(deltas.0.reason.as_deref(), Some("deltas_returned"));
+        assert!(
+            deltas
+                .0
+                .deltas
+                .iter()
+                .any(|delta| delta.kind == "foreground_changed")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn reality_audit_persists_forced_drift() -> anyhow::Result<()> {
         let temp = TempDir::new()?;
         let service = service_with_db(temp.path())?;
@@ -1815,7 +2974,165 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test]
+    async fn observe_delta_emits_sensor_specific_changes() -> anyhow::Result<()> {
+        let temp = TempDir::new()?;
+        let service = service_with_db(temp.path())?;
+        let mut before = synthetic_input("Sensor Window");
+        install_rich_sensor_state(&mut before, "before")?;
+        install_synthetic_input(&service, before.clone())?;
+        service
+            .reality_baseline(Parameters(RealityBaselineParams {
+                profile_id: Some("synthetic".to_owned()),
+                epoch_id: Some("sensor-epoch".to_owned()),
+                force_new_epoch: true,
+                include: sensor_slots(),
+                depth: DEFAULT_DEPTH,
+                max_elements: DEFAULT_MAX_ELEMENTS,
+            }))
+            .await?;
+
+        let mut after = before;
+        install_rich_sensor_state(&mut after, "after")?;
+        install_synthetic_input(&service, after)?;
+        let deltas = service
+            .observe_delta(Parameters(ObserveDeltaParams {
+                profile_id: Some("synthetic".to_owned()),
+                since_epoch: Some("sensor-epoch".to_owned()),
+                since_seq: Some(0),
+                include: sensor_slots(),
+                depth: DEFAULT_DEPTH,
+                max_elements: DEFAULT_MAX_ELEMENTS,
+                max_deltas: DEFAULT_MAX_DELTAS,
+            }))
+            .await?;
+        let kinds = deltas
+            .0
+            .deltas
+            .iter()
+            .map(|delta| delta.kind.as_str())
+            .collect::<BTreeSet<_>>();
+        for expected in [
+            "uia_element_name_changed",
+            "hud_field_changed",
+            "hud_error_changed",
+            "entity_moved",
+            "entity_class_changed",
+            "entity_confidence_changed",
+            "audio_summary_changed",
+            "runtime_event_changed",
+            "clipboard_summary_changed",
+            "filesystem_summary_changed",
+        ] {
+            assert!(kinds.contains(expected), "missing {expected}: {kinds:?}");
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn observe_delta_suppresses_child_rects_for_whole_window_translation()
+    -> anyhow::Result<()> {
+        let temp = TempDir::new()?;
+        let service = service_with_db(temp.path())?;
+        let mut before = synthetic_input("Translated Window");
+        before.focused = Some(FocusedElement {
+            element_id: ElementId::parse("0x1234:0001")?,
+            name: "Translate Button".to_owned(),
+            role: "Button".to_owned(),
+            automation_id: Some("TranslateButton".to_owned()),
+            bbox: Rect {
+                x: 20,
+                y: 30,
+                w: 80,
+                h: 30,
+            },
+            enabled: true,
+            patterns: vec![UiaPattern::Invoke],
+            value: None,
+            selected_text: None,
+        });
+        before.elements = vec![AccessibleNode {
+            element_id: ElementId::parse("0x1234:0001")?,
+            parent: None,
+            name: "Translate Button".to_owned(),
+            role: "Button".to_owned(),
+            automation_id: Some("TranslateButton".to_owned()),
+            bbox: Rect {
+                x: 20,
+                y: 30,
+                w: 80,
+                h: 30,
+            },
+            enabled: true,
+            focused: true,
+            patterns: vec![UiaPattern::Invoke],
+            children_count: 0,
+            depth: 1,
+        }];
+        install_synthetic_input(&service, before.clone())?;
+        service
+            .reality_baseline(Parameters(RealityBaselineParams {
+                profile_id: Some("synthetic".to_owned()),
+                epoch_id: Some("translate-epoch".to_owned()),
+                force_new_epoch: true,
+                include: vec![ObserveSlot::Focused, ObserveSlot::Elements],
+                depth: DEFAULT_DEPTH,
+                max_elements: DEFAULT_MAX_ELEMENTS,
+            }))
+            .await?;
+
+        let mut after = before;
+        after.foreground.window_bounds.x += 12;
+        after.foreground.window_bounds.y += 8;
+        let focused = after
+            .focused
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("missing focused element"))?;
+        focused.bbox.x += 12;
+        focused.bbox.y += 8;
+        after.elements[0].bbox.x += 12;
+        after.elements[0].bbox.y += 8;
+        install_synthetic_input(&service, after)?;
+
+        let deltas = service
+            .observe_delta(Parameters(ObserveDeltaParams {
+                profile_id: Some("synthetic".to_owned()),
+                since_epoch: Some("translate-epoch".to_owned()),
+                since_seq: Some(0),
+                include: vec![ObserveSlot::Focused, ObserveSlot::Elements],
+                depth: DEFAULT_DEPTH,
+                max_elements: DEFAULT_MAX_ELEMENTS,
+                max_deltas: DEFAULT_MAX_DELTAS,
+            }))
+            .await?;
+        let paths = deltas
+            .0
+            .deltas
+            .iter()
+            .map(|delta| delta.path.as_str())
+            .collect::<BTreeSet<_>>();
+        assert!(
+            paths.contains("/foreground/window_bounds"),
+            "missing foreground move: {paths:?}"
+        );
+        assert!(
+            !paths.contains("/focused/bbox"),
+            "focus bbox should be implied by foreground move: {paths:?}"
+        );
+        assert!(
+            !paths
+                .iter()
+                .any(|path| path.starts_with("/elements/") && path.ends_with("/bbox")),
+            "child element bbox should be implied by foreground move: {paths:?}"
+        );
+        Ok(())
+    }
+
     fn service_with_db(path: &Path) -> anyhow::Result<SynapseService> {
+        service_with_profile_dir(path, path)
+    }
+
+    fn service_with_profile_dir(path: &Path, profile_dir: &Path) -> anyhow::Result<SynapseService> {
         SynapseService::try_with_m2_shutdown_reason_and_m3_config(
             CancellationToken::new(),
             "test",
@@ -1823,7 +3140,7 @@ mod tests {
             &M2ServiceConfig::default(),
             M3ServiceConfig::from_cli_parts(
                 Some(path.join("db")),
-                None,
+                Some(profile_dir.to_path_buf()),
                 false,
                 "127.0.0.1:0".to_owned(),
                 NonZeroUsize::new(DEFAULT_MAX_SUBSCRIPTIONS_NONZERO.get())
@@ -1836,6 +3153,31 @@ mod tests {
             ),
             M4ServiceConfig::default(),
         )
+    }
+
+    fn write_profile(path: &Path, id: &str, use_scope: &str) -> anyhow::Result<()> {
+        fs::write(
+            path,
+            format!(
+                r#"
+id = "{id}"
+label = "{id}"
+schema_version = 2
+use_scope = "{use_scope}"
+mouse_curve_default = "natural"
+keyboard_dynamics_default = "natural"
+
+[[matches]]
+exe = "{id}.exe"
+
+[detection]
+classes_of_interest = ["window"]
+confidence_threshold = 0.50
+max_detections = 8
+"#
+            ),
+        )?;
+        Ok(())
     }
 
     fn install_synthetic_input(
@@ -1879,5 +3221,132 @@ mod tests {
         input.detection_status = SensorStatus::Disabled;
         input.audio_status = SensorStatus::Disabled;
         input
+    }
+
+    fn sensor_slots() -> Vec<ObserveSlot> {
+        vec![
+            ObserveSlot::Focused,
+            ObserveSlot::Elements,
+            ObserveSlot::Entities,
+            ObserveSlot::Hud,
+            ObserveSlot::Audio,
+            ObserveSlot::Events,
+            ObserveSlot::Clipboard,
+            ObserveSlot::Fs,
+            ObserveSlot::Diagnostics,
+        ]
+    }
+
+    fn install_rich_sensor_state(
+        input: &mut ObservationInput,
+        variant: &str,
+    ) -> anyhow::Result<()> {
+        let at = Utc::now();
+        let is_after = variant == "after";
+        let element_name = if is_after {
+            "After Button"
+        } else {
+            "Before Button"
+        };
+        input.elements = vec![AccessibleNode {
+            element_id: ElementId::parse("0x1234:0001")?,
+            parent: None,
+            name: element_name.to_owned(),
+            role: "Button".to_owned(),
+            automation_id: Some("SyntheticButton".to_owned()),
+            bbox: Rect {
+                x: if is_after { 12 } else { 10 },
+                y: 10,
+                w: 80,
+                h: 30,
+            },
+            enabled: true,
+            focused: false,
+            patterns: vec![UiaPattern::Invoke],
+            children_count: 0,
+            depth: 1,
+        }];
+        input.hud.by_name.insert(
+            "hp".to_owned(),
+            HudReading {
+                raw_text: if is_after { "HP 8/10" } else { "HP 10/10" }.to_owned(),
+                parsed: HudValue::Text(if is_after { "8/10" } else { "10/10" }.to_owned()),
+                confidence: if is_after { 0.91 } else { 0.99 },
+                stale_ms: 0,
+            },
+        );
+        input.hud.errors.insert(
+            "mana".to_owned(),
+            HudFieldError {
+                code: "ocr_low_confidence".to_owned(),
+                detail: if is_after {
+                    "after blur"
+                } else {
+                    "before blur"
+                }
+                .to_owned(),
+            },
+        );
+        input.entities = vec![DetectedEntity {
+            entity_id: "synthetic-target".to_owned(),
+            track_id: 7,
+            class_label: if is_after { "skeleton" } else { "rat" }.to_owned(),
+            bbox: Rect {
+                x: if is_after { 40 } else { 20 },
+                y: 20,
+                w: 16,
+                h: 16,
+            },
+            confidence: if is_after { 0.66 } else { 0.88 },
+            first_seen_at: at,
+            last_seen_at: at,
+            velocity_px_per_s: None,
+        }];
+        input.audio = AudioContext {
+            rms_db: if is_after { -18.0 } else { -40.0 },
+            vad_speech_recent: is_after,
+            recent_events: vec![AudioEvent {
+                at,
+                kind: if is_after { "combat_chime" } else { "silence" }.to_owned(),
+                azimuth_deg: Some(if is_after { 15.0 } else { 0.0 }),
+                confidence: if is_after { 0.7 } else { 0.1 },
+            }],
+            direction_estimate: None,
+        };
+        input.recent_events = vec![EventSummary {
+            seq: if is_after { 2 } else { 1 },
+            at,
+            source: EventSource::ActionEmitter,
+            kind: "action.accepted".to_owned(),
+            data_excerpt: json!({
+                "status": if is_after { "accepted_after" } else { "accepted_before" },
+            }),
+        }];
+        input.clipboard_summary = Some(ClipboardSummary {
+            formats: vec!["text/plain".to_owned()],
+            text_len: Some(if is_after { 11 } else { 6 }),
+            text_excerpt: Some(if is_after { "after text" } else { "before" }.to_owned()),
+            redacted: true,
+        });
+        input.fs_recent = vec![FsEvent {
+            at,
+            path: if is_after {
+                "C:\\Synthetic\\after.txt"
+            } else {
+                "C:\\Synthetic\\before.txt"
+            }
+            .to_owned(),
+            kind: if is_after {
+                FsEventKind::Modified
+            } else {
+                FsEventKind::Created
+            },
+            size_bytes: Some(if is_after { 20 } else { 10 }),
+        }];
+        input.a11y_status = SensorStatus::Healthy;
+        input.capture_status = SensorStatus::Healthy;
+        input.detection_status = SensorStatus::Healthy;
+        input.audio_status = SensorStatus::Healthy;
+        Ok(())
     }
 }

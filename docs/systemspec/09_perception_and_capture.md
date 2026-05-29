@@ -240,8 +240,9 @@ architecture in #536 keeps that path for baseline/debug/full-audit reads but
 
 - `RealityBaseline` establishes epoch, seq, compact state hash, and physical
   source refs from a bounded full observation plus profile-specific SoTs.
-- `RealityDelta` records ordered foreground/focus/HUD/entity/log/action/storage
-  changes after that baseline.
+- `RealityDelta` records ordered foreground/focus/UIA element/HUD
+  value+error/entity/audio/log/action/clipboard/filesystem/storage changes
+  after that baseline.
 - `RealityAudit` periodically re-reads physical SoTs and compares actual state
   to the baseline+delta assumption; drift produces explicit rebase guidance.
 

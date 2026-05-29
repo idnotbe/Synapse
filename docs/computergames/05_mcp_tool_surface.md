@@ -233,6 +233,13 @@ These are the live delta-first reality surfaces registered by
   epoch. Empty changes return an explicit `no_changes` result with the current
   cursor; changed reality persists `CF_KV/reality/delta/v1/<profile>/<epoch>/<seq>`
   rows, updates the head row, and publishes `reality_delta` SSE events.
+  The compact comparison now emits stable-path, field-level deltas for
+  foreground/focus, UIA element appear/disappear/name/bounds changes, HUD
+  values and errors, entity appear/disappear/move/class/confidence changes,
+  audio summaries, log/runtime action outcomes, clipboard summaries,
+  filesystem summaries, and diagnostics.
+  Each delta scopes `source_refs` to the changed physical surface so high-fanout
+  UIA changes do not repeat unrelated observation refs on every row.
   Missing baselines, stale epochs, profile changes, and overflowed cursors
   return explicit rebase guidance; invalid future `since_seq` fails closed.
 - `reality_audit` re-reads physical SoTs, compares them against the
