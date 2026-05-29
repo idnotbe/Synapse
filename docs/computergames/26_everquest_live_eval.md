@@ -365,6 +365,30 @@ trigger, call the real MCP tool with a known action/log/observe cluster, and
 separately inspect all five durable `CF_KV` rows afterward. This is a domain
 pack/storage surface, not a training script or FSV substitute.
 
+## Trajectory Rows
+
+#512 adds `everquest_trajectory_record`, the runtime surface that links real
+Synapse audit rows and EQ log byte ranges into ordered, token-efficient
+trajectory evidence. The tool writes:
+
+- `CF_KV/everquest/trajectory/v1/everquest.live/<trajectory_id>`
+- A local JSONL provenance artifact under the Synapse EverQuest trajectory
+  export directory when `export_jsonl=true`.
+
+Each transition must point at existing physical evidence: the durable
+current-state row, one or more `CF_ACTION_LOG`, `CF_OBSERVATIONS`, and
+`CF_EVENTS` rows, plus bounded EQ log offsets with optional byte-range hashes.
+Optional links can include DynamicJEPA domain-transition rows, outcome rows,
+planner guard rows, and map-state rows. Missing refs, duplicate transition
+ids, out-of-order timestamps, bad log offsets, and log hash mismatches fail
+closed before new storage mutation. Duplicate trajectory ids return the
+already-stored row without rewriting it.
+
+Trajectory rows are the bridge from attended gameplay evidence to later
+ContextGraph/DynamicJEPA exports and model scorecards. They are not scripts,
+training jobs, or FSV substitutes. Manual FSV must still read the physical
+storage rows and export file before and after the real MCP trigger.
+
 ## Action-Prior Scorecard Rows
 
 #531 adds the runtime storage surface for measuring whether the EverQuest world
@@ -437,6 +461,7 @@ GitHub issues remain the canonical coordination state:
 | #508 | Literal `/loc` probe with EQ log readback |
 | #510 | Current-state estimator fusing logs, `/loc`, map, HUD, and action audit |
 | #511 | EverQuest DynamicJEPA state/action/outcome domain pack |
+| #512 | Linked trajectory rows from Synapse audit rows plus EQ log events |
 | #514 | Planner guard-decision rows for bounded EverQuest candidates |
 | #517 | Stabilize EverQuest foreground before accepted action candidates |
 | #518 | Safe target/combat model for level-1 wizard leveling |

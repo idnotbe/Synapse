@@ -16,7 +16,7 @@ Source files covered:
 - `crates/synapse-mcp/src/m3/{audio, audit_export, permissions, profile, profile_authoring, profile_quality, profile_registry, reflex, replay, subscribe}.rs`
 - `crates/synapse-core/src/types.rs`
 
-All 64 live tools are registered on `SynapseService` via `#[tool(description=...)]` in `server.rs`. Tool descriptions are taken verbatim from the source. Every tool returns through `Json<T>` so the response shape exactly matches the deserialized response struct.
+All 65 live tools are registered on `SynapseService` via `#[tool(description=...)]` in `server.rs`. Tool descriptions are taken verbatim from the source. Every tool returns through `Json<T>` so the response shape exactly matches the deserialized response struct.
 
 Default error response shape (all tools): `ErrorData { code: rmcp::ErrorCode(-32099), message, data: { "code": <SCREAMING_SNAKE_CASE> } }` via `crates/synapse-mcp/src/m1.rs::mcp_error`.
 
@@ -389,7 +389,31 @@ The persisted domain pack names explicit state/action/outcome/entity fields, enu
 
 Manual FSV must read physical EQ UI/log/action/storage state before the trigger, call this real MCP tool with a known action/log/observe cluster, then separately inspect the five durable `CF_KV` rows afterward. The tool is not a training script and does not replace runtime FSV for gameplay behavior.
 
-## 9k. `everquest_action_prior_record`
+## 9k. `everquest_trajectory_record`
+
+**Description:** "Persist one ordered EverQuest trajectory from linked action, observation, event, log, state, and outcome evidence with JSONL provenance readback"
+**Side effects:** verifies linked source rows/log byte ranges, writes `CF_KV/everquest/trajectory/v1/everquest.live/<trajectory_id>`, writes a local JSONL provenance artifact by default, then reads the persisted row back.
+
+| Parameter | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `trajectory_id` | `String` | yes | - | ASCII id used in the row key and JSONL file name |
+| `profile_id` | `String` | no | `everquest.live` | EverQuest profile id; other ids fail closed |
+| `intent` | `EverQuestTrajectoryIntent` | yes | - | `navigation_probe`, `target_consider_probe`, `combat_attempt`, `recovery`, or `level_up_run` |
+| `session_id` | `String` | yes | - | ASCII trajectory session id |
+| `transitions` | `Vec<EverQuestTrajectoryTransitionInput>` | yes | - | 1..=32 strictly ordered transition records |
+| `source_refs` | `Vec<EverQuestTrajectorySourceRef>` | yes at runtime | `[]` by schema | Top-level provenance refs; runtime requires at least one |
+| `export_jsonl` | `bool` | no | `true` | Write a local JSONL provenance artifact |
+
+Each transition requires `transition_id`, `sequence`, `occurred_at`, a `state_row_key` in `CF_KV`, at least one source row in each of `CF_ACTION_LOG`, `CF_OBSERVATIONS`, and `CF_EVENTS`, and at least one bounded EQ log ref. Optional `domain_transition_row_key`, `outcome_row_key`, `guard_row_key`, and `map_state_row_key` point to existing `CF_KV` rows.
+
+**Returns:** `EverQuestTrajectoryRecordResponse { ok, row_key, duplicate_of_prior_row, stored_value_len_bytes, summary, trajectory }`. Rows include linked source row key hex, value lengths, compact summaries, trajectory hash, export artifact metadata, and redaction/evidence-boundary flags.
+**Errors:** `TOOL_PARAMS_INVALID`, `STORAGE_READ_FAILED`, `STORAGE_WRITE_FAILED`, `STORAGE_CORRUPTED`, `TOOL_INTERNAL_ERROR`.
+
+The tool rejects missing linked rows, duplicate transition ids, non-increasing sequences, out-of-order timestamps, empty required ref lists, invalid log offsets, and log hash mismatches before writing new storage. If the trajectory row already exists, it returns the stored row with `duplicate_of_prior_row=true` without rewriting storage or the export artifact. Raw chat bodies and raw target names are not persisted.
+
+Manual FSV must read `CF_KV`, source CF counts/samples, EQ log bytes, and the JSONL file path before the trigger, call the real MCP tool with known linked source refs, then separately inspect the persisted trajectory row and export artifact afterward.
+
+## 9l. `everquest_action_prior_record`
 
 **Description:** "Persist one EverQuest action-prior prediction/outcome sample with computed correctness and exact CF_KV readback"
 **Side effects:** validates a redacted prediction/outcome sample, computes correctness, writes `CF_KV/everquest/action_prior_eval/v1/everquest.live/<sample_id>`, then reads that exact row back before returning.
@@ -409,7 +433,7 @@ Manual FSV must read physical EQ UI/log/action/storage state before the trigger,
 **Returns:** `EverQuestActionPriorRecordResponse { ok, row_key, stored_value_len_bytes, sample }`. `sample.correctness.class` is one of `correct_top1`, `correct_top3`, `correct_context`, `wrong`, `abstained`, or `unknown_actual`; it also carries calibration bucket, useful flag, overconfident-wrong flag, and the evidence boundary that scorecards are not FSV.
 **Errors:** `TOOL_PARAMS_INVALID`, `STORAGE_WRITE_FAILED`, `STORAGE_READ_FAILED`, `STORAGE_CORRUPTED`, `TOOL_INTERNAL_ERROR`.
 
-## 9l. `everquest_action_prior_scorecard`
+## 9m. `everquest_action_prior_scorecard`
 
 **Description:** "Aggregate persisted EverQuest action-prior samples into a floor-not-ceiling competence scorecard with exact CF_KV readback"
 **Side effects:** reads named eval rows from `CF_KV`, writes `CF_KV/everquest/action_prior_scorecard/v1/everquest.live/<window_id>`, then reads that exact row back before returning.

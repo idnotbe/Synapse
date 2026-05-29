@@ -106,7 +106,7 @@ Release profile: `opt-level=3`, `lto="thin"`, `codegen-units=16`, `panic="abort"
 
 ## 4. Public MCP tool surface (live)
 
-All 64 live tools live in `crates/synapse-mcp/src/server.rs` (declared via `#[tool_router]`). Grouped by milestone:
+All 65 live tools live in `crates/synapse-mcp/src/server.rs` (declared via `#[tool_router]`). Grouped by milestone:
 
 ### 4.1 M1 — perception (6 tools)
 
@@ -216,7 +216,7 @@ paths propagate that same context into `CF_ACTION_LOG` and
 
 Full parameter/return tables: [13_mcp_tool_reference.md](13_mcp_tool_reference.md).
 
-### 4.6 EverQuest live evaluation/world model (12 tools)
+### 4.6 EverQuest live evaluation/world model (13 tools)
 
 | Tool | Description | Source |
 |---|---|---|
@@ -230,6 +230,7 @@ Full parameter/return tables: [13_mcp_tool_reference.md](13_mcp_tool_reference.m
 | `everquest_planner_guard` | Persist fail-closed guard decisions for bounded gameplay candidates | `server/everquest_guard.rs` |
 | `everquest_route_plan` | Store bounded route plans from current state to local map landmarks/zone lines | `server/everquest_route.rs` |
 | `everquest_domain_normalize` | Store the DynamicJEPA domain pack plus typed state/action/outcome/transition rows | `server/everquest_domain.rs` |
+| `everquest_trajectory_record` | Store ordered trajectory rows and JSONL provenance from linked action/observation/event/log evidence | `server/everquest_trajectory.rs` |
 | `everquest_action_prior_record` | Store prediction/outcome samples with correctness and readback | `server/everquest_scorecard.rs` |
 | `everquest_action_prior_scorecard` | Aggregate action-prior samples into a floor-not-ceiling competence scorecard | `server/everquest_scorecard.rs` |
 

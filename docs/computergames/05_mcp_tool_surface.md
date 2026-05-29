@@ -15,8 +15,9 @@
    ingest, #528 adds EverQuest hazard/safe memory record and consult tools,
    #527 adds EverQuest route-plan rows, #525 adds EverQuest current-map sensor
    rows, #514 adds EverQuest planner guard-decision rows, #511 adds the
-   EverQuest DynamicJEPA domain normalizer, and #531 adds EverQuest
-   action-prior sample/scorecard tools, bringing the live surface to 64. Any
+   EverQuest DynamicJEPA domain normalizer, #512 adds linked trajectory rows
+   from action/observation/event/log evidence, and #531 adds EverQuest
+   action-prior sample/scorecard tools, bringing the live surface to 65. Any
    further agent-facing tools require an ADR-approved cap change.
    Overlapping tools merge. Profile and parameter knobs are the escape hatches.
 2. **One tool, one verb.** No `do_everything(action_kind, ...)` mega-tools.
@@ -34,7 +35,7 @@ visible chat-buffer pollution readback that also gates `/loc`, #510 adds
 `everquest_outcome_ingest`, #528 adds `everquest_memory_record` plus
 `everquest_memory_consult`, #514 adds `everquest_planner_guard`, #527 adds
 `everquest_route_plan`, #525 adds `everquest_map_sensor`, #511 adds
-`everquest_domain_normalize`, and #531 adds
+`everquest_domain_normalize`, #512 adds `everquest_trajectory_record`, and #531 adds
 `everquest_action_prior_record` plus `everquest_action_prior_scorecard`. M4 adds `act_combo`, `act_run_shell`, and
 `act_launch`; M5 adds local profile-registry/audit quality scoring, authoring
 candidates, registry row operations, import/export, audit intelligence, and
@@ -112,10 +113,11 @@ future `tools/list` snapshots in #447/#448.
 | 60 | `everquest_planner_guard` | write/read | evaluates one bounded EverQuest candidate against foreground/chat/state/combat guards, persists the guard-decision row, and reads it back |
 | 61 | `everquest_route_plan` | write/read | stores one bounded route plan from current state to a local map landmark/zone line without movement |
 | 62 | `everquest_domain_normalize` | write/read | stores the EverQuest DynamicJEPA domain pack plus typed state/action/outcome/transition rows |
-| 63 | `everquest_action_prior_record` | write/read | stores one prediction/outcome sample under `CF_KV` with computed correctness and exact readback |
-| 64 | `everquest_action_prior_scorecard` | write/read | aggregates stored samples into a floor-not-ceiling competence scorecard row and reads it back |
+| 63 | `everquest_trajectory_record` | write/read | stores one ordered trajectory from linked action/observation/event/log/state evidence and writes a JSONL provenance artifact |
+| 64 | `everquest_action_prior_record` | write/read | stores one prediction/outcome sample under `CF_KV` with computed correctness and exact readback |
+| 65 | `everquest_action_prior_scorecard` | write/read | aggregates stored samples into a floor-not-ceiling competence scorecard row and reads it back |
 
-M3 live count: 30 tools. Current live count: 64
+M3 live count: 30 tools. Current live count: 65
 tools.
 
 Deferred ideas from earlier drafts (`describe` and `read_hud`) are still not
@@ -134,6 +136,7 @@ for bounded candidate actions;
 `everquest_map_sensor` is the #525 current-map calibration/readback row tool;
 `everquest_domain_normalize` is the #511 DynamicJEPA state/action/outcome
 domain-pack normalizer;
+`everquest_trajectory_record` is the #512 ordered trajectory row/export tool;
 `everquest_action_prior_record` and `everquest_action_prior_scorecard` are the
 #531 competence scorecard tools;
 `act_combo`, `act_run_shell`, and `act_launch` remain the M4 phase plan
@@ -985,7 +988,54 @@ call this real MCP tool with a known action/log/observe cluster, and separately
 inspect the five `CF_KV` rows afterward. The tool is not a training script and
 does not replace runtime FSV for gameplay behavior.
 
-### 3.13k `everquest_action_prior_record`
+### 3.13k `everquest_trajectory_record`
+
+```json
+{
+  "name": "everquest_trajectory_record",
+  "input_schema": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["trajectory_id", "intent", "session_id", "transitions"],
+    "properties": {
+      "trajectory_id": {"type": "string"},
+      "profile_id": {"type": "string", "default": "everquest.live"},
+      "intent": {"enum": ["navigation_probe", "target_consider_probe", "combat_attempt", "recovery", "level_up_run"]},
+      "session_id": {"type": "string"},
+      "transitions": {"type": "array", "minItems": 1, "maxItems": 32, "items": {"type": "object"}},
+      "source_refs": {"type": "array", "items": {"type": "object"}, "default": []},
+      "export_jsonl": {"type": "boolean", "default": true}
+    }
+  }
+}
+```
+
+`everquest_trajectory_record` persists one ordered #512 trajectory row at
+`CF_KV/everquest/trajectory/v1/everquest.live/<trajectory_id>` and, by
+default, writes a JSONL provenance artifact under the local Synapse
+EverQuest trajectory export directory. Each transition must link existing
+physical source rows: a current-state row in `CF_KV`, at least one
+`CF_ACTION_LOG` row, one `CF_OBSERVATIONS` row, one `CF_EVENTS` row, and one
+bounded EQ log byte range. Optional refs can point to domain-transition,
+outcome, guard, and map-state `CF_KV` rows.
+
+The tool verifies linked source rows and physical log byte ranges before it
+writes the trajectory. It rejects missing action/observation/event/log refs,
+duplicate transition ids, out-of-order sequences/timestamps, missing source
+rows, bad log offsets, and log hash mismatches. If the trajectory row already
+exists, the tool returns the stored row with `duplicate_of_prior_row=true`
+without rewriting storage or the export artifact.
+
+Stored rows include transition order, source row key hex, value lengths,
+compact summaries, trajectory hash, redaction flags, and an evidence boundary
+stating that this is a runtime storage/export surface, not an FSV script. Raw
+chat bodies and raw target names are not persisted.
+
+Manual FSV must read `CF_KV`, source CF counts/samples, EQ log bytes, and the
+export-file path before the trigger, call this real MCP tool with known linked
+source refs, then separately inspect the trajectory row and JSONL artifact.
+
+### 3.13l `everquest_action_prior_record`
 
 ```json
 {
@@ -1044,7 +1094,7 @@ an FSV substitute. Manual FSV must still read storage state before the trigger,
 call the tool with known synthetic prediction/outcome inputs, and separately
 read `storage_inspect` or another physical storage readback after the write.
 
-### 3.13l `everquest_action_prior_scorecard`
+### 3.13m `everquest_action_prior_scorecard`
 
 ```json
 {
@@ -2350,6 +2400,13 @@ profile-authoring and audit-export defaults below.
 | `everquest_route_plan` | `map_calibration` | omitted | #527 |
 | `everquest_route_plan` | `stale_after_seconds` | `300` | #527 |
 | `everquest_route_plan` | `max_waypoints` | `8` | #527 |
+| `everquest_trajectory_record` | `trajectory_id` | required; no default | #512 |
+| `everquest_trajectory_record` | `profile_id` | `"everquest.live"` | #512 |
+| `everquest_trajectory_record` | `intent` | required; no default | #512 |
+| `everquest_trajectory_record` | `session_id` | required; no default | #512 |
+| `everquest_trajectory_record` | `transitions` | required; no default | #512 |
+| `everquest_trajectory_record` | `source_refs` | `[]`; runtime requires at least one | #512 |
+| `everquest_trajectory_record` | `export_jsonl` | `true` | #512 |
 | `everquest_action_prior_record` | `sample_id` | required; no default | #531 |
 | `everquest_action_prior_record` | `profile_id` | `"everquest.live"` | #531 |
 | `everquest_action_prior_record` | `prediction_id` | required; no default | #531 |
