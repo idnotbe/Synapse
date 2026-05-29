@@ -117,6 +117,7 @@ pub struct RealityAuditParams {
 
 #[derive(Clone, Debug, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct RealityBaselineResponse {
     pub ok: bool,
     pub created: bool,
@@ -322,7 +323,7 @@ impl SynapseService {
             "tool.invocation kind=reality_baseline"
         );
         self.require_m3_permissions(REALITY_BASELINE_TOOL, &required_reality_write_permissions())?;
-        let response = self.capture_or_read_reality_baseline(params.0)?;
+        let response = self.capture_or_read_reality_baseline(&params.0)?;
         Ok(Json(response))
     }
 
@@ -360,7 +361,7 @@ impl SynapseService {
             "tool.invocation kind=reality_audit"
         );
         self.require_m3_permissions(REALITY_AUDIT_TOOL, &required_reality_write_permissions())?;
-        let response = self.audit_reality(params.0)?;
+        let response = self.audit_reality(&params.0)?;
         Ok(Json(response))
     }
 }
@@ -368,7 +369,7 @@ impl SynapseService {
 impl SynapseService {
     fn capture_or_read_reality_baseline(
         &self,
-        params: RealityBaselineParams,
+        params: &RealityBaselineParams,
     ) -> Result<RealityBaselineResponse, ErrorData> {
         let existing_profile_key = params
             .profile_id
@@ -405,6 +406,8 @@ impl SynapseService {
             "reality_baseline",
         )?;
         let profile = select_profile(params.profile_id.as_deref(), &captured.observation)?;
+        let profile_id = profile.profile_id;
+        let profile_key = profile.profile_key;
         let epoch_id = params
             .epoch_id
             .as_deref()
@@ -412,10 +415,10 @@ impl SynapseService {
             .transpose()?
             .unwrap_or_else(new_epoch_id);
         let baseline = RealityBaseline {
-            epoch_id: epoch_id.clone(),
+            epoch_id,
             baseline_seq: 0,
             generated_at: captured.observation.at,
-            profile_id: profile.profile_id.clone(),
+            profile_id: profile_id.clone(),
             source_surfaces: source_surfaces(&captured.source_refs),
             source_refs: captured.source_refs.clone(),
             compact_state_hash: captured.compact_state_hash.clone(),
@@ -423,12 +426,12 @@ impl SynapseService {
             size_bytes: captured.size_bytes,
             size_estimate_tokens: captured.size_estimate_tokens,
         };
-        let baseline_row_key = baseline_row_key(&profile.profile_key, &epoch_id);
+        let baseline_row_key = baseline_row_key(&profile_key, &baseline.epoch_id);
         let head = RealityHeadRow {
             schema_version: SCHEMA_VERSION,
-            profile_id: profile.profile_id.clone(),
-            profile_key: profile.profile_key.clone(),
-            epoch_id: epoch_id.clone(),
+            profile_id,
+            profile_key: profile_key.clone(),
+            epoch_id: baseline.epoch_id.clone(),
             baseline_seq: baseline.baseline_seq,
             head_seq: baseline.baseline_seq,
             compact_state_hash: captured.compact_state_hash,
@@ -441,15 +444,12 @@ impl SynapseService {
         };
         let baseline_readback =
             self.write_kv_json_readback(&baseline_row_key, &baseline, "reality baseline row")?;
-        let head_readback = self.write_kv_json_readback(
-            &head_key(&profile.profile_key),
-            &head,
-            "reality head row",
-        )?;
+        let head_readback =
+            self.write_kv_json_readback(&head_key(&profile_key), &head, "reality head row")?;
         Ok(RealityBaselineResponse {
             ok: true,
             created: true,
-            profile_key: profile.profile_key.clone(),
+            profile_key,
             baseline,
             baseline_required: false,
             rebase_required: false,
@@ -461,6 +461,7 @@ impl SynapseService {
         })
     }
 
+    #[allow(clippy::too_many_lines)]
     fn observe_reality_delta(
         &self,
         params: ObserveDeltaParams,
@@ -645,7 +646,10 @@ impl SynapseService {
         })
     }
 
-    fn audit_reality(&self, params: RealityAuditParams) -> Result<RealityAuditResponse, ErrorData> {
+    fn audit_reality(
+        &self,
+        params: &RealityAuditParams,
+    ) -> Result<RealityAuditResponse, ErrorData> {
         let captured = self.capture_reality_observation(
             &params.include,
             params.depth,
@@ -653,7 +657,8 @@ impl SynapseService {
             "reality_audit",
         )?;
         let profile = select_profile(params.profile_id.as_deref(), &captured.observation)?;
-        let head = self.read_reality_head(&profile.profile_key)?;
+        let profile_key = profile.profile_key;
+        let head = self.read_reality_head(&profile_key)?;
         if let Some(expected_epoch) = params.epoch_id.as_deref() {
             validate_key_segment(expected_epoch)?;
         }
@@ -701,7 +706,7 @@ impl SynapseService {
         let audit_id = new_audit_id();
         let audit = RealityAudit {
             audit_id: audit_id.clone(),
-            epoch_id: compared_epoch.clone(),
+            epoch_id: compared_epoch,
             baseline_seq: head.as_ref().map_or(0, |row| row.baseline_seq),
             compared_seq_start: head.as_ref().map_or(0, |row| row.baseline_seq),
             compared_seq_end: head.as_ref().map_or(0, |row| row.head_seq),
@@ -716,20 +721,19 @@ impl SynapseService {
             rebase_reason: rebase_required.then(|| rebase_reason(baseline_status, drift_status)),
             follow_up_refs: Vec::new(),
         };
-        let row_key = audit_row_key(&profile.profile_key, &audit_id);
+        let row_key = audit_row_key(&profile_key, &audit_id);
         let audit_readback = self.write_kv_json_readback(&row_key, &audit, "reality audit row")?;
         let mut readback_rows = vec![audit_readback];
         if let Some(head) = &head {
             readback_rows.push(self.readback_kv_row(&head_key(&head.profile_key))?);
         }
         let (size_bytes, size_estimate_tokens) = json_size_estimate(&audit)?;
-        let response_head_key = head.as_ref().map_or_else(
-            || head_key(&profile.profile_key),
-            |row| head_key(&row.profile_key),
-        );
+        let response_head_key = head
+            .as_ref()
+            .map_or_else(|| head_key(&profile_key), |row| head_key(&row.profile_key));
         Ok(RealityAuditResponse {
             ok: true,
-            profile_key: profile.profile_key.clone(),
+            profile_key,
             audit,
             baseline_required: head.is_none(),
             rebase_required,
@@ -807,6 +811,7 @@ impl SynapseService {
         else {
             return Ok(None);
         };
+        drop(runtime);
         decode_json_row(&bytes, "reality head row").map(Some)
     }
 
@@ -827,6 +832,7 @@ impl SynapseService {
                     format!("reality baseline row missing: {row_key}"),
                 )
             })?;
+        drop(runtime);
         decode_json_row(&bytes, "reality baseline row")
     }
 
@@ -916,6 +922,7 @@ impl SynapseService {
                     format!("{label} missing after write: {key}"),
                 )
             })?;
+        drop(runtime);
         Ok(RealityRowReadback {
             cf_name: cf::CF_KV.to_owned(),
             row_key: key.to_owned(),
@@ -941,6 +948,7 @@ impl SynapseService {
                     format!("reality row missing: {key}"),
                 )
             })?;
+        drop(runtime);
         Ok(RealityRowReadback {
             cf_name: cf::CF_KV.to_owned(),
             row_key: key.to_owned(),
@@ -991,7 +999,8 @@ fn compact_state(observation: &Observation) -> Result<CompactRealityState, Error
         hud.insert(
             name.clone(),
             CompactHudReading {
-                parsed: serde_json::to_value(&reading.parsed).map_err(encode_value_error)?,
+                parsed: serde_json::to_value(&reading.parsed)
+                    .map_err(|error| encode_value_error(&error))?,
                 raw_text_sha256: non_empty_hash(&reading.raw_text),
                 confidence_milli: confidence_milli(reading.confidence),
                 stale_ms: reading.stale_ms,
@@ -1006,7 +1015,8 @@ fn compact_state(observation: &Observation) -> Result<CompactRealityState, Error
                 entity_id: entity.entity_id.clone(),
                 track_id: entity.track_id,
                 class_label: entity.class_label.clone(),
-                bbox: serde_json::to_value(entity.bbox).map_err(encode_value_error)?,
+                bbox: serde_json::to_value(entity.bbox)
+                    .map_err(|error| encode_value_error(&error))?,
                 confidence_milli: confidence_milli(entity.confidence),
             })
         })
@@ -1027,7 +1037,7 @@ fn compact_state(observation: &Observation) -> Result<CompactRealityState, Error
             process_path_sha256: non_empty_hash(&observation.foreground.process_path),
             window_title_sha256: non_empty_hash(&observation.foreground.window_title),
             window_bounds: serde_json::to_value(observation.foreground.window_bounds)
-                .map_err(encode_value_error)?,
+                .map_err(|error| encode_value_error(&error))?,
             monitor_index: observation.foreground.monitor_index,
             profile_id: observation.foreground.profile_id.clone(),
             is_fullscreen: observation.foreground.is_fullscreen,
@@ -1057,7 +1067,7 @@ fn compact_focused(focused: &synapse_core::FocusedElement) -> Result<CompactFocu
         name_sha256: non_empty_hash(&focused.name),
         role: focused.role.clone(),
         automation_id: focused.automation_id.clone(),
-        bbox: serde_json::to_value(focused.bbox).map_err(encode_value_error)?,
+        bbox: serde_json::to_value(focused.bbox).map_err(|error| encode_value_error(&error))?,
         enabled: focused.enabled,
     })
 }
@@ -1487,7 +1497,7 @@ fn confidence_milli(value: f32) -> u32 {
     } else if scaled <= 0.0 {
         0
     } else {
-        scaled as u32
+        format!("{scaled:.0}").parse::<u32>().unwrap_or(0)
     }
 }
 
@@ -1500,7 +1510,7 @@ fn hash_json<T>(value: &T) -> Result<String, ErrorData>
 where
     T: Serialize,
 {
-    let bytes = serde_json::to_vec(value).map_err(encode_value_error)?;
+    let bytes = serde_json::to_vec(value).map_err(|error| encode_value_error(&error))?;
     Ok(hash_bytes(&bytes))
 }
 
@@ -1524,7 +1534,9 @@ fn json_size_estimate<T>(value: &T) -> Result<(u32, u32), ErrorData>
 where
     T: Serialize,
 {
-    let len = serde_json::to_vec(value).map_err(encode_value_error)?.len();
+    let len = serde_json::to_vec(value)
+        .map_err(|error| encode_value_error(&error))?
+        .len();
     let size_bytes = u32::try_from(len).unwrap_or(u32::MAX);
     Ok((size_bytes, size_bytes.div_ceil(4)))
 }
@@ -1541,7 +1553,7 @@ where
     })
 }
 
-fn encode_value_error(error: serde_json::Error) -> ErrorData {
+fn encode_value_error(error: &serde_json::Error) -> ErrorData {
     mcp_error(
         error_codes::TOOL_INTERNAL_ERROR,
         format!("encode reality compact state: {error}"),

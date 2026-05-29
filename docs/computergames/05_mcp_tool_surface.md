@@ -22,8 +22,9 @@
    surprise detector row writer, #516 adds the compact EverQuest world-summary
    context row writer, #531 adds EverQuest action-prior sample/scorecard
    tools, #522 adds transparent EverQuest predictive-model fit/predict rows,
-   and #535 adds the narrow EverQuest safe slash-command plus survival
-   readiness row surfaces, bringing the live surface to 74. Any
+   #535 adds the narrow EverQuest safe slash-command plus survival readiness
+   row surfaces, and #538 adds the delta-first reality baseline/delta/audit
+   tools, bringing the live surface to 77. Any
    further agent-facing tools require an ADR-approved cap change.
    Overlapping tools merge. Profile and parameter knobs are the escape hatches.
 2. **One tool, one verb.** No `do_everything(action_kind, ...)` mega-tools.
@@ -34,9 +35,9 @@
 7. **Stable identifiers.** `element_id`, `entity_id`, `track_id`, `reflex_id`, `session_id` are returned by tools and accepted unchanged by subsequent calls. Agent never invents these.
 8. **Delta-first reality.** Per #536, full observations establish or repair a
    baseline; routine context should be ordered reality deltas, with periodic
-   full audits to detect drift and force rebase. Until #537-#543 land, the
-   existing tools remain the live surface and manual SoT readback remains
-   mandatory.
+   full audits to detect drift and force rebase. #537 defines the canonical
+   schemas and #538 exposes the live MCP baseline/delta/audit tools. Manual SoT
+   readback remains mandatory because tool returns are attempt evidence only.
 
 The first 30 tools below are the live M3 baseline. #499 adds `act_keymap` as a
 profile-keymap action alias, #508 adds `everquest_loc_probe` as a literal
@@ -54,14 +55,14 @@ also gates `/loc` and the safe command tool, #510 adds
 `everquest_world_model_inspect`, #515 adds `everquest_surprise_detect`, #516 adds
 `everquest_world_summary`, #522 adds `everquest_predictive_model_fit` plus
 `everquest_predictive_model_predict`, and #531 adds
-`everquest_action_prior_record` plus `everquest_action_prior_scorecard`. M4 adds `act_combo`, `act_run_shell`, and
-`act_launch`; M5 adds local profile-registry/audit quality scoring, authoring
-candidates, registry row operations, import/export, audit intelligence, and
-consented redacted audit export bundles.
+`everquest_action_prior_record` plus `everquest_action_prior_scorecard`. #538
+adds `reality_baseline`, `observe_delta`, and `reality_audit`. M4 adds
+`act_combo`, `act_run_shell`, and `act_launch`; M5 adds local
+profile-registry/audit quality scoring, authoring candidates, registry row
+operations, import/export, audit intelligence, and consented redacted audit
+export bundles.
 Schemas use abbreviated JSON Schema syntax; canonical schema is exported by the
-daemon through standard MCP `tools/list`. Until the M4 tools are implemented,
-their schemas in this doc are the target contract for #401/#403/#406 and the
-future `tools/list` snapshots in #447/#448.
+daemon through standard MCP `tools/list`.
 
 ---
 
@@ -143,8 +144,11 @@ future `tools/list` snapshots in #447/#448.
 | 72 | `everquest_predictive_model_predict` | write/read | stores one calibrated next-outcome prediction row with abstention and exact readback |
 | 73 | `everquest_action_prior_record` | write/read | stores one prediction/outcome sample under `CF_KV` with computed correctness and exact readback |
 | 74 | `everquest_action_prior_scorecard` | write/read | aggregates stored samples into a floor-not-ceiling competence scorecard row and reads it back |
+| 75 | `reality_baseline` | write/read | captures or reuses a compact reality baseline, persists `CF_KV/reality/baseline/*` and `CF_KV/reality/head/*`, and reads them back |
+| 76 | `observe_delta` | write/read | returns ordered reality deltas since a cursor, persists changed `CF_KV/reality/delta/*` rows, updates head, and publishes `reality_delta` SSE events |
+| 77 | `reality_audit` | write/read | re-reads physical reality, compares it to the caller's assumed epoch/hash, persists `CF_KV/reality/audit/*`, and returns drift/rebase guidance |
 
-M3 live count: 30 tools. Current live count: 74
+M3 live count: 30 tools. Current live count: 77
 tools.
 
 Deferred ideas from earlier drafts (`describe` and `read_hud`) are still not
@@ -152,6 +156,8 @@ live M3/M4 agent-facing tools. `act_keymap` is the #499 profile-keymap alias
 addition; `everquest_loc_probe` is the #508 literal `/loc` readback tool;
 `everquest_safe_command` is the #535 allowlisted non-social slash command tool;
 `everquest_survival_readiness` is the #535 read-only survival row tool;
+`reality_baseline`, `observe_delta`, and `reality_audit` are the #538
+delta-first reality baseline/delta/audit tools;
 `everquest_chat_input_state` is the #524 visible chat input pollution state
 tool and preflight source for text-like EverQuest commands;
 `everquest_current_state` is the #510 current-state row writer/readback tool;
@@ -214,20 +220,25 @@ Returns `Observation` (see `06_data_schemas.md`). Typical size 1–6 KB.
 
 Errors: `OBSERVE_NO_PERCEPTION_AVAILABLE` (all sensors down), `OBSERVE_INTERNAL`.
 
-### 3.1a `reality_baseline`, `observe_delta`, `reality_audit` (planned, #536-#542)
+### 3.1a `reality_baseline`, `observe_delta`, `reality_audit` (live, #536/#538)
 
-These are the planned delta-first reality surfaces and are not live until the
-#536 child issues land. They must not be counted in the live tool total yet.
+These are the live delta-first reality surfaces registered by
+`server/reality.rs` and counted in the live 77-tool surface.
 
 - `reality_baseline` captures or reads a compact baseline for the current
-  profile/session. It returns epoch, baseline seq, physical source refs,
-  baseline hash, and token/size counters.
+  profile/session. It persists `CF_KV/reality/baseline/v1/<profile>/<epoch>`
+  plus `CF_KV/reality/head/v1/<profile>` and returns epoch, baseline seq,
+  physical source refs, baseline hash, row readbacks, and token/size counters.
 - `observe_delta` returns ordered `RealityDelta` records since a cursor or
-  epoch. Empty changes return an explicit no-op delta or empty batch with the
-  current cursor; stale/overflowed cursors return `rebase_required`.
+  epoch. Empty changes return an explicit `no_changes` result with the current
+  cursor; changed reality persists `CF_KV/reality/delta/v1/<profile>/<epoch>/<seq>`
+  rows, updates the head row, and publishes `reality_delta` SSE events.
+  Missing baselines, stale epochs, profile changes, and overflowed cursors
+  return explicit rebase guidance; invalid future `since_seq` fails closed.
 - `reality_audit` re-reads physical SoTs, compares them against the
-  baseline+delta assumption, persists a `RealityAudit` row, and returns drift
-  status plus rebase guidance.
+  baseline+delta assumption, persists
+  `CF_KV/reality/audit/v1/<profile>/<audit_id>`, and returns drift status plus
+  rebase guidance.
 
 Manual FSV for these tools must prove live `synapse-mcp`, call the real MCP
 tool, and separately inspect the physical UI/log/file/process/storage/device

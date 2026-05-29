@@ -200,7 +200,8 @@ Release profile: `opt-level=3`, `lto="thin"`, `codegen-units=16`, `panic="abort"
 
 ## 4. Public MCP tool surface (live)
 
-All 72 live tools live in `crates/synapse-mcp/src/server.rs` (declared via `#[tool_router]`). Grouped by milestone:
+All 77 live tools live in `crates/synapse-mcp/src/server.rs` and routed
+submodules (declared via `#[tool_router]`). Grouped by milestone:
 
 ### 4.1 M1 — perception (6 tools)
 
@@ -310,11 +311,13 @@ paths propagate that same context into `CF_ACTION_LOG` and
 
 Full parameter/return tables: [13_mcp_tool_reference.md](#file-13).
 
-### 4.6 EverQuest live evaluation/world model (20 tools)
+### 4.6 EverQuest live evaluation/world model (22 tools)
 
 | Tool | Description | Source |
 |---|---|---|
 | `everquest_loc_probe` | Send fixed `/loc` only after visible chat-input safety and verify EQ log coordinate output | `server/everquest_tools.rs` |
+| `everquest_safe_command` | Send one allowlisted non-social survival command after the chat-input gate and verify no `You say` pollution | `server/everquest_tools.rs` |
+| `everquest_survival_readiness` | Read foreground/HUD/log/chat survival blockers and persist a compact readiness row | `server/everquest_tools.rs` |
 | `everquest_chat_input_state` | Read visible chat-input pollution state from EQ foreground/UI layout/OCR crop | `server/everquest_tools.rs` |
 | `everquest_current_state` | Persist compact current state from foreground/log/map/HUD/action audit | `server/everquest_state.rs` |
 | `everquest_map_sensor` | Persist calibrated map-window sensor state from current-state, visible map evidence, and local maps | `server/everquest_map_sensor.rs` |
@@ -335,9 +338,28 @@ Full parameter/return tables: [13_mcp_tool_reference.md](#file-13).
 | `everquest_action_prior_record` | Store prediction/outcome samples with correctness and readback | `server/everquest_scorecard.rs` |
 | `everquest_action_prior_scorecard` | Aggregate action-prior samples into a floor-not-ceiling competence scorecard | `server/everquest_scorecard.rs` |
 
-### 4.7 PRD-planned tools NOT live in this build
+### 4.7 Delta-first reality (3 tools)
 
-`docs/computergames/05_mcp_tool_surface.md` defines the tool surface. Synapse's live build now has the M3 baseline, four operator storage diagnostics, M4 `act_combo`/`act_run_shell`/`act_launch`, profile HUD extraction through `observe`, and the M5 local registry/audit tools (`profile_quality_refresh`, `profile_registry_*` including rollback, `audit_intelligence_query`, `audit_export_consent_set`, and `audit_export_bundle`). The following PRD-planned entries remain unimplemented: `describe` (M5 VLM) and standalone `read_hud`.
+| Tool | Description | Source |
+|---|---|---|
+| `reality_baseline` | Capture or reuse a compact baseline and persist `CF_KV/reality/baseline/*` plus the current head row | `server/reality.rs` |
+| `observe_delta` | Return ordered `RealityDelta` rows since a cursor, persist changed delta rows, update head, and publish `reality_delta` SSE events | `server/reality.rs` |
+| `reality_audit` | Re-read physical SoTs, compare against the caller's assumed epoch/hash, persist an audit row, and return drift/rebase guidance | `server/reality.rs` |
+
+These tools implement #538 for the #536 delta-first architecture. Manual FSV
+must call the real MCP tools and separately inspect the physical
+`CF_KV/reality/*` rows plus process/window/log/device SoTs.
+
+### 4.8 PRD-planned tools NOT live in this build
+
+`docs/computergames/05_mcp_tool_surface.md` defines the tool surface. Synapse's
+live build now has the M3 baseline, four operator storage diagnostics, M4
+`act_combo`/`act_run_shell`/`act_launch`, profile HUD extraction through
+`observe`, the #538 delta-first reality tools, and the M5 local registry/audit
+tools (`profile_quality_refresh`, `profile_registry_*` including rollback,
+`audit_intelligence_query`, `audit_export_consent_set`, and
+`audit_export_bundle`). The following PRD-planned entries remain unimplemented:
+`describe` (M5 VLM) and standalone `read_hud`.
 
 ## 5. Entry points
 
@@ -588,6 +610,7 @@ crates/synapse-mcp/
     │   ├── m2_tools.rs             # M2 action tool wrappers
     │   ├── m3_tools.rs             # M3 profile/reflex/storage tool wrappers
     │   ├── m4_tools.rs             # M4 combo/shell/launch tool wrappers
+    │   ├── reality.rs              # #538 reality_baseline/observe_delta/reality_audit tools and CF_KV rows
     │   ├── target_policy.rs        # Supported-use target gating and policy evidence
     │   └── tests.rs                # Server-level unit tests
     ├── safety.rs                   # Operator-hotkey handler that disables reflexes + fires release_all
@@ -3207,11 +3230,12 @@ pub struct M1State {
 
 `last_observed_foreground` is updated after each successful `observe` call (`server.rs::observe`). This is the SoT consulted by `ensure_act_type_foreground` so `act_type` refuses to type into the wrong window.
 
-### 5.1a Delta-first reality target (#536)
+### 5.1a Delta-first reality tools (#536/#538)
 
 The current `observe` implementation builds full `Observation` values. The
-target architecture in #536 keeps that path for baseline/debug/full-audit reads
-but adds a delta-first context flow:
+architecture in #536 keeps that path for baseline/debug/full-audit reads but
+#538 exposes a live delta-first context flow through `reality_baseline`,
+`observe_delta`, and `reality_audit`:
 
 - `RealityBaseline` establishes epoch, seq, compact state hash, and physical
   source refs from a bounded full observation plus profile-specific SoTs.
@@ -3220,8 +3244,11 @@ but adds a delta-first context flow:
 - `RealityAudit` periodically re-reads physical SoTs and compares actual state
   to the baseline+delta assumption; drift produces explicit rebase guidance.
 
-Until #537-#542 land, these schemas/tools are planned surfaces. Existing live
-FSV must still use the current MCP tools and separate physical SoT readback.
+`reality_baseline` and `observe_delta` persist
+`CF_KV/reality/baseline/*`, `CF_KV/reality/delta/*`, and
+`CF_KV/reality/head/*` rows; `reality_audit` persists
+`CF_KV/reality/audit/*`. Manual FSV must trigger the real MCP tools and then
+read storage/process/UI/log SoTs separately.
 
 ### 5.2 ObserveParams and slot expansion
 
@@ -4017,15 +4044,16 @@ Open M4 work (per `docs/impplan/05_m4_hardware_hid_first_game.md`):
 
 - `firmware/pico-hid/` — standalone RP2040 firmware project excluded from the root Cargo workspace; remaining firmware issues close only with real device evidence.
 - `synapse-hid-host` — serial driver with discovery, connect/IDENTIFY, CRC16 framing, pipeline/backpressure, and reconnect paths. `Backend::Hardware` uses `HardwareBackend` when `--hardware-hid <port|auto>` connects successfully, otherwise it fails closed through `HardwareUnavailableBackend`.
-- `act_combo`, `act_run_shell`, `act_launch` — three M4 tools that bring the live MCP tool count from 30 -> 33; #499 adds `act_keymap` for profile keymap aliases; M5 profile-registry/audit work adds `profile_quality_refresh`, six `profile_authoring_*` candidate tools, eight `profile_registry_*` tools including the report inspector and rollback, `audit_intelligence_query`, `audit_export_consent_set`, and `audit_export_bundle`; #508/#524/#510/#525/#526/#527/#528/#514/#511/#512/#521/#513/#515/#516/#520/#522/#531 add the EverQuest `/loc`, visible chat-input state, current-state, map-sensor, outcome, route, memory, planner-guard, DynamicJEPA domain normalization, linked trajectory, ContextGraph/DynamicJEPA episode export, approved-prefix world-model rows/readback, surprise detection, compact world-summary context rows, map-pack inventory/provenance via local CLI, predictive-model fit/predict rows, and action-prior tools, bringing the live MCP surface to 72 plus EverQuest local support binaries.
+- `act_combo`, `act_run_shell`, `act_launch` — three M4 tools that bring the live MCP tool count from 30 -> 33; #499 adds `act_keymap` for profile keymap aliases; M5 profile-registry/audit work adds `profile_quality_refresh`, six `profile_authoring_*` candidate tools, eight `profile_registry_*` tools including the report inspector and rollback, `audit_intelligence_query`, `audit_export_consent_set`, and `audit_export_bundle`; #508/#524/#510/#525/#526/#527/#528/#514/#511/#512/#521/#513/#515/#516/#520/#522/#531 add the EverQuest `/loc`, visible chat-input state, current-state, map-sensor, outcome, route, memory, planner-guard, DynamicJEPA domain normalization, linked trajectory, ContextGraph/DynamicJEPA episode export, approved-prefix world-model rows/readback, surprise detection, compact world-summary context rows, map-pack inventory/provenance via local CLI, predictive-model fit/predict rows, and action-prior tools; #538 adds the delta-first reality baseline/delta/audit tools, bringing the live MCP surface to 77 plus EverQuest local support binaries.
 - `minecraft.java` profile (the first game profile) — fifth bundled profile, validated against a single-player creative world per `15_roadmap_and_milestones.md` §6.
 - M3 hold-over items still open: per-subscriber `subscribe.buffer_size` (currently hard-pinned to 4096); persistent writers for `CF_EVENTS`/`CF_OBSERVATIONS`/`CF_SESSIONS`/`CF_TELEMETRY`/`CF_PROCESS_HISTORY`/`CF_KV` (`CF_REFLEX_AUDIT` and `CF_ACTION_LOG` have live writers); audio detector → SSE-bus sink integration. Profile HUD fields now run through `observe`; standalone `read_hud` remains deferred. VLM `describe` and Florence-2 remain M5.
 
 ## 3. Tools delivered vs planned
 
 PRD `docs/computergames/05_mcp_tool_surface.md` started from a 30-tool M3
-baseline and now records the approved 72-tool live surface after M4/M5,
-profile-registry/audit, and EverQuest world-model expansion. Current build:
+baseline and now records the approved 77-tool live surface after M4/M5,
+profile-registry/audit, EverQuest world-model expansion, and #538
+delta-first reality tools. Current build:
 
 | # | Tool | Milestone | Status | Note |
 |---|---|---|---|---|
@@ -4083,34 +4111,39 @@ profile-registry/audit, and EverQuest world-model expansion. Current build:
 | 51 | `audit_export_consent_set` | M5 (registry/audit) | live | writes/reads local audit export consent |
 | 52 | `audit_export_bundle` | M5 (registry/audit) | live | exports consented redacted local audit bundle |
 | 53 | `everquest_loc_probe` | M4/M5 (EverQuest) | live | fixed `/loc` with chat-input safety and log readback |
-| 54 | `everquest_chat_input_state` | M4/M5 (EverQuest) | live | visible chat-input pollution readback |
-| 55 | `everquest_current_state` | M4/M5 (EverQuest) | live | compact current-state row |
-| 56 | `everquest_map_sensor` | M4/M5 (EverQuest) | live | visible map/current-state/map-file calibration row |
-| 57 | `everquest_outcome_ingest` | M4/M5 (EverQuest) | live | compact EQ log outcome rows |
-| 58 | `everquest_memory_record` | M4/M5 (EverQuest) | live | hazard/safe-area memory rows |
-| 59 | `everquest_memory_consult` | M4/M5 (EverQuest) | live | planner memory consult rows |
-| 60 | `everquest_planner_guard` | M4/M5 (EverQuest) | live | fail-closed candidate guard rows |
-| 61 | `everquest_route_plan` | M4/M5 (EverQuest) | live | bounded route-plan rows |
-| 62 | `everquest_domain_normalize` | M4/M5 (EverQuest) | live | DynamicJEPA domain pack and typed transition rows |
-| 63 | `everquest_trajectory_record` | M4/M5 (EverQuest) | live | linked trajectory rows and JSONL provenance |
-| 64 | `everquest_episode_export` | M4/M5 (EverQuest) | live | ContextGraph/DynamicJEPA episode JSONL export |
-| 65 | `everquest_world_model_record` | M4/M5 (EverQuest) | live | approved-prefix world-model rows |
-| 66 | `everquest_world_model_inspect` | M4/M5 (EverQuest) | live | counts, selected keys, and redacted samples |
-| 67 | `everquest_surprise_detect` | M4/M5 (EverQuest) | live | surprise stop/repair rows |
-| 68 | `everquest_world_summary` | M4/M5 (EverQuest) | live | compact world-summary context rows |
-| 69 | `everquest_predictive_model_fit` | M4/M5 (EverQuest) | live | transparent action-conditioned model rows |
-| 70 | `everquest_predictive_model_predict` | M4/M5 (EverQuest) | live | calibrated prediction rows with abstention |
-| 71 | `everquest_action_prior_record` | M4/M5 (EverQuest) | live | prediction/outcome sample rows |
-| 72 | `everquest_action_prior_scorecard` | M4/M5 (EverQuest) | live | floor-not-ceiling competence scorecard rows |
+| 54 | `everquest_safe_command` | M4/M5 (EverQuest) | live | allowlisted non-social survival command with chat-input safety |
+| 55 | `everquest_survival_readiness` | M4/M5 (EverQuest) | live | read-only blocker/readiness row |
+| 56 | `everquest_chat_input_state` | M4/M5 (EverQuest) | live | visible chat-input pollution readback |
+| 57 | `everquest_current_state` | M4/M5 (EverQuest) | live | compact current-state row |
+| 58 | `everquest_map_sensor` | M4/M5 (EverQuest) | live | visible map/current-state/map-file calibration row |
+| 59 | `everquest_outcome_ingest` | M4/M5 (EverQuest) | live | compact EQ log outcome rows |
+| 60 | `everquest_memory_record` | M4/M5 (EverQuest) | live | hazard/safe-area memory rows |
+| 61 | `everquest_memory_consult` | M4/M5 (EverQuest) | live | planner memory consult rows |
+| 62 | `everquest_planner_guard` | M4/M5 (EverQuest) | live | fail-closed candidate guard rows |
+| 63 | `everquest_route_plan` | M4/M5 (EverQuest) | live | bounded route-plan rows |
+| 64 | `everquest_domain_normalize` | M4/M5 (EverQuest) | live | DynamicJEPA domain pack and typed transition rows |
+| 65 | `everquest_trajectory_record` | M4/M5 (EverQuest) | live | linked trajectory rows and JSONL provenance |
+| 66 | `everquest_episode_export` | M4/M5 (EverQuest) | live | ContextGraph/DynamicJEPA episode JSONL export |
+| 67 | `everquest_world_model_record` | M4/M5 (EverQuest) | live | approved-prefix world-model rows |
+| 68 | `everquest_world_model_inspect` | M4/M5 (EverQuest) | live | counts, selected keys, and redacted samples |
+| 69 | `everquest_surprise_detect` | M4/M5 (EverQuest) | live | surprise stop/repair rows |
+| 70 | `everquest_world_summary` | M4/M5 (EverQuest) | live | compact world-summary context rows |
+| 71 | `everquest_predictive_model_fit` | M4/M5 (EverQuest) | live | transparent action-conditioned model rows |
+| 72 | `everquest_predictive_model_predict` | M4/M5 (EverQuest) | live | calibrated prediction rows with abstention |
+| 73 | `everquest_action_prior_record` | M4/M5 (EverQuest) | live | prediction/outcome sample rows |
+| 74 | `everquest_action_prior_scorecard` | M4/M5 (EverQuest) | live | floor-not-ceiling competence scorecard rows |
+| 75 | `reality_baseline` | M4/#538 (reality) | live | compact baseline/head rows with exact readback |
+| 76 | `observe_delta` | M4/#538 (reality) | live | ordered reality deltas, head updates, and `reality_delta` SSE events |
+| 77 | `reality_audit` | M4/#538 (reality) | live | physical drift audit row with rebase guidance |
 | — | `describe` | M5 (VLM) | not live | Florence-2 |
 
-Live count in `crates/synapse-mcp/src/server.rs`: **72** (M1: 6,
+Live count in `crates/synapse-mcp/src/server.rs`: **77** (M1: 6,
 M2/action: 10, M3/M5 module stubs: 33 including
 `profile_quality_refresh`, six `profile_authoring_*` tools, eight
 `profile_registry_*` tools, `audit_intelligence_query`,
 `audit_export_consent_set`, `audit_export_bundle`, and 4 operator storage
-diagnostics, plus M4 `act_combo`/`act_run_shell`/`act_launch`, plus 20
-EverQuest runtime/world-model tools).
+diagnostics, plus M4 `act_combo`/`act_run_shell`/`act_launch`, plus 22
+EverQuest runtime/world-model tools, plus three delta-first reality tools).
 
 EverQuest local support binaries live in `crates/synapse-everquest`: `eq-map-inspect`,
 `eq-zone-graph`, and `eq-map-inventory`. The #520 `eq-map-inventory` surface is
@@ -4304,12 +4337,17 @@ Source files covered:
 - `crates/synapse-mcp/src/server/everquest_world_summary/{model,validation}.rs`
 - `crates/synapse-mcp/src/server/everquest_predictive_model.rs`
 - `crates/synapse-mcp/src/server/everquest_scorecard.rs`
+- `crates/synapse-mcp/src/server/reality.rs`
 - `crates/synapse-mcp/src/m1.rs` (+ `m1/{ocr, search, sources}.rs`)
 - `crates/synapse-mcp/src/m2/{aim, click, clipboard, drag, pad, press, release_all, scroll, type_text}.rs`
 - `crates/synapse-mcp/src/m3/{audio, audit_export, permissions, profile, profile_authoring, profile_quality, profile_registry, reflex, replay, subscribe}.rs`
 - `crates/synapse-core/src/types.rs`
 
-All 72 live tools are registered on `SynapseService` via `#[tool(description=...)]` in `server.rs`. Tool descriptions are taken verbatim from the source. Every tool returns through `Json<T>` so the response shape exactly matches the deserialized response struct.
+All 77 live tools are registered on `SynapseService` via
+`#[tool(description=...)]` in `server.rs` and routed submodules. Tool
+descriptions are taken verbatim from the source. Every tool returns through
+`Json<T>` so the response shape exactly matches the deserialized response
+struct.
 
 Default error response shape (all tools): `ErrorData { code: rmcp::ErrorCode(-32099), message, data: { "code": <SCREAMING_SNAKE_CASE> } }` via `crates/synapse-mcp/src/m1.rs::mcp_error`.
 
@@ -4321,11 +4359,11 @@ afterward the agent reads the separate physical source of truth the tool should
 have changed or observed. Tool returns and health responses are liveness and
 attempt evidence only.
 
-Issue #536 adds planned delta-first reality tools. `reality_baseline`,
-`observe_delta`, and `reality_audit` are target surfaces for #537-#542 and are
-not counted in the live tool total until implemented. Their contract is:
-baseline establishes epoch/hash/source refs, delta returns ordered changes since
-a cursor, and audit re-reads physical SoTs to detect drift and force rebase.
+Issue #536 defines the delta-first reality architecture and #538 exposes the
+live `reality_baseline`, `observe_delta`, and `reality_audit` tools. Their
+contract is: baseline establishes epoch/hash/source refs, delta returns ordered
+changes since a cursor, and audit re-reads physical SoTs to detect drift and
+force rebase.
 
 ## 1. `health`
 
@@ -4354,6 +4392,74 @@ a cursor, and audit re-reads physical SoTs to detect drift and force rebase.
 
 **Returns:** `synapse_core::Observation`.
 **Errors:** `OBSERVE_NO_PERCEPTION_AVAILABLE` (forced via `SYNAPSE_MCP_FORCE_NO_PERCEPTION`), `OBSERVE_INTERNAL` (forced or assembler error), `A11Y_NO_FOREGROUND`, `CAPTURE_TARGET_LOST`, perception subsystem errors.
+
+## 2a. `reality_baseline`
+
+**Description:** "Capture or read a compact delta-first reality baseline and persist CF_KV reality rows"
+**Permissions:** `READ_STORAGE`, `WRITE_STORAGE`, `READ_EVENTS`
+**Side effects:** captures/reads the current perception input, persists
+`CF_KV/reality/baseline/v1/<profile>/<epoch>` and
+`CF_KV/reality/head/v1/<profile>`, then reads those rows back.
+
+| Parameter | Type | Required | Default | Range | Description |
+|---|---|---|---|---|---|
+| `profile_id` | `Option<String>` | no | observed profile or `unprofiled` | key segment | Expected profile key |
+| `epoch_id` | `Option<String>` | no | generated | key segment | Operator-provided epoch id |
+| `force_new_epoch` | `bool` | no | `false` | — | Capture a new baseline even when a head exists |
+| `include` | `Vec<ObserveSlot>` | no | empty | see `observe` | Slots used to build the compact baseline |
+| `depth` | `u32` | no | `2` | `1..=6` | Observation depth |
+| `max_elements` | `usize` | no | `60` | `1..=500` | Observation element cap |
+
+**Returns:** `RealityBaselineResponse { ok, created, profile_key,
+baseline, baseline_required=false, rebase_required=false, reason, head,
+readback_rows, size_bytes, size_estimate_tokens }`.
+
+## 2b. `observe_delta`
+
+**Description:** "Return ordered compact reality deltas since a cursor, persist changed rows, and publish reality_delta events"
+**Permissions:** `READ_STORAGE`, `WRITE_STORAGE`, `READ_EVENTS`
+**Side effects:** captures current reality, compares it to
+`CF_KV/reality/head/v1/<profile>`, writes any
+`CF_KV/reality/delta/v1/<profile>/<epoch>/<seq>` rows, updates the head row,
+and publishes one `reality_delta` SSE event for each persisted delta.
+
+| Parameter | Type | Required | Default | Range | Description |
+|---|---|---|---|---|---|
+| `profile_id` | `Option<String>` | no | observed profile or `unprofiled` | key segment | Expected profile key |
+| `since_epoch` | `Option<String>` | no | current head epoch | key segment | Cursor epoch |
+| `since_seq` | `Option<u64>` | no | baseline seq | — | Return deltas after this sequence |
+| `include` | `Vec<ObserveSlot>` | no | empty | see `observe` | Slots used for comparison |
+| `depth` | `u32` | no | `2` | `1..=6` | Observation depth |
+| `max_elements` | `usize` | no | `60` | `1..=500` | Observation element cap |
+| `max_deltas` | `u32` | no | `64` | `1..=256` | Max deltas returned/written before rebase |
+
+**Returns:** `ObserveDeltaResponse { ok, profile_key, epoch_id, from_seq,
+to_seq, deltas, cursor, baseline_required, rebase_required, reason,
+readback_rows, published_sse_events, size_bytes, size_estimate_tokens }`.
+Missing baseline, stale epoch, profile change, and overflow return explicit
+rebase guidance; future `since_seq` fails closed with `TOOL_PARAMS_INVALID`.
+
+## 2c. `reality_audit`
+
+**Description:** "Re-read physical reality, compare against an assumed compact state hash, and persist drift audit rows"
+**Permissions:** `READ_STORAGE`, `WRITE_STORAGE`, `READ_EVENTS`
+**Side effects:** captures a fresh compact physical reality read, compares it
+to the caller's `epoch_id`/`assumption_hash` or the current head row, writes
+`CF_KV/reality/audit/v1/<profile>/<audit_id>`, and reads the audit/head rows
+back.
+
+| Parameter | Type | Required | Default | Range | Description |
+|---|---|---|---|---|---|
+| `profile_id` | `Option<String>` | no | observed profile or `unprofiled` | key segment | Expected profile key |
+| `epoch_id` | `Option<String>` | no | current head epoch | key segment | Assumed epoch |
+| `assumption_hash` | `Option<String>` | no | current head hash | `sha256:*` | Agent's assumed compact state hash |
+| `include` | `Vec<ObserveSlot>` | no | empty | see `observe` | Slots used for physical audit |
+| `depth` | `u32` | no | `2` | `1..=6` | Observation depth |
+| `max_elements` | `usize` | no | `60` | `1..=500` | Observation element cap |
+
+**Returns:** `RealityAuditResponse { ok, profile_key, audit,
+baseline_required, rebase_required, reason, row_key, head_key, readback_rows,
+size_bytes, size_estimate_tokens }`.
 
 ## 3. `find`
 
@@ -5747,7 +5853,7 @@ Source files covered:
 - `m3_reflex_cancel_tool.rs`, `m3_reflex_history_tool.rs`, `m3_reflex_list_tool.rs`, `m3_reflex_register_tool.rs` — reflex CRUD
 - `m3_replay_record_tool.rs` — replay JSONL writer
 - `m3_subscribe_tool.rs` — subscribe + cancel
-- `m3_tools_list.rs` / `m4_tools_list.rs` — `tools/list` exposes the current 72-tool surface, including #499 `act_keymap`, M5 profile-registry/audit tools, #462 `profile_authoring_*`, #468 `profile_registry_report`, `profile_registry_rollback`, #460 `audit_export_*`, and the EverQuest world-model tools through `everquest_chat_input_state`, `everquest_planner_guard`, `everquest_domain_normalize`, `everquest_trajectory_record`, `everquest_episode_export`, `everquest_world_model_record`, `everquest_world_model_inspect`, `everquest_surprise_detect`, `everquest_world_summary`, `everquest_predictive_model_fit`, `everquest_predictive_model_predict`, and `everquest_action_prior_scorecard`
+- `m3_tools_list.rs` / `m4_tools_list.rs` — `tools/list` exposes the current 77-tool surface, including #499 `act_keymap`, M5 profile-registry/audit tools, #462 `profile_authoring_*`, #468 `profile_registry_report`, `profile_registry_rollback`, #460 `audit_export_*`, the EverQuest world-model tools through `everquest_chat_input_state`, `everquest_planner_guard`, `everquest_domain_normalize`, `everquest_trajectory_record`, `everquest_episode_export`, `everquest_world_model_record`, `everquest_world_model_inspect`, `everquest_surprise_detect`, `everquest_world_summary`, `everquest_predictive_model_fit`, `everquest_predictive_model_predict`, `everquest_action_prior_scorecard`, and #538 `reality_baseline`/`observe_delta`/`reality_audit`
 - `sigint_clean_exit.rs` — Ctrl-C / Ctrl-Break shuts the daemon down within deadline
 
 ### 2.5 `synapse-models` (1 file)

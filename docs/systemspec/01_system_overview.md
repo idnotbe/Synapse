@@ -108,7 +108,8 @@ Release profile: `opt-level=3`, `lto="thin"`, `codegen-units=16`, `panic="abort"
 
 ## 4. Public MCP tool surface (live)
 
-All 72 live tools live in `crates/synapse-mcp/src/server.rs` (declared via `#[tool_router]`). Grouped by milestone:
+All 77 live tools live in `crates/synapse-mcp/src/server.rs` and routed
+submodules (declared via `#[tool_router]`). Grouped by milestone:
 
 ### 4.1 M1 — perception (6 tools)
 
@@ -218,11 +219,13 @@ paths propagate that same context into `CF_ACTION_LOG` and
 
 Full parameter/return tables: [13_mcp_tool_reference.md](13_mcp_tool_reference.md).
 
-### 4.6 EverQuest live evaluation/world model (20 tools)
+### 4.6 EverQuest live evaluation/world model (22 tools)
 
 | Tool | Description | Source |
 |---|---|---|
 | `everquest_loc_probe` | Send fixed `/loc` only after visible chat-input safety and verify EQ log coordinate output | `server/everquest_tools.rs` |
+| `everquest_safe_command` | Send one allowlisted non-social survival command after the chat-input gate and verify no `You say` pollution | `server/everquest_tools.rs` |
+| `everquest_survival_readiness` | Read foreground/HUD/log/chat survival blockers and persist a compact readiness row | `server/everquest_tools.rs` |
 | `everquest_chat_input_state` | Read visible chat-input pollution state from EQ foreground/UI layout/OCR crop | `server/everquest_tools.rs` |
 | `everquest_current_state` | Persist compact current state from foreground/log/map/HUD/action audit | `server/everquest_state.rs` |
 | `everquest_map_sensor` | Persist calibrated map-window sensor state from current-state, visible map evidence, and local maps | `server/everquest_map_sensor.rs` |
@@ -243,9 +246,28 @@ Full parameter/return tables: [13_mcp_tool_reference.md](13_mcp_tool_reference.m
 | `everquest_action_prior_record` | Store prediction/outcome samples with correctness and readback | `server/everquest_scorecard.rs` |
 | `everquest_action_prior_scorecard` | Aggregate action-prior samples into a floor-not-ceiling competence scorecard | `server/everquest_scorecard.rs` |
 
-### 4.7 PRD-planned tools NOT live in this build
+### 4.7 Delta-first reality (3 tools)
 
-`docs/computergames/05_mcp_tool_surface.md` defines the tool surface. Synapse's live build now has the M3 baseline, four operator storage diagnostics, M4 `act_combo`/`act_run_shell`/`act_launch`, profile HUD extraction through `observe`, and the M5 local registry/audit tools (`profile_quality_refresh`, `profile_registry_*` including rollback, `audit_intelligence_query`, `audit_export_consent_set`, and `audit_export_bundle`). The following PRD-planned entries remain unimplemented: `describe` (M5 VLM) and standalone `read_hud`.
+| Tool | Description | Source |
+|---|---|---|
+| `reality_baseline` | Capture or reuse a compact baseline and persist `CF_KV/reality/baseline/*` plus the current head row | `server/reality.rs` |
+| `observe_delta` | Return ordered `RealityDelta` rows since a cursor, persist changed delta rows, update head, and publish `reality_delta` SSE events | `server/reality.rs` |
+| `reality_audit` | Re-read physical SoTs, compare against the caller's assumed epoch/hash, persist an audit row, and return drift/rebase guidance | `server/reality.rs` |
+
+These tools implement #538 for the #536 delta-first architecture. Manual FSV
+must call the real MCP tools and separately inspect the physical
+`CF_KV/reality/*` rows plus process/window/log/device SoTs.
+
+### 4.8 PRD-planned tools NOT live in this build
+
+`docs/computergames/05_mcp_tool_surface.md` defines the tool surface. Synapse's
+live build now has the M3 baseline, four operator storage diagnostics, M4
+`act_combo`/`act_run_shell`/`act_launch`, profile HUD extraction through
+`observe`, the #538 delta-first reality tools, and the M5 local registry/audit
+tools (`profile_quality_refresh`, `profile_registry_*` including rollback,
+`audit_intelligence_query`, `audit_export_consent_set`, and
+`audit_export_bundle`). The following PRD-planned entries remain unimplemented:
+`describe` (M5 VLM) and standalone `read_hud`.
 
 ## 5. Entry points
 

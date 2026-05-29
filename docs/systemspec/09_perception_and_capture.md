@@ -231,11 +231,12 @@ pub struct M1State {
 
 `last_observed_foreground` is updated after each successful `observe` call (`server.rs::observe`). This is the SoT consulted by `ensure_act_type_foreground` so `act_type` refuses to type into the wrong window.
 
-### 5.1a Delta-first reality target (#536)
+### 5.1a Delta-first reality tools (#536/#538)
 
 The current `observe` implementation builds full `Observation` values. The
-target architecture in #536 keeps that path for baseline/debug/full-audit reads
-but adds a delta-first context flow:
+architecture in #536 keeps that path for baseline/debug/full-audit reads but
+#538 exposes a live delta-first context flow through `reality_baseline`,
+`observe_delta`, and `reality_audit`:
 
 - `RealityBaseline` establishes epoch, seq, compact state hash, and physical
   source refs from a bounded full observation plus profile-specific SoTs.
@@ -244,8 +245,11 @@ but adds a delta-first context flow:
 - `RealityAudit` periodically re-reads physical SoTs and compares actual state
   to the baseline+delta assumption; drift produces explicit rebase guidance.
 
-Until #537-#542 land, these schemas/tools are planned surfaces. Existing live
-FSV must still use the current MCP tools and separate physical SoT readback.
+`reality_baseline` and `observe_delta` persist
+`CF_KV/reality/baseline/*`, `CF_KV/reality/delta/*`, and
+`CF_KV/reality/head/*` rows; `reality_audit` persists
+`CF_KV/reality/audit/*`. Manual FSV must trigger the real MCP tools and then
+read storage/process/UI/log SoTs separately.
 
 ### 5.2 ObserveParams and slot expansion
 

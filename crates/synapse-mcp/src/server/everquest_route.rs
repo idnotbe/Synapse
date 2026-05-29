@@ -386,7 +386,7 @@ impl SynapseService {
                 &value,
                 "EverQuest world-model transition row",
             )?;
-            match learned_transition_from_world_model_row(key_text, row) {
+            match learned_transition_from_world_model_row(&key_text, row) {
                 Ok(Some(transition)) => index.transitions.push(transition),
                 Ok(None) => {}
                 Err(hazard) => index.hazards.push(hazard),
@@ -896,7 +896,7 @@ fn state_source_refs(sources: &[EverQuestStateSource]) -> Vec<EverQuestRouteSour
 }
 
 fn learned_transition_from_world_model_row(
-    storage_key: String,
+    storage_key: &str,
     row: EverQuestWorldModelRow,
 ) -> Result<Option<EverQuestRouteVerifiedTransition>, EverQuestRouteHazard> {
     if row.world_model_kind != EverQuestWorldModelKind::Transition {
@@ -904,18 +904,18 @@ fn learned_transition_from_world_model_row(
     }
     if row.row_kind != "everquest_world_model" {
         return Err(invalid_transition_hazard(
-            &storage_key,
+            storage_key,
             "world-model row_kind is not everquest_world_model",
         ));
     }
     if row.redaction.raw_chat_body_persisted || !row.redaction.compact_redacted {
         return Err(invalid_transition_hazard(
-            &storage_key,
+            storage_key,
             "transition row redaction boundary is not compact/redacted",
         ));
     }
     let payload = row.payload.as_object().ok_or_else(|| {
-        invalid_transition_hazard(&storage_key, "transition payload must be a JSON object")
+        invalid_transition_hazard(storage_key, "transition payload must be a JSON object")
     })?;
     let verification_status = payload
         .get("verification_status")
@@ -925,22 +925,28 @@ fn learned_transition_from_world_model_row(
         return Ok(None);
     }
     let from_zone_short_name = payload_text(payload, "from_zone_short_name")
-        .ok_or_else(|| invalid_transition_hazard(&storage_key, "missing from_zone_short_name"))?;
+        .ok_or_else(|| invalid_transition_hazard(storage_key, "missing from_zone_short_name"))?;
     let to_zone_short_name = payload_text(payload, "to_zone_short_name")
-        .ok_or_else(|| invalid_transition_hazard(&storage_key, "missing to_zone_short_name"))?;
+        .ok_or_else(|| invalid_transition_hazard(storage_key, "missing to_zone_short_name"))?;
     let pre_zone_location = payload_location(payload, "pre_zone_location").ok_or_else(|| {
-        invalid_transition_hazard(&storage_key, "missing complete pre_zone_location")
+        invalid_transition_hazard(storage_key, "missing complete pre_zone_location")
     })?;
     let post_zone_location = payload_location(payload, "post_zone_location").ok_or_else(|| {
-        invalid_transition_hazard(&storage_key, "missing complete post_zone_location")
+        invalid_transition_hazard(storage_key, "missing complete post_zone_location")
     })?;
     let confidence = payload
         .get("confidence")
         .and_then(Value::as_f64)
-        .unwrap_or(f64::from(MIN_VERIFIED_TRANSITION_CONFIDENCE)) as f32;
-    if !confidence.is_finite() || confidence < MIN_VERIFIED_TRANSITION_CONFIDENCE {
+        .unwrap_or_else(|| f64::from(MIN_VERIFIED_TRANSITION_CONFIDENCE));
+    if !confidence.is_finite() || confidence < f64::from(MIN_VERIFIED_TRANSITION_CONFIDENCE) {
         return Ok(None);
     }
+    let confidence = confidence.to_string().parse::<f32>().map_err(|error| {
+        invalid_transition_hazard(
+            storage_key,
+            format!("transition confidence cannot be represented as f32: {error}"),
+        )
+    })?;
     let mut source_refs = vec![EverQuestRouteSourceRef {
         kind: "everquest_world_model_transition".to_owned(),
         row_key: Some(row.row_key.clone()),
@@ -2164,7 +2170,7 @@ mod tests {
         }));
 
         let result = learned_transition_from_world_model_row(
-            "everquest/transition/v1/everquest.live/missing-post-loc".to_owned(),
+            "everquest/transition/v1/everquest.live/missing-post-loc",
             row,
         );
 

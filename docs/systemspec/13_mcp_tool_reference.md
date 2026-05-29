@@ -20,12 +20,17 @@ Source files covered:
 - `crates/synapse-mcp/src/server/everquest_world_summary/{model,validation}.rs`
 - `crates/synapse-mcp/src/server/everquest_predictive_model.rs`
 - `crates/synapse-mcp/src/server/everquest_scorecard.rs`
+- `crates/synapse-mcp/src/server/reality.rs`
 - `crates/synapse-mcp/src/m1.rs` (+ `m1/{ocr, search, sources}.rs`)
 - `crates/synapse-mcp/src/m2/{aim, click, clipboard, drag, pad, press, release_all, scroll, type_text}.rs`
 - `crates/synapse-mcp/src/m3/{audio, audit_export, permissions, profile, profile_authoring, profile_quality, profile_registry, reflex, replay, subscribe}.rs`
 - `crates/synapse-core/src/types.rs`
 
-All 72 live tools are registered on `SynapseService` via `#[tool(description=...)]` in `server.rs`. Tool descriptions are taken verbatim from the source. Every tool returns through `Json<T>` so the response shape exactly matches the deserialized response struct.
+All 77 live tools are registered on `SynapseService` via
+`#[tool(description=...)]` in `server.rs` and routed submodules. Tool
+descriptions are taken verbatim from the source. Every tool returns through
+`Json<T>` so the response shape exactly matches the deserialized response
+struct.
 
 Default error response shape (all tools): `ErrorData { code: rmcp::ErrorCode(-32099), message, data: { "code": <SCREAMING_SNAKE_CASE> } }` via `crates/synapse-mcp/src/m1.rs::mcp_error`.
 
@@ -37,11 +42,11 @@ afterward the agent reads the separate physical source of truth the tool should
 have changed or observed. Tool returns and health responses are liveness and
 attempt evidence only.
 
-Issue #536 adds planned delta-first reality tools. `reality_baseline`,
-`observe_delta`, and `reality_audit` are target surfaces for #537-#542 and are
-not counted in the live tool total until implemented. Their contract is:
-baseline establishes epoch/hash/source refs, delta returns ordered changes since
-a cursor, and audit re-reads physical SoTs to detect drift and force rebase.
+Issue #536 defines the delta-first reality architecture and #538 exposes the
+live `reality_baseline`, `observe_delta`, and `reality_audit` tools. Their
+contract is: baseline establishes epoch/hash/source refs, delta returns ordered
+changes since a cursor, and audit re-reads physical SoTs to detect drift and
+force rebase.
 
 ## 1. `health`
 
@@ -70,6 +75,74 @@ a cursor, and audit re-reads physical SoTs to detect drift and force rebase.
 
 **Returns:** `synapse_core::Observation`.
 **Errors:** `OBSERVE_NO_PERCEPTION_AVAILABLE` (forced via `SYNAPSE_MCP_FORCE_NO_PERCEPTION`), `OBSERVE_INTERNAL` (forced or assembler error), `A11Y_NO_FOREGROUND`, `CAPTURE_TARGET_LOST`, perception subsystem errors.
+
+## 2a. `reality_baseline`
+
+**Description:** "Capture or read a compact delta-first reality baseline and persist CF_KV reality rows"
+**Permissions:** `READ_STORAGE`, `WRITE_STORAGE`, `READ_EVENTS`
+**Side effects:** captures/reads the current perception input, persists
+`CF_KV/reality/baseline/v1/<profile>/<epoch>` and
+`CF_KV/reality/head/v1/<profile>`, then reads those rows back.
+
+| Parameter | Type | Required | Default | Range | Description |
+|---|---|---|---|---|---|
+| `profile_id` | `Option<String>` | no | observed profile or `unprofiled` | key segment | Expected profile key |
+| `epoch_id` | `Option<String>` | no | generated | key segment | Operator-provided epoch id |
+| `force_new_epoch` | `bool` | no | `false` | — | Capture a new baseline even when a head exists |
+| `include` | `Vec<ObserveSlot>` | no | empty | see `observe` | Slots used to build the compact baseline |
+| `depth` | `u32` | no | `2` | `1..=6` | Observation depth |
+| `max_elements` | `usize` | no | `60` | `1..=500` | Observation element cap |
+
+**Returns:** `RealityBaselineResponse { ok, created, profile_key,
+baseline, baseline_required=false, rebase_required=false, reason, head,
+readback_rows, size_bytes, size_estimate_tokens }`.
+
+## 2b. `observe_delta`
+
+**Description:** "Return ordered compact reality deltas since a cursor, persist changed rows, and publish reality_delta events"
+**Permissions:** `READ_STORAGE`, `WRITE_STORAGE`, `READ_EVENTS`
+**Side effects:** captures current reality, compares it to
+`CF_KV/reality/head/v1/<profile>`, writes any
+`CF_KV/reality/delta/v1/<profile>/<epoch>/<seq>` rows, updates the head row,
+and publishes one `reality_delta` SSE event for each persisted delta.
+
+| Parameter | Type | Required | Default | Range | Description |
+|---|---|---|---|---|---|
+| `profile_id` | `Option<String>` | no | observed profile or `unprofiled` | key segment | Expected profile key |
+| `since_epoch` | `Option<String>` | no | current head epoch | key segment | Cursor epoch |
+| `since_seq` | `Option<u64>` | no | baseline seq | — | Return deltas after this sequence |
+| `include` | `Vec<ObserveSlot>` | no | empty | see `observe` | Slots used for comparison |
+| `depth` | `u32` | no | `2` | `1..=6` | Observation depth |
+| `max_elements` | `usize` | no | `60` | `1..=500` | Observation element cap |
+| `max_deltas` | `u32` | no | `64` | `1..=256` | Max deltas returned/written before rebase |
+
+**Returns:** `ObserveDeltaResponse { ok, profile_key, epoch_id, from_seq,
+to_seq, deltas, cursor, baseline_required, rebase_required, reason,
+readback_rows, published_sse_events, size_bytes, size_estimate_tokens }`.
+Missing baseline, stale epoch, profile change, and overflow return explicit
+rebase guidance; future `since_seq` fails closed with `TOOL_PARAMS_INVALID`.
+
+## 2c. `reality_audit`
+
+**Description:** "Re-read physical reality, compare against an assumed compact state hash, and persist drift audit rows"
+**Permissions:** `READ_STORAGE`, `WRITE_STORAGE`, `READ_EVENTS`
+**Side effects:** captures a fresh compact physical reality read, compares it
+to the caller's `epoch_id`/`assumption_hash` or the current head row, writes
+`CF_KV/reality/audit/v1/<profile>/<audit_id>`, and reads the audit/head rows
+back.
+
+| Parameter | Type | Required | Default | Range | Description |
+|---|---|---|---|---|---|
+| `profile_id` | `Option<String>` | no | observed profile or `unprofiled` | key segment | Expected profile key |
+| `epoch_id` | `Option<String>` | no | current head epoch | key segment | Assumed epoch |
+| `assumption_hash` | `Option<String>` | no | current head hash | `sha256:*` | Agent's assumed compact state hash |
+| `include` | `Vec<ObserveSlot>` | no | empty | see `observe` | Slots used for physical audit |
+| `depth` | `u32` | no | `2` | `1..=6` | Observation depth |
+| `max_elements` | `usize` | no | `60` | `1..=500` | Observation element cap |
+
+**Returns:** `RealityAuditResponse { ok, profile_key, audit,
+baseline_required, rebase_required, reason, row_key, head_key, readback_rows,
+size_bytes, size_estimate_tokens }`.
 
 ## 3. `find`
 

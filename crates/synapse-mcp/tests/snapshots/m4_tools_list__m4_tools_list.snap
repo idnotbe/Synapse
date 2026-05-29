@@ -3,7 +3,7 @@ source: crates/synapse-mcp/tests/m4_tools_list.rs
 expression: snapshot
 ---
 {
-  "count": 74,
+  "count": 77,
   "m4_defaults": [
     {
       "actual": 33,
@@ -154,6 +154,7 @@ expression: snapshot
     "find",
     "health",
     "observe",
+    "observe_delta",
     "profile_activate",
     "profile_authoring_accept",
     "profile_authoring_export",
@@ -172,6 +173,8 @@ expression: snapshot
     "profile_registry_rollback",
     "profile_registry_search",
     "read_text",
+    "reality_audit",
+    "reality_baseline",
     "reflex_cancel",
     "reflex_history",
     "reflex_list",

@@ -287,11 +287,11 @@ pub enum SensorStatus {
 
 ---
 
-### 2.10 Reality baseline, deltas, and audits (target)
+### 2.10 Reality baseline, deltas, and audits (live MCP storage surface)
 
-Issue #536 introduces the target delta-first reality contract. #537 implements
-these as canonical `synapse-core` schemas; MCP surfaces remain planned until
-#538 exposes them through `tools/list`.
+Issue #536 introduces the delta-first reality contract. #537 implements these
+as canonical `synapse-core` schemas, and #538 exposes the live MCP tools through
+`tools/list`: `reality_baseline`, `observe_delta`, and `reality_audit`.
 
 ```rust
 pub struct SourceRef {
@@ -464,6 +464,13 @@ Physical storage target:
 - `CF_KV/reality/delta/v1/<profile>/<epoch>/<seq>`
 - `CF_KV/reality/audit/v1/<profile>/<audit_id>`
 - `CF_KV/reality/head/v1/<profile>` for the current epoch/seq/hash pointer
+
+The head row is a compact private MCP/storage row (`RealityHeadRow` in
+`server/reality.rs`) that contains the current epoch, baseline row key, head
+sequence, compact state hash, source refs, and the redacted compact state used
+to generate future deltas. It is not a replacement for the public
+`RealityBaseline`/`RealityDelta`/`RealityAudit` schemas; it is the physical
+cursor state the MCP tools read and write.
 
 Full observations remain the source for baseline and explicit audit/debug
 expansion. Routine context should prefer `RealityDelta` batches because they

@@ -74,6 +74,7 @@ crates/synapse-mcp/
     │   ├── m2_tools.rs             # M2 action tool wrappers
     │   ├── m3_tools.rs             # M3 profile/reflex/storage tool wrappers
     │   ├── m4_tools.rs             # M4 combo/shell/launch tool wrappers
+    │   ├── reality.rs              # #538 reality_baseline/observe_delta/reality_audit tools and CF_KV rows
     │   ├── target_policy.rs        # Supported-use target gating and policy evidence
     │   └── tests.rs                # Server-level unit tests
     ├── safety.rs                   # Operator-hotkey handler that disables reflexes + fires release_all
