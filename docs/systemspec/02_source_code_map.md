@@ -36,7 +36,7 @@ crates/synapse-mcp/
 ├── Cargo.toml                      # Binary crate; depends on every other library crate
 └── src/
     ├── main.rs                     # Process entrypoint, clap CLI, telemetry init, stdio/http dispatch
-    ├── server.rs                   # SynapseService: ServerHandler + #[tool_router] declaring 67 MCP tools
+    ├── server.rs                   # SynapseService: ServerHandler + #[tool_router] declaring 68 MCP tools
     ├── server/
     │   ├── action_audit.rs         # CF_ACTION_LOG start/result audit rows with profile/session context
     │   ├── audit_context.rs        # Profile activation/session/event audit context persistence helpers
@@ -50,6 +50,11 @@ crates/synapse-mcp/
     │   ├── everquest_route.rs      # EverQuest bounded map/route plan rows
     │   ├── everquest_scorecard.rs  # EverQuest action-prior sample and scorecard rows
     │   ├── everquest_state.rs      # EverQuest current-state row fusion
+    │   ├── everquest_surprise.rs   # EverQuest surprise detector MCP router/storage bridge
+    │   ├── everquest_surprise/     # Surprise detector model, comparison, validation helpers
+    │   │   ├── compare.rs          # Prediction-vs-observation divergence and remediation logic
+    │   │   ├── model.rs            # Tool params, response, and compact payload structs
+    │   │   └── validation.rs       # Fail-closed params/source-ref normalization
     │   ├── everquest_tools.rs      # EverQuest /loc and chat-input safety tools
     │   ├── everquest_trajectory.rs # EverQuest linked trajectory rows and JSONL provenance export
     │   ├── everquest_world_model.rs # EverQuest approved-prefix world-model tool router/storage methods

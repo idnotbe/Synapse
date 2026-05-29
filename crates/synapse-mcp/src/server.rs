@@ -119,6 +119,7 @@ mod everquest_outcome;
 mod everquest_route;
 mod everquest_scorecard;
 mod everquest_state;
+mod everquest_surprise;
 mod everquest_tools;
 mod everquest_trajectory;
 mod everquest_world_model;
@@ -245,6 +246,7 @@ impl SynapseService {
             + Self::everquest_outcome_tool_router()
             + Self::everquest_route_tool_router()
             + Self::everquest_scorecard_tool_router()
+            + Self::everquest_surprise_tool_router()
             + Self::everquest_trajectory_tool_router()
             + Self::everquest_world_model_tool_router()
             + Self::m3_tool_router()

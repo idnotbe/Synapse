@@ -192,7 +192,7 @@ Release profile: `opt-level=3`, `lto="thin"`, `codegen-units=16`, `panic="abort"
 
 ## 4. Public MCP tool surface (live)
 
-All 67 live tools live in `crates/synapse-mcp/src/server.rs` (declared via `#[tool_router]`). Grouped by milestone:
+All 68 live tools live in `crates/synapse-mcp/src/server.rs` (declared via `#[tool_router]`). Grouped by milestone:
 
 ### 4.1 M1 — perception (6 tools)
 
@@ -302,7 +302,7 @@ paths propagate that same context into `CF_ACTION_LOG` and
 
 Full parameter/return tables: [13_mcp_tool_reference.md](#file-13).
 
-### 4.6 EverQuest live evaluation/world model (15 tools)
+### 4.6 EverQuest live evaluation/world model (16 tools)
 
 | Tool | Description | Source |
 |---|---|---|
@@ -319,6 +319,7 @@ Full parameter/return tables: [13_mcp_tool_reference.md](#file-13).
 | `everquest_trajectory_record` | Store ordered trajectory rows and JSONL provenance from linked action/observation/event/log evidence | `server/everquest_trajectory.rs` |
 | `everquest_world_model_record` | Store compact approved-prefix world-model rows with exact readback | `server/everquest_world_model.rs` |
 | `everquest_world_model_inspect` | Inspect approved world-model prefixes, selected keys, counts, and redacted samples | `server/everquest_world_model.rs` |
+| `everquest_surprise_detect` | Compare predicted outcome with observed state/log evidence and store a surprise stop/repair row | `server/everquest_surprise.rs` |
 | `everquest_action_prior_record` | Store prediction/outcome samples with correctness and readback | `server/everquest_scorecard.rs` |
 | `everquest_action_prior_scorecard` | Aggregate action-prior samples into a floor-not-ceiling competence scorecard | `server/everquest_scorecard.rs` |
 
@@ -525,7 +526,7 @@ crates/synapse-mcp/
 ├── Cargo.toml                      # Binary crate; depends on every other library crate
 └── src/
     ├── main.rs                     # Process entrypoint, clap CLI, telemetry init, stdio/http dispatch
-    ├── server.rs                   # SynapseService: ServerHandler + #[tool_router] declaring 67 MCP tools
+    ├── server.rs                   # SynapseService: ServerHandler + #[tool_router] declaring 68 MCP tools
     ├── server/
     │   ├── action_audit.rs         # CF_ACTION_LOG start/result audit rows with profile/session context
     │   ├── audit_context.rs        # Profile activation/session/event audit context persistence helpers
@@ -539,6 +540,11 @@ crates/synapse-mcp/
     │   ├── everquest_route.rs      # EverQuest bounded map/route plan rows
     │   ├── everquest_scorecard.rs  # EverQuest action-prior sample and scorecard rows
     │   ├── everquest_state.rs      # EverQuest current-state row fusion
+    │   ├── everquest_surprise.rs   # EverQuest surprise detector MCP router/storage bridge
+    │   ├── everquest_surprise/     # Surprise detector model, comparison, validation helpers
+    │   │   ├── compare.rs          # Prediction-vs-observation divergence and remediation logic
+    │   │   ├── model.rs            # Tool params, response, and compact payload structs
+    │   │   └── validation.rs       # Fail-closed params/source-ref normalization
     │   ├── everquest_tools.rs      # EverQuest /loc and chat-input safety tools
     │   ├── everquest_trajectory.rs # EverQuest linked trajectory rows and JSONL provenance export
     │   ├── everquest_world_model.rs # EverQuest approved-prefix world-model tool router/storage methods
@@ -2049,7 +2055,7 @@ pub struct SynapseService {
 }
 ```
 
-Implements `rmcp::ServerHandler` via `#[tool_handler(router = self.tool_router)]`. The 67 tools are declared on the same struct under milestone and EverQuest `#[tool_router]` impls; `#[tool(description = "...")]` annotations produce JSON-Schema entries for `tools/list` automatically.
+Implements `rmcp::ServerHandler` via `#[tool_handler(router = self.tool_router)]`. The 68 tools are declared on the same struct under milestone and EverQuest `#[tool_router]` impls; `#[tool(description = "...")]` annotations produce JSON-Schema entries for `tools/list` automatically.
 
 ### 1.1 Constructors
 
@@ -3945,14 +3951,14 @@ Open M4 work (per `docs/impplan/05_m4_hardware_hid_first_game.md`):
 
 - `firmware/pico-hid/` — standalone RP2040 firmware project excluded from the root Cargo workspace; remaining firmware issues close only with real device evidence.
 - `synapse-hid-host` — serial driver with discovery, connect/IDENTIFY, CRC16 framing, pipeline/backpressure, and reconnect paths. `Backend::Hardware` uses `HardwareBackend` when `--hardware-hid <port|auto>` connects successfully, otherwise it fails closed through `HardwareUnavailableBackend`.
-- `act_combo`, `act_run_shell`, `act_launch` — three M4 tools that bring the live MCP tool count from 30 -> 33; #499 adds `act_keymap` for profile keymap aliases; M5 profile-registry/audit work adds `profile_quality_refresh`, six `profile_authoring_*` candidate tools, eight `profile_registry_*` tools including the report inspector and rollback, `audit_intelligence_query`, `audit_export_consent_set`, and `audit_export_bundle`; #508/#524/#510/#525/#526/#527/#528/#514/#511/#512/#513/#531 add the EverQuest `/loc`, visible chat-input state, current-state, map-sensor, outcome, route, memory, planner-guard, DynamicJEPA domain normalization, linked trajectory, approved-prefix world-model rows/readback, and action-prior tools, bringing the live surface to 67.
+- `act_combo`, `act_run_shell`, `act_launch` — three M4 tools that bring the live MCP tool count from 30 -> 33; #499 adds `act_keymap` for profile keymap aliases; M5 profile-registry/audit work adds `profile_quality_refresh`, six `profile_authoring_*` candidate tools, eight `profile_registry_*` tools including the report inspector and rollback, `audit_intelligence_query`, `audit_export_consent_set`, and `audit_export_bundle`; #508/#524/#510/#525/#526/#527/#528/#514/#511/#512/#513/#515/#531 add the EverQuest `/loc`, visible chat-input state, current-state, map-sensor, outcome, route, memory, planner-guard, DynamicJEPA domain normalization, linked trajectory, approved-prefix world-model rows/readback, surprise detection, and action-prior tools, bringing the live surface to 68.
 - `minecraft.java` profile (the first game profile) — fifth bundled profile, validated against a single-player creative world per `15_roadmap_and_milestones.md` §6.
 - M3 hold-over items still open: per-subscriber `subscribe.buffer_size` (currently hard-pinned to 4096); persistent writers for `CF_EVENTS`/`CF_OBSERVATIONS`/`CF_SESSIONS`/`CF_TELEMETRY`/`CF_PROCESS_HISTORY`/`CF_KV` (`CF_REFLEX_AUDIT` and `CF_ACTION_LOG` have live writers); audio detector → SSE-bus sink integration. Profile HUD fields now run through `observe`; standalone `read_hud` remains deferred. VLM `describe` and Florence-2 remain M5.
 
 ## 3. Tools delivered vs planned
 
 PRD `docs/computergames/05_mcp_tool_surface.md` started from a 30-tool M3
-baseline and now records the approved 67-tool live surface after M4/M5,
+baseline and now records the approved 68-tool live surface after M4/M5,
 profile-registry/audit, and EverQuest world-model expansion. Current build:
 
 | # | Tool | Milestone | Status | Note |
@@ -4023,16 +4029,17 @@ profile-registry/audit, and EverQuest world-model expansion. Current build:
 | 63 | `everquest_trajectory_record` | M4/M5 (EverQuest) | live | linked trajectory rows and JSONL provenance |
 | 64 | `everquest_world_model_record` | M4/M5 (EverQuest) | live | approved-prefix world-model rows |
 | 65 | `everquest_world_model_inspect` | M4/M5 (EverQuest) | live | counts, selected keys, and redacted samples |
-| 66 | `everquest_action_prior_record` | M4/M5 (EverQuest) | live | prediction/outcome sample rows |
-| 67 | `everquest_action_prior_scorecard` | M4/M5 (EverQuest) | live | floor-not-ceiling competence scorecard rows |
+| 66 | `everquest_surprise_detect` | M4/M5 (EverQuest) | live | surprise stop/repair rows |
+| 67 | `everquest_action_prior_record` | M4/M5 (EverQuest) | live | prediction/outcome sample rows |
+| 68 | `everquest_action_prior_scorecard` | M4/M5 (EverQuest) | live | floor-not-ceiling competence scorecard rows |
 | — | `describe` | M5 (VLM) | not live | Florence-2 |
 
-Live count in `crates/synapse-mcp/src/server.rs`: **67** (M1: 6,
+Live count in `crates/synapse-mcp/src/server.rs`: **68** (M1: 6,
 M2/action: 10, M3/M5 module stubs: 33 including
 `profile_quality_refresh`, six `profile_authoring_*` tools, eight
 `profile_registry_*` tools, `audit_intelligence_query`,
 `audit_export_consent_set`, `audit_export_bundle`, and 4 operator storage
-diagnostics, plus M4 `act_combo`/`act_run_shell`/`act_launch`, plus 15
+diagnostics, plus M4 `act_combo`/`act_run_shell`/`act_launch`, plus 16
 EverQuest runtime/world-model tools).
 
 ## 4. Architecture Decision Records (ADRs)
@@ -4213,13 +4220,15 @@ Source files covered:
 - `crates/synapse-mcp/src/server/everquest_trajectory.rs`
 - `crates/synapse-mcp/src/server/everquest_world_model.rs`
 - `crates/synapse-mcp/src/server/everquest_world_model/{model,validation}.rs`
+- `crates/synapse-mcp/src/server/everquest_surprise.rs`
+- `crates/synapse-mcp/src/server/everquest_surprise/{model,compare,validation}.rs`
 - `crates/synapse-mcp/src/server/everquest_scorecard.rs`
 - `crates/synapse-mcp/src/m1.rs` (+ `m1/{ocr, search, sources}.rs`)
 - `crates/synapse-mcp/src/m2/{aim, click, clipboard, drag, pad, press, release_all, scroll, type_text}.rs`
 - `crates/synapse-mcp/src/m3/{audio, audit_export, permissions, profile, profile_authoring, profile_quality, profile_registry, reflex, replay, subscribe}.rs`
 - `crates/synapse-core/src/types.rs`
 
-All 67 live tools are registered on `SynapseService` via `#[tool(description=...)]` in `server.rs`. Tool descriptions are taken verbatim from the source. Every tool returns through `Json<T>` so the response shape exactly matches the deserialized response struct.
+All 68 live tools are registered on `SynapseService` via `#[tool(description=...)]` in `server.rs`. Tool descriptions are taken verbatim from the source. Every tool returns through `Json<T>` so the response shape exactly matches the deserialized response struct.
 
 Default error response shape (all tools): `ErrorData { code: rmcp::ErrorCode(-32099), message, data: { "code": <SCREAMING_SNAKE_CASE> } }` via `crates/synapse-mcp/src/m1.rs::mcp_error`.
 
@@ -4658,7 +4667,28 @@ The tool rejects invalid profile ids, invalid row ids, non-object or empty paylo
 
 Manual FSV for both #513 tools must read `CF_KV` before the trigger, call the real MCP tool with known synthetic world-model data, then separately read selected keys, prefix counts, and storage/WAL state afterward. These tools are storage/readback surfaces, not FSV scripts and not gameplay-progress proof.
 
-## 9n. `everquest_action_prior_record`
+## 9n. `everquest_surprise_detect`
+
+**Description:** "Compare predicted EverQuest outcome with observed state/log evidence and persist a compact surprise world-model row"
+**Side effects:** reads the persisted current-state row by default or a provided observed override, compares it to a compact prediction, writes `CF_KV/everquest/surprise/v1/everquest.live/<surprise_id>` through the approved world-model row path, then reads that exact row back. It does not execute input.
+
+| Parameter | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `surprise_id` | `String` | yes | - | ASCII id used in the surprise row key |
+| `profile_id` | `String` | no | `everquest.live` | EverQuest profile id; other ids fail closed |
+| `prediction` | `Option<EverQuestSurprisePrediction>` | no | - | Expected zone/outcome/action plus confidence and source refs |
+| `observed_state_row_key` | `String` | no | `everquest/current_state/v1/everquest.live` | Current-state row to read when no observed override is supplied |
+| `observed_override` | `Option<EverQuestSurpriseObservedOverride>` | no | - | Manual/log edge input with observed zone/outcome/confidence/source refs |
+| `threshold` | `f32` | no | `0.50` | Divergence and confidence threshold |
+| `stale_after_seconds` | `u64` | no | `300` | Older observed state/log evidence becomes a stop/repair row |
+| `source_refs` | `Vec<EverQuestWorldModelSourceRef>` | no | `[]` | Additional compact provenance refs |
+
+**Returns:** `EverQuestSurpriseDetectResponse { ok, row_key, stored_value_len_bytes, decision, surprise_detected, stop_condition, world_model }`. Decisions include `surprise_detected`, `expected_outcome_confirmed`, `abstain_missing_prediction`, `abstain_stale_observation`, `abstain_low_confidence_observation`, and other fail-closed stop/repair states.
+**Errors:** `TOOL_PARAMS_INVALID`, `STORAGE_READ_FAILED`, `STORAGE_WRITE_FAILED`, `STORAGE_CORRUPTED`, `TOOL_INTERNAL_ERROR`.
+
+Manual FSV must read physical EQ log/current-state/storage before the trigger, call this real MCP tool with known expected/observed inputs, then separately inspect `everquest_world_model_inspect`, `storage_inspect`, and DB/WAL bytes afterward. The row is repair evidence only, not gameplay progress proof.
+
+## 9o. `everquest_action_prior_record`
 
 **Description:** "Persist one EverQuest action-prior prediction/outcome sample with computed correctness and exact CF_KV readback"
 **Side effects:** validates a redacted prediction/outcome sample, computes correctness, writes `CF_KV/everquest/action_prior_eval/v1/everquest.live/<sample_id>`, then reads that exact row back before returning.
@@ -4678,7 +4708,7 @@ Manual FSV for both #513 tools must read `CF_KV` before the trigger, call the re
 **Returns:** `EverQuestActionPriorRecordResponse { ok, row_key, stored_value_len_bytes, sample }`. `sample.correctness.class` is one of `correct_top1`, `correct_top3`, `correct_context`, `wrong`, `abstained`, or `unknown_actual`; it also carries calibration bucket, useful flag, overconfident-wrong flag, and the evidence boundary that scorecards are not FSV.
 **Errors:** `TOOL_PARAMS_INVALID`, `STORAGE_WRITE_FAILED`, `STORAGE_READ_FAILED`, `STORAGE_CORRUPTED`, `TOOL_INTERNAL_ERROR`.
 
-## 9o. `everquest_action_prior_scorecard`
+## 9p. `everquest_action_prior_scorecard`
 
 **Description:** "Aggregate persisted EverQuest action-prior samples into a floor-not-ceiling competence scorecard with exact CF_KV readback"
 **Side effects:** reads named eval rows from `CF_KV`, writes `CF_KV/everquest/action_prior_scorecard/v1/everquest.live/<window_id>`, then reads that exact row back before returning.
@@ -5533,7 +5563,7 @@ Source files covered:
 - `m3_reflex_cancel_tool.rs`, `m3_reflex_history_tool.rs`, `m3_reflex_list_tool.rs`, `m3_reflex_register_tool.rs` — reflex CRUD
 - `m3_replay_record_tool.rs` — replay JSONL writer
 - `m3_subscribe_tool.rs` — subscribe + cancel
-- `m3_tools_list.rs` / `m4_tools_list.rs` — `tools/list` exposes the current 67-tool surface, including #499 `act_keymap`, M5 profile-registry/audit tools, #462 `profile_authoring_*`, #468 `profile_registry_report`, `profile_registry_rollback`, #460 `audit_export_*`, and the EverQuest world-model tools through `everquest_chat_input_state`, `everquest_planner_guard`, `everquest_domain_normalize`, `everquest_trajectory_record`, `everquest_world_model_record`, `everquest_world_model_inspect`, and `everquest_action_prior_scorecard`
+- `m3_tools_list.rs` / `m4_tools_list.rs` — `tools/list` exposes the current 68-tool surface, including #499 `act_keymap`, M5 profile-registry/audit tools, #462 `profile_authoring_*`, #468 `profile_registry_report`, `profile_registry_rollback`, #460 `audit_export_*`, and the EverQuest world-model tools through `everquest_chat_input_state`, `everquest_planner_guard`, `everquest_domain_normalize`, `everquest_trajectory_record`, `everquest_world_model_record`, `everquest_world_model_inspect`, `everquest_surprise_detect`, and `everquest_action_prior_scorecard`
 - `sigint_clean_exit.rs` — Ctrl-C / Ctrl-Break shuts the daemon down within deadline
 
 ### 2.5 `synapse-models` (1 file)
@@ -5747,11 +5777,11 @@ Counted by walking `crates/` and slicing by path. Comments, blank lines, and `mo
 |---|---|
 | Workspace member crates | **15** |
 | Default workspace binaries (`synapse-mcp`, `synapse-overlay`) | 2 |
-| Total Rust source files (excluding tests/benches) | **156** |
+| Total Rust source files (excluding tests/benches) | **160** |
 | Total Rust integration-test files | 76 |
 | Total Rust bench files | 13 |
-| MCP tools registered in `server.rs` | **67** (M1/M2/M3/M4/M5 plus EverQuest runtime tools including `/loc`, chat-input state, current-state, map sensor, outcome ingest, memory, planner guard, route plan, DynamicJEPA domain normalize, trajectory record, approved-prefix world-model record/inspect, and action-prior scorecard) |
-| MCP tools approved by `05_mcp_tool_surface.md` (agent surface cap) | 67 |
+| MCP tools registered in `server.rs` | **68** (M1/M2/M3/M4/M5 plus EverQuest runtime tools including `/loc`, chat-input state, current-state, map sensor, outcome ingest, memory, planner guard, route plan, DynamicJEPA domain normalize, trajectory record, approved-prefix world-model record/inspect, surprise detect, and action-prior scorecard) |
+| MCP tools approved by `05_mcp_tool_surface.md` (agent surface cap) | 68 |
 | RocksDB column families | **11** (`ALL_COLUMN_FAMILIES.len() == 11`; excludes implicit `default` CF) |
 | Stable error-code constants in `synapse_core::error_codes` | **105** |
 | Reserved subsystem error enums (mapped to those codes) | 11 (`StorageError`, `ReflexError`, `ActionError`, `ProfileError`, `ProfileLoadError`, `AudioError`, `PerceptionError`, `CaptureError`, `ModelError`, `A11yError`, `TelemetryError` + parse errors `ElementIdParseError`/`EventFilterValidationError`) |

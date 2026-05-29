@@ -1,7 +1,7 @@
-mod model;
+pub(super) mod model;
 #[cfg(test)]
 mod tests;
-mod validation;
+pub(super) mod validation;
 
 use rmcp::ErrorData;
 use synapse_core::error_codes;
@@ -61,6 +61,14 @@ impl SynapseService {
 }
 
 impl SynapseService {
+    pub(super) fn record_world_model_params(
+        &self,
+        params: EverQuestWorldModelRecordParams,
+    ) -> Result<EverQuestWorldModelRecordResponse, ErrorData> {
+        let params = normalize_record_params(params)?;
+        self.record_world_model_row(params)
+    }
+
     fn record_world_model_row(
         &self,
         params: NormalizedRecordParams,

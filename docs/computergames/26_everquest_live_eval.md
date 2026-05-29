@@ -420,6 +420,25 @@ tool with known synthetic world-model data, then separately reads the selected
 key, prefix counts, and storage/WAL state afterward. These rows are not
 movement, combat, level-progress, or gameplay-success proof by themselves.
 
+## Surprise Detector Rows
+
+#515 adds `everquest_surprise_detect`, a compact runtime detector that compares
+predicted route/action outcomes against observed EQ log, UI/current-state, or
+outcome evidence. It writes compatible world-model rows at
+`CF_KV/everquest/surprise/v1/everquest.live/<surprise_id>`.
+
+The row records the prediction, observed state/log summary, compared fields,
+divergence score, threshold, mismatch reasons, remediation steps, and
+`stop_condition`. Unexpected zone entries, action outcomes, or state changes
+therefore become first-class repair evidence instead of blind movement
+continuing after the world model is wrong.
+
+Missing prediction, stale log/current-state evidence, false OCR-style zone
+evidence, and low-confidence state all fail closed as stop/repair rows. The
+tool executes no input. Manual FSV must read the physical EQ log/current-state
+storage before the trigger, call the real MCP tool, then separately read
+`everquest_world_model_inspect`, `storage_inspect`, and DB/WAL bytes afterward.
+
 ## Action-Prior Scorecard Rows
 
 #531 adds the runtime storage surface for measuring whether the EverQuest world
@@ -495,6 +514,7 @@ GitHub issues remain the canonical coordination state:
 | #512 | Linked trajectory rows from Synapse audit rows plus EQ log events |
 | #513 | Durable world-model row prefixes and compact readback tools |
 | #514 | Planner guard-decision rows for bounded EverQuest candidates |
+| #515 | Surprise detector for unexpected zone/action outcomes |
 | #517 | Stabilize EverQuest foreground before accepted action candidates |
 | #518 | Safe target/combat model for level-1 wizard leveling |
 | #519 | Manual FSV route from Neriak Foreign Quarter to Nektulos safe area |
@@ -505,6 +525,7 @@ GitHub issues remain the canonical coordination state:
 | #528 | Hazard and safe-area memory rows for planning |
 | #529 | ContextGraph ingestion/retrieval for exported EQ memories |
 | #531 | 60-80% useful action-prior scorecard with honest abstention |
+| #533 | Learned verified zone-transition volumes from physical crossings |
 | #504 | Remove unsafe `open_chat` alias and verify chat-focus denial |
 
 ## Gameplay Learning Memory

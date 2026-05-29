@@ -17,8 +17,9 @@
    rows, #514 adds EverQuest planner guard-decision rows, #511 adds the
    EverQuest DynamicJEPA domain normalizer, #512 adds linked trajectory rows
    from action/observation/event/log evidence, #513 adds EverQuest
-   world-model record/inspect storage surfaces, and #531 adds EverQuest
-   action-prior sample/scorecard tools, bringing the live surface to 67. Any
+   world-model record/inspect storage surfaces, #515 adds the EverQuest
+   surprise detector row writer, and #531 adds EverQuest action-prior
+   sample/scorecard tools, bringing the live surface to 68. Any
    further agent-facing tools require an ADR-approved cap change.
    Overlapping tools merge. Profile and parameter knobs are the escape hatches.
 2. **One tool, one verb.** No `do_everything(action_kind, ...)` mega-tools.
@@ -37,7 +38,8 @@ visible chat-buffer pollution readback that also gates `/loc`, #510 adds
 `everquest_memory_consult`, #514 adds `everquest_planner_guard`, #527 adds
 `everquest_route_plan`, #525 adds `everquest_map_sensor`, #511 adds
 `everquest_domain_normalize`, #512 adds `everquest_trajectory_record`, #513 adds
-`everquest_world_model_record` plus `everquest_world_model_inspect`, and #531 adds
+`everquest_world_model_record` plus `everquest_world_model_inspect`, #515 adds
+`everquest_surprise_detect`, and #531 adds
 `everquest_action_prior_record` plus `everquest_action_prior_scorecard`. M4 adds `act_combo`, `act_run_shell`, and
 `act_launch`; M5 adds local profile-registry/audit quality scoring, authoring
 candidates, registry row operations, import/export, audit intelligence, and
@@ -118,10 +120,11 @@ future `tools/list` snapshots in #447/#448.
 | 63 | `everquest_trajectory_record` | write/read | stores one ordered trajectory from linked action/observation/event/log/state evidence and writes a JSONL provenance artifact |
 | 64 | `everquest_world_model_record` | write/read | stores one compact world-model row under an approved `CF_KV` prefix with exact readback |
 | 65 | `everquest_world_model_inspect` | read | inspects approved EverQuest world-model prefixes, selected keys, counts, and redacted samples |
-| 66 | `everquest_action_prior_record` | write/read | stores one prediction/outcome sample under `CF_KV` with computed correctness and exact readback |
-| 67 | `everquest_action_prior_scorecard` | write/read | aggregates stored samples into a floor-not-ceiling competence scorecard row and reads it back |
+| 66 | `everquest_surprise_detect` | write/read | compares predicted EverQuest outcome against observed state/log evidence and stores a compact surprise row |
+| 67 | `everquest_action_prior_record` | write/read | stores one prediction/outcome sample under `CF_KV` with computed correctness and exact readback |
+| 68 | `everquest_action_prior_scorecard` | write/read | aggregates stored samples into a floor-not-ceiling competence scorecard row and reads it back |
 
-M3 live count: 30 tools. Current live count: 67
+M3 live count: 30 tools. Current live count: 68
 tools.
 
 Deferred ideas from earlier drafts (`describe` and `read_hud`) are still not
@@ -143,6 +146,8 @@ domain-pack normalizer;
 `everquest_trajectory_record` is the #512 ordered trajectory row/export tool;
 `everquest_world_model_record` and `everquest_world_model_inspect` are the
 #513 approved-prefix storage/readback tools;
+`everquest_surprise_detect` is the #515 prediction-vs-observation surprise row
+writer;
 `everquest_action_prior_record` and `everquest_action_prior_scorecard` are the
 #531 competence scorecard tools;
 `act_combo`, `act_run_shell`, and `act_launch` remain the M4 phase plan
@@ -1124,7 +1129,67 @@ This is the normal compact readback surface for planners, ContextGraph export,
 surprise detection, and manual FSV evidence. It does not parse raw EQ logs or
 drive game input.
 
-### 3.13n `everquest_action_prior_record`
+### 3.13n `everquest_surprise_detect`
+
+```json
+{
+  "name": "everquest_surprise_detect",
+  "input_schema": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["surprise_id"],
+    "properties": {
+      "surprise_id": {"type": "string"},
+      "profile_id": {"type": "string", "default": "everquest.live"},
+      "prediction": {
+        "type": "object",
+        "properties": {
+          "prediction_id": {"type": "string"},
+          "expected_action": {"type": "string"},
+          "expected_zone_short_name": {"type": "string"},
+          "expected_outcome_kind": {"type": "string"},
+          "confidence": {"type": "number", "default": 1.0},
+          "source_refs": {"type": "array", "items": {"type": "object"}}
+        }
+      },
+      "observed_state_row_key": {"type": "string", "default": "everquest/current_state/v1/everquest.live"},
+      "observed_override": {
+        "type": "object",
+        "properties": {
+          "observed_outcome_id": {"type": "string"},
+          "observed_zone_short_name": {"type": "string"},
+          "observed_outcome_kind": {"type": "string"},
+          "observed_at": {"type": "string", "format": "date-time"},
+          "zone_confidence": {"type": "number", "default": 1.0},
+          "outcome_confidence": {"type": "number", "default": 1.0},
+          "source_mode": {"type": "string"},
+          "source_refs": {"type": "array", "items": {"type": "object"}}
+        }
+      },
+      "threshold": {"type": "number", "default": 0.5},
+      "stale_after_seconds": {"type": "integer", "default": 300},
+      "source_refs": {"type": "array", "items": {"type": "object"}}
+    }
+  }
+}
+```
+
+`everquest_surprise_detect` compares a compact predicted action/outcome
+against observed state or log evidence, then writes a compatible
+`everquest_world_model_record` row at
+`CF_KV/everquest/surprise/v1/everquest.live/<surprise_id>`. It records the
+decision, divergence score, compared fields, mismatch reasons, remediation
+steps, and whether gameplay should stop for state repair. It never executes
+input.
+
+Missing prediction, stale observation, false/low-confidence OCR-style zone
+evidence, and low-confidence current state all fail closed with a persisted
+stop/repair row instead of treating the planner state as safe. Manual FSV must
+read physical EQ log/current-state/storage before the trigger, call the real
+MCP tool, then separately inspect `CF_KV`, `everquest_world_model_inspect`, and
+the physical DB bytes afterward.
+
+### 3.13o `everquest_action_prior_record`
 
 ```json
 {
@@ -1183,7 +1248,7 @@ an FSV substitute. Manual FSV must still read storage state before the trigger,
 call the tool with known synthetic prediction/outcome inputs, and separately
 read `storage_inspect` or another physical storage readback after the write.
 
-### 3.13o `everquest_action_prior_scorecard`
+### 3.13p `everquest_action_prior_scorecard`
 
 ```json
 {
@@ -2510,6 +2575,14 @@ profile-authoring and audit-export defaults below.
 | `everquest_world_model_inspect` | `row_key` | omitted; no selected row | #513 |
 | `everquest_world_model_inspect` | `sample_limit` | `8` | #513 |
 | `everquest_world_model_inspect` | `include_payload` | `false` | #513 |
+| `everquest_surprise_detect` | `surprise_id` | required; no default | #515 |
+| `everquest_surprise_detect` | `profile_id` | `"everquest.live"` | #515 |
+| `everquest_surprise_detect` | `prediction` | omitted; missing prediction persists a stop/repair row | #515 |
+| `everquest_surprise_detect` | `observed_state_row_key` | `"everquest/current_state/v1/everquest.live"` | #515 |
+| `everquest_surprise_detect` | `observed_override` | omitted; reads current-state row | #515 |
+| `everquest_surprise_detect` | `threshold` | `0.5` | #515 |
+| `everquest_surprise_detect` | `stale_after_seconds` | `300` | #515 |
+| `everquest_surprise_detect` | `source_refs` | `[]` | #515 |
 | `everquest_action_prior_record` | `sample_id` | required; no default | #531 |
 | `everquest_action_prior_record` | `profile_id` | `"everquest.live"` | #531 |
 | `everquest_action_prior_record` | `prediction_id` | required; no default | #531 |
