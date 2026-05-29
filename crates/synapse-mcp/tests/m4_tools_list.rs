@@ -4,7 +4,7 @@ use anyhow::{Context, ensure};
 use serde_json::{Value, json};
 use synapse_test_utils::stdio_mcp_client::StdioMcpClient;
 
-const EXPECTED_TOOLS: [&str; 69] = [
+const EXPECTED_TOOLS: [&str; 70] = [
     "act_aim",
     "act_click",
     "act_clipboard",
@@ -27,6 +27,7 @@ const EXPECTED_TOOLS: [&str; 69] = [
     "everquest_chat_input_state",
     "everquest_current_state",
     "everquest_domain_normalize",
+    "everquest_episode_export",
     "everquest_loc_probe",
     "everquest_map_sensor",
     "everquest_memory_consult",
@@ -92,7 +93,7 @@ async fn m4_tools_list_snapshot_defaults_and_closed_schemas() -> anyhow::Result<
         .map(str::to_owned)
         .collect::<Vec<_>>();
     assert_eq!(names, expected);
-    assert_eq!(names.len(), 69);
+    assert_eq!(names.len(), 70);
     assert_no_duplicate_names(&names)?;
 
     assert_schema_roots_closed(tools)?;

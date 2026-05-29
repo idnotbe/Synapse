@@ -24,7 +24,7 @@ Source files covered:
 - `crates/synapse-mcp/src/m3/{audio, audit_export, permissions, profile, profile_authoring, profile_quality, profile_registry, reflex, replay, subscribe}.rs`
 - `crates/synapse-core/src/types.rs`
 
-All 69 live tools are registered on `SynapseService` via `#[tool(description=...)]` in `server.rs`. Tool descriptions are taken verbatim from the source. Every tool returns through `Json<T>` so the response shape exactly matches the deserialized response struct.
+All 70 live tools are registered on `SynapseService` via `#[tool(description=...)]` in `server.rs`. Tool descriptions are taken verbatim from the source. Every tool returns through `Json<T>` so the response shape exactly matches the deserialized response struct.
 
 Default error response shape (all tools): `ErrorData { code: rmcp::ErrorCode(-32099), message, data: { "code": <SCREAMING_SNAKE_CASE> } }` via `crates/synapse-mcp/src/m1.rs::mcp_error`.
 
@@ -421,7 +421,28 @@ The tool rejects missing linked rows, duplicate transition ids, non-increasing s
 
 Manual FSV must read `CF_KV`, source CF counts/samples, EQ log bytes, and the JSONL file path before the trigger, call the real MCP tool with known linked source refs, then separately inspect the persisted trajectory row and export artifact afterward.
 
-## 9l. `everquest_world_model_record`
+## 9l. `everquest_episode_export`
+
+**Description:** "Export redacted EverQuest trajectory/domain rows to ContextGraph-compatible DynamicJEPA episode JSONL with final artifact readback"
+**Side effects:** reads existing `CF_KV` trajectory/current-state/DynamicJEPA state-action-outcome rows, writes a local JSONL artifact under the EverQuest ContextGraph episode export root, then reads the final file bytes back.
+
+| Parameter | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `export_id` | `String` | yes | - | ASCII id used for the default JSONL file name |
+| `profile_id` | `String` | no | `everquest.live` | EverQuest profile id; other ids fail closed |
+| `trajectory_row_keys` | `Vec<String>` | yes | - | 1..=32 existing `CF_KV/everquest/trajectory/v1/...` rows |
+| `issue_refs` | `Vec<String>` | no | `[]` | GitHub issue/evidence refs carried into each episode |
+| `output_path` | `Option<String>` | no | `<export_id>.jsonl` | Relative path below the local episode export root |
+| `overwrite` | `bool` | no | `false` | Existing output files fail closed unless explicitly replaced |
+
+**Returns:** `EverQuestEpisodeExportResponse { ok, export_id, profile_id, output_path, line_count, bytes, sha256, episode_count, source_row_count, readback, episodes }`. Each JSONL row includes ContextGraph-compatible `source_of_truth`, `state`, `action`, `outcome`, `transition`, `expected_persisted_delta`, and `actual_readback` blocks.
+**Errors:** `TOOL_PARAMS_INVALID`, `STORAGE_READ_FAILED`, `STORAGE_WRITE_FAILED`, `STORAGE_CORRUPTED`, `TOOL_INTERNAL_ERROR`.
+
+The tool refuses zero-row exports, missing trajectory/domain/current-state rows, invalid row schemas, linkage mismatches, unredacted log refs, raw chat/target redaction flags, duplicate trajectory keys, duplicate generated episode ids, absolute output paths, non-JSONL output paths, and accidental overwrite. Raw session ids are not exported; the transition entity carries only `session_id_sha256`.
+
+Manual FSV must read the source `CF_KV` rows and output path before the trigger, call the real MCP tool, then separately inspect the source rows and final JSONL file bytes afterward. The export is not a training script and does not replace physical EQ UI/log/action FSV.
+
+## 9m. `everquest_world_model_record`
 
 **Description:** "Persist one compact EverQuest world-model row under an approved CF_KV prefix with exact readback"
 **Side effects:** validates one compact world-model payload, writes `CF_KV` under an approved EverQuest world-model prefix, then reads the exact row back before returning.
@@ -445,7 +466,7 @@ Approved key prefixes are `everquest/map/v1/everquest.live/`, `everquest/zone_gr
 
 The tool rejects invalid profile ids, invalid row ids, non-object or empty payloads, oversized payloads, missing source refs, malformed hashes, duplicate create writes, replace-without-existing-row, and payloads that appear to contain raw chat/message bodies.
 
-## 9m. `everquest_world_model_inspect`
+## 9n. `everquest_world_model_inspect`
 
 **Description:** "Inspect approved EverQuest world-model CF_KV prefixes, selected keys, counts, and redacted samples"
 **Side effects:** none beyond reading `CF_KV`.
@@ -463,7 +484,7 @@ The tool rejects invalid profile ids, invalid row ids, non-object or empty paylo
 
 Manual FSV for both #513 tools must read `CF_KV` before the trigger, call the real MCP tool with known synthetic world-model data, then separately read selected keys, prefix counts, and storage/WAL state afterward. These tools are storage/readback surfaces, not FSV scripts and not gameplay-progress proof.
 
-## 9n. `everquest_surprise_detect`
+## 9o. `everquest_surprise_detect`
 
 **Description:** "Compare predicted EverQuest outcome with observed state/log evidence and persist a compact surprise world-model row"
 **Side effects:** reads the persisted current-state row by default or a provided observed override, compares it to a compact prediction, writes `CF_KV/everquest/surprise/v1/everquest.live/<surprise_id>` through the approved world-model row path, then reads that exact row back. It does not execute input.
@@ -484,7 +505,7 @@ Manual FSV for both #513 tools must read `CF_KV` before the trigger, call the re
 
 Manual FSV must read physical EQ log/current-state/storage before the trigger, call this real MCP tool with known expected/observed inputs, then separately inspect `everquest_world_model_inspect`, `storage_inspect`, and DB/WAL bytes afterward. The row is repair evidence only, not gameplay progress proof.
 
-## 9o. `everquest_world_summary`
+## 9p. `everquest_world_summary`
 
 **Description:** "Persist one compact EverQuest world-state summary for context injection with map/log/storage provenance and chat redaction"
 **Side effects:** reads the persisted current-state row by default or a provided synthetic override, builds bounded map context from local EQ map files, writes `CF_KV/everquest/world_summary/v1/everquest.live/<summary_id>`, then reads that exact row back. It does not execute input.
@@ -508,7 +529,7 @@ Manual FSV must read physical EQ log/current-state/storage before the trigger, c
 
 Manual FSV must read physical EQ map/log/current-state/storage before the trigger, call this real MCP tool with known expected outputs, then separately inspect `storage_inspect` and DB/WAL bytes for the exact summary key. The row is compact context evidence only and not movement, combat, or level-progress proof.
 
-## 9p. `everquest_action_prior_record`
+## 9q. `everquest_action_prior_record`
 
 **Description:** "Persist one EverQuest action-prior prediction/outcome sample with computed correctness and exact CF_KV readback"
 **Side effects:** validates a redacted prediction/outcome sample, computes correctness, writes `CF_KV/everquest/action_prior_eval/v1/everquest.live/<sample_id>`, then reads that exact row back before returning.
@@ -528,7 +549,7 @@ Manual FSV must read physical EQ map/log/current-state/storage before the trigge
 **Returns:** `EverQuestActionPriorRecordResponse { ok, row_key, stored_value_len_bytes, sample }`. `sample.correctness.class` is one of `correct_top1`, `correct_top3`, `correct_context`, `wrong`, `abstained`, or `unknown_actual`; it also carries calibration bucket, useful flag, overconfident-wrong flag, and the evidence boundary that scorecards are not FSV.
 **Errors:** `TOOL_PARAMS_INVALID`, `STORAGE_WRITE_FAILED`, `STORAGE_READ_FAILED`, `STORAGE_CORRUPTED`, `TOOL_INTERNAL_ERROR`.
 
-## 9q. `everquest_action_prior_scorecard`
+## 9r. `everquest_action_prior_scorecard`
 
 **Description:** "Aggregate persisted EverQuest action-prior samples into a floor-not-ceiling competence scorecard with exact CF_KV readback"
 **Side effects:** reads named eval rows from `CF_KV`, writes `CF_KV/everquest/action_prior_scorecard/v1/everquest.live/<window_id>`, then reads that exact row back before returning.

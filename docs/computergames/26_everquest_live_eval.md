@@ -429,6 +429,26 @@ ContextGraph/DynamicJEPA exports and model scorecards. They are not scripts,
 training jobs, or FSV substitutes. Manual FSV must still read the physical
 storage rows and export file before and after the real MCP trigger.
 
+## ContextGraph Episode Export
+
+#521 adds `everquest_episode_export`, the runtime bridge from Synapse's
+trajectory/domain rows into ContextGraph-compatible DynamicJEPA episode JSONL.
+The tool reads existing `CF_KV` trajectory and DynamicJEPA state/action/outcome
+rows, refuses incomplete or unredacted sources, writes a local JSONL artifact,
+and reads the final artifact bytes back before reporting success.
+
+Each exported line carries `source_of_truth`, `state`, `action`, `outcome`,
+`transition`, `expected_persisted_delta`, and `actual_readback` blocks. Source
+refs include the Synapse row keys and hashes, current-state row key, linked
+action/observation/event/log refs, issue refs, and ContextGraph-compatible CF
+names. Raw chat bodies, raw target names, and raw session ids are excluded; the
+session id appears only as a SHA-256 hash inside the transition entity block.
+
+Manual FSV for this bridge must call the real MCP tool, then separately inspect
+the physical `CF_KV` source rows and the JSONL file on disk. The export is a
+planning/model evidence surface and does not prove movement, combat, or level
+progress by itself.
+
 ## World-Model Prefix Rows
 
 #513 adds durable, compact EverQuest world-model storage prefixes and readback
@@ -585,6 +605,7 @@ GitHub issues remain the canonical coordination state:
 | #518 | Safe target/combat model for level-1 wizard leveling |
 | #519 | Manual FSV route from Neriak Foreign Quarter to Nektulos safe area |
 | #520 | Map data acquisition/provenance and optional community map pack workflow |
+| #521 | ContextGraph-compatible DynamicJEPA episode JSONL export |
 | #522 | Tiny local predictive EverQuest world model after verified trajectories |
 | #525 | Calibrated map-window sensor from visible map, `/loc`, and map files |
 | #526 | Compact outcome log taxonomy for combat/spell/XP/death/hazard learning |

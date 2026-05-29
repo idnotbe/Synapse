@@ -16,11 +16,12 @@
    #527 adds EverQuest route-plan rows, #525 adds EverQuest current-map sensor
    rows, #514 adds EverQuest planner guard-decision rows, #511 adds the
    EverQuest DynamicJEPA domain normalizer, #512 adds linked trajectory rows
-   from action/observation/event/log evidence, #513 adds EverQuest
+   from action/observation/event/log evidence, #521 adds the
+   ContextGraph-compatible DynamicJEPA episode exporter, #513 adds EverQuest
    world-model record/inspect storage surfaces, #515 adds the EverQuest
    surprise detector row writer, #516 adds the compact EverQuest world-summary
    context row writer, and #531 adds EverQuest action-prior sample/scorecard
-   tools, bringing the live surface to 69. Any
+   tools, bringing the live surface to 70. Any
    further agent-facing tools require an ADR-approved cap change.
    Overlapping tools merge. Profile and parameter knobs are the escape hatches.
 2. **One tool, one verb.** No `do_everything(action_kind, ...)` mega-tools.
@@ -38,9 +39,10 @@ visible chat-buffer pollution readback that also gates `/loc`, #510 adds
 `everquest_outcome_ingest`, #528 adds `everquest_memory_record` plus
 `everquest_memory_consult`, #514 adds `everquest_planner_guard`, #527 adds
 `everquest_route_plan`, #525 adds `everquest_map_sensor`, #511 adds
-`everquest_domain_normalize`, #512 adds `everquest_trajectory_record`, #513 adds
-`everquest_world_model_record` plus `everquest_world_model_inspect`, #515 adds
-`everquest_surprise_detect`, #516 adds `everquest_world_summary`, and #531 adds
+`everquest_domain_normalize`, #512 adds `everquest_trajectory_record`, #521 adds
+`everquest_episode_export`, #513 adds `everquest_world_model_record` plus
+`everquest_world_model_inspect`, #515 adds `everquest_surprise_detect`, #516 adds
+`everquest_world_summary`, and #531 adds
 `everquest_action_prior_record` plus `everquest_action_prior_scorecard`. M4 adds `act_combo`, `act_run_shell`, and
 `act_launch`; M5 adds local profile-registry/audit quality scoring, authoring
 candidates, registry row operations, import/export, audit intelligence, and
@@ -119,14 +121,15 @@ future `tools/list` snapshots in #447/#448.
 | 61 | `everquest_route_plan` | write/read | stores one bounded route plan from current state to a local map landmark/zone line without movement |
 | 62 | `everquest_domain_normalize` | write/read | stores the EverQuest DynamicJEPA domain pack plus typed state/action/outcome/transition rows |
 | 63 | `everquest_trajectory_record` | write/read | stores one ordered trajectory from linked action/observation/event/log/state evidence and writes a JSONL provenance artifact |
-| 64 | `everquest_world_model_record` | write/read | stores one compact world-model row under an approved `CF_KV` prefix with exact readback |
-| 65 | `everquest_world_model_inspect` | read | inspects approved EverQuest world-model prefixes, selected keys, counts, and redacted samples |
-| 66 | `everquest_surprise_detect` | write/read | compares predicted EverQuest outcome against observed state/log evidence and stores a compact surprise row |
-| 67 | `everquest_world_summary` | write/read | stores one compact world-state summary row for context injection with map/log/storage provenance and chat redaction |
-| 68 | `everquest_action_prior_record` | write/read | stores one prediction/outcome sample under `CF_KV` with computed correctness and exact readback |
-| 69 | `everquest_action_prior_scorecard` | write/read | aggregates stored samples into a floor-not-ceiling competence scorecard row and reads it back |
+| 64 | `everquest_episode_export` | read/write | exports redacted trajectory/domain rows to ContextGraph-compatible DynamicJEPA episode JSONL and reads the file back |
+| 65 | `everquest_world_model_record` | write/read | stores one compact world-model row under an approved `CF_KV` prefix with exact readback |
+| 66 | `everquest_world_model_inspect` | read | inspects approved EverQuest world-model prefixes, selected keys, counts, and redacted samples |
+| 67 | `everquest_surprise_detect` | write/read | compares predicted EverQuest outcome against observed state/log evidence and stores a compact surprise row |
+| 68 | `everquest_world_summary` | write/read | stores one compact world-state summary row for context injection with map/log/storage provenance and chat redaction |
+| 69 | `everquest_action_prior_record` | write/read | stores one prediction/outcome sample under `CF_KV` with computed correctness and exact readback |
+| 70 | `everquest_action_prior_scorecard` | write/read | aggregates stored samples into a floor-not-ceiling competence scorecard row and reads it back |
 
-M3 live count: 30 tools. Current live count: 69
+M3 live count: 30 tools. Current live count: 70
 tools.
 
 Deferred ideas from earlier drafts (`describe` and `read_hud`) are still not
@@ -146,6 +149,8 @@ for bounded candidate actions;
 `everquest_domain_normalize` is the #511 DynamicJEPA state/action/outcome
 domain-pack normalizer;
 `everquest_trajectory_record` is the #512 ordered trajectory row/export tool;
+`everquest_episode_export` is the #521 ContextGraph/DynamicJEPA episode JSONL
+export tool;
 `everquest_world_model_record` and `everquest_world_model_inspect` are the
 #513 approved-prefix storage/readback tools;
 `everquest_surprise_detect` is the #515 prediction-vs-observation surprise row
@@ -1050,7 +1055,46 @@ Manual FSV must read `CF_KV`, source CF counts/samples, EQ log bytes, and the
 export-file path before the trigger, call this real MCP tool with known linked
 source refs, then separately inspect the trajectory row and JSONL artifact.
 
-### 3.13l `everquest_world_model_record`
+### 3.13l `everquest_episode_export`
+
+```json
+{
+  "name": "everquest_episode_export",
+  "input_schema": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["export_id", "trajectory_row_keys"],
+    "properties": {
+      "export_id": {"type": "string"},
+      "profile_id": {"type": "string", "default": "everquest.live"},
+      "trajectory_row_keys": {"type": "array", "minItems": 1, "maxItems": 32, "items": {"type": "string"}},
+      "issue_refs": {"type": "array", "items": {"type": "string"}, "default": []},
+      "output_path": {"type": "string"},
+      "overwrite": {"type": "boolean", "default": false}
+    }
+  }
+}
+```
+
+`everquest_episode_export` reads existing #512 trajectory rows and #511
+DynamicJEPA state/action/outcome rows from `CF_KV`, then writes one compact
+ContextGraph-compatible DynamicJEPA episode JSONL artifact under the local
+Synapse EverQuest episode export root. Each line includes `source_of_truth`,
+`state`, `action`, `outcome`, `transition`, `expected_persisted_delta`, and
+`actual_readback` blocks.
+
+The tool fails closed for empty exports, missing source rows, invalid schemas,
+state/action/outcome linkage mismatches, unredacted log refs, raw chat/target
+redaction flags, duplicate trajectory row keys, duplicate generated episode ids,
+absolute output paths, non-JSONL output paths, and accidental overwrite. Raw
+session ids are not written; the transition entity carries `session_id_sha256`
+only.
+
+Manual FSV must read the source `CF_KV` rows and target JSONL path before the
+trigger, call this real MCP tool with known trajectory row keys, and separately
+inspect the same rows plus final JSONL bytes afterward.
+
+### 3.13m `everquest_world_model_record`
 
 ```json
 {
@@ -1104,7 +1148,7 @@ known synthetic payloads and source refs, then separately inspect the selected
 row and storage/WAL state afterward. This tool is a storage/readback surface,
 not an FSV script or gameplay-success proof.
 
-### 3.13m `everquest_world_model_inspect`
+### 3.13n `everquest_world_model_inspect`
 
 ```json
 {
@@ -1133,7 +1177,7 @@ This is the normal compact readback surface for planners, ContextGraph export,
 surprise detection, and manual FSV evidence. It does not parse raw EQ logs or
 drive game input.
 
-### 3.13n `everquest_surprise_detect`
+### 3.13o `everquest_surprise_detect`
 
 ```json
 {
@@ -1193,7 +1237,7 @@ read physical EQ log/current-state/storage before the trigger, call the real
 MCP tool, then separately inspect `CF_KV`, `everquest_world_model_inspect`, and
 the physical DB bytes afterward.
 
-### 3.13o `everquest_world_summary`
+### 3.13p `everquest_world_summary`
 
 ```json
 {
@@ -1236,7 +1280,7 @@ tool with known expected outputs, then separately inspect `storage_inspect` and
 the physical DB bytes afterward. The summary is context evidence only; movement
 and level-progress claims still require separate gameplay FSV.
 
-### 3.13p `everquest_action_prior_record`
+### 3.13q `everquest_action_prior_record`
 
 ```json
 {
@@ -1295,7 +1339,7 @@ an FSV substitute. Manual FSV must still read storage state before the trigger,
 call the tool with known synthetic prediction/outcome inputs, and separately
 read `storage_inspect` or another physical storage readback after the write.
 
-### 3.13q `everquest_action_prior_scorecard`
+### 3.13r `everquest_action_prior_scorecard`
 
 ```json
 {
@@ -2608,6 +2652,12 @@ profile-authoring and audit-export defaults below.
 | `everquest_trajectory_record` | `transitions` | required; no default | #512 |
 | `everquest_trajectory_record` | `source_refs` | `[]`; runtime requires at least one | #512 |
 | `everquest_trajectory_record` | `export_jsonl` | `true` | #512 |
+| `everquest_episode_export` | `export_id` | required; no default | #521 |
+| `everquest_episode_export` | `profile_id` | `"everquest.live"` | #521 |
+| `everquest_episode_export` | `trajectory_row_keys` | required; no default | #521 |
+| `everquest_episode_export` | `issue_refs` | `[]` | #521 |
+| `everquest_episode_export` | `output_path` | omitted; defaults to `<export_id>.jsonl` under local export root | #521 |
+| `everquest_episode_export` | `overwrite` | `false` | #521 |
 | `everquest_world_model_record` | `row_kind` | required; no default | #513 |
 | `everquest_world_model_record` | `row_id` | required; no default | #513 |
 | `everquest_world_model_record` | `profile_id` | `"everquest.live"` | #513 |
