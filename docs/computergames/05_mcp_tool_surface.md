@@ -14,8 +14,9 @@
    EverQuest current-state estimator, #526 adds compact EverQuest outcome
    ingest, #528 adds EverQuest hazard/safe memory record and consult tools,
    #527 adds EverQuest route-plan rows, #525 adds EverQuest current-map sensor
-   rows, and #531 adds EverQuest action-prior sample/scorecard tools, bringing
-   the live surface to 62. Any
+   rows, #514 adds EverQuest planner guard-decision rows, and #531 adds
+   EverQuest action-prior sample/scorecard tools, bringing the live surface to
+   63. Any
    further agent-facing tools require an ADR-approved cap change.
    Overlapping tools merge. Profile and parameter knobs are the escape hatches.
 2. **One tool, one verb.** No `do_everything(action_kind, ...)` mega-tools.
@@ -31,9 +32,9 @@ EverQuest `/loc` readback tool, #524 adds `everquest_chat_input_state` as the
 visible chat-buffer pollution readback that also gates `/loc`, #510 adds
 `everquest_current_state` as the compact world-state row writer/readback tool, #526 adds
 `everquest_outcome_ingest`, #528 adds `everquest_memory_record` plus
-`everquest_memory_consult`, #527 adds `everquest_route_plan`, #525 adds
-`everquest_map_sensor`, and #531 adds `everquest_action_prior_record` plus
-`everquest_action_prior_scorecard`. M4 adds `act_combo`, `act_run_shell`, and
+`everquest_memory_consult`, #514 adds `everquest_planner_guard`, #527 adds
+`everquest_route_plan`, #525 adds `everquest_map_sensor`, and #531 adds
+`everquest_action_prior_record` plus `everquest_action_prior_scorecard`. M4 adds `act_combo`, `act_run_shell`, and
 `act_launch`; M5 adds local profile-registry/audit quality scoring, authoring
 candidates, registry row operations, import/export, audit intelligence, and
 consented redacted audit export bundles.
@@ -107,11 +108,12 @@ future `tools/list` snapshots in #447/#448.
 | 57 | `everquest_outcome_ingest` | write/read | parses bounded EQ log bytes into compact redacted outcome rows with offset/hash readback |
 | 58 | `everquest_memory_record` | write/read | stores one compact hazard or safe-area memory row with source refs, stale/conflict handling, and exact readback |
 | 59 | `everquest_memory_consult` | write/read | consults hazard/safe memories for one candidate action and persists the planner decision row |
-| 60 | `everquest_route_plan` | write/read | stores one bounded route plan from current state to a local map landmark/zone line without movement |
-| 61 | `everquest_action_prior_record` | write/read | stores one prediction/outcome sample under `CF_KV` with computed correctness and exact readback |
-| 62 | `everquest_action_prior_scorecard` | write/read | aggregates stored samples into a floor-not-ceiling competence scorecard row and reads it back |
+| 60 | `everquest_planner_guard` | write/read | evaluates one bounded EverQuest candidate against foreground/chat/state/combat guards, persists the guard-decision row, and reads it back |
+| 61 | `everquest_route_plan` | write/read | stores one bounded route plan from current state to a local map landmark/zone line without movement |
+| 62 | `everquest_action_prior_record` | write/read | stores one prediction/outcome sample under `CF_KV` with computed correctness and exact readback |
+| 63 | `everquest_action_prior_scorecard` | write/read | aggregates stored samples into a floor-not-ceiling competence scorecard row and reads it back |
 
-M3 live count: 30 tools. Current live count: 62
+M3 live count: 30 tools. Current live count: 63
 tools.
 
 Deferred ideas from earlier drafts (`describe` and `read_hud`) are still not
@@ -124,6 +126,8 @@ tool and preflight source for text-like EverQuest commands;
 tool;
 `everquest_memory_record` and `everquest_memory_consult` are the #528
 hazard/safe-area memory and planner consult tools;
+`everquest_planner_guard` is the #514 guard-decision row writer/readback tool
+for bounded candidate actions;
 `everquest_route_plan` is the #527 bounded local map route planner;
 `everquest_map_sensor` is the #525 current-map calibration/readback row tool;
 `everquest_action_prior_record` and `everquest_action_prior_scorecard` are the
@@ -817,7 +821,48 @@ that exact decision row back. Matching active hazards return `avoid`; matching
 safe areas without hazards return `allow_with_safe_memory`; candidates with no
 target, zone, or location return `abstain_state_unknown`.
 
-### 3.13h `everquest_route_plan`
+### 3.13h `everquest_planner_guard`
+
+```json
+{
+  "name": "everquest_planner_guard",
+  "input_schema": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["decision_id", "candidate_kind"],
+    "properties": {
+      "decision_id": {"type": "string"},
+      "profile_id": {"type": "string", "default": "everquest.live"},
+      "candidate_kind": {"enum": ["loc_probe", "inventory_read", "map_read", "target_consider", "bounded_move", "sit_rest", "combat_spell"]},
+      "candidate_label": {"type": "string"},
+      "hotbar_alias": {"type": "string"},
+      "target_name": {"type": "string"},
+      "target_level": {"type": "integer"},
+      "target_con_summary": {"type": "string"},
+      "state_row_key": {"type": "string", "default": "everquest/current_state/v1/everquest.live"},
+      "state_override": {"type": "object", "additionalProperties": false},
+      "chat_input_override": {"type": "object", "additionalProperties": false}
+    }
+  }
+}
+```
+
+`everquest_planner_guard` evaluates one candidate action before it can become
+foreground input. It reads the live foreground process/profile, reads the
+visible chat-input pollution state, reads the persisted current-state row by
+default, writes
+`CF_KV/everquest/planner_guard_decision/v1/everquest.live/<decision_id>`, and
+reads the exact row back. Selected rows require `eqgame.exe` plus
+`everquest.live`, empty visible chat input, a current-state row, known zone, and
+candidate-specific guards. `combat_spell` is only selected for verified
+`hotbar4` Blast of Cold, level-1-safe target levels, and non-gamble con text.
+
+Rejected rows preserve every failed guard name and reason. The tool never
+executes input; movement/combat FSV must read this row before sending a bounded
+action and then separately inspect the physical EQ UI/log/storage SoT after the
+action.
+
+### 3.13i `everquest_route_plan`
 
 ```json
 {
@@ -855,7 +900,7 @@ calibration produce persisted abstain rows instead of guessed movement.
 Manual FSV must read the physical map/current-state SoT before the trigger,
 call this real MCP tool, and separately inspect `CF_KV` afterward.
 
-### 3.13i `everquest_action_prior_record`
+### 3.13j `everquest_action_prior_record`
 
 ```json
 {
@@ -914,7 +959,7 @@ an FSV substitute. Manual FSV must still read storage state before the trigger,
 call the tool with known synthetic prediction/outcome inputs, and separately
 read `storage_inspect` or another physical storage readback after the write.
 
-### 3.13j `everquest_action_prior_scorecard`
+### 3.13k `everquest_action_prior_scorecard`
 
 ```json
 {
@@ -2207,6 +2252,12 @@ profile-authoring and audit-export defaults below.
 | `everquest_memory_consult` | `profile_id` | `"everquest.live"` | #528 |
 | `everquest_memory_consult` | `memory_row_keys` | `[]`; scans memory prefixes | #528 |
 | `everquest_memory_consult` | `max_memory_rows` | `128` | #528 |
+| `everquest_planner_guard` | `decision_id` | required; no default | #514 |
+| `everquest_planner_guard` | `profile_id` | `"everquest.live"` | #514 |
+| `everquest_planner_guard` | `candidate_kind` | required; no default | #514 |
+| `everquest_planner_guard` | `state_row_key` | `"everquest/current_state/v1/everquest.live"` | #514 |
+| `everquest_planner_guard` | `state_override` | omitted; reads storage current-state row | #514 |
+| `everquest_planner_guard` | `chat_input_override` | omitted; reads visible chat-input state | #514 |
 | `everquest_route_plan` | `profile_id` | `"everquest.live"` | #527 |
 | `everquest_route_plan` | `state_row_key` | `"everquest/current_state/v1/everquest.live"` | #527 |
 | `everquest_route_plan` | `state_override` | omitted; reads storage current-state row | #527 |

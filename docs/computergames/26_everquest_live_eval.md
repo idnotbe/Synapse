@@ -309,6 +309,29 @@ Manual FSV for route planning reads the physical map file line and current
 state before the trigger, calls the real MCP tool, then separately reads the
 route-plan row through storage readback. Route rows do not execute movement.
 
+## Planner Guard-Decision Rows
+
+#514 adds the bounded candidate guard surface that must be read before live
+movement or combat inputs. The tool writes:
+
+- `CF_KV/everquest/planner_guard_decision/v1/everquest.live/<decision_id>` for
+  one selected or rejected candidate action.
+
+`everquest_planner_guard` reads live foreground/profile state, visible
+chat-input pollution state, and the persisted current-state row before
+evaluating a candidate. Selected candidates require `eqgame.exe` foreground,
+active `everquest.live`, empty visible chat input, current-state availability,
+known zone, and candidate-specific guards. Combat candidates are stricter:
+only the verified `hotbar4` Blast of Cold attack spell can be selected, the
+level-1 wizard target must be level-1-safe, and gamble/high-risk con text
+rejects the candidate.
+
+The guard tool never executes input. It produces the planner verdict and
+source refs only. Manual FSV for any later action still reads physical SoT
+before the trigger, reads the persisted guard-decision row, executes the real
+bounded foreground action manually, and then separately reads the EQ UI/log and
+Synapse storage/audit SoTs afterward.
+
 ## Action-Prior Scorecard Rows
 
 #531 adds the runtime storage surface for measuring whether the EverQuest world
@@ -380,6 +403,7 @@ GitHub issues remain the canonical coordination state:
 | #505 | EverQuest world model / DynamicJEPA navigation architecture |
 | #508 | Literal `/loc` probe with EQ log readback |
 | #510 | Current-state estimator fusing logs, `/loc`, map, HUD, and action audit |
+| #514 | Planner guard-decision rows for bounded EverQuest candidates |
 | #517 | Stabilize EverQuest foreground before accepted action candidates |
 | #518 | Safe target/combat model for level-1 wizard leveling |
 | #519 | Manual FSV route from Neriak Foreign Quarter to Nektulos safe area |

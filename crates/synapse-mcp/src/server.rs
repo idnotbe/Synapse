@@ -110,6 +110,7 @@ mod action_audit;
 mod action_preflight;
 mod audit_context;
 mod context;
+mod everquest_guard;
 mod everquest_log;
 mod everquest_map_sensor;
 mod everquest_memory;
@@ -233,6 +234,7 @@ impl SynapseService {
         Self::m1_tool_router()
             + Self::m2_tool_router()
             + Self::everquest_tool_router()
+            + Self::everquest_guard_tool_router()
             + Self::everquest_state_tool_router()
             + Self::everquest_map_sensor_tool_router()
             + Self::everquest_memory_tool_router()

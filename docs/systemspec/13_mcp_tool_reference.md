@@ -8,6 +8,7 @@ Source files covered:
 - `crates/synapse-mcp/src/server/everquest_map_sensor.rs`
 - `crates/synapse-mcp/src/server/everquest_memory.rs`
 - `crates/synapse-mcp/src/server/everquest_outcome.rs`
+- `crates/synapse-mcp/src/server/everquest_guard.rs`
 - `crates/synapse-mcp/src/server/everquest_route.rs`
 - `crates/synapse-mcp/src/server/everquest_scorecard.rs`
 - `crates/synapse-mcp/src/m1.rs` (+ `m1/{ocr, search, sources}.rs`)
@@ -15,7 +16,7 @@ Source files covered:
 - `crates/synapse-mcp/src/m3/{audio, audit_export, permissions, profile, profile_authoring, profile_quality, profile_registry, reflex, replay, subscribe}.rs`
 - `crates/synapse-core/src/types.rs`
 
-All 62 live tools are registered on `SynapseService` via `#[tool(description=...)]` in `server.rs`. Tool descriptions are taken verbatim from the source. Every tool returns through `Json<T>` so the response shape exactly matches the deserialized response struct.
+All 63 live tools are registered on `SynapseService` via `#[tool(description=...)]` in `server.rs`. Tool descriptions are taken verbatim from the source. Every tool returns through `Json<T>` so the response shape exactly matches the deserialized response struct.
 
 Default error response shape (all tools): `ErrorData { code: rmcp::ErrorCode(-32099), message, data: { "code": <SCREAMING_SNAKE_CASE> } }` via `crates/synapse-mcp/src/m1.rs::mcp_error`.
 
@@ -341,7 +342,31 @@ Manual FSV must read the physical EQ log/UI/storage evidence first, call the rea
 
 Manual FSV must read the physical map/current-state SoT before the trigger, call the real MCP tool, then separately inspect the persisted `CF_KV` route-plan row. This tool does not execute movement.
 
-## 9i. `everquest_action_prior_record`
+## 9i. `everquest_planner_guard`
+
+**Description:** "Evaluate and persist one EverQuest planner guard decision before bounded foreground gameplay input"
+**Side effects:** reads live foreground/profile state, visible chat-input state, and the persisted current-state row by default, writes `CF_KV/everquest/planner_guard_decision/v1/everquest.live/<decision_id>`, then reads that exact row back. It does not execute input.
+
+| Parameter | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `decision_id` | `String` | yes | - | Guard decision id used in the row key |
+| `profile_id` | `String` | no | `everquest.live` | EverQuest profile id; other ids fail closed |
+| `candidate_kind` | `EverQuestPlannerCandidateKind` | yes | - | One of `loc_probe`, `inventory_read`, `map_read`, `target_consider`, `bounded_move`, `sit_rest`, or `combat_spell` |
+| `candidate_label` | `Option<String>` | no | - | Human-readable bounded candidate label |
+| `hotbar_alias` | `Option<String>` | no | - | Required for combat spell selection; only `hotbar4` is currently verified |
+| `target_name` | `Option<String>` | no | - | Optional target name |
+| `target_level` | `Option<u32>` | no | - | Target level for combat safety checks |
+| `target_con_summary` | `Option<String>` | no | - | Compact consider/con summary for combat safety checks |
+| `state_row_key` | `String` | no | `everquest/current_state/v1/everquest.live` | Current-state source row to read |
+| `state_override` | `Option<EverQuestPlannerGuardStateOverride>` | no | - | Synthetic/manual edge input with source refs |
+| `chat_input_override` | `Option<EverQuestPlannerGuardChatInputOverride>` | no | - | Synthetic/manual edge input; live FSV should use the real detector |
+
+**Returns:** `EverQuestPlannerGuardResponse { ok, row_key, stored_value_len_bytes, decision }`. The decision row is `select` only when foreground/profile, chat-input, current-state, known-zone, no-stop-hazard, and candidate-specific guards pass. Rejections persist every failed guard and reason. `combat_spell` requires verified `hotbar4`, level-1-safe target level, and non-gamble con text.
+**Errors:** `TOOL_PARAMS_INVALID`, `STORAGE_READ_FAILED`, `STORAGE_WRITE_FAILED`, `STORAGE_CORRUPTED`, `TOOL_INTERNAL_ERROR`.
+
+Manual FSV must read the physical foreground/chat/UI/log/storage SoT before the trigger, call the real MCP tool, then separately inspect the persisted `CF_KV` guard row. Any later movement/combat action still needs its own before/after physical SoT readback.
+
+## 9j. `everquest_action_prior_record`
 
 **Description:** "Persist one EverQuest action-prior prediction/outcome sample with computed correctness and exact CF_KV readback"
 **Side effects:** validates a redacted prediction/outcome sample, computes correctness, writes `CF_KV/everquest/action_prior_eval/v1/everquest.live/<sample_id>`, then reads that exact row back before returning.
@@ -361,7 +386,7 @@ Manual FSV must read the physical map/current-state SoT before the trigger, call
 **Returns:** `EverQuestActionPriorRecordResponse { ok, row_key, stored_value_len_bytes, sample }`. `sample.correctness.class` is one of `correct_top1`, `correct_top3`, `correct_context`, `wrong`, `abstained`, or `unknown_actual`; it also carries calibration bucket, useful flag, overconfident-wrong flag, and the evidence boundary that scorecards are not FSV.
 **Errors:** `TOOL_PARAMS_INVALID`, `STORAGE_WRITE_FAILED`, `STORAGE_READ_FAILED`, `STORAGE_CORRUPTED`, `TOOL_INTERNAL_ERROR`.
 
-## 9j. `everquest_action_prior_scorecard`
+## 9k. `everquest_action_prior_scorecard`
 
 **Description:** "Aggregate persisted EverQuest action-prior samples into a floor-not-ceiling competence scorecard with exact CF_KV readback"
 **Side effects:** reads named eval rows from `CF_KV`, writes `CF_KV/everquest/action_prior_scorecard/v1/everquest.live/<window_id>`, then reads that exact row back before returning.

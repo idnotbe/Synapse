@@ -374,7 +374,7 @@ impl SynapseService {
         ))
     }
 
-    fn detect_everquest_chat_input_state(&self) -> EverQuestChatInputState {
+    pub(super) fn detect_everquest_chat_input_state(&self) -> EverQuestChatInputState {
         let foreground = self
             .m1_state()
             .and_then(|state| current_input(&state, 1))
