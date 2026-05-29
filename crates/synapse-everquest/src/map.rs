@@ -7,7 +7,7 @@ use std::{
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-const MAP_DIR_NAME: &str = "maps";
+pub const MAP_DIR_NAME: &str = "maps";
 
 pub const DEFAULT_MAX_MAP_FILE_BYTES: u64 = 8 * 1024 * 1024;
 

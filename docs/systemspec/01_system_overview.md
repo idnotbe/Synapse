@@ -32,6 +32,7 @@ Source files covered:
 - `crates/synapse-telemetry/src/lib.rs`
 - `crates/synapse-models/src/lib.rs`
 - `crates/synapse-hid-host/src/lib.rs`
+- `crates/synapse-everquest/src/lib.rs`
 - `crates/synapse-overlay/src/main.rs`
 
 ## 1. What Synapse is
@@ -57,6 +58,7 @@ The repository operates under the doctrine in `AGENTS.md`: manual Full State Ver
 | Capture | DXGI duplication or Windows.Graphics.Capture | `windows-capture` v2.0 + `windows` v0.62 | Zero-copy GPU frame surface for OCR/CNN paths |
 | ViGEm virtual pad | ViGEmBus driver, user-space client | `vigem-client` v0.1.4 (X360 default, optional DS4) | Virtual Xbox/DualShock controller for `act_pad` |
 | Pi Pico HID gateway | USB serial, RP2040 firmware (M4) | `serialport` v4.9 + `crc16` | Hardware HID host surface; `synapse-hid-host` implements serial discovery, connect/IDENTIFY, framing, pipelined send, and reconnect paths. See `docs/computergames/09_hardware_hid_gateway.md` |
+| EverQuest local data | Daybreak install maps/logs plus `%APPDATA%/Synapse/everquest` map-pack cache | `synapse-everquest` crate + local CLI binaries | Parses EQ logs and maps, builds zone graphs, inventories base/community map sets, preserves archive hashes/manifests, and feeds the attended EverQuest world-model FSV workflow |
 | `synapse-overlay` binary | currently a placeholder (`crates/synapse-overlay/src/main.rs` is 1 line) | n/a | Future debug overlay for M5 production polish |
 
 ## 3. Technology stack
@@ -247,10 +249,12 @@ Full parameter/return tables: [13_mcp_tool_reference.md](13_mcp_tool_reference.m
 | Binary | Source | Purpose |
 |---|---|---|
 | `synapse-mcp` | `crates/synapse-mcp/src/main.rs` (clap CLI, `tokio::main`) | The MCP server; `--mode stdio` (default) or `--mode http` |
+| `eq-map-inspect` | `crates/synapse-everquest/src/bin/eq-map-inspect.rs` | Local EQ map parser/inspection helper |
+| `eq-zone-graph` | `crates/synapse-everquest/src/bin/eq-zone-graph.rs` | Local static zone-graph builder from EQ map labels/zone lines |
+| `eq-map-inventory` | `crates/synapse-everquest/src/bin/eq-map-inventory.rs` | Local EQ map-set inventory/provenance manifest helper for #520 |
 | `synapse-overlay` | `crates/synapse-overlay/src/main.rs` | Placeholder binary for the future debug overlay; current source is `fn main() {}` |
-| (no other workspace binaries) | — | All other crates are libraries |
 
-Default workspace members for build (`Cargo.toml`): `crates/synapse-mcp`, `crates/synapse-overlay`. All other crates are pulled in via the `[workspace.members]` list.
+Default workspace members for build (`Cargo.toml`): `crates/synapse-mcp`, `crates/synapse-overlay`. The EverQuest binaries are workspace members through `crates/synapse-everquest` and are built explicitly when needed for local map/log provenance work.
 
 CLI flags on `synapse-mcp` (parsed in `main.rs::Cli`, full table: [03_configuration.md](03_configuration.md)):
 
@@ -282,6 +286,7 @@ CLI flags on `synapse-mcp` (parsed in `main.rs::Cli`, full table: [03_configurat
 | `%LOCALAPPDATA%/synapse/logs/` | `crates/synapse-telemetry/src/lib.rs::default_log_dir` | JSON tracing files (`synapse.log` daily rotated); GC keeps 7 days / 500 MiB ceiling, configurable via `SYNAPSE_LOG_GC_INTERVAL_S` |
 | `%LOCALAPPDATA%/synapse/replays/` | `crates/synapse-mcp/src/m3/permissions.rs::replay_root` | JSONL files written by `replay_record` (default name `replay-<uuid-v7>.jsonl`) |
 | `%APPDATA%/synapse/token.txt` | operator-provisioned | If present, overrides `SYNAPSE_BEARER_TOKEN` for the HTTP transport (`crates/synapse-mcp/src/http/auth.rs::token_file_path`) |
+| `%APPDATA%/Synapse/everquest/map_packs/` | `eq-map-inventory` and operator-supervised acquisition workflow | Preserved community-map archive copies and JSON provenance manifests, including source URLs, SHA-256 hashes, counts, skipped files, and rollback target |
 | Bundled profiles | resolved by `crates/synapse-profiles/src/parser.rs::bundled_profiles_dir`, overridable with `SYNAPSE_PROFILE_DIR` | Per-app/per-game TOML profiles |
 
 ## 7. Storage tier classification
@@ -370,10 +375,19 @@ Holds `ModelDescriptor` (id, path, sha256, input_shape, class_map), `Detector` t
 ### 9.13 synapse-hid-host
 USB-serial driver for the RP2040 HID gateway firmware (`firmware/pico-hid/`, excluded from the root workspace via `Cargo.toml::exclude`). The crate exposes serial discovery, `HidGateway::connect`, IDENTIFY parsing/version validation, CRC16 frame encode/decode, pipelined send, reconnect state, firmware telemetry snapshots, and HID error mapping. `synapse-mcp --hardware-hid <port|auto>` uses this crate to build the live `HardwareBackend`.
 
-### 9.14 synapse-test-utils (shared test rig)
+### 9.14 synapse-everquest
+EverQuest-specific local data helpers. The library parses EQ log files, map
+files, map-set inventories, and static zone graphs. Binaries:
+`eq-map-inspect`, `eq-zone-graph`, and `eq-map-inventory`. `eq-map-inventory`
+is the #520 provenance surface for reading the physical `maps` directory,
+computing per-file and aggregate SHA-256 hashes, preserving community map-pack
+archive provenance, recording skipped/corrupt maps and duplicate-label samples,
+and writing a manifest that manual FSV separately reads from disk.
+
+### 9.15 synapse-test-utils (shared test rig)
 Provides `StdioMcpClient` for spawning `synapse-mcp` over stdio and driving JSON-RPC initialize → tool calls in integration tests, plus Notepad/audio fixtures (`launch_notepad`, `wait_for_window_title_regex`, `notepad_process_ids`).
 
-### 9.15 synapse-overlay (M5 placeholder)
+### 9.16 synapse-overlay (M5 placeholder)
 Currently `fn main() {}`. Will hold the debug overlay UI shipped at M5.
 
 ## 10. Milestone state (verified against `CHANGELOG.md` and `docs/impplan/`)

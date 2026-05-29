@@ -72,6 +72,7 @@ Manual FSV must read these surfaces before and after each trigger:
 | Foreground window state | title/class/HWND/process path for the active EverQuest window |
 | Visible game UI | OCR/screenshot evidence for character/server/zone/level/XP or UI text |
 | EverQuest install/log files | relevant same-day logs/config files under the Daybreak install |
+| EverQuest map files | base `maps\*.txt`, optional map-set subdirectories such as `maps\Brewall`, and Synapse map-pack archive/manifest cache |
 | Synapse profile state | `profile_list`, `profile_activate`, `observe` foreground `profile_id=everquest.live` |
 | Synapse action/audit state | `storage_inspect` row counts/samples for `CF_ACTION_LOG`, observations, events, profile quality |
 
@@ -235,6 +236,45 @@ calibration. Map-sensor rows do not execute movement.
 Manual FSV for map sensing reads the physical screenshot/observe crop, physical
 EQ log/current-state row, and local map file before the trigger, calls the real
 MCP tool, then separately reads the persisted `CF_KV` map-sensor row.
+
+## Map Data Provenance
+
+#520 adds a local map inventory/provenance surface for the configured host:
+
+- `eq-map-inventory --root <everquest-install-root> [--set <name>]`
+
+This is a real local CLI for map-pack state, not an FSV substitute. It reads
+physical map files, computes per-file and aggregate SHA-256 hashes, parses each
+`.txt` map with `synapse-everquest`, reports skipped/corrupt files and duplicate
+label samples, and can write a JSON provenance manifest. Manual FSV still reads
+the map directory, archive, and manifest bytes independently before and after
+any acquisition or install action.
+
+Current host readback on 2026-05-29:
+
+| Surface | Readback |
+|---|---|
+| Base EQ maps | `C:\Users\Public\Daybreak Game Company\Installed Games\EverQuest\maps`; 121 top-level `.txt` files; aggregate SHA-256 `sha256:3d5eed00f56f089f6f7aaf6f77893a24dcc3e16e08d0dbf85fa3ebf425769412` |
+| Base parse status | 120 parseable maps; `kael.txt` skipped because line 4050 has an empty point label |
+| Community source page | Brewall EQ Maps: `https://www.eqmaps.info/eq-map-files/` |
+| Preserved archive | `%APPDATA%\Synapse\everquest\map_packs\archives\brewall-20240109.zip`; SHA-256 `sha256:9b8d17e3e1058ceb7276b1d1e6fcee46b9930ba8bf68450bcb572d9641b5305d` |
+| Installed map set | `C:\Users\Public\Daybreak Game Company\Installed Games\EverQuest\maps\Brewall`; 1,707 `.txt` files; base top-level count remained 121 |
+| Brewall inventory | 1,686 parseable maps, 21 skipped maps, aggregate SHA-256 `sha256:068125aabd59fe8472ca35fc891f5e639ab075c722464beb0bc3c1997bab6434` |
+| Manifest SoT | `%APPDATA%\Synapse\everquest\map_packs\manifests\brewall-20240109.json`; records source URLs, archive path/hash, file counts, skipped files, duplicate label samples, `base_maps_overwritten=false`, and rollback target |
+| Rollback | Delete `maps\Brewall` to remove the community map set; do not delete or overwrite base `maps\*.txt` |
+
+Community map packs must be installed in a separate map-set directory or a
+Synapse cache unless an issue explicitly approves replacing base files. Before
+any replacement-style workflow, first preserve a backup plus manifest of the
+original files, then read both backup and target directories directly. The map
+window can select a custom map set, but world-model code must record which set
+was used before treating labels or route hints as SoT.
+
+Manual FSV for map data uses these edges: unavailable download/source URL,
+corrupt archive or corrupt map file, duplicate/stale labels, and permission or
+write-target failure. Each edge must print the source directory/archive/manifest
+state before and after the trigger and verify that base maps were not silently
+modified.
 
 ## Compact Outcome Rows
 
@@ -544,6 +584,7 @@ GitHub issues remain the canonical coordination state:
 | #517 | Stabilize EverQuest foreground before accepted action candidates |
 | #518 | Safe target/combat model for level-1 wizard leveling |
 | #519 | Manual FSV route from Neriak Foreign Quarter to Nektulos safe area |
+| #520 | Map data acquisition/provenance and optional community map pack workflow |
 | #522 | Tiny local predictive EverQuest world model after verified trajectories |
 | #525 | Calibrated map-window sensor from visible map, `/loc`, and map files |
 | #526 | Compact outcome log taxonomy for combat/spell/XP/death/hazard learning |

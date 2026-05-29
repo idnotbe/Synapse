@@ -1,5 +1,6 @@
 pub mod log;
 pub mod map;
+pub mod map_inventory;
 pub mod zone_graph;
 
 pub use log::{
@@ -11,7 +12,12 @@ pub use log::{
 pub use map::{
     DEFAULT_MAX_MAP_FILE_BYTES, EverQuestMapColor, EverQuestMapCoord, EverQuestMapError,
     EverQuestMapFile, EverQuestMapLine, EverQuestMapPoint, EverQuestMapRecord, EverQuestMapSource,
-    discover_map_files, parse_map_file, parse_map_file_with_limit, parse_map_record,
+    MAP_DIR_NAME, discover_map_files, parse_map_file, parse_map_file_with_limit, parse_map_record,
+};
+pub use map_inventory::{
+    EverQuestDuplicateLabel, EverQuestDuplicateZone, EverQuestMapFileInventory,
+    EverQuestMapInventoryError, EverQuestMapSetInventory, EverQuestMapSetKind,
+    EverQuestSkippedMapFile, inventory_map_set, inventory_map_set_with_limit, sha256_file,
 };
 pub use zone_graph::{
     EverQuestNearestLandmark, EverQuestZoneEdge, EverQuestZoneEdgeResolution, EverQuestZoneGraph,

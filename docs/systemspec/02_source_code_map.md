@@ -22,7 +22,7 @@ synapse/
 ├── tests/                          # Repo-level fixtures only (audio WAV samples)
 │   └── fixtures/audio/             # Test-shared WAV fixtures
 ├── target/                         # Cargo build output (gitignored)
-└── crates/                         # 15 workspace member crates (see §2)
+└── crates/                         # 16 workspace member crates (see §2)
 ```
 
 `firmware/pico-hid/` is referenced in `Cargo.toml::exclude` and reserved for the M4 RP2040 firmware. It is not present in the current tree.
@@ -322,7 +322,26 @@ crates/synapse-profiles/
     └── watcher.rs                  # ProfileRuntime (notify watcher, 200ms debounce, ProfileStatus)
 ```
 
-### 2.11 `crates/synapse-hid-host/`
+### 2.11 `crates/synapse-everquest/` — EverQuest map/log/world-data helpers
+
+```
+crates/synapse-everquest/
+├── Cargo.toml                      # EverQuest data helper crate; log/map parsing plus CLI tools
+├── src/
+│   ├── lib.rs                      # Public exports for log, map, map inventory, and zone graph helpers
+│   ├── log.rs                      # EQ log-file discovery, tailing, /loc parsing, and compact outcome classification
+│   ├── map.rs                      # EQ .txt map parser for point/line records and map-file discovery
+│   ├── map_inventory.rs            # Map-set inventory/provenance hashes, skipped files, duplicate labels, archive hash helper
+│   ├── zone_graph.rs               # Static zone graph/landmark/zone-edge builder from local EQ maps
+│   └── bin/
+│       ├── eq-map-inspect.rs       # Local parser/readback helper for one map file
+│       ├── eq-map-inventory.rs     # Local #520 map-pack inventory/provenance manifest helper
+│       └── eq-zone-graph.rs        # Local zone graph inspection/export helper
+└── tests/
+    └── map_inventory.rs            # Focused map-inventory regression checks; supporting evidence only
+```
+
+### 2.12 `crates/synapse-hid-host/`
 
 ```
 crates/synapse-hid-host/
@@ -339,7 +358,7 @@ crates/synapse-hid-host/
     └── transport.rs                # Serialport-backed HidGateway
 ```
 
-### 2.12 `crates/synapse-models/` — ONNX runtime wrapper
+### 2.13 `crates/synapse-models/` — ONNX runtime wrapper
 
 ```
 crates/synapse-models/
@@ -348,7 +367,7 @@ crates/synapse-models/
     └── lib.rs                      # ModelDescriptor, Detector trait, DetectionFrame, ort feature-gated session loader
 ```
 
-### 2.13 `crates/synapse-telemetry/` — tracing + metrics
+### 2.14 `crates/synapse-telemetry/` — tracing + metrics
 
 ```
 crates/synapse-telemetry/
@@ -358,7 +377,7 @@ crates/synapse-telemetry/
     └── metrics.rs                  # M3_METRICS array (19 specs), describe_metric, CARDINALITY_LIMIT=1000
 ```
 
-### 2.14 `crates/synapse-test-utils/` — shared test rig
+### 2.15 `crates/synapse-test-utils/` — shared test rig
 
 ```
 crates/synapse-test-utils/
@@ -369,7 +388,7 @@ crates/synapse-test-utils/
     └── stdio_mcp_client.rs         # StdioMcpClient: launches synapse-mcp, drives initialize + tools/call
 ```
 
-### 2.15 `crates/synapse-overlay/` — M5 placeholder
+### 2.16 `crates/synapse-overlay/` — M5 placeholder
 
 ```
 crates/synapse-overlay/
@@ -416,6 +435,7 @@ synapse-core            (no synapse-* deps; standalone shared types)
   ├── synapse-models        (synapse-core for DetectionBatch)
   ├── synapse-storage       (synapse-core: retention, error_codes)
   ├── synapse-profiles      (synapse-core)
+  ├── synapse-everquest     (serde/schemars/regex/chrono/sha2; local EQ files, no synapse-* runtime deps)
   ├── synapse-a11y          (synapse-core)
   ├── synapse-capture       (synapse-core, synapse-telemetry)
   ├── synapse-audio         (synapse-core, synapse-models{directml})
