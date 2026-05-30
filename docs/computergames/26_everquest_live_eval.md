@@ -240,6 +240,29 @@ than loading full raw logs into the model context. Its durable row is
 world-model context injection, surprise detection, and scorecards should read
 that row or derived storage rows instead of rereading unbounded log text.
 
+## World-Model Doctrine
+
+#505 is the EverQuest world-model architecture source. The model is a compact,
+provenance-linked state machine for supervised play, not a claim of autonomous
+game intelligence. The intended data path is:
+
+`physical SoT -> compact event -> normalized state/action/outcome -> transition
+-> trajectory -> prediction/plan trace -> guard decision -> surprise/drift
+repair -> compact context`.
+
+Physical SoTs stay authoritative at every layer: visible UI/HUD, foreground
+`eqgame.exe`, EQ logs, `/loc` log offsets, local map files and map-pack
+manifests, `CF_KV` world/reality rows, `CF_ACTION_LOG`, profile-quality rows,
+and GitHub issue memory. ContextGraph-style retrieval (#529) may help future
+agents remember proven lessons, but Synapse storage and physical EQ state remain
+the gameplay SoT for manual FSV.
+
+No movement or combat row counts as accepted gameplay progress while current
+state confidence is low, an audit reports drift, the visible chat-input gate is
+unsafe, survival readiness is false, or a planner guard requires repair/rebase.
+In those states the correct behavior is to stop, read the physical SoT, record a
+safe next probe, and update #501/#500/#505/#536 issue memory as needed.
+
 ## Delta Reality For EverQuest
 
 Issue #536 changes the EverQuest context strategy from repeated full-state
@@ -713,8 +736,12 @@ GitHub issues remain the canonical coordination state:
 | #499 | Safe input aliases and foreground action audit |
 | #500 | Full-tool manual FSV coverage matrix against EverQuest |
 | #501 | Gameplay learning, hotkey/focus rules, and durable skill memory |
+| #504 | Remove unsafe `open_chat` alias and verify chat-focus denial |
 | #505 | EverQuest world model / DynamicJEPA navigation architecture |
+| #506 | Parse local EQ map files into geometry and label records |
+| #507 | Build static zone graph from map labels and zone-line landmarks |
 | #508 | Literal `/loc` probe with EQ log readback |
+| #509 | Map-window OCR/readback contract for visible zone title and labels |
 | #510 | Current-state estimator fusing logs, `/loc`, map, HUD, and action audit |
 | #511 | EverQuest DynamicJEPA state/action/outcome domain pack |
 | #512 | Linked trajectory rows from Synapse audit rows plus EQ log events |
@@ -728,14 +755,27 @@ GitHub issues remain the canonical coordination state:
 | #520 | Map data acquisition/provenance and optional community map pack workflow |
 | #521 | ContextGraph-compatible DynamicJEPA episode JSONL export |
 | #522 | Tiny local predictive EverQuest world model after verified trajectories |
+| #523 | Live-eval docs/world-model issue-map alignment |
+| #524 | Visible chat-buffer pollution detector before text-like probes |
 | #525 | Calibrated map-window sensor from visible map, `/loc`, and map files |
 | #526 | Compact outcome log taxonomy for combat/spell/XP/death/hazard learning |
 | #527 | Local route planner from current state to map landmarks/zone lines |
 | #528 | Hazard and safe-area memory rows for planning |
 | #529 | ContextGraph ingestion/retrieval for exported EQ memories |
+| #530 | Exa MCP research key configured on the host without leaking secrets |
 | #531 | 60-80% useful action-prior scorecard with honest abstention |
+| #532 | Floor-aware Neriak route graph and bounded intermediate waypoints |
 | #533 | Learned verified zone-transition volumes from physical crossings |
-| #504 | Remove unsafe `open_chat` alias and verify chat-focus denial |
+| #534 | Planner guard level-evidence labels are unambiguous |
+| #535 | Survival readiness, food/drink, and mana recovery gate |
+| #536 | Delta-of-reality observation model and periodic drift audit |
+| #537 | Reality baseline, delta, and audit schemas |
+| #538 | MCP `reality_baseline`, `observe_delta`, and `reality_audit` tools |
+| #539 | Ordered reality deltas from live sensors |
+| #540 | Persist reality baseline, delta journal, head, and audit rows |
+| #541 | Feed EverQuest world summaries from deltas plus drift audits |
+| #542 | Manual FSV runbook for reality deltas and drift audits |
+| #543 | Profile-quality signals from delta accuracy and drift audits |
 
 ## Gameplay Learning Memory
 
