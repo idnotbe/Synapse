@@ -17,6 +17,7 @@ use synapse_everquest::{EverQuestLogKind, EverQuestLogTailBatch, tail_log};
 use synapse_perception::{PerceptionError, TextRegion, read_text};
 use tokio::time::sleep;
 
+use super::everquest_ui_context::{EverQuestUiContextReadback, everquest_ui_context_from_input};
 use super::{
     Json, Parameters, SynapseService, everquest_log::EVERQUEST_PROFILE_ID, tool, tool_router,
 };
@@ -142,6 +143,7 @@ pub struct EverQuestSurvivalReadinessRow {
     pub row_key: String,
     pub generated_at: DateTime<Utc>,
     pub foreground: EverQuestSurvivalForeground,
+    pub ui_context: EverQuestUiContextReadback,
     pub chat_input_state: EverQuestChatInputState,
     pub log: EverQuestSurvivalLogReadback,
     pub hud: EverQuestSurvivalHudReadback,
@@ -531,6 +533,7 @@ impl SynapseService {
             window_title: input.foreground.window_title.clone(),
             profile_id: input.foreground.profile_id.clone(),
         };
+        let ui_context = everquest_ui_context_from_input(&input);
         let chat_input_state = self.detect_everquest_chat_input_state();
         let active = self.resolve_active_everquest_log().map_err(|detail| {
             mcp_error(
@@ -544,10 +547,17 @@ impl SynapseService {
         let hud = survival_hud_readback(&input.hud);
         let posture = posture_readiness(&log);
         let food_drink = food_drink_readiness(&log);
-        let combat_readiness =
-            combat_readiness_readback(&foreground, &chat_input_state, &hud, &food_drink, &posture);
+        let combat_readiness = combat_readiness_readback(
+            &foreground,
+            &ui_context,
+            &chat_input_state,
+            &hud,
+            &food_drink,
+            &posture,
+        );
         let blockers = survival_blockers(
             &foreground,
+            &ui_context,
             &chat_input_state,
             &hud,
             &food_drink,
@@ -562,6 +572,7 @@ impl SynapseService {
             row_key: SURVIVAL_READINESS_ROW_KEY.to_owned(),
             generated_at: Utc::now(),
             foreground,
+            ui_context,
             chat_input_state,
             log,
             hud,
@@ -672,10 +683,25 @@ impl SynapseService {
                 &json!({ "chat_input_state": chat_input_state }),
             ));
         }
-        let input = {
+        let mut input = {
             let state = self.m1_state()?;
-            current_input(&state, 1)?
+            current_input(&state, 2)?
         };
+        self.resolve_input_profile_and_hud(&mut input, true);
+        let ui_context = everquest_ui_context_from_input(&input);
+        if ui_context.login_screen_visible {
+            return Err(tool_error(
+                tool_name,
+                "login_screen_visible",
+                format!(
+                    "{tool_name} refused to emit {command} because the visible EverQuest UI is the login screen"
+                ),
+                &json!({
+                    "ui_context": ui_context,
+                    "chat_input_state": chat_input_state,
+                }),
+            ));
+        }
         if let Some(reason) = focused_text_entry_pollution_reason(input.focused.as_ref()) {
             "deny_focused_text_entry_not_empty".clone_into(&mut chat_input_state.decision);
             chat_input_state.denial_reason = Some(reason.clone());
@@ -1190,6 +1216,7 @@ fn posture_readiness(log: &EverQuestSurvivalLogReadback) -> EverQuestPostureRead
 
 fn combat_readiness_readback(
     foreground: &EverQuestSurvivalForeground,
+    ui_context: &EverQuestUiContextReadback,
     chat: &EverQuestChatInputState,
     hud: &EverQuestSurvivalHudReadback,
     food_drink: &EverQuestFoodDrinkReadiness,
@@ -1198,6 +1225,7 @@ fn combat_readiness_readback(
     let health_floor_percent = 80;
     let mana_floor_percent = 30;
     let ready = foreground.is_everquest_foreground
+        && ui_context.in_world
         && chat.allows_text_command()
         && food_drink.has_food_or_drink != Some(false)
         && hud
@@ -1212,8 +1240,9 @@ fn combat_readiness_readback(
         health_floor_percent,
         mana_floor_percent,
         source_summary: format!(
-            "foreground={} chat={} food={} hp={:?}/{:?} mana={:?}/{:?} posture={}",
+            "foreground={} ui={} chat={} food={} hp={:?}/{:?} mana={:?}/{:?} posture={}",
             foreground.is_everquest_foreground,
+            ui_context.status,
             chat.decision,
             food_drink.status,
             hud.hp_current,
@@ -1227,6 +1256,7 @@ fn combat_readiness_readback(
 
 fn survival_blockers(
     foreground: &EverQuestSurvivalForeground,
+    ui_context: &EverQuestUiContextReadback,
     chat: &EverQuestChatInputState,
     hud: &EverQuestSurvivalHudReadback,
     food_drink: &EverQuestFoodDrinkReadiness,
@@ -1236,6 +1266,11 @@ fn survival_blockers(
     let mut blockers = Vec::new();
     if !foreground.is_everquest_foreground {
         blockers.push("foreground_not_everquest".to_owned());
+    }
+    if ui_context.login_screen_visible {
+        blockers.push("login_screen_visible".to_owned());
+    } else if !ui_context.in_world {
+        blockers.push("gameplay_ui_not_proven".to_owned());
     }
     if !chat.allows_text_command() {
         blockers.push("chat_input_not_safe".to_owned());
@@ -2338,11 +2373,88 @@ mod tests {
         };
         let chat = empty_chat_state();
 
-        let combat = combat_readiness_readback(&foreground, &chat, &hud, &food_drink, &posture);
-        let blockers = survival_blockers(&foreground, &chat, &hud, &food_drink, &posture, &combat);
+        let ui_context = in_world_ui_context();
+        let combat =
+            combat_readiness_readback(&foreground, &ui_context, &chat, &hud, &food_drink, &posture);
+        let blockers = survival_blockers(
+            &foreground,
+            &ui_context,
+            &chat,
+            &hud,
+            &food_drink,
+            &posture,
+            &combat,
+        );
 
         assert!(!combat.ready_for_combat_spell);
         assert_eq!(blockers, vec!["food_drink_absent"]);
+    }
+
+    #[test]
+    fn survival_readiness_blocks_login_screen_even_with_stale_hud() {
+        let foreground = EverQuestSurvivalForeground {
+            is_everquest_foreground: true,
+            process_name: "eqgame.exe".to_owned(),
+            window_title: "EverQuest".to_owned(),
+            profile_id: Some(EVERQUEST_PROFILE_ID.to_owned()),
+        };
+        let ui_context = EverQuestUiContextReadback {
+            status: "login_screen".to_owned(),
+            in_world: false,
+            login_screen_visible: true,
+            login_signal_names: vec!["username_label".to_owned(), "login_button".to_owned()],
+            in_world_signal_names: vec!["inventory_level".to_owned()],
+            focused_text_role: Some("Edit".to_owned()),
+            focused_text_name: Some("Username".to_owned()),
+            focused_text_value_len: Some(1),
+            focused_text_selected_len: Some(0),
+            source_mode: "everquest_hud_login_and_inventory_signal_scan".to_owned(),
+        };
+        let hud = EverQuestSurvivalHudReadback {
+            level_raw: Some("Inventory Thenumberone 1 Wizard".to_owned()),
+            resource_raw: Some("36/36 28/28 NEXT LEVEL 0.000%".to_owned()),
+            hp_current: Some(36),
+            hp_max: Some(36),
+            hp_percent: Some(100),
+            mana_current: Some(28),
+            mana_max: Some(28),
+            mana_percent: Some(100),
+            resource_parse_status: "parsed_hp_mana".to_owned(),
+        };
+        let food_drink = EverQuestFoodDrinkReadiness {
+            status: "not_observed_in_log_window".to_owned(),
+            has_food_or_drink: None,
+            hunger_signal_seen: false,
+            thirst_signal_seen: false,
+            out_of_food_drink_seen: false,
+            source: "physical_eq_log_tail_no_food_drink_signal".to_owned(),
+        };
+        let posture = EverQuestPostureReadiness {
+            rest_state: "standing_casting".to_owned(),
+            is_sitting: Some(false),
+            latest_rest_timestamp: None,
+            latest_rest_summary: None,
+            latest_cast_timestamp: Some("Sat May 30 07:34:49 2026".to_owned()),
+            latest_cast_summary: Some("casting_started".to_owned()),
+            latest_posture_timestamp: Some("Sat May 30 07:34:49 2026".to_owned()),
+            latest_posture_summary: Some("standing_casting".to_owned()),
+        };
+        let chat = empty_chat_state();
+
+        let combat =
+            combat_readiness_readback(&foreground, &ui_context, &chat, &hud, &food_drink, &posture);
+        let blockers = survival_blockers(
+            &foreground,
+            &ui_context,
+            &chat,
+            &hud,
+            &food_drink,
+            &posture,
+            &combat,
+        );
+
+        assert!(!combat.ready_for_combat_spell);
+        assert!(blockers.contains(&"login_screen_visible".to_owned()));
     }
 
     #[test]
@@ -2415,6 +2527,24 @@ mod tests {
             latest_cast_summary: latest_cast_summary.map(str::to_owned),
             latest_posture_timestamp: latest_posture_timestamp.map(str::to_owned),
             latest_posture_summary: latest_posture_summary.map(str::to_owned),
+        }
+    }
+
+    fn in_world_ui_context() -> EverQuestUiContextReadback {
+        EverQuestUiContextReadback {
+            status: "in_world_ui".to_owned(),
+            in_world: true,
+            login_screen_visible: false,
+            login_signal_names: Vec::new(),
+            in_world_signal_names: vec![
+                "inventory_level".to_owned(),
+                "inventory_next_level_percent".to_owned(),
+            ],
+            focused_text_role: None,
+            focused_text_name: None,
+            focused_text_value_len: None,
+            focused_text_selected_len: None,
+            source_mode: "everquest_hud_login_and_inventory_signal_scan".to_owned(),
         }
     }
 

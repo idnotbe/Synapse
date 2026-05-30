@@ -164,6 +164,7 @@ impl SynapseService {
             .map_err(|error| attach_action_preflight_to_error(&error, &preflight))?;
         super::target_policy::ensure_supported_use_allows(&runtime, &foreground, tool)
             .map_err(|error| attach_action_preflight_to_error(&error, &preflight))?;
+        let preflight = self.ensure_everquest_live_ui_context_for_action(tool, preflight)?;
         Ok(preflight)
     }
 

@@ -125,6 +125,7 @@ mod everquest_state;
 mod everquest_surprise;
 mod everquest_tools;
 mod everquest_trajectory;
+mod everquest_ui_context;
 mod everquest_world_model;
 mod everquest_world_summary;
 mod handler;

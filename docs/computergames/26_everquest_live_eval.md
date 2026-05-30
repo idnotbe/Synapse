@@ -110,6 +110,15 @@ ambiguous or contradictory XP percentage, the agent must treat the visible crop
 as the SoT, fail closed for the numeric claim, and record the OCR mismatch on
 #495/#500.
 
+`everquest.login_screen_text` is a signal-only guard for the current login
+screen failure mode. It scans visible labels such as username, password, login,
+and quick connect, but runtime rows must persist only compact signal names and
+focused-field lengths, never raw account text or credentials. If this signal is
+visible, EverQuest action preflight and survival readiness must treat the client
+as not in-world: no Inventory, hotbar, movement, combat, merchant, or chat
+recovery action may be counted as gameplay mutation until a separate visible UI
+readback proves the operator-owned character is back in-world.
+
 ## Safe Input Aliases
 
 The EverQuest profile owns reviewed keyboard aliases in its `[keymap]` table:
@@ -139,7 +148,8 @@ text-like EverQuest command surfaces. `everquest_loc_probe` takes no command
 string and no free-text parameters; it emits only the literal `/loc` key
 sequence after foreground/profile/logging preconditions and after #524's
 visible chat input pollution gate reads trusted `everquest.chat_input_state`
-with `text_present=false`. `everquest_safe_command` is narrower than
+with `text_present=false`, and after the login-screen guard proves the UI is
+not the account login form. `everquest_safe_command` is narrower than
 `act_type`, but broader than `/loc`: it accepts only enum-selected survival
 commands (`sit_on`, `sit_off`, `stand`) and emits the corresponding literal
 slash command (`/sit on`, `/sit off`, `/stand`) through the same gate.
@@ -195,15 +205,17 @@ returned readback is supporting evidence, not the only verdict.
 candidates. Before `act_press`, `act_keymap`, mouse, scroll, or pad input is
 emitted under the active `everquest.live` profile, the MCP action path reads
 the current foreground, verifies or restores the configured `eqgame.exe`
-window, then reads the foreground again. The readback includes whether the HWND
-is minimized; a minimized `eqgame.exe` is restored before accepted dispatch,
-and remains fail-closed if the post-refocus state is still minimized or
-unknown. The `CF_ACTION_LOG` started row stores the `details.preflight` proof
-with before/after HWND/process/path/title/minimized state, candidate count,
-focus attempt status, and final preflight state. If a non-EverQuest window
-remains foreground, if `eqgame.exe` is missing, if minimized state cannot be
-proved usable, or if Windows refuses a safe refocus/readback, the action fails
-closed and must not be counted as gameplay progress.
+window, then reads the foreground again. It also reads the login-screen guard
+HUD before dispatch. The readback includes whether the HWND is minimized; a
+minimized `eqgame.exe` is restored before accepted dispatch, and remains
+fail-closed if the post-refocus state is still minimized or unknown. The
+`CF_ACTION_LOG` started row stores the `details.preflight` proof with
+before/after HWND/process/path/title/minimized state, candidate count, focus
+attempt status, final preflight state, and compact `everquest_ui_context`. If a
+non-EverQuest window remains foreground, if `eqgame.exe` is missing, if the
+login screen is visible, if minimized state cannot be proved usable, or if
+Windows refuses a safe refocus/readback, the action fails closed and must not be
+counted as gameplay progress.
 
 Before claiming an alias effect, manually read the visible UI/log/storage SoT
 before the trigger, call the real MCP `act_keymap` tool while `eqgame.exe` is
@@ -842,6 +854,10 @@ Initial learned rules:
   alias or normal gameplay primitive.
 - Restore world focus and read visible UI state before movement or combat
   inputs.
+- `eqgame.exe` process/window identity is not enough by itself. If the login
+  screen is visible, keys target account fields instead of gameplay, so stop
+  until operator login restores `Thenumberone` in-world and `observe`/readiness
+  rows show non-login UI context.
 - Use the in-game Options/keybind UI as the authoritative control list when a
   binding is uncertain.
 - Summarize public chat bodies in issues; do not preserve unnecessary raw chat.

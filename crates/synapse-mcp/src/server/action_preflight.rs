@@ -12,6 +12,9 @@ use synapse_core::{ForegroundContext, Profile, ProfileId, error_codes};
 use synapse_profiles::ProfileRuntime;
 
 use super::SynapseService;
+use super::everquest_ui_context::{
+    EverQuestUiContextReadback, deny_login_screen_action, everquest_ui_context_from_input,
+};
 use crate::m1::{current_input, mcp_error};
 
 const EVERQUEST_PROFILE_ID: &str = "everquest.live";
@@ -39,6 +42,8 @@ pub(super) struct ActionPreflightReadback {
     pub after: Option<ForegroundProof>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub readback_error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub everquest_ui_context: Option<EverQuestUiContextReadback>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -227,6 +232,37 @@ impl SynapseService {
         drop(state);
         Ok(input.foreground)
     }
+
+    pub(super) fn ensure_everquest_live_ui_context_for_action(
+        &self,
+        tool: &'static str,
+        mut preflight: ActionPreflightReadback,
+    ) -> Result<ActionPreflightReadback, ErrorData> {
+        let runtime = self.profile_runtime()?;
+        let active_profile_id = runtime
+            .active_profile_id()
+            .map_err(|error| mcp_error(error.code(), error.to_string()))?;
+        let applies_to_everquest = preflight.target_profile_id.as_deref()
+            == Some(EVERQUEST_PROFILE_ID)
+            || active_profile_id.as_deref() == Some(EVERQUEST_PROFILE_ID);
+        if !applies_to_everquest {
+            return Ok(preflight);
+        }
+        if preflight.target_profile_id.is_none() {
+            preflight.target_profile_id = Some(EVERQUEST_PROFILE_ID.to_owned());
+        }
+        let mut input = {
+            let state = self.m1_state()?;
+            current_input(&state, 2)?
+        };
+        self.resolve_input_profile_and_hud(&mut input, true);
+        let ui_context = everquest_ui_context_from_input(&input);
+        preflight.everquest_ui_context = Some(ui_context.clone());
+        if ui_context.login_screen_visible {
+            return Err(deny_login_screen_action(tool, &preflight));
+        }
+        Ok(preflight)
+    }
 }
 
 fn window_enumeration_failed_error(
@@ -250,6 +286,7 @@ fn window_enumeration_failed_error(
         focus_error: Some(error.to_string()),
         after: None,
         readback_error: None,
+        everquest_ui_context: None,
     };
     everquest_preflight_error(
         error_codes::ACTION_TARGET_INVALID,
@@ -280,6 +317,7 @@ fn target_window_missing_error(
         focus_error: None,
         after: None,
         readback_error: None,
+        everquest_ui_context: None,
     };
     everquest_preflight_error(
         error_codes::ACTION_TARGET_INVALID,
@@ -318,6 +356,7 @@ fn refocus_attempt_preflight(
         focus_error: input.focus_error,
         after: input.after,
         readback_error: input.readback_error,
+        everquest_ui_context: None,
     }
 }
 
@@ -380,6 +419,7 @@ fn not_applicable_preflight(
         focus_error: None,
         after: Some(before),
         readback_error: None,
+        everquest_ui_context: None,
     }
 }
 
@@ -404,6 +444,7 @@ fn verified_everquest_preflight(
         focus_error: None,
         after: Some(before),
         readback_error: None,
+        everquest_ui_context: None,
     }
 }
 
@@ -429,6 +470,7 @@ fn everquest_preflight_error_without_readback(
         focus_error: None,
         after: None,
         readback_error: None,
+        everquest_ui_context: None,
     };
     everquest_preflight_error(code, reason, message, &preflight)
 }

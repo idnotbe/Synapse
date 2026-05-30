@@ -657,8 +657,10 @@ block into the action audit started row before dispatch. For `everquest.live`
 that block proves the active profile before the check, the before/after
 foreground HWND/process/path/title, whether the tool had to refocus
 `eqgame.exe`, whether the HWND was minimized, and the final preflight status.
-Missing, minimized-after-refocus, or mismatched EverQuest foreground fails
-closed before input is emitted.
+The preflight also carries compact `everquest_ui_context`: visible login-screen
+signals deny before input is emitted because keys would target account fields,
+not gameplay. Missing, minimized-after-refocus, mismatched EverQuest
+foreground, or visible login UI fails closed before input is emitted.
 
 ### 3.13a `act_keymap`
 
@@ -688,7 +690,8 @@ write policy/error audit rows when the action gate is reached.
 
 The started row also includes the same `details.preflight` proof as `act_press`.
 For EverQuest manual FSV, denied non-EQ foreground rows must be treated as
-non-progress; only an ok row with verified `eqgame.exe` preflight plus a
+non-progress, and denied login-screen rows are not gameplay attempts. Only an
+ok row with verified `eqgame.exe` preflight, non-login UI context, and a
 separate game/log/storage readback can support an action-effect claim.
 
 ### 3.13b `everquest_loc_probe`
@@ -706,8 +709,9 @@ separate game/log/storage readback can support an action-effect claim.
 `everquest_loc_probe` is deliberately not a general chat or command surface. It
 accepts no command text or parameters, emits only the literal `/loc` key
 sequence for the active `everquest.live` foreground profile only after the
-visible chat input pollution gate reads `text_present=false`, then tails the
-physical EverQuest log from the pre-trigger byte offset. Success requires a
+visible chat input pollution gate reads `text_present=false` and the
+login-screen guard reads non-login UI context, then tails the physical
+EverQuest log from the pre-trigger byte offset. Success requires a
 new `Your Location is Y, X, Z` line, `you_say_count=0`, and the pre-dispatch
 `chat_input_state` readback; otherwise the tool fails closed and writes the
 deny/error row to `CF_ACTION_LOG`.
@@ -739,11 +743,12 @@ and any player-say output are failure cases, not fallbacks.
 `everquest_safe_command` is a narrow survival/readiness tool, not a general
 chat or command surface. It emits only one allowlisted literal slash command
 for the active `everquest.live` foreground profile after the same visible chat
-input pollution gate used by `everquest_loc_probe`: `/sit on`, `/sit off`, or
-`/stand`. It then tails the physical EverQuest log from the pre-trigger byte
-offset and succeeds only when no `You say` line appears. The response returns
-the literal command, EQ log byte offsets, bounded compact event summaries,
-`you_say_count`, and the pre-dispatch `chat_input_state` readback.
+input pollution gate and login-screen guard used by `everquest_loc_probe`:
+`/sit on`, `/sit off`, or `/stand`. It then tails the physical EverQuest log
+from the pre-trigger byte offset and succeeds only when no `You say` line
+appears. The response returns the literal command, EQ log byte offsets, bounded
+compact event summaries, `you_say_count`, and the pre-dispatch
+`chat_input_state` readback.
 
 Manual FSV must still read the visible UI after the command. For rest/readiness
 work, the SoT is the Inventory/Player-window HP/mana/posture readback plus the
@@ -766,9 +771,10 @@ without a separate issue and explicit operator approval.
 `everquest_survival_readiness` is read-only. It sends no input and writes a
 single compact row to
 `CF_KV/everquest/survival_readiness/v1/everquest.live/latest`. The row fuses
-foreground/profile state, `everquest.chat_input_state`, visible HUD resource
-text (`HP/Mana` pairs when readable), and a bounded recent physical EQ log
-window large enough to retain posture proof across normal hunger/thirst spam.
+foreground/profile state, a compact EverQuest UI-context guard,
+`everquest.chat_input_state`, visible HUD resource text (`HP/Mana` pairs when
+readable), and a bounded recent physical EQ log window large enough to retain
+posture proof across normal hunger/thirst spam.
 Resource OCR accepts normal slash pairs such as `28/28` and the observed
 slash-loss form where the separator is read as `1`, such as `28128` for
 `28/28`. It detects food/drink absence from the authoritative log signal
@@ -777,10 +783,14 @@ hunger/thirst timestamps as compact booleans/timestamps. Casting posture can be
 proven by recent physical spell-cast log signals such as
 `You begin casting ...` or `Your <spell> spell fizzles!`; those own-player
 signals are stored only as compact cast/posture summaries and timestamps.
+The UI-context guard treats the visible EverQuest login screen as not in-world
+and records only signal names such as username/password/login labels plus
+focused-field lengths; raw account text or credentials are never persisted.
 
 This row is a readiness verdict, not an action surface. It can prove current
 blockers such as `mana_below_combat_floor`, `food_drink_absent`,
-`hud_hp_mana_unavailable`, or `standing_posture_not_proven_for_casting`.
+`login_screen_visible`, `gameplay_ui_not_proven`, `hud_hp_mana_unavailable`, or
+`standing_posture_not_proven_for_casting`.
 Merchant/economy/item acquisition remains disallowed unless a later issue has
 explicit operator approval and its own manual FSV.
 
