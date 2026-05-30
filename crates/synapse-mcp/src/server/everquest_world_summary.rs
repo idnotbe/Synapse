@@ -3,32 +3,35 @@ mod validation;
 
 use chrono::{DateTime, Utc};
 use rmcp::ErrorData;
-use synapse_core::error_codes;
+use synapse_core::{RealityAudit, RealityDelta, RealityDriftStatus, error_codes};
 use synapse_everquest::{
     EverQuestMapCoord, EverQuestZoneEdge, EverQuestZoneGraph, EverQuestZoneLandmark,
     build_zone_graph_from_root,
 };
+use synapse_storage::cf;
 
 use self::{
     model::{
         EverQuestWorldSummaryEvidenceBoundary, EverQuestWorldSummaryExit,
         EverQuestWorldSummaryFocus, EverQuestWorldSummaryHazard, EverQuestWorldSummaryLandmark,
         EverQuestWorldSummaryLevel, EverQuestWorldSummaryLocation, EverQuestWorldSummaryParams,
-        EverQuestWorldSummaryRecovery, EverQuestWorldSummaryRedaction,
-        EverQuestWorldSummaryResponse, EverQuestWorldSummaryRow, EverQuestWorldSummarySourceRef,
-        EverQuestWorldSummaryTransition, EverQuestWorldSummaryZone, MAX_SOURCE_REFS,
-        NormalizedSummaryParams, SCHEMA_VERSION, TOOL,
+        EverQuestWorldSummaryRealityContext, EverQuestWorldSummaryRecovery,
+        EverQuestWorldSummaryRedaction, EverQuestWorldSummaryResponse, EverQuestWorldSummaryRow,
+        EverQuestWorldSummarySourceRef, EverQuestWorldSummaryTransition, EverQuestWorldSummaryZone,
+        MAX_SOURCE_REFS, NormalizedSummaryParams, SCHEMA_VERSION, TOOL,
     },
     validation::{decode_json_row, normalize_params, sanitize_summary},
 };
 use super::{
     Json, Parameters, SynapseService,
     everquest_state::{EverQuestCurrentState, EverQuestStateActionSummary, EverQuestStateSource},
+    reality::RealityHeadRow,
     tool, tool_router,
 };
 use crate::m1::mcp_error;
 
 const UNKNOWN_PROCESS: &str = "unknown";
+const REALITY_STATUS_READY: &str = "ready";
 
 #[derive(Clone, Debug)]
 struct SummarySourceState {
@@ -72,7 +75,8 @@ impl SynapseService {
         let params = normalize_params(params.0)?;
         let source = self.summary_source_state(&params)?;
         let graph = self.summary_graph_context(&params);
-        let row = build_summary_row(&params, &source, graph);
+        let reality_context = self.summary_reality_context(&params)?;
+        let row = build_summary_row(&params, &source, graph, &reality_context);
         let (summary, stored_value_len_bytes) =
             self.persist_world_summary_json(&row.row_key, &row)?;
         Ok(Json(EverQuestWorldSummaryResponse {
@@ -219,6 +223,220 @@ impl SynapseService {
         }
     }
 
+    #[allow(clippy::too_many_lines)]
+    fn summary_reality_context(
+        &self,
+        params: &NormalizedSummaryParams,
+    ) -> Result<EverQuestWorldSummaryRealityContext, ErrorData> {
+        let profile_key = params.profile_id.clone();
+        let head_key = reality_head_key(&profile_key);
+        let head_bytes = {
+            let runtime = self.reflex_runtime()?;
+            let runtime = runtime.lock().map_err(|_| {
+                mcp_error(
+                    error_codes::TOOL_INTERNAL_ERROR,
+                    "reflex runtime lock poisoned while reading EverQuest reality head",
+                )
+            })?;
+            runtime
+                .storage_kv_row(head_key.as_bytes())
+                .map_err(|error| mcp_error(error.code(), error.to_string()))?
+        };
+        let Some(head_bytes) = head_bytes else {
+            return Ok(missing_reality_context(profile_key, head_key));
+        };
+
+        let head = decode_json_row::<RealityHeadRow>(
+            &head_bytes,
+            "EverQuest reality head row for world summary",
+        )?;
+        let mut source_refs = vec![EverQuestWorldSummarySourceRef {
+            kind: "reality_head".to_owned(),
+            row_key: Some(head_key.clone()),
+            path: None,
+            line_number: None,
+            start_offset: None,
+            next_offset: None,
+            summary: Some(sanitize_summary(&format!(
+                "baseline epoch {} head seq {}",
+                head.epoch_id, head.head_seq
+            ))),
+        }];
+
+        let mut newest_delta_seq = None;
+        let mut newest_delta_key = None;
+        let mut newest_delta_kind = None;
+        let mut newest_delta_path = None;
+        let mut newest_delta_at = None;
+        let mut delta_missing = false;
+        if head.head_seq > head.baseline_seq {
+            let delta_key = reality_delta_key(&head.profile_key, &head.epoch_id, head.head_seq);
+            let delta_bytes = {
+                let runtime = self.reflex_runtime()?;
+                let runtime = runtime.lock().map_err(|_| {
+                    mcp_error(
+                        error_codes::TOOL_INTERNAL_ERROR,
+                        "reflex runtime lock poisoned while reading newest EverQuest reality delta",
+                    )
+                })?;
+                runtime
+                    .storage_kv_row(delta_key.as_bytes())
+                    .map_err(|error| mcp_error(error.code(), error.to_string()))?
+            };
+            if let Some(delta_bytes) = delta_bytes {
+                let delta = decode_json_row::<RealityDelta>(
+                    &delta_bytes,
+                    "newest EverQuest reality delta row",
+                )?;
+                newest_delta_seq = Some(delta.seq);
+                newest_delta_kind = Some(sanitize_summary(&delta.kind));
+                newest_delta_path = Some(sanitize_summary(&delta.path));
+                newest_delta_at = Some(delta.at);
+                newest_delta_key = Some(delta_key.clone());
+                source_refs.push(EverQuestWorldSummarySourceRef {
+                    kind: "reality_delta".to_owned(),
+                    row_key: Some(delta_key),
+                    path: None,
+                    line_number: None,
+                    start_offset: None,
+                    next_offset: None,
+                    summary: Some(sanitize_summary(&format!(
+                        "newest delta seq {} kind {} path {}",
+                        delta.seq, delta.kind, delta.path
+                    ))),
+                });
+            } else {
+                delta_missing = true;
+                newest_delta_seq = Some(head.head_seq);
+                newest_delta_key = Some(delta_key.clone());
+                source_refs.push(EverQuestWorldSummarySourceRef {
+                    kind: "reality_delta_missing".to_owned(),
+                    row_key: Some(delta_key),
+                    path: None,
+                    line_number: None,
+                    start_offset: None,
+                    next_offset: None,
+                    summary: Some(
+                        "head seq advanced but newest delta row was absent in storage".to_owned(),
+                    ),
+                });
+            }
+        }
+
+        let latest_audit = self.read_latest_reality_audit(&head.profile_key)?;
+        let (
+            audit_status,
+            latest_audit_row_key,
+            latest_audit_id,
+            latest_audit_ran_at,
+            drift_severity,
+            drift_item_count,
+            audit_rebase_required,
+        ) = if let Some((row_key, audit)) = latest_audit {
+            let audit_epoch_stale = audit.epoch_id != head.epoch_id;
+            let audit_seq_stale = audit.compared_seq_end < head.head_seq;
+            let audit_stale = audit_epoch_stale || audit_seq_stale;
+            let audit_status = if audit_stale {
+                "stale".to_owned()
+            } else {
+                drift_status_string(audit.drift_status).to_owned()
+            };
+            let drift_severity = if audit_stale {
+                "stale".to_owned()
+            } else {
+                drift_status_string(audit.drift_status).to_owned()
+            };
+            let audit_rebase_required = !audit_stale && audit.rebase_required;
+            source_refs.push(EverQuestWorldSummarySourceRef {
+                kind: "reality_audit".to_owned(),
+                row_key: Some(row_key.clone()),
+                path: None,
+                line_number: None,
+                start_offset: None,
+                next_offset: None,
+                summary: Some(sanitize_summary(&format!(
+                    "audit {} epoch {} drift {} rebase_required={} stale={audit_stale}",
+                    audit.audit_id,
+                    audit.epoch_id,
+                    drift_status_string(audit.drift_status),
+                    audit.rebase_required
+                ))),
+            });
+            (
+                audit_status,
+                Some(row_key),
+                Some(audit.audit_id),
+                Some(audit.ran_at),
+                drift_severity,
+                len_to_u32(audit.drift_items.len()),
+                audit_rebase_required,
+            )
+        } else {
+            (
+                "not_run".to_owned(),
+                None,
+                None,
+                None,
+                "unknown".to_owned(),
+                0,
+                false,
+            )
+        };
+
+        source_refs.truncate(MAX_SOURCE_REFS);
+        let status =
+            reality_context_status(delta_missing, audit_status.as_str(), audit_rebase_required);
+        let safe_next_probe = reality_safe_next_probe(&status).to_owned();
+        Ok(EverQuestWorldSummaryRealityContext {
+            profile_key: head.profile_key,
+            status,
+            head_key,
+            head_present: true,
+            last_baseline_epoch_id: Some(head.epoch_id),
+            last_baseline_seq: Some(head.baseline_seq),
+            last_head_seq: Some(head.head_seq),
+            newest_delta_seq,
+            newest_delta_key,
+            newest_delta_kind,
+            newest_delta_path,
+            newest_delta_at,
+            audit_status,
+            latest_audit_row_key,
+            latest_audit_id,
+            latest_audit_ran_at,
+            drift_severity,
+            drift_item_count,
+            rebase_required: delta_missing || audit_rebase_required,
+            safe_next_probe,
+            source_refs,
+        })
+    }
+
+    fn read_latest_reality_audit(
+        &self,
+        profile_key: &str,
+    ) -> Result<Option<(String, RealityAudit)>, ErrorData> {
+        let prefix = reality_audit_prefix(profile_key);
+        let rows = {
+            let runtime = self.reflex_runtime()?;
+            let runtime = runtime.lock().map_err(|_| {
+                mcp_error(
+                    error_codes::TOOL_INTERNAL_ERROR,
+                    "reflex runtime lock poisoned while reading EverQuest reality audits",
+                )
+            })?;
+            runtime
+                .storage_cf_prefix_rows(cf::CF_KV, prefix.as_bytes(), usize::MAX)
+                .map_err(|error| mcp_error(error.code(), error.to_string()))?
+        };
+        let Some((key, value)) = rows.into_iter().last() else {
+            return Ok(None);
+        };
+        let row_key = String::from_utf8_lossy(&key).into_owned();
+        let audit = decode_json_row::<RealityAudit>(&value, "latest EverQuest reality audit row")?;
+        Ok(Some((row_key, audit)))
+    }
+
     fn persist_world_summary_json(
         &self,
         key: &str,
@@ -267,25 +485,30 @@ impl SynapseService {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn build_summary_row(
     params: &NormalizedSummaryParams,
     source: &SummarySourceState,
     graph_context: GraphContext,
+    reality_context: &EverQuestWorldSummaryRealityContext,
 ) -> EverQuestWorldSummaryRow {
     let mut source_refs = source.source_refs.clone();
     source_refs.extend(params.source_refs.clone());
+    source_refs.extend(reality_context.source_refs.clone());
     if let Some(ref source_ref) = graph_context.source_ref {
         source_refs.push(source_ref.clone());
     }
     source_refs.truncate(MAX_SOURCE_REFS);
 
     let mut hazards = source.hazards.clone();
+    hazards.extend(reality_hazards(reality_context));
     if let Some(hazard) = graph_context.hazard {
         hazards.push(hazard);
     }
 
     let mut active_blockers =
         active_blockers(source, graph_context.graph.as_ref(), &hazards, params);
+    active_blockers.extend(reality_blockers(reality_context));
     let nearest_exits = graph_context.graph.as_ref().map_or_else(Vec::new, |graph| {
         nearest_exits_for_source(graph, source, params.max_exits)
     });
@@ -304,9 +527,19 @@ fn build_summary_row(
     active_blockers.sort();
     active_blockers.dedup();
 
-    let recent_transitions =
+    let mut recent_transitions =
         limited_transitions(&source.recent_transitions, params.max_transitions);
-    let safe_next_probes = safe_next_probes(&active_blockers, &nearest_exits);
+    if let Some(transition) = reality_transition(reality_context) {
+        recent_transitions.insert(0, transition);
+        recent_transitions.truncate(params.max_transitions);
+    }
+    let mut safe_next_probes = Vec::new();
+    if reality_context.status != REALITY_STATUS_READY {
+        safe_next_probes.push(reality_context.safe_next_probe.clone());
+    }
+    safe_next_probes.extend(base_safe_next_probes(&active_blockers, &nearest_exits));
+    safe_next_probes.sort();
+    safe_next_probes.dedup();
     let compact_status = if active_blockers.is_empty() {
         "ready"
     } else {
@@ -342,6 +575,7 @@ fn build_summary_row(
         hazards,
         active_blockers,
         source_refs,
+        reality_context: reality_context.clone(),
         compaction_recovery: EverQuestWorldSummaryRecovery {
             latest_summary_row_key: params.row_key.clone(),
             durable_skill_memory_issue: "https://github.com/ChrisRoyse/Synapse/issues/501"
@@ -663,7 +897,7 @@ fn limited_transitions(
         .collect()
 }
 
-fn safe_next_probes(
+fn base_safe_next_probes(
     active_blockers: &[String],
     nearest_exits: &[EverQuestWorldSummaryExit],
 ) -> Vec<String> {
@@ -698,6 +932,195 @@ fn safe_next_probes(
         .collect::<Vec<_>>();
     probes.push("planner_guard_before_any_movement".to_owned());
     probes
+}
+
+fn missing_reality_context(
+    profile_key: String,
+    head_key: String,
+) -> EverQuestWorldSummaryRealityContext {
+    EverQuestWorldSummaryRealityContext {
+        profile_key,
+        status: "baseline_missing".to_owned(),
+        head_key: head_key.clone(),
+        head_present: false,
+        last_baseline_epoch_id: None,
+        last_baseline_seq: None,
+        last_head_seq: None,
+        newest_delta_seq: None,
+        newest_delta_key: None,
+        newest_delta_kind: None,
+        newest_delta_path: None,
+        newest_delta_at: None,
+        audit_status: "not_run".to_owned(),
+        latest_audit_row_key: None,
+        latest_audit_id: None,
+        latest_audit_ran_at: None,
+        drift_severity: "unknown".to_owned(),
+        drift_item_count: 0,
+        rebase_required: true,
+        safe_next_probe: "capture_reality_baseline".to_owned(),
+        source_refs: vec![EverQuestWorldSummarySourceRef {
+            kind: "reality_head_missing".to_owned(),
+            row_key: Some(head_key),
+            path: None,
+            line_number: None,
+            start_offset: None,
+            next_offset: None,
+            summary: Some("reality head row absent before world-summary build".to_owned()),
+        }],
+    }
+}
+
+fn reality_context_status(
+    delta_missing: bool,
+    audit_status: &str,
+    audit_rebase_required: bool,
+) -> String {
+    if delta_missing {
+        "delta_row_missing".to_owned()
+    } else if audit_status == "not_run" {
+        "audit_missing".to_owned()
+    } else if audit_status == "stale" {
+        "audit_stale".to_owned()
+    } else if audit_rebase_required {
+        "rebase_required".to_owned()
+    } else if audit_status == "in_sync" {
+        REALITY_STATUS_READY.to_owned()
+    } else {
+        "drift_detected".to_owned()
+    }
+}
+
+fn reality_safe_next_probe(status: &str) -> &'static str {
+    match status {
+        REALITY_STATUS_READY => "continue_with_delta_context",
+        "audit_missing" | "audit_stale" => "run_reality_audit_before_movement",
+        "delta_row_missing" => "run_reality_audit_then_capture_reality_baseline",
+        "rebase_required" | "drift_detected" => "stop_repair_then_capture_reality_baseline",
+        "baseline_missing" => "capture_reality_baseline",
+        _ => "refresh_reality_baseline_and_audit",
+    }
+}
+
+fn reality_hazards(
+    context: &EverQuestWorldSummaryRealityContext,
+) -> Vec<EverQuestWorldSummaryHazard> {
+    match context.status.as_str() {
+        REALITY_STATUS_READY => Vec::new(),
+        "audit_missing" => vec![EverQuestWorldSummaryHazard {
+            code: "reality_audit_missing".to_owned(),
+            severity: "warning".to_owned(),
+            detail: "delta-guided EverQuest state has no persisted reality audit yet".to_owned(),
+        }],
+        "audit_stale" => vec![EverQuestWorldSummaryHazard {
+            code: "reality_audit_stale".to_owned(),
+            severity: "warning".to_owned(),
+            detail: "latest reality audit does not cover the current baseline/head seq".to_owned(),
+        }],
+        "baseline_missing" => vec![EverQuestWorldSummaryHazard {
+            code: "reality_baseline_missing".to_owned(),
+            severity: "high".to_owned(),
+            detail: "reality head row is absent; capture baseline before movement or combat"
+                .to_owned(),
+        }],
+        "delta_row_missing" => vec![EverQuestWorldSummaryHazard {
+            code: "reality_delta_missing".to_owned(),
+            severity: "high".to_owned(),
+            detail: "reality head seq points at a delta row that is absent from storage".to_owned(),
+        }],
+        "rebase_required" | "drift_detected" => vec![EverQuestWorldSummaryHazard {
+            code: "reality_drift_rebase_required".to_owned(),
+            severity: "high".to_owned(),
+            detail: format!(
+                "latest reality audit status {} with {} drift item(s)",
+                context.audit_status, context.drift_item_count
+            ),
+        }],
+        _ => vec![EverQuestWorldSummaryHazard {
+            code: "reality_context_unready".to_owned(),
+            severity: "warning".to_owned(),
+            detail: format!("reality context status {}", context.status),
+        }],
+    }
+}
+
+fn reality_blockers(context: &EverQuestWorldSummaryRealityContext) -> Vec<String> {
+    match context.status.as_str() {
+        REALITY_STATUS_READY => Vec::new(),
+        "audit_missing" => vec!["reality_audit_missing".to_owned()],
+        "audit_stale" => vec!["reality_audit_stale".to_owned()],
+        "baseline_missing" => vec!["reality_baseline_missing".to_owned()],
+        "delta_row_missing" => vec!["reality_delta_missing".to_owned()],
+        "rebase_required" | "drift_detected" => vec!["reality_drift_rebase_required".to_owned()],
+        _ => vec!["reality_context_unready".to_owned()],
+    }
+}
+
+fn reality_transition(
+    context: &EverQuestWorldSummaryRealityContext,
+) -> Option<EverQuestWorldSummaryTransition> {
+    if let Some(delta_key) = &context.newest_delta_key {
+        return Some(EverQuestWorldSummaryTransition {
+            transition_kind: "reality_delta".to_owned(),
+            summary: sanitize_summary(&format!(
+                "delta seq {:?} kind {:?} path {:?}; audit {}",
+                context.newest_delta_seq,
+                context.newest_delta_kind,
+                context.newest_delta_path,
+                context.audit_status
+            )),
+            source_ref: Some(EverQuestWorldSummarySourceRef {
+                kind: "reality_delta".to_owned(),
+                row_key: Some(delta_key.clone()),
+                path: None,
+                line_number: None,
+                start_offset: None,
+                next_offset: None,
+                summary: Some("newest persisted delta used by summary".to_owned()),
+            }),
+        });
+    }
+    context
+        .latest_audit_row_key
+        .as_ref()
+        .map(|row_key| EverQuestWorldSummaryTransition {
+            transition_kind: "reality_audit".to_owned(),
+            summary: sanitize_summary(&format!(
+                "audit status {} drift {}",
+                context.audit_status, context.drift_severity
+            )),
+            source_ref: Some(EverQuestWorldSummarySourceRef {
+                kind: "reality_audit".to_owned(),
+                row_key: Some(row_key.clone()),
+                path: None,
+                line_number: None,
+                start_offset: None,
+                next_offset: None,
+                summary: Some("latest persisted audit used by summary".to_owned()),
+            }),
+        })
+}
+
+const fn drift_status_string(status: RealityDriftStatus) -> &'static str {
+    match status {
+        RealityDriftStatus::InSync => "in_sync",
+        RealityDriftStatus::MinorDrift => "minor_drift",
+        RealityDriftStatus::MajorDrift => "major_drift",
+        RealityDriftStatus::RebaseRequired => "rebase_required",
+        RealityDriftStatus::SourceUnavailable => "source_unavailable",
+    }
+}
+
+fn reality_head_key(profile_key: &str) -> String {
+    format!("reality/head/v1/{profile_key}")
+}
+
+fn reality_delta_key(profile_key: &str, epoch_id: &str, seq: u64) -> String {
+    format!("reality/delta/v1/{profile_key}/{epoch_id}/{seq:020}")
+}
+
+fn reality_audit_prefix(profile_key: &str) -> String {
+    format!("reality/audit/v1/{profile_key}/")
 }
 
 fn state_source_refs(sources: &[EverQuestStateSource]) -> Vec<EverQuestWorldSummarySourceRef> {
@@ -748,6 +1171,10 @@ fn len_to_u64(value: usize) -> u64 {
     u64::try_from(value).unwrap_or(u64::MAX)
 }
 
+fn len_to_u32(value: usize) -> u32 {
+    u32::try_from(value).unwrap_or(u32::MAX)
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
@@ -770,12 +1197,19 @@ mod tests {
                 hazard: None,
                 source_ref: None,
             },
+            &ready_reality_context(),
         );
 
         assert_eq!(row.compact_status, "ready");
         assert_eq!(row.zone.short_name.as_deref(), Some("neriaka"));
         assert_eq!(row.level_progress.level, Some(1));
         assert_eq!(row.nearest_exits[0].label, "to_Nektulos_Forest");
+        assert_eq!(row.reality_context.audit_status, "in_sync");
+        assert_eq!(row.reality_context.newest_delta_seq, Some(2));
+        assert!(
+            row.safe_next_probes
+                .contains(&"planner_guard_before_any_movement".to_owned())
+        );
         assert!(!serde_json::to_string(&row).unwrap().contains("you say"));
         assert!(row.redaction.redaction_probe_present);
     }
@@ -792,6 +1226,7 @@ mod tests {
                 hazard: None,
                 source_ref: None,
             },
+            &ready_reality_context(),
         );
 
         assert_eq!(row.compact_status, "blocked");
@@ -815,6 +1250,7 @@ mod tests {
                 }),
                 source_ref: None,
             },
+            &ready_reality_context(),
         );
 
         assert_eq!(row.compact_status, "blocked");
@@ -823,6 +1259,63 @@ mod tests {
                 .contains(&"map_graph_unavailable".to_owned())
         );
         assert!(row.nearest_landmarks.is_empty());
+    }
+
+    #[test]
+    fn missing_reality_audit_blocks_blind_movement() {
+        let params = params("missing-reality-audit");
+        let source = source_state(Some("neriaka"), false);
+        let reality = EverQuestWorldSummaryRealityContext {
+            status: "audit_missing".to_owned(),
+            audit_status: "not_run".to_owned(),
+            latest_audit_row_key: None,
+            latest_audit_id: None,
+            latest_audit_ran_at: None,
+            drift_severity: "unknown".to_owned(),
+            drift_item_count: 0,
+            rebase_required: false,
+            safe_next_probe: "run_reality_audit_before_movement".to_owned(),
+            ..ready_reality_context()
+        };
+        let row = build_summary_row(
+            &params,
+            &source,
+            GraphContext {
+                graph: Some(graph()),
+                hazard: None,
+                source_ref: None,
+            },
+            &reality,
+        );
+
+        assert_eq!(row.compact_status, "blocked");
+        assert!(
+            row.active_blockers
+                .contains(&"reality_audit_missing".to_owned())
+        );
+        assert!(
+            row.safe_next_probes
+                .contains(&"run_reality_audit_before_movement".to_owned())
+        );
+    }
+
+    #[test]
+    fn stale_reality_audit_blocks_until_fresh_audit() {
+        assert_eq!(reality_context_status(false, "stale", false), "audit_stale");
+        let reality = EverQuestWorldSummaryRealityContext {
+            status: "audit_stale".to_owned(),
+            audit_status: "stale".to_owned(),
+            drift_severity: "stale".to_owned(),
+            safe_next_probe: "run_reality_audit_before_movement".to_owned(),
+            ..ready_reality_context()
+        };
+        let blockers = reality_blockers(&reality);
+
+        assert!(blockers.contains(&"reality_audit_stale".to_owned()));
+        assert_eq!(
+            reality_safe_next_probe(&reality.status),
+            "run_reality_audit_before_movement"
+        );
     }
 
     fn params(summary_id: &str) -> NormalizedSummaryParams {
@@ -872,6 +1365,58 @@ mod tests {
             }],
             source_refs: Vec::new(),
             redaction_probe_present: redaction_probe,
+        }
+    }
+
+    fn ready_reality_context() -> EverQuestWorldSummaryRealityContext {
+        EverQuestWorldSummaryRealityContext {
+            profile_key: "everquest.live".to_owned(),
+            status: REALITY_STATUS_READY.to_owned(),
+            head_key: "reality/head/v1/everquest.live".to_owned(),
+            head_present: true,
+            last_baseline_epoch_id: Some("issue-541-test".to_owned()),
+            last_baseline_seq: Some(0),
+            last_head_seq: Some(2),
+            newest_delta_seq: Some(2),
+            newest_delta_key: Some(
+                "reality/delta/v1/everquest.live/issue-541-test/00000000000000000002".to_owned(),
+            ),
+            newest_delta_kind: Some("log_cursor_changed".to_owned()),
+            newest_delta_path: Some("/events".to_owned()),
+            newest_delta_at: Some(Utc::now()),
+            audit_status: "in_sync".to_owned(),
+            latest_audit_row_key: Some(
+                "reality/audit/v1/everquest.live/audit-issue-541-test".to_owned(),
+            ),
+            latest_audit_id: Some("audit-issue-541-test".to_owned()),
+            latest_audit_ran_at: Some(Utc::now()),
+            drift_severity: "in_sync".to_owned(),
+            drift_item_count: 0,
+            rebase_required: false,
+            safe_next_probe: "continue_with_delta_context".to_owned(),
+            source_refs: vec![
+                EverQuestWorldSummarySourceRef {
+                    kind: "reality_head".to_owned(),
+                    row_key: Some("reality/head/v1/everquest.live".to_owned()),
+                    path: None,
+                    line_number: None,
+                    start_offset: None,
+                    next_offset: None,
+                    summary: Some("baseline epoch issue-541-test head seq 2".to_owned()),
+                },
+                EverQuestWorldSummarySourceRef {
+                    kind: "reality_delta".to_owned(),
+                    row_key: Some(
+                        "reality/delta/v1/everquest.live/issue-541-test/00000000000000000002"
+                            .to_owned(),
+                    ),
+                    path: None,
+                    line_number: None,
+                    start_offset: None,
+                    next_offset: None,
+                    summary: Some("newest delta seq 2".to_owned()),
+                },
+            ],
         }
     }
 

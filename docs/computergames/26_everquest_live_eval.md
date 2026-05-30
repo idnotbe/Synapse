@@ -262,6 +262,27 @@ implemented. Until then, use existing real MCP tools (`observe`,
 `everquest_current_state`, `everquest_world_summary`, `storage_inspect`) plus
 manual before/after SoT readback.
 
+#541 wires this into `everquest_world_summary`. Every summary row now carries a
+`reality_context` block derived from the persisted `CF_KV` rows:
+
+- `reality/head/v1/everquest.live` for the last baseline epoch, baseline seq,
+  and current head seq.
+- `reality/delta/v1/everquest.live/<epoch>/<seq>` for the newest compact delta
+  when the head seq is above the baseline seq.
+- `reality/audit/v1/everquest.live/<audit_id>` for the latest drift-audit
+  verdict.
+
+The row must include `last_baseline_epoch_id`, `last_baseline_seq`,
+`last_head_seq`, `newest_delta_seq`, `audit_status`, `drift_severity`,
+`rebase_required`, and `safe_next_probe`. Missing baseline, missing newest
+delta, missing audit, or drift requiring rebase produces explicit blockers and
+safe probes before movement or combat. A ready summary can be used between full
+audits because its source refs point at the delta and audit rows that guided the
+compact assumption. Action-prior or world-model scoring rows that are evaluated
+from a delta-guided state must include `reality_delta` and/or `reality_audit`
+source refs so later scorecards can distinguish delta-corrected predictions
+from full-audit-corrected predictions without storing raw chat/log bodies.
+
 ## Current-Map Sensor Rows
 
 #525 adds `everquest_map_sensor`, the runtime surface for turning visible map
@@ -566,7 +587,8 @@ full map files. It writes
 `CF_KV/everquest/world_summary/v1/everquest.live/<summary_id>` with bounded
 current zone/position confidence, nearest exits and landmarks, recent
 transitions, safe next probes, level state, focus state, hazards, blockers,
-source refs, and compaction recovery links to #501, #500, and #505.
+source refs, delta-reality context, and compaction recovery links to #501, #500,
+and #505.
 
 The default path reads the persisted `everquest_current_state` row and local EQ
 map graph. `state_override` exists for synthetic manual FSV with known inputs,
@@ -576,12 +598,24 @@ persists no raw chat bodies. Unknown zone, missing map graph, stale state,
 non-EQ foreground, and low-confidence zone/location state persist explicit
 blockers and safe next probes instead of allowing blind movement.
 
+The #541 row contract also reads persisted reality rows and injects a compact
+`reality_context` object. `status=ready` requires a baseline/head plus an
+`in_sync` audit. `status=audit_missing` records
+`run_reality_audit_before_movement`; `status=baseline_missing` records
+`capture_reality_baseline`; `status=delta_row_missing` records
+`run_reality_audit_then_capture_reality_baseline`; and drift/rebase statuses
+record `stop_repair_then_capture_reality_baseline`. The same source refs are
+copied into the summary row so manual FSV can read the exact physical
+`CF_KV` keys and DB/WAL bytes after the MCP trigger.
+
 Manual FSV for this row reads physical map/log/current-state/storage before the
 trigger, calls the real MCP tool, then separately reads `storage_inspect` and
 DB/WAL bytes for the exact summary key. The required happy path is the current
 Neriak context reporting level 1, `neriaka`, and the `to_Nektulos_Forest`
-candidate without raw chat bodies. Required edges are unknown zone, map missing,
-stale state, and chat redaction.
+candidate without raw chat bodies and with `reality_context.audit_status`
+`in_sync`. Required edges are unknown zone, map missing, stale state, chat
+redaction, missing baseline, missing audit, stale delta/head mismatch, forced
+drift requiring rebase, and non-EQ foreground.
 
 ## Predictive Model Rows
 

@@ -97,6 +97,8 @@ pub struct EverQuestWorldSummaryRow {
     pub hazards: Vec<EverQuestWorldSummaryHazard>,
     pub active_blockers: Vec<String>,
     pub source_refs: Vec<EverQuestWorldSummarySourceRef>,
+    #[serde(default)]
+    pub reality_context: EverQuestWorldSummaryRealityContext,
     pub compaction_recovery: EverQuestWorldSummaryRecovery,
     pub redaction: EverQuestWorldSummaryRedaction,
     pub evidence_boundary: EverQuestWorldSummaryEvidenceBoundary,
@@ -200,6 +202,43 @@ pub struct EverQuestWorldSummarySourceRef {
     pub next_offset: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct EverQuestWorldSummaryRealityContext {
+    pub profile_key: String,
+    pub status: String,
+    pub head_key: String,
+    pub head_present: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_baseline_epoch_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_baseline_seq: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_head_seq: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub newest_delta_seq: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub newest_delta_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub newest_delta_kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub newest_delta_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub newest_delta_at: Option<DateTime<Utc>>,
+    pub audit_status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest_audit_row_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest_audit_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest_audit_ran_at: Option<DateTime<Utc>>,
+    pub drift_severity: String,
+    pub drift_item_count: u32,
+    pub rebase_required: bool,
+    pub safe_next_probe: String,
+    pub source_refs: Vec<EverQuestWorldSummarySourceRef>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
