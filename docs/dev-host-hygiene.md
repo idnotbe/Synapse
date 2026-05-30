@@ -78,6 +78,12 @@ Authoritative local readbacks:
   environment, Machine environment, DPAPI fallback.
 * `C:\Users\hotra\.codex\config.toml` points `[mcp_servers.exa]` at
   `C:\Users\hotra\.codex\bin\exa-mcp-server.cmd` by absolute path.
+* Windows Claude Code, Claude Desktop, and Cursor MCP configs also point Exa at
+  `C:\Users\hotra\.codex\bin\exa-mcp-server.cmd`; they do not store the raw key.
+* WSL agents use `/home/cabdru/.local/bin/exa-mcp-server-global`, which invokes
+  the same Windows DPAPI-backed launcher through WSL interop. WSL Claude Code
+  and WSL Codex should point Exa at that wrapper and should not store
+  `EXA_API_KEY` in their active MCP config.
 * `C:\Users\hotra\.codex\bin` should be first in the User `Path`, and
   `%APPDATA%\npm` should be present for the global `exa-mcp-server` npm package.
 
