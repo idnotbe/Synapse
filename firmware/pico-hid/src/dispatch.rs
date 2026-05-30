@@ -18,6 +18,10 @@ pub use firmware_version::{
     SYNAPSE_PICO_HID_FW_MAJOR as FW_VERSION_MAJOR, SYNAPSE_PICO_HID_FW_MINOR as FW_VERSION_MINOR,
     SYNAPSE_PICO_HID_FW_PATCH as FW_VERSION_PATCH,
 };
+#[cfg(feature = "fake-fw-major-mismatch")]
+pub const IDENTIFY_FW_MAJOR: u8 = FW_VERSION_MAJOR.wrapping_add(1);
+#[cfg(not(feature = "fake-fw-major-mismatch"))]
+pub const IDENTIFY_FW_MAJOR: u8 = FW_VERSION_MAJOR;
 pub const CAPABILITY_MOUSE: u32 = 1 << 0;
 pub const CAPABILITY_KEYBOARD: u32 = 1 << 1;
 pub const CAPABILITY_GAMEPAD: u32 = 1 << 2;
@@ -45,7 +49,7 @@ pub struct IdentifyInfo {
 impl IdentifyInfo {
     pub const fn new(build_hash: [u8; BUILD_HASH_LEN], vid: u16, pid: u16) -> Self {
         Self {
-            fw_major: FW_VERSION_MAJOR,
+            fw_major: IDENTIFY_FW_MAJOR,
             fw_minor: FW_VERSION_MINOR,
             fw_patch: FW_VERSION_PATCH,
             build_hash,

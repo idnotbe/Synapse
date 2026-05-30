@@ -355,7 +355,7 @@ immediately (no queueing).
 
 ### 7.3 Firmware version handshake
 
-`IDENTIFY_RESP` is 20 bytes: `[fw_major u8][fw_minor u8][fw_patch u8][reserved u8][build_hash 8 bytes][vid u16le][pid u16le][capabilities u32le]`. Host compares `fw_major` against compiled-in `EXPECTED_FW_MAJOR`. Mismatch returns `HID_FIRMWARE_VERSION_MISMATCH` and aborts. Operator runs `synapse-mcp hid flash` to update.
+`IDENTIFY_RESP` is 20 bytes: `[fw_major u8][fw_minor u8][fw_patch u8][reserved u8][build_hash 8 bytes][vid u16le][pid u16le][capabilities u32le]`. Host compares `fw_major` against compiled-in `EXPECTED_FW_MAJOR`. Mismatch returns `HID_FIRMWARE_VERSION_MISMATCH` and aborts. Operator runs `synapse-mcp hid flash` to update. The real-device mismatch image is built with `.\scripts\release\firmware\build_pico_hid.ps1 -Features fake-fw-major-mismatch`, which emits `pico-hid-fake-fw-major-mismatch-<version>.uf2` and changes only the advertised identify major.
 
 ---
 
@@ -440,6 +440,7 @@ firmware range check still prevents overlarge mouse payloads.
 |---|---|
 | Protocol roundtrip | `cd firmware/pico-hid; cargo test --tests` (host-side parser tests with hand-crafted frames) |
 | Firmware loopback | Build with `.\scripts\release\firmware\build_pico_hid.ps1 -Features loopback`; firmware echoes every command back as `PONG`. Host driver sends 1000 commands, asserts all return. |
+| Firmware major mismatch | Build with `.\scripts\release\firmware\build_pico_hid.ps1 -Features fake-fw-major-mismatch`; host `IDENTIFY` must fail with `HID_FIRMWARE_VERSION_MISMATCH` after flashing the image to a real Pico. |
 | Watchdog | Connect, send commands, stop >1s, observe `RELEASE_ALL` via internal telemetry. |
 | Stress | Send 10,000 mouse-move-rel commands at full rate; assert no drops, all acked. |
 | Re-enumeration | Trigger `RESET_TO_BOOTLOADER`, observe device drops, mass storage appears, reflash, reconnect. |

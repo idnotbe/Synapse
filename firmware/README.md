@@ -42,6 +42,17 @@ That writes `scripts\release\firmware\pico-hid-loopback-<version>.uf2` so a
 physical loopback-PONG board can be flashed without overwriting the default HID
 firmware release artifact.
 
+Handshake mismatch acceptance firmware also uses the same helper:
+
+```powershell
+.\scripts\release\firmware\build_pico_hid.ps1 -Features fake-fw-major-mismatch
+```
+
+That writes
+`scripts\release\firmware\pico-hid-fake-fw-major-mismatch-<version>.uf2`.
+The image changes only the `IDENTIFY_RESP.fw_major` byte so the host can prove
+the `HID_FIRMWARE_VERSION_MISMATCH` path against a real Pico.
+
 For a local conversion while already inside `firmware\pico-hid`, the lower
 level command remains:
 

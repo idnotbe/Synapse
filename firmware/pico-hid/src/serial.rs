@@ -341,8 +341,7 @@ async fn serial_until_disconnect(
         loop {
             let consumed = match parse_host_frame(&rx[..rx_len]) {
                 ParseResult::Frame { frame, consumed } => {
-                    let reset_to_bootloader =
-                        frame.command == HostCommand::ResetToBootloader as u8;
+                    let reset_to_bootloader = frame.command == HostCommand::ResetToBootloader as u8;
                     let outcome = runtime.lock(|runtime| {
                         runtime
                             .borrow_mut()

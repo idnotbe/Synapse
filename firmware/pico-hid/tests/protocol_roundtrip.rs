@@ -1,6 +1,7 @@
 #[cfg(not(feature = "loopback"))]
 use pico_hid::dispatch::{
-    DispatchOutcome, DispatchState, IdentifyInfo, MAX_RESPONSE_PAYLOAD_LEN, dispatch_frame,
+    DispatchOutcome, DispatchState, IDENTIFY_FW_MAJOR, IdentifyInfo, MAX_RESPONSE_PAYLOAD_LEN,
+    dispatch_frame,
 };
 #[cfg(not(feature = "loopback"))]
 use pico_hid::protocol::DeviceCommand;
@@ -181,6 +182,7 @@ fn dispatcher_returns_query_responses_and_updates_telemetry() {
     let identify_outcome = dispatch_frame(&mut state, identify_frame, identify);
     assert_eq!(identify_outcome.command, DeviceCommand::IdentifyResp);
     assert_eq!(identify_outcome.payload_len, 20);
+    assert_eq!(identify_outcome.payload[0], IDENTIFY_FW_MAJOR);
     assert_eq!(&identify_outcome.payload[4..12], b"TESTHASH");
     assert_eq!(
         u16::from_le_bytes([identify_outcome.payload[12], identify_outcome.payload[13]]),

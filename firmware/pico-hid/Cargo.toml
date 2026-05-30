@@ -39,6 +39,7 @@ firmware-bin = [
     "dep:static_cell",
 ]
 loopback = []
+fake-fw-major-mismatch = []
 defmt = [
     "firmware-bin",
     "dep:defmt",
