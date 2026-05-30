@@ -69,13 +69,16 @@ Authoritative local readbacks:
 * `HKCU\Environment\EXA_API_KEY` is the primary user-scoped environment value.
 * `C:\Users\hotra\.codex\secrets\exa_api_key.dpapi` is the current-user DPAPI
   fallback.
-* `C:\Users\hotra\.codex\bin\exa-mcp-server.cmd` is the Codex MCP launcher. It
-  preserves stdin/stdout for the stdio MCP protocol, then starts the global npm
-  `exa-mcp-server.cmd`.
+* `C:\Users\hotra\.codex\bin\exa-mcp-server.cmd` is the shared Windows MCP
+  launcher. It clears any inherited process `EXA_API_KEY`, resolves the
+  configured host secret, preserves stdin/stdout for the stdio MCP protocol,
+  then starts the global npm `exa-mcp-server.cmd`. This prevents a future agent
+  with a poisoned process environment from shadowing the verified host-global
+  key.
 * `C:\Users\hotra\.codex\bin\exa-mcp-server.ps1` is the key resolver used by
-  the launcher when the process environment does not already contain
-  `EXA_API_KEY`. It resolves the key in this order: process environment, User
-  environment, Machine environment, DPAPI fallback.
+  the launcher. The shared CMD launcher invokes it after clearing inherited
+  process state, so the effective MCP resolution order is User environment,
+  Machine environment, then current-user DPAPI fallback.
 * `C:\Users\hotra\.codex\config.toml` points `[mcp_servers.exa]` at
   `C:\Users\hotra\.codex\bin\exa-mcp-server.cmd` by absolute path.
 * Windows Claude Code, Claude Desktop, and Cursor MCP configs also point Exa at
