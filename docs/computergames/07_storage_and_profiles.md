@@ -403,7 +403,11 @@ applies the requested row cap, and writes a readback report to
 `CF_KV/audit_retention/v1/report/<run_id>`. Strategic rows such as
 `CF_PROFILES/profile_quality/v1/<profile_id>` and
 `CF_KV/audit_export/v1/consent/<profile_id>` are policy-visible and preserved
-under disk pressure rather than compacted away by this path. Retention
+under disk pressure rather than compacted away by this path. M4 reality rows
+use the same classification: `CF_KV/reality/baseline/v1/`,
+`CF_KV/reality/head/v1/`, and `CF_KV/reality/audit/v1/` are strategic
+preserve rows, while `CF_KV/reality/delta/v1/` is the capped high-frequency
+delta journal. Retention
 backfills and report rows use the bounded storage-maintenance write path so
 Level3/Level4 pressure cannot silently drop the migration/report evidence;
 ordinary probe and ingestion writes remain pressure-gated.

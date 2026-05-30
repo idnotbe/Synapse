@@ -2724,6 +2724,11 @@ outcomes, applies row caps, and writes a durable report row to
 `CF_KV/audit_retention/v1/report/<run_id>`. Manual FSV reads `storage_inspect`
 before, calls this trigger, then reads `storage_inspect` and the report row
 afterward.
+The policy list also covers the M4 reality namespace: `reality_baselines`,
+`reality_heads`, and `reality_audits` are strategic preserve classes in
+`CF_KV`, and `reality_delta_journal` caps the high-frequency
+`CF_KV/reality/delta/v1/` rows without deleting the current baseline/head/audit
+evidence.
 Retention backfills and report rows use the storage-maintenance write path, so
 Level3/Level4 disk pressure cannot silently drop the migration/report evidence;
 ordinary probe and ingestion writes remain pressure-gated.

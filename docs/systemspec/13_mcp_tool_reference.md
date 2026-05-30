@@ -1392,7 +1392,7 @@ Recording cadence: observations sampled every `OBSERVATION_SAMPLE_INTERVAL = 250
 |---|---|---|---|---|
 | none | `{}` | no | `{}` | Always reports every operator-visible RocksDB column family. |
 
-**Returns:** `StorageInspectResponse { schema_version: u32, pressure_level, pressure_transition_codes, audit_retention_policies, cf_sizes, cf_row_counts, cf_row_samples }`. Each `cf_row_samples` value is a bounded newest-row list with `key_hex`, `value_len_bytes`, `value_utf8_prefix`, and `value_truncated`. `audit_retention_policies` lists the #463 audit classes and strategic prefixes that `storage_gc_once` uses in `AUDIT_RETENTION` mode.
+**Returns:** `StorageInspectResponse { schema_version: u32, pressure_level, pressure_transition_codes, audit_retention_policies, cf_sizes, cf_row_counts, cf_row_samples }`. Each `cf_row_samples` value is a bounded newest-row list with `key_hex`, `value_len_bytes`, `value_utf8_prefix`, and `value_truncated`. `audit_retention_policies` lists the #463 audit classes plus the M4 reality storage classes that `storage_gc_once` uses in `AUDIT_RETENTION` mode: strategic `reality_baselines`, `reality_heads`, and `reality_audits`, plus capped `reality_delta_journal`.
 **Errors:** `STORAGE_OPEN_FAILED`, `TOOL_PARAMS_INVALID` (unknown parameter).
 
 ## 28. `storage_put_probe_rows`
@@ -1417,7 +1417,7 @@ Recording cadence: observations sampled every `OBSERVATION_SAMPLE_INTERVAL = 250
 
 **Description:** "Run one synchronous storage GC pass and return per-CF before/after row counts"
 **Permissions:** `WRITE_STORAGE` (operator diagnostic)
-**Side effects:** evicts rows from a diagnostic CF whose row count exceeds its soft cap. With `cf_name="AUDIT_RETENTION"`, scans profile-linked audit rows, backfills missing profile linkage, dedupes repeated outcomes, deletes expired/capped rows, preserves unknown-schema and strategic rows, and writes `CF_KV/audit_retention/v1/report/<run_id>`. Audit-retention backfills and report rows use the bounded storage-maintenance write path so Level3/Level4 pressure cannot silently drop the migration/report evidence; ordinary probe or ingestion writes remain pressure-gated.
+**Side effects:** evicts rows from a diagnostic CF whose row count exceeds its soft cap. With `cf_name="AUDIT_RETENTION"`, scans profile-linked audit rows, backfills missing profile linkage, dedupes repeated outcomes, deletes expired/capped rows, preserves unknown-schema and strategic rows, and writes `CF_KV/audit_retention/v1/report/<run_id>`. The M4 reality namespace is policy-visible: baseline, head, and audit rows are strategic preserve classes, while `CF_KV/reality/delta/v1/` is capped as the high-frequency delta journal. Audit-retention backfills and report rows use the bounded storage-maintenance write path so Level3/Level4 pressure cannot silently drop the migration/report evidence; ordinary probe or ingestion writes remain pressure-gated.
 
 | Parameter | Type | Required | Default | Description |
 |---|---|---|---|---|

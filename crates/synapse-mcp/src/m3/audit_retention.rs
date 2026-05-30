@@ -648,7 +648,7 @@ struct PolicySpec {
 }
 
 fn policy_specs() -> Vec<PolicySpec> {
-    vec![
+    let mut specs = vec![
         PolicySpec {
             audit_class: "actions",
             cf_name: cf::CF_ACTION_LOG,
@@ -725,6 +725,53 @@ fn policy_specs() -> Vec<PolicySpec> {
             dedupe_key_fields: &[],
             pressure_preserve: true,
             strategic: true,
+        },
+    ];
+    specs.extend(reality_policy_specs());
+    specs
+}
+
+const fn reality_policy_specs() -> [PolicySpec; 4] {
+    [
+        PolicySpec {
+            audit_class: "reality_baselines",
+            cf_name: cf::CF_KV,
+            key_prefix: Some("reality/baseline/v1/"),
+            ttl_label: "none",
+            ttl_ns: None,
+            dedupe_key_fields: &[],
+            pressure_preserve: true,
+            strategic: true,
+        },
+        PolicySpec {
+            audit_class: "reality_heads",
+            cf_name: cf::CF_KV,
+            key_prefix: Some("reality/head/v1/"),
+            ttl_label: "none",
+            ttl_ns: None,
+            dedupe_key_fields: &[],
+            pressure_preserve: true,
+            strategic: true,
+        },
+        PolicySpec {
+            audit_class: "reality_audits",
+            cf_name: cf::CF_KV,
+            key_prefix: Some("reality/audit/v1/"),
+            ttl_label: "none",
+            ttl_ns: None,
+            dedupe_key_fields: &[],
+            pressure_preserve: true,
+            strategic: true,
+        },
+        PolicySpec {
+            audit_class: "reality_delta_journal",
+            cf_name: cf::CF_KV,
+            key_prefix: Some("reality/delta/v1/"),
+            ttl_label: "lru",
+            ttl_ns: None,
+            dedupe_key_fields: &[],
+            pressure_preserve: false,
+            strategic: false,
         },
     ]
 }
@@ -844,4 +891,42 @@ fn decode_error(error: synapse_storage::StorageError) -> ErrorData {
 
 fn invalid(message: impl Into<String>) -> ErrorData {
     mcp_error(error_codes::TOOL_PARAMS_INVALID, message.into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reality_rows_have_retention_classes() {
+        let policies = audit_retention_policies();
+        let by_class = |audit_class: &str| {
+            policies
+                .iter()
+                .find(|policy| policy.audit_class == audit_class)
+                .unwrap_or_else(|| panic!("missing policy {audit_class}"))
+        };
+
+        let baseline = by_class("reality_baselines");
+        assert_eq!(baseline.cf_name, cf::CF_KV);
+        assert_eq!(baseline.key_prefix.as_deref(), Some("reality/baseline/v1/"));
+        assert!(baseline.strategic);
+        assert!(baseline.pressure_preserve);
+
+        let head = by_class("reality_heads");
+        assert_eq!(head.key_prefix.as_deref(), Some("reality/head/v1/"));
+        assert!(head.strategic);
+        assert!(head.pressure_preserve);
+
+        let audit = by_class("reality_audits");
+        assert_eq!(audit.key_prefix.as_deref(), Some("reality/audit/v1/"));
+        assert!(audit.strategic);
+        assert!(audit.pressure_preserve);
+
+        let delta = by_class("reality_delta_journal");
+        assert_eq!(delta.cf_name, cf::CF_KV);
+        assert_eq!(delta.key_prefix.as_deref(), Some("reality/delta/v1/"));
+        assert!(!delta.strategic);
+        assert!(!delta.pressure_preserve);
+    }
 }

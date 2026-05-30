@@ -483,6 +483,13 @@ Physical storage target:
 - `CF_KV/reality/audit/v1/<profile>/<audit_id>`
 - `CF_KV/reality/head/v1/<profile>` for the current epoch/seq/hash pointer
 
+`storage_gc_once` with `cf_name="AUDIT_RETENTION"` treats
+`reality/baseline/v1/`, `reality/head/v1/`, and `reality/audit/v1/` as
+strategic preserve classes. `reality/delta/v1/` is the capped
+high-frequency journal; retention overflow must delete only excess delta rows
+and must leave the baseline, head pointer, and audit rows available for drift
+repair and manual FSV readback.
+
 The head row is a compact private MCP/storage row (`RealityHeadRow` in
 `server/reality.rs`) that contains the current epoch, baseline row key, head
 sequence, compact state hash, source refs, and the redacted compact state used
