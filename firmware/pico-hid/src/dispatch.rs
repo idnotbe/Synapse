@@ -12,7 +12,7 @@ mod firmware_version;
 #[cfg(feature = "loopback")]
 pub const MAX_RESPONSE_PAYLOAD_LEN: usize = crate::protocol::MAX_PAYLOAD_LEN;
 #[cfg(not(feature = "loopback"))]
-pub const MAX_RESPONSE_PAYLOAD_LEN: usize = 32;
+pub const MAX_RESPONSE_PAYLOAD_LEN: usize = 64;
 pub use firmware_version::{
     SYNAPSE_PICO_HID_BUILD_HASH_LEN as BUILD_HASH_LEN,
     SYNAPSE_PICO_HID_FW_MAJOR as FW_VERSION_MAJOR, SYNAPSE_PICO_HID_FW_MINOR as FW_VERSION_MINOR,
@@ -119,6 +119,10 @@ pub struct Telemetry {
     pub commands_executed: u32,
     pub watchdog_fires: u32,
     pub crc_errors: u32,
+    pub timed_commands: u32,
+    pub previous_command_delta_us: u32,
+    pub last_command_delta_us: u32,
+    pub last_timed_command_uptime_us: u32,
 }
 
 impl Telemetry {
@@ -131,6 +135,10 @@ impl Telemetry {
             commands_executed: 0,
             watchdog_fires: 0,
             crc_errors: 0,
+            timed_commands: 0,
+            previous_command_delta_us: 0,
+            last_command_delta_us: 0,
+            last_timed_command_uptime_us: 0,
         }
     }
 
@@ -143,7 +151,11 @@ impl Telemetry {
         out[16..20].copy_from_slice(&self.commands_executed.to_le_bytes());
         out[20..24].copy_from_slice(&self.watchdog_fires.to_le_bytes());
         out[24..28].copy_from_slice(&self.crc_errors.to_le_bytes());
-        28
+        out[28..32].copy_from_slice(&self.timed_commands.to_le_bytes());
+        out[32..36].copy_from_slice(&self.previous_command_delta_us.to_le_bytes());
+        out[36..40].copy_from_slice(&self.last_command_delta_us.to_le_bytes());
+        out[40..44].copy_from_slice(&self.last_timed_command_uptime_us.to_le_bytes());
+        44
     }
 
     pub fn record_frame_received(&mut self) {
@@ -165,6 +177,16 @@ impl Telemetry {
 
     pub fn record_command_executed(&mut self) {
         self.commands_executed = self.commands_executed.wrapping_add(1);
+    }
+
+    pub fn record_timed_command(&mut self, now_us: u32) {
+        if self.timed_commands > 0 {
+            let delta_us = now_us.wrapping_sub(self.last_timed_command_uptime_us);
+            self.previous_command_delta_us = self.last_command_delta_us;
+            self.last_command_delta_us = delta_us;
+        }
+        self.last_timed_command_uptime_us = now_us;
+        self.timed_commands = self.timed_commands.wrapping_add(1);
     }
 
     pub fn record_watchdog_fire(&mut self) {
@@ -237,6 +259,26 @@ pub fn dispatch_frame(
     frame: Frame<'_>,
     identify: IdentifyInfo,
 ) -> DispatchOutcome {
+    dispatch_frame_inner(state, frame, identify, None)
+}
+
+#[cfg(not(feature = "loopback"))]
+pub fn dispatch_frame_at_us(
+    state: &mut DispatchState,
+    frame: Frame<'_>,
+    identify: IdentifyInfo,
+    now_us: u32,
+) -> DispatchOutcome {
+    dispatch_frame_inner(state, frame, identify, Some(now_us))
+}
+
+#[cfg(not(feature = "loopback"))]
+fn dispatch_frame_inner(
+    state: &mut DispatchState,
+    frame: Frame<'_>,
+    identify: IdentifyInfo,
+    now_us: Option<u32>,
+) -> DispatchOutcome {
     let command = match HostCommand::from_u8(frame.command) {
         Some(command) => command,
         None => return DispatchOutcome::nak(frame.seq, NakReason::UnknownCommand),
@@ -267,9 +309,28 @@ pub fn dispatch_frame(
         state.telemetry.record_link_error();
     } else {
         state.telemetry.record_command_executed();
+        if let Some(now_us) = now_us.filter(|_| is_timed_action_command(command)) {
+            state.telemetry.record_timed_command(now_us);
+        }
     }
 
     outcome
+}
+
+#[cfg(not(feature = "loopback"))]
+const fn is_timed_action_command(command: HostCommand) -> bool {
+    matches!(
+        command,
+        HostCommand::MouseMoveRel
+            | HostCommand::MouseButton
+            | HostCommand::MouseWheel
+            | HostCommand::KeyDown
+            | HostCommand::KeyUp
+            | HostCommand::KeyMods
+            | HostCommand::PadReport
+            | HostCommand::ReleaseAll
+            | HostCommand::WatchdogKick
+    )
 }
 
 #[cfg(all(not(feature = "loopback"), feature = "force-first-nak"))]

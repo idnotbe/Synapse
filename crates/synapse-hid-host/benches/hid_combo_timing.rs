@@ -65,15 +65,15 @@ fn bench_single_combo(criterion: &mut Criterion, mut gateway: HidGateway) {
 
 fn measure_combo_timing(gateway: &mut HidGateway) -> Result<BenchReport, Box<dyn Error>> {
     let before = gateway.get_telemetry()?;
+    let before_timed_commands = require_timed_commands(before)?;
     let mut max_deviation_ns = 0_u128;
     let mut latest_intervals = [0_u128; STEP_COUNT - 1];
+    let mut after = before;
 
     for _ in 0..RUN_COUNT {
-        let send_times = send_scheduled_combo(gateway)?;
-        let intervals = [
-            send_times[1].duration_since(send_times[0]).as_nanos(),
-            send_times[2].duration_since(send_times[1]).as_nanos(),
-        ];
+        send_scheduled_combo(gateway)?;
+        after = gateway.get_telemetry()?;
+        let intervals = firmware_intervals_ns(after)?;
         latest_intervals = intervals;
         for interval in intervals {
             max_deviation_ns = max_deviation_ns.max(deviation_ns(
@@ -83,18 +83,21 @@ fn measure_combo_timing(gateway: &mut HidGateway) -> Result<BenchReport, Box<dyn
         }
     }
 
-    let after = gateway.get_telemetry()?;
-    let command_delta = telemetry_command_delta_excluding_after_read(before, after);
+    let timed_command_delta = require_timed_commands(after)?.saturating_sub(before_timed_commands);
+    let command_delta = after
+        .commands_executed
+        .saturating_sub(before.commands_executed);
     let dropped_delta = after.frames_dropped.saturating_sub(before.frames_dropped);
     let crc_delta = after.crc_errors.saturating_sub(before.crc_errors);
     let pass = max_deviation_ns <= TARGET_DEVIATION_NS
-        && command_delta == EXPECTED_COMMANDS
+        && timed_command_delta == EXPECTED_COMMANDS
         && dropped_delta == 0
         && crc_delta == 0;
 
     Ok(BenchReport {
         before,
         after,
+        timed_command_delta,
         command_delta,
         expected_commands: EXPECTED_COMMANDS,
         dropped_delta,
@@ -105,17 +108,15 @@ fn measure_combo_timing(gateway: &mut HidGateway) -> Result<BenchReport, Box<dyn
     })
 }
 
-fn send_scheduled_combo(gateway: &mut HidGateway) -> Result<[Instant; STEP_COUNT], Box<dyn Error>> {
+fn send_scheduled_combo(gateway: &mut HidGateway) -> Result<(), Box<dyn Error>> {
     let start = Instant::now();
-    let mut send_times = [start; STEP_COUNT];
     for (index, payload) in STEP_PAYLOADS.iter().enumerate() {
         let step_index = u64::try_from(index).map_err(|_| "step index overflow")?;
         let deadline = start + Duration::from_millis(STEP_INTERVAL_MS * step_index);
         wait_until(deadline);
-        send_times[index] = Instant::now();
         gateway.send_command(HOST_COMMAND_MOUSE_MOVE_REL, payload)?;
     }
-    Ok(send_times)
+    Ok(())
 }
 
 fn wait_until(deadline: Instant) {
@@ -136,6 +137,7 @@ fn wait_until(deadline: Instant) {
 struct BenchReport {
     before: HidTelemetrySnapshot,
     after: HidTelemetrySnapshot,
+    timed_command_delta: u32,
     command_delta: u32,
     expected_commands: u32,
     dropped_delta: u32,
@@ -148,10 +150,11 @@ struct BenchReport {
 impl BenchReport {
     fn print(&self) {
         println!(
-            "readback={BENCH_NAME} before={:?} after={:?} expected_commands={} command_delta={} dropped_delta={} crc_delta={} latest_intervals_ns={:?} target_deviation_ns={} max_deviation_ns={} result_value={}",
+            "readback={BENCH_NAME} before={:?} after={:?} expected_timed_commands={} timed_command_delta={} command_delta={} dropped_delta={} crc_delta={} latest_intervals_ns={:?} target_deviation_ns={} max_deviation_ns={} result_value={}",
             self.before,
             self.after,
             self.expected_commands,
+            self.timed_command_delta,
             self.command_delta,
             self.dropped_delta,
             self.crc_delta,
@@ -183,14 +186,22 @@ fn connect_gateway() -> Result<HidGateway, Box<dyn Error>> {
     }
 }
 
-const fn telemetry_command_delta_excluding_after_read(
-    before: HidTelemetrySnapshot,
-    after: HidTelemetrySnapshot,
-) -> u32 {
-    after
-        .commands_executed
-        .saturating_sub(before.commands_executed)
-        .saturating_sub(1)
+fn firmware_intervals_ns(
+    snapshot: HidTelemetrySnapshot,
+) -> Result<[u128; STEP_COUNT - 1], Box<dyn Error>> {
+    let intervals = snapshot
+        .command_timing_intervals_us()
+        .ok_or("firmware telemetry is missing command timing interval fields")?;
+    Ok([
+        u128::from(intervals[0]) * 1_000,
+        u128::from(intervals[1]) * 1_000,
+    ])
+}
+
+fn require_timed_commands(snapshot: HidTelemetrySnapshot) -> Result<u32, Box<dyn Error>> {
+    snapshot
+        .timed_commands
+        .ok_or_else(|| "firmware telemetry is missing timed command counter".into())
 }
 
 const fn deviation_ns(actual: u128, expected: u128) -> u128 {

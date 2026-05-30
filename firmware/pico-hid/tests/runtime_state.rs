@@ -85,6 +85,67 @@ fn runtime_crc_window_drives_error_led_priority() {
 }
 
 #[test]
+fn runtime_records_action_command_timing_without_overwriting_it_on_telemetry_reads() {
+    let identify = IdentifyInfo::new(*b"TESTHASH", 0x2E8A, 0x1F50);
+    let mut runtime = RuntimeState::new();
+
+    assert_eq!(
+        runtime
+            .dispatch_frame_at_us(
+                1_000,
+                1_000_000,
+                frame(1, HostCommand::MouseMoveRel, &[1, 0, 0, 0]),
+                identify,
+            )
+            .command,
+        DeviceCommand::Ack
+    );
+    assert_eq!(
+        runtime
+            .dispatch_frame_at_us(
+                1_100,
+                1_100_000,
+                frame(2, HostCommand::MouseMoveRel, &[1, 0, 0, 0]),
+                identify,
+            )
+            .command,
+        DeviceCommand::Ack
+    );
+    assert_eq!(
+        runtime
+            .dispatch_frame_at_us(
+                1_200,
+                1_200_000,
+                frame(3, HostCommand::MouseMoveRel, &[1, 0, 0, 0]),
+                identify,
+            )
+            .command,
+        DeviceCommand::Ack
+    );
+
+    let telemetry = runtime.dispatch_frame_at_us(
+        1_200,
+        1_200_500,
+        frame(4, HostCommand::GetTelemetry, &[]),
+        identify,
+    );
+
+    assert_eq!(telemetry.command, DeviceCommand::TelemetryResp);
+    assert_eq!(payload_u32(&telemetry, 28), 3);
+    assert_eq!(payload_u32(&telemetry, 32), 100_000);
+    assert_eq!(payload_u32(&telemetry, 36), 100_000);
+    assert_eq!(payload_u32(&telemetry, 40), 1_200_000);
+    assert_eq!(runtime.dispatch_state().telemetry.timed_commands, 3);
+    assert_eq!(
+        runtime
+            .dispatch_state()
+            .telemetry
+            .last_timed_command_uptime_us,
+        1_200_000
+    );
+}
+
+#[test]
 fn runtime_invalid_payload_does_not_refresh_watchdog_or_reports() {
     let identify = IdentifyInfo::new(*b"TESTHASH", 0x2E8A, 0x1F50);
     let mut runtime = RuntimeState::new();
@@ -104,4 +165,13 @@ fn frame<'a>(seq: u32, command: HostCommand, payload: &'a [u8]) -> Frame<'a> {
         command: command as u8,
         payload,
     }
+}
+
+fn payload_u32(outcome: &pico_hid::dispatch::DispatchOutcome, start: usize) -> u32 {
+    u32::from_le_bytes([
+        outcome.payload[start],
+        outcome.payload[start + 1],
+        outcome.payload[start + 2],
+        outcome.payload[start + 3],
+    ])
 }

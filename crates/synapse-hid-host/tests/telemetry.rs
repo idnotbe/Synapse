@@ -3,13 +3,13 @@ use std::io::{self, ErrorKind, Read, Write};
 use synapse_hid_host::{
     DEVICE_COMMAND_TELEMETRY_RESP, HOST_COMMAND_MOUSE_MOVE_REL, HidError, HidPipeline,
     HidTelemetrySnapshot, HostCommandRequest, MAX_FRAME_LEN, NAK_REASON_PAYLOAD_INVALID,
-    TELEMETRY_PAYLOAD_LEN, encode_device_frame,
+    TELEMETRY_BASE_PAYLOAD_LEN, TELEMETRY_PAYLOAD_LEN, encode_device_frame,
 };
 use synapse_test_utils::hid_loopback::MockPicoFirmware;
 
 #[test]
 fn telemetry_snapshot_parses_28_byte_payload_fields() {
-    let mut payload = [0u8; TELEMETRY_PAYLOAD_LEN];
+    let mut payload = [0u8; TELEMETRY_BASE_PAYLOAD_LEN];
     for (index, value) in [1u32, 2, 3, 4, 5, 6, 7].iter().copied().enumerate() {
         payload[index * 4..index * 4 + 4].copy_from_slice(&value.to_le_bytes());
     }
@@ -27,8 +27,37 @@ fn telemetry_snapshot_parses_28_byte_payload_fields() {
             commands_executed: 5,
             watchdog_fires: 6,
             crc_errors: 7,
+            timed_commands: None,
+            previous_command_delta_us: None,
+            last_command_delta_us: None,
+            last_timed_command_uptime_us: None,
         }
     );
+    assert!(
+        HidTelemetrySnapshot::from_payload(&payload[..TELEMETRY_BASE_PAYLOAD_LEN - 1]).is_none()
+    );
+}
+
+#[test]
+fn telemetry_snapshot_parses_command_timing_extension() {
+    let mut payload = [0u8; TELEMETRY_PAYLOAD_LEN];
+    for (index, value) in [1u32, 2, 3, 4, 5, 6, 7, 8, 100_000, 100_250, 500_250]
+        .iter()
+        .copied()
+        .enumerate()
+    {
+        payload[index * 4..index * 4 + 4].copy_from_slice(&value.to_le_bytes());
+    }
+
+    let snapshot = HidTelemetrySnapshot::from_payload(&payload)
+        .unwrap_or_else(|| panic!("known-valid telemetry payload should parse"));
+
+    assert_eq!(snapshot.timed_commands, Some(8));
+    assert_eq!(
+        snapshot.command_timing_intervals_us(),
+        Some([100_000, 100_250])
+    );
+    assert_eq!(snapshot.last_timed_command_uptime_us, Some(500_250));
     assert!(HidTelemetrySnapshot::from_payload(&payload[..TELEMETRY_PAYLOAD_LEN - 1]).is_none());
 }
 
@@ -57,6 +86,7 @@ fn pipeline_reads_telemetry_after_ten_thousand_commands() {
     assert_eq!(before.commands_executed, 10_000);
     assert_eq!(snapshot.frames_received, 10_001);
     assert_eq!(snapshot.commands_executed, 10_000);
+    assert_eq!(snapshot.timed_commands, Some(10_000));
     assert_eq!(snapshot.link_errors, 0);
     assert_eq!(snapshot.crc_errors, 0);
     assert_eq!(after.frames_received, 10_001);

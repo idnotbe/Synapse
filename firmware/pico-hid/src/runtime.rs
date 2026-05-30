@@ -1,4 +1,8 @@
-use crate::dispatch::{DispatchOutcome, DispatchState, IdentifyInfo, dispatch_frame};
+#[cfg(feature = "loopback")]
+use crate::dispatch::dispatch_frame;
+#[cfg(not(feature = "loopback"))]
+use crate::dispatch::dispatch_frame_at_us;
+use crate::dispatch::{DispatchOutcome, DispatchState, IdentifyInfo};
 use crate::led::{LedInputs, WATCHDOG_WINDOW_MS};
 use crate::protocol::{DeviceCommand, Frame, NakReason};
 use crate::reports::{BootKeyboardReport, BootMouseReport, GamepadReport};
@@ -37,8 +41,23 @@ impl RuntimeState {
         frame: Frame<'_>,
         identify: IdentifyInfo,
     ) -> DispatchOutcome {
+        self.dispatch_frame_at_us(now_ms, now_ms.wrapping_mul(1000), frame, identify)
+    }
+
+    pub fn dispatch_frame_at_us(
+        &mut self,
+        now_ms: u32,
+        now_us: u32,
+        frame: Frame<'_>,
+        identify: IdentifyInfo,
+    ) -> DispatchOutcome {
         self.dispatch.telemetry.uptime_ms = now_ms;
+        #[cfg(feature = "loopback")]
+        let _ = now_us;
+        #[cfg(feature = "loopback")]
         let outcome = dispatch_frame(&mut self.dispatch, frame, identify);
+        #[cfg(not(feature = "loopback"))]
+        let outcome = dispatch_frame_at_us(&mut self.dispatch, frame, identify, now_us);
         if outcome.command != DeviceCommand::Nak {
             self.watchdog
                 .record_valid_command(now_ms, self.dispatch.watchdog_timeout_ms);

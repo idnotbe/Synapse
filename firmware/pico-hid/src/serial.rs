@@ -342,10 +342,11 @@ async fn serial_until_disconnect(
             let consumed = match parse_host_frame(&rx[..rx_len]) {
                 ParseResult::Frame { frame, consumed } => {
                     let reset_to_bootloader = frame.command == HostCommand::ResetToBootloader as u8;
+                    let (now_ms, now_us) = now_ms_us();
                     let outcome = runtime.lock(|runtime| {
                         runtime
                             .borrow_mut()
-                            .dispatch_frame_at(now_ms(), frame, identify)
+                            .dispatch_frame_at_us(now_ms, now_us, frame, identify)
                     });
                     let tx_len = encode_device_frame(
                         frame.seq,
@@ -428,6 +429,12 @@ async fn serial_until_disconnect(
 
 fn now_ms() -> u32 {
     Instant::now().as_millis() as u32
+}
+
+#[cfg(not(feature = "loopback"))]
+fn now_ms_us() -> (u32, u32) {
+    let now = Instant::now();
+    (now.as_millis() as u32, now.as_micros() as u32)
 }
 
 async fn write_serial_bytes(

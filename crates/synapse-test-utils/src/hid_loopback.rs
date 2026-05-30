@@ -2,7 +2,7 @@ use std::collections::VecDeque;
 use std::io::{self, ErrorKind, Read, Write};
 use std::time::Duration;
 
-use pico_hid::dispatch::{DispatchState, IdentifyInfo, Telemetry, dispatch_frame};
+use pico_hid::dispatch::{DispatchState, IdentifyInfo, Telemetry, dispatch_frame_at_us};
 use pico_hid::protocol::{
     DeviceCommand, DropReason, MAX_FRAME_LEN, NakReason, ParseResult, encode_device_frame,
     encode_nak, parse_host_frame,
@@ -27,6 +27,10 @@ pub struct LoopbackTelemetry {
     pub commands_executed: u32,
     pub watchdog_fires: u32,
     pub crc_errors: u32,
+    pub timed_commands: u32,
+    pub previous_command_delta_us: u32,
+    pub last_command_delta_us: u32,
+    pub last_timed_command_uptime_us: u32,
 }
 
 impl From<Telemetry> for LoopbackTelemetry {
@@ -39,6 +43,10 @@ impl From<Telemetry> for LoopbackTelemetry {
             commands_executed: value.commands_executed,
             watchdog_fires: value.watchdog_fires,
             crc_errors: value.crc_errors,
+            timed_commands: value.timed_commands,
+            previous_command_delta_us: value.previous_command_delta_us,
+            last_command_delta_us: value.last_command_delta_us,
+            last_timed_command_uptime_us: value.last_timed_command_uptime_us,
         }
     }
 }
@@ -76,6 +84,7 @@ pub struct MockPicoFirmware {
     state: DispatchState,
     watchdog: Watchdog,
     now_ms: u32,
+    now_us: u32,
     rx: Vec<u8>,
     tx: VecDeque<u8>,
     host_bytes_written: usize,
@@ -109,6 +118,7 @@ impl MockPicoFirmware {
             state: DispatchState::new(),
             watchdog: Watchdog::new(),
             now_ms: 0,
+            now_us: 0,
             rx: Vec::new(),
             tx: VecDeque::new(),
             host_bytes_written: 0,
@@ -147,6 +157,11 @@ impl MockPicoFirmware {
     #[must_use]
     pub const fn now_ms(&self) -> u32 {
         self.now_ms
+    }
+
+    #[must_use]
+    pub const fn now_us(&self) -> u32 {
+        self.now_us
     }
 
     #[must_use]
@@ -190,6 +205,7 @@ impl MockPicoFirmware {
 
     pub fn advance_time(&mut self, elapsed_ms: u32) -> WatchdogPoll {
         self.now_ms = self.now_ms.wrapping_add(elapsed_ms);
+        self.now_us = self.now_us.wrapping_add(elapsed_ms.wrapping_mul(1000));
         self.state.telemetry.uptime_ms = self.now_ms;
         self.watchdog.poll(self.now_ms, &mut self.state)
     }
@@ -198,7 +214,11 @@ impl MockPicoFirmware {
         loop {
             let consumed = match parse_host_frame(&self.rx) {
                 ParseResult::Frame { frame, consumed } => {
-                    let outcome = dispatch_frame(&mut self.state, frame, self.identify);
+                    self.now_us = self.now_us.wrapping_add(1000);
+                    self.now_ms = self.now_us / 1000;
+                    self.state.telemetry.uptime_ms = self.now_ms;
+                    let outcome =
+                        dispatch_frame_at_us(&mut self.state, frame, self.identify, self.now_us);
                     let mut response = [0u8; MAX_FRAME_LEN];
                     let len = encode_device_frame(
                         frame.seq,

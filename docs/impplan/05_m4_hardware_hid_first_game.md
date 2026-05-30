@@ -303,8 +303,10 @@ Serial prefix: SYN-PICO-HID
 - Reconnect loop every 500 ms on serial disconnect.
 - Immediate fail-fast `ACTION_HID_PORT_DISCONNECTED` while disconnected.
 - `GET_TELEMETRY` host readback via `HidGateway::get_telemetry` /
-  `HidReconnectGateway::get_telemetry`, parsing the 28-byte firmware
-  `TELEMETRY_RESP` payload.
+  `HidReconnectGateway::get_telemetry`, parsing the 28-byte base firmware
+  `TELEMETRY_RESP` payload plus the current 44-byte timing extension
+  (`timed_commands`, `previous_command_delta_us`, `last_command_delta_us`,
+  `last_timed_command_uptime_us`).
 - `hid identify` and `hid flash` support through `synapse-mcp` CLI surfaces.
 
 ### 3.3 Action backend deliverable
@@ -727,7 +729,7 @@ code exists; it is done only when the issue is closed with manual FSV evidence.
 | Issue | State | Work item |
 |---|---|---|
 | #430 | blocked | H-01 `action_hardware_press` p99 <= 5 ms; waits on physical RP2040 attach per #487. |
-| #431 | blocked | H-02 `hid_combo_timing` step interval within 0.5 ms; waits on physical RP2040 attach per #487. |
+| #431 | blocked | H-02 `hid_combo_timing` step interval within 0.5 ms from firmware timing telemetry; waits on physical RP2040 attach per #487. |
 | #432 | blocked | H-03 `hid_high_volume`, 10k mouse moves no drops; waits on physical RP2040 attach per #487. |
 | #433 | closed | H-04 HID protocol parser fuzz target as supporting evidence. |
 | #434 | blocked | H-05 one-hour hardware reconnect soak, unplug/replug x100; waits on physical RP2040 attach per #487. |
@@ -825,12 +827,12 @@ reading the listed physical SoT.
 | H4 | Call real MCP `act_press` with `backend="hardware"` and key `w` while a text or hook target is focused. | External low-level keyboard hook or target text state, `CF_ACTION_LOG`, held-state snapshot, and firmware telemetry. | A physical HID KeyDown/KeyUp pair is observed, the target receives exactly one `w`, and the action audit row records hardware backend success. |
 | H5 | Call real MCP `act_aim` with `backend="hardware"`, style `snap`, and a known screen coordinate. | `GetCursorPos` before/after, action audit row, and firmware telemetry command counters. | The cursor lands within +/-1 px of the target and the audit row records the hardware relative-move path. |
 | H6 | Hold a key/button through hardware, then call real MCP `release_all`. | External HID observer or target state, action held-state snapshot, and firmware neutral report telemetry. | All keyboard, mouse, and gamepad reports return to neutral with no stuck inputs. |
-| H7 | Call real MCP `act_combo` for three hardware-backed steps at `0`, `50`, and `100` ms. | Reflex/audit rows, `CF_ACTION_LOG`, external HID timing observer, and target UI/game state. | The one-shot combo fires in order, uses the requested backend for each step, and measured step intervals match the schedule within the M4 tolerance. |
+| H7 | Call real MCP `act_combo` for three hardware-backed steps at `0`, `50`, and `100` ms. | Reflex/audit rows, `CF_ACTION_LOG`, firmware timing telemetry, external HID timing observer, and target UI/game state. | The one-shot combo fires in order, uses the requested backend for each step, and measured step intervals match the schedule within the M4 tolerance. |
 | H8 | Call real MCP `act_run_shell` with an allowlisted `cmd.exe /c echo synapse-m4-shell-ok`. | MCP response, child process exit code, captured stdout/stderr bytes, process table, and action/safety log row. | Exit code 0; stdout is exactly the synthetic marker; stderr is empty; no truncation or timeout is reported. |
 | H9 | Call real MCP `act_launch` with an allowlisted Notepad launch and a Notepad title wait regex. | Process table, window enumeration/UIA tree, MCP response, and action/safety log row. | A Notepad PID/HWND is returned, the title regex matches an actual window, and the launched process exists independently of the return value. |
 | H10 | Bring Minecraft Java local single-player world to foreground and call real MCP `observe`. | Foreground process/window state, profile runtime state, observation JSON, screenshot/HUD readback, and game UI. | `minecraft.java` resolves, HUD fields populate, and the observation is tied to a local supported-use game window. |
 | H11 | In Minecraft Java single-player, call a profile-allowed action through the real action surface. | Profile policy decision log, `CF_ACTION_LOG`, foreground/window state, and visible game-state change. | The supported-use gate allows the action, the audit row records `use_scope=single_player`, and the game state changes as expected. |
-| H12 | After several hardware actions, call `GET_TELEMETRY` through the host gateway path. | Firmware telemetry before/after, `CF_ACTION_LOG`, and serial link state. | `commands_executed` increases by the known command count, error counters stay unchanged for clean traffic, and the serial link remains usable. |
+| H12 | After several hardware actions, call `GET_TELEMETRY` through the host gateway path. | Firmware telemetry before/after, `CF_ACTION_LOG`, and serial link state. | `commands_executed` and `timed_commands` increase by the known command count, action-command deltas are populated for timed commands, error counters stay unchanged for clean traffic, and the serial link remains usable. |
 
 ### 8.2 Edge cases
 
@@ -887,7 +889,7 @@ M4 blocks M5 until all gates are satisfied and issue evidence is posted:
 6. Hardware watchdog releases all held inputs within 1 second of host silence.
 7. Reconnect loop survives unplug/replug and resumes within 1 second.
 8. `action_hardware_press` p99 <= 5 ms on the configured host.
-9. `hid_combo_timing` step interval is within 0.5 ms of scheduled.
+9. `hid_combo_timing` step interval is within 0.5 ms of scheduled using firmware timing telemetry.
 10. `hid_high_volume` sends 10k mouse moves with no drops.
 11. All M4 error codes are reachable through real trigger paths.
 12. Hardware HID is refused without explicit enablement and works with it.

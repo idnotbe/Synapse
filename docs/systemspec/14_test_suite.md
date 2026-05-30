@@ -132,7 +132,7 @@ Source files covered:
 | `synapse-reflex` | `reflex_combo_step_interval.rs` | Combo step accuracy |
 | `synapse-reflex` | `reflex_tick_jitter_idle.rs` | Scheduler tick jitter idle p99 ≤ 200 µs (`REFERENCE_REFLEX_TICK_JITTER_IDLE_P99_US`) |
 | `synapse-reflex` | `reflex_tick_jitter_under_load.rs` | Scheduler tick jitter under load |
-| `synapse-hid-host` | `hid_combo_timing.rs` | 3-step HID combo scheduled interval deviation ≤ 0.5 ms |
+| `synapse-hid-host` | `hid_combo_timing.rs` | 3-step HID combo scheduled interval deviation ≤ 0.5 ms using firmware timing telemetry |
 | `synapse-hid-host` | `hid_high_volume.rs` | 10k relative mouse moves ≤ 15 s, zero drops/CRC errors, cursor X +10k |
 | `synapse-hid-host` | `hid_protocol_encode_1mb.rs` | HID protocol encode throughput |
 | `synapse-storage` | `batch_throughput.rs` | put_batch / flush rates |

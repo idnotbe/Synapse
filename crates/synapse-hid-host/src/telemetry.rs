@@ -10,7 +10,8 @@ use crate::protocol::{
     MAX_FRAME_LEN, ParseError, encode_host_frame, parse_device_frame_prefix,
 };
 
-pub const TELEMETRY_PAYLOAD_LEN: usize = 28;
+pub const TELEMETRY_BASE_PAYLOAD_LEN: usize = 28;
+pub const TELEMETRY_PAYLOAD_LEN: usize = 44;
 const READ_CHUNK_LEN: usize = 64;
 const MAX_RX_BUFFER_LEN: usize = MAX_FRAME_LEN * 2;
 
@@ -23,12 +24,16 @@ pub struct HidTelemetrySnapshot {
     pub commands_executed: u32,
     pub watchdog_fires: u32,
     pub crc_errors: u32,
+    pub timed_commands: Option<u32>,
+    pub previous_command_delta_us: Option<u32>,
+    pub last_command_delta_us: Option<u32>,
+    pub last_timed_command_uptime_us: Option<u32>,
 }
 
 impl HidTelemetrySnapshot {
     #[must_use]
     pub fn from_payload(payload: &[u8]) -> Option<Self> {
-        if payload.len() != TELEMETRY_PAYLOAD_LEN {
+        if payload.len() != TELEMETRY_BASE_PAYLOAD_LEN && payload.len() < TELEMETRY_PAYLOAD_LEN {
             return None;
         }
 
@@ -40,7 +45,19 @@ impl HidTelemetrySnapshot {
             commands_executed: u32_at(payload, 16),
             watchdog_fires: u32_at(payload, 20),
             crc_errors: u32_at(payload, 24),
+            timed_commands: optional_u32_at(payload, 28),
+            previous_command_delta_us: optional_u32_at(payload, 32),
+            last_command_delta_us: optional_u32_at(payload, 36),
+            last_timed_command_uptime_us: optional_u32_at(payload, 40),
         })
+    }
+
+    #[must_use]
+    pub const fn command_timing_intervals_us(&self) -> Option<[u32; 2]> {
+        match (self.previous_command_delta_us, self.last_command_delta_us) {
+            (Some(previous), Some(last)) => Some([previous, last]),
+            _ => None,
+        }
     }
 }
 
@@ -51,6 +68,13 @@ fn u32_at(payload: &[u8], offset: usize) -> u32 {
         payload[offset + 2],
         payload[offset + 3],
     ])
+}
+
+fn optional_u32_at(payload: &[u8], offset: usize) -> Option<u32> {
+    if payload.len() < offset + 4 {
+        return None;
+    }
+    Some(u32_at(payload, offset))
 }
 
 pub(crate) fn request_telemetry<T>(

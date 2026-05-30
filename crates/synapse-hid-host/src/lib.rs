@@ -41,7 +41,7 @@ pub use reconnect::{
     HidReconnectGateway, HidReconnectTarget, RECONNECT_INTERVAL_MS, ReconnectConnector,
     ReconnectGateway, ReconnectLink, ReconnectSnapshot, ReconnectStateKind,
 };
-pub use telemetry::{HidTelemetrySnapshot, TELEMETRY_PAYLOAD_LEN};
+pub use telemetry::{HidTelemetrySnapshot, TELEMETRY_BASE_PAYLOAD_LEN, TELEMETRY_PAYLOAD_LEN};
 pub use transport::{
     DEFAULT_BAUD_RATE, DEFAULT_READ_TIMEOUT_MS, HidGateway, perform_loopback_probe_on_port,
 };

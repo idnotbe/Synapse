@@ -82,10 +82,14 @@ The firmware now exposes the Synapse Pico HID composite USB device:
 
 The CDC dispatcher handles identity, mouse, keyboard, gamepad, release-all,
 watchdog, and telemetry commands. Runtime state drives HID reports, telemetry
-counters, watchdog release-all behavior, and LED status. Building with the
-`loopback` feature enables a debug firmware path that responds with PONG frames
-instead of driving HID reports. Building with `force-first-nak` preserves the
-normal HID runtime but forces one retry for ACK/NAK pipeline acceptance.
+counters, firmware-side action-command timing, watchdog release-all behavior,
+and LED status. `GET_TELEMETRY` returns the base counters plus
+`timed_commands`, `previous_command_delta_us`, `last_command_delta_us`, and
+`last_timed_command_uptime_us` so hardware timing checks can inspect the device
+clock instead of host send timestamps. Building with the `loopback` feature
+enables a debug firmware path that responds with PONG frames instead of driving
+HID reports. Building with `force-first-nak` preserves the normal HID runtime
+but forces one retry for ACK/NAK pipeline acceptance.
 
 ## Flash
 

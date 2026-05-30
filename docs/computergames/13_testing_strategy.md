@@ -207,7 +207,7 @@ Tracked benches:
 | `aim_curve_step_calc_natural` | ≤ 1 µs |
 | `action_software_press` | ≤ 3 ms |
 | `action_hardware_press` | ≤ 5 ms |
-| `hid_combo_timing` | ≤ 0.5 ms step-interval deviation |
+| `hid_combo_timing` | ≤ 0.5 ms step-interval deviation, read from firmware timing telemetry |
 | `hid_high_volume` | 10k commands ≤ 15 s, zero drops/CRC errors |
 | `detection_rtdetr_v2_s_coco_640` | ≤ 25 ms DirectML / ≤ 8 ms CUDA |
 | `ocr_winrt_120x32` | ≤ 8 ms |
@@ -273,7 +273,7 @@ Self-hosted runner has an RP2040 board attached. Rig:
 | Scenario | Asserts |
 |---|---|
 | `hid_mouse_move_latency` | Round-trip latency p99 ≤ 5 ms |
-| `hid_combo_timing` | 3-step combo step intervals within 0.5 ms of scheduled |
+| `hid_combo_timing` | 3-step combo step intervals within 0.5 ms of scheduled, using device-side timing telemetry |
 | `hid_release_all_on_disconnect` | Host disconnect → watchdog releases everything within 1 s |
 | `hid_high_volume` | 10,000 mouse-move commands at full rate, no drops |
 | `hid_reflash` | Reset to bootloader, flash, verify new identity |

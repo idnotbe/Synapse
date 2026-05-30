@@ -204,7 +204,7 @@ fn dispatcher_returns_query_responses_and_updates_telemetry() {
     let telemetry = frame(13, HostCommand::GetTelemetry, &[]);
     let telemetry_outcome = dispatch_frame(&mut state, telemetry, identify);
     assert_eq!(telemetry_outcome.command, DeviceCommand::TelemetryResp);
-    assert_eq!(telemetry_outcome.payload_len, 28);
+    assert_eq!(telemetry_outcome.payload_len, 44);
     assert_eq!(
         u32::from_le_bytes([
             telemetry_outcome.payload[0],
@@ -263,6 +263,10 @@ fn telemetry_response_contains_all_counter_fields() {
     state.telemetry.commands_executed = 4;
     state.telemetry.watchdog_fires = 5;
     state.telemetry.crc_errors = 6;
+    state.telemetry.timed_commands = 7;
+    state.telemetry.previous_command_delta_us = 100_000;
+    state.telemetry.last_command_delta_us = 100_250;
+    state.telemetry.last_timed_command_uptime_us = 500_250;
 
     let telemetry = dispatch_frame(
         &mut state,
@@ -270,7 +274,7 @@ fn telemetry_response_contains_all_counter_fields() {
         identify,
     );
     assert_eq!(telemetry.command, DeviceCommand::TelemetryResp);
-    assert_eq!(telemetry.payload_len, 28);
+    assert_eq!(telemetry.payload_len, 44);
     assert_eq!(payload_u32(&telemetry, 0), 1);
     assert_eq!(payload_u32(&telemetry, 4), 11);
     assert_eq!(payload_u32(&telemetry, 8), 2);
@@ -278,6 +282,10 @@ fn telemetry_response_contains_all_counter_fields() {
     assert_eq!(payload_u32(&telemetry, 16), 4);
     assert_eq!(payload_u32(&telemetry, 20), 5);
     assert_eq!(payload_u32(&telemetry, 24), 6);
+    assert_eq!(payload_u32(&telemetry, 28), 7);
+    assert_eq!(payload_u32(&telemetry, 32), 100_000);
+    assert_eq!(payload_u32(&telemetry, 36), 100_250);
+    assert_eq!(payload_u32(&telemetry, 40), 500_250);
     assert_eq!(state.telemetry.commands_executed, 5);
 }
 
