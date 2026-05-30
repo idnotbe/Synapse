@@ -102,7 +102,16 @@ expression: profile_tool_shapes
             "candidate_id": {
               "type": "string"
             },
-            "evidence_summary": true,
+            "evidence_summary": {
+              "type": [
+                "object",
+                "array",
+                "string",
+                "number",
+                "boolean",
+                "null"
+              ]
+            },
             "expected_improvement": {
               "items": {
                 "type": "string"
@@ -120,7 +129,16 @@ expression: profile_tool_shapes
                 "null"
               ]
             },
-            "patch": true,
+            "patch": {
+              "type": [
+                "object",
+                "array",
+                "string",
+                "number",
+                "boolean",
+                "null"
+              ]
+            },
             "profile_id": {
               "type": "string"
             },
@@ -472,7 +490,16 @@ expression: profile_tool_shapes
             "candidate_id": {
               "type": "string"
             },
-            "evidence_summary": true,
+            "evidence_summary": {
+              "type": [
+                "object",
+                "array",
+                "string",
+                "number",
+                "boolean",
+                "null"
+              ]
+            },
             "expected_improvement": {
               "items": {
                 "type": "string"
@@ -490,7 +517,16 @@ expression: profile_tool_shapes
                 "null"
               ]
             },
-            "patch": true,
+            "patch": {
+              "type": [
+                "object",
+                "array",
+                "string",
+                "number",
+                "boolean",
+                "null"
+              ]
+            },
             "profile_id": {
               "type": "string"
             },
@@ -796,7 +832,16 @@ expression: profile_tool_shapes
             "candidate_id": {
               "type": "string"
             },
-            "evidence_summary": true,
+            "evidence_summary": {
+              "type": [
+                "object",
+                "array",
+                "string",
+                "number",
+                "boolean",
+                "null"
+              ]
+            },
             "expected_improvement": {
               "items": {
                 "type": "string"
@@ -814,7 +859,16 @@ expression: profile_tool_shapes
                 "null"
               ]
             },
-            "patch": true,
+            "patch": {
+              "type": [
+                "object",
+                "array",
+                "string",
+                "number",
+                "boolean",
+                "null"
+              ]
+            },
             "profile_id": {
               "type": "string"
             },
@@ -1270,7 +1324,16 @@ expression: profile_tool_shapes
             "candidate_id": {
               "type": "string"
             },
-            "evidence_summary": true,
+            "evidence_summary": {
+              "type": [
+                "object",
+                "array",
+                "string",
+                "number",
+                "boolean",
+                "null"
+              ]
+            },
             "expected_improvement": {
               "items": {
                 "type": "string"
@@ -1288,7 +1351,16 @@ expression: profile_tool_shapes
                 "null"
               ]
             },
-            "patch": true,
+            "patch": {
+              "type": [
+                "object",
+                "array",
+                "string",
+                "number",
+                "boolean",
+                "null"
+              ]
+            },
             "profile_id": {
               "type": "string"
             },
@@ -2809,7 +2881,16 @@ expression: profile_tool_shapes
             "summary": {
               "$ref": "#/$defs/ProfileRegistryRowSummary"
             },
-            "value": true
+            "value": {
+              "type": [
+                "object",
+                "array",
+                "string",
+                "number",
+                "boolean",
+                "null"
+              ]
+            }
           },
           "required": [
             "summary",
@@ -3378,7 +3459,16 @@ expression: profile_tool_shapes
             "summary": {
               "$ref": "#/$defs/ProfileRegistryRowSummary"
             },
-            "value": true
+            "value": {
+              "type": [
+                "object",
+                "array",
+                "string",
+                "number",
+                "boolean",
+                "null"
+              ]
+            }
           },
           "required": [
             "summary",
@@ -4786,7 +4876,16 @@ expression: profile_tool_shapes
             "summary": {
               "$ref": "#/$defs/ProfileRegistryRowSummary"
             },
-            "value": true
+            "value": {
+              "type": [
+                "object",
+                "array",
+                "string",
+                "number",
+                "boolean",
+                "null"
+              ]
+            }
           },
           "required": [
             "summary",
