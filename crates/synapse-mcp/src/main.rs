@@ -114,7 +114,7 @@ struct Cli {
 }
 
 impl Cli {
-    fn m2_config(&self) -> m2::M2ServiceConfig {
+    fn m2_config() -> m2::M2ServiceConfig {
         m2::M2ServiceConfig::from_env()
     }
 
@@ -172,7 +172,7 @@ async fn run() -> anyhow::Result<ExitCode> {
         "capture dpi awareness initialized"
     );
 
-    let m2_config = cli.m2_config();
+    let m2_config = Cli::m2_config();
     let m3_config = cli.m3_config();
     let m4_config = match cli.m4_config() {
         Ok(config) => config,

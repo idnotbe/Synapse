@@ -63,6 +63,26 @@ impl ComApartmentKind {
     pub const fn is_sta_family(self) -> bool {
         matches!(self, Self::Sta | Self::MainSta)
     }
+
+    #[must_use]
+    pub const fn is_mta(self) -> bool {
+        matches!(self, Self::Mta)
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UiaWorkerReadback {
+    pub thread_id: u32,
+    pub apartment: ComApartmentKind,
+    pub owned_window_count: usize,
+}
+
+impl UiaWorkerReadback {
+    #[must_use]
+    pub const fn is_mta_windowless(&self) -> bool {
+        self.apartment.is_mta() && self.owned_window_count == 0
+    }
 }
 
 pub struct WinEventSubscription {
@@ -188,4 +208,14 @@ fn flush_pending(
 pub fn subscribe_win_events(sender: AccessibleEventSender) -> A11yResult<WinEventSubscription> {
     let inner = platform::subscribe_win_events(sender)?;
     Ok(WinEventSubscription { inner })
+}
+
+/// Returns a live readback from the dedicated UI Automation client worker.
+///
+/// # Errors
+///
+/// Returns a structured accessibility error when the worker cannot initialize,
+/// or `A11Y_NOT_AVAILABLE` on non-Windows platforms.
+pub fn uia_worker_readback() -> A11yResult<UiaWorkerReadback> {
+    platform::uia_worker_readback()
 }

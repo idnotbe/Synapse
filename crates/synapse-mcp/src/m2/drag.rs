@@ -6,12 +6,11 @@ use serde::{Deserialize, Serialize};
 use synapse_action::{
     ActionBackend, ActionError, ActionHandle, EmitState, RecordedInput, RecordingBackend,
 };
+#[cfg(windows)]
+use synapse_core::Rect;
 use synapse_core::{
     Action, AimCurve, AimNaturalParams, Backend, ElementId, MouseButton, MouseTarget, Point,
 };
-
-#[cfg(windows)]
-use synapse_a11y::uiautomation::types::Rect as UiaRect;
 
 use crate::m1::mcp_error;
 
@@ -177,14 +176,9 @@ fn target_point(target: &ActDragTarget, role: &'static str) -> Result<Point, Err
 
 #[cfg(windows)]
 fn element_center(element_id: &ElementId, role: &'static str) -> Result<Point, ErrorData> {
-    let element = synapse_a11y::re_resolve(element_id).map_err(|err| {
+    let rect = synapse_a11y::element_bounding_rect(element_id).map_err(|err| {
         action_error_to_mcp(&ActionError::ElementNotResolved {
             detail: format!("act_drag {role} element {element_id} could not be resolved: {err}"),
-        })
-    })?;
-    let rect = element.get_bounding_rectangle().map_err(|err| {
-        action_error_to_mcp(&ActionError::TargetInvalid {
-            detail: format!("act_drag {role} element {element_id} bbox unavailable: {err}"),
         })
     })?;
     center_from_rect_edges(RectEdges::from(rect)).map_err(|error| action_error_to_mcp(&error))
@@ -209,13 +203,13 @@ struct RectEdges {
 }
 
 #[cfg(windows)]
-impl From<UiaRect> for RectEdges {
-    fn from(value: UiaRect) -> Self {
+impl From<Rect> for RectEdges {
+    fn from(value: Rect) -> Self {
         Self {
-            left: value.get_left(),
-            top: value.get_top(),
-            right: value.get_right(),
-            bottom: value.get_bottom(),
+            left: value.x,
+            top: value.y,
+            right: value.x.saturating_add(value.w),
+            bottom: value.y.saturating_add(value.h),
         }
     }
 }

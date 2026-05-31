@@ -295,21 +295,12 @@ impl OcrProvider for HudTextProvider {
 #[cfg(windows)]
 fn bounded_uia_text_region(region: Rect) -> Option<TextRegion> {
     let point = region_center(region)?;
-    let element = synapse_a11y::element_from_point(point).ok()?;
-    let name = element.get_cached_name().ok()?;
-    let name = name.trim();
+    let element = synapse_a11y::element_node_from_point(point).ok()?;
+    let name = element.name.trim();
     if name.is_empty() {
         return None;
     }
-    let bbox = element
-        .get_cached_bounding_rectangle()
-        .ok()
-        .map(|rect| Rect {
-            x: rect.get_left(),
-            y: rect.get_top(),
-            w: rect.get_right().saturating_sub(rect.get_left()),
-            h: rect.get_bottom().saturating_sub(rect.get_top()),
-        })?;
+    let bbox = element.bbox;
     if !uia_text_bbox_is_bound_to_hud_region(region, bbox) {
         return None;
     }

@@ -1,6 +1,8 @@
 use std::{
     ffi::c_void,
-    sync::{Mutex, OnceLock},
+    sync::{Mutex, OnceLock, mpsc},
+    thread,
+    time::Duration,
 };
 
 use synapse_core::{Rect, UiaPattern};
@@ -10,46 +12,166 @@ use uiautomation::{
     types::{ControlType, ElementMode, TreeScope, UIProperty},
     variants::{Value, Variant},
 };
-use windows::Win32::Foundation::HWND;
+use windows::Win32::{
+    Foundation::{HWND, LPARAM},
+    System::{
+        Com::{
+            APTTYPE, APTTYPE_MAINSTA, APTTYPE_MTA, APTTYPE_NA, APTTYPE_STA, APTTYPEQUALIFIER,
+            COINIT_MULTITHREADED, CoGetApartmentType, CoInitializeEx, CoUninitialize,
+        },
+        Threading::GetCurrentThreadId,
+    },
+    UI::WindowsAndMessaging::EnumThreadWindows,
+};
+use windows::core::BOOL;
 
-use crate::{A11yError, A11yResult, ElementSearchScope};
+use crate::{A11yError, A11yResult, ComApartmentKind, ElementSearchScope, UiaWorkerReadback};
 
-static UIA_CLIENT: OnceLock<ProcessUiaClient> = OnceLock::new();
+type UiaJob = Box<dyn FnOnce(&UIAutomation) + Send + 'static>;
 
-struct ProcessUiaClient {
-    automation: Mutex<UIAutomation>,
+static UIA_WORKER: OnceLock<ProcessUiaWorker> = OnceLock::new();
+static UIA_WORKER_INIT_LOCK: Mutex<()> = Mutex::new(());
+
+struct ProcessUiaWorker {
+    tx: mpsc::Sender<UiaJob>,
 }
 
-#[allow(clippy::non_send_fields_in_send_ty)]
-unsafe impl Send for ProcessUiaClient {}
-unsafe impl Sync for ProcessUiaClient {}
-
-fn client() -> A11yResult<&'static ProcessUiaClient> {
-    if let Some(client) = UIA_CLIENT.get() {
-        return Ok(client);
+fn worker() -> A11yResult<&'static ProcessUiaWorker> {
+    if let Some(worker) = UIA_WORKER.get() {
+        return Ok(worker);
     }
 
-    let automation = UIAutomation::new()
-        .or_else(|_err| UIAutomation::new_direct())
-        .map_err(map_uia_error)?;
-    UIA_CLIENT
-        .set(ProcessUiaClient {
-            automation: Mutex::new(automation),
-        })
-        .map_err(|_client| A11yError::internal("UIA client was initialized concurrently"))?;
-    UIA_CLIENT
-        .get()
-        .ok_or_else(|| A11yError::internal("UIA client missing after initialization"))
-}
-
-pub(super) fn with_automation<T>(
-    action: impl FnOnce(&UIAutomation) -> A11yResult<T>,
-) -> A11yResult<T> {
-    let guard = client()?
-        .automation
+    let _guard = UIA_WORKER_INIT_LOCK
         .lock()
         .map_err(|err| A11yError::internal(err.to_string()))?;
-    action(&guard)
+    if let Some(worker) = UIA_WORKER.get() {
+        return Ok(worker);
+    }
+
+    UIA_WORKER
+        .set(start_worker()?)
+        .map_err(|_worker| A11yError::internal("UIA worker was initialized concurrently"))?;
+    UIA_WORKER
+        .get()
+        .ok_or_else(|| A11yError::internal("UIA worker missing after initialization"))
+}
+
+fn start_worker() -> A11yResult<ProcessUiaWorker> {
+    let (tx, rx) = mpsc::channel::<UiaJob>();
+    let (ready_tx, ready_rx) = mpsc::sync_channel(1);
+    thread::Builder::new()
+        .name("synapse-a11y-uia-mta".to_owned())
+        .spawn(move || uia_worker_thread(rx, ready_tx))
+        .map_err(|err| A11yError::internal(format!("spawn UIA worker thread failed: {err}")))?;
+
+    let readback = ready_rx
+        .recv_timeout(Duration::from_secs(5))
+        .map_err(|err| A11yError::internal(format!("UIA worker did not initialize: {err}")))??;
+    tracing::info!(
+        code = "A11Y_UIA_WORKER_READY",
+        thread_id = readback.thread_id,
+        apartment = ?readback.apartment,
+        owned_window_count = readback.owned_window_count,
+        "UI Automation worker initialized"
+    );
+    Ok(ProcessUiaWorker { tx })
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn uia_worker_thread(
+    rx: mpsc::Receiver<UiaJob>,
+    ready: mpsc::SyncSender<A11yResult<UiaWorkerReadback>>,
+) {
+    let init = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
+    if init.is_err() {
+        let _ = ready.send(Err(A11yError::internal(format!(
+            "CoInitializeEx(COINIT_MULTITHREADED) failed: {init:?}"
+        ))));
+        return;
+    }
+
+    let automation = match UIAutomation::new_direct().map_err(map_uia_error) {
+        Ok(automation) => automation,
+        Err(err) => {
+            let _ = ready.send(Err(err));
+            unsafe {
+                CoUninitialize();
+            }
+            return;
+        }
+    };
+
+    let readback = read_current_worker_state();
+    let _ = ready.send(Ok(readback));
+
+    while let Ok(job) = rx.recv() {
+        job(&automation);
+    }
+
+    unsafe {
+        CoUninitialize();
+    }
+}
+
+pub(super) fn with_automation<T: Send + 'static>(
+    action: impl FnOnce(&UIAutomation) -> A11yResult<T> + Send + 'static,
+) -> A11yResult<T> {
+    let (reply_tx, reply_rx) = mpsc::sync_channel(1);
+    worker()?
+        .tx
+        .send(Box::new(move |automation| {
+            let _ = reply_tx.send(action(automation));
+        }))
+        .map_err(|err| A11yError::internal(format!("send UIA worker job failed: {err}")))?;
+    reply_rx
+        .recv()
+        .map_err(|err| A11yError::internal(format!("receive UIA worker job failed: {err}")))?
+}
+
+pub(super) fn worker_readback() -> A11yResult<UiaWorkerReadback> {
+    with_automation(|_automation| Ok(read_current_worker_state()))
+}
+
+fn read_current_worker_state() -> UiaWorkerReadback {
+    let thread_id = unsafe { GetCurrentThreadId() };
+    UiaWorkerReadback {
+        thread_id,
+        apartment: read_current_apartment(),
+        owned_window_count: owned_window_count(thread_id),
+    }
+}
+
+fn read_current_apartment() -> ComApartmentKind {
+    let mut apartment = APTTYPE::default();
+    let mut qualifier = APTTYPEQUALIFIER::default();
+    if unsafe { CoGetApartmentType(&raw mut apartment, &raw mut qualifier) }.is_err() {
+        return ComApartmentKind::Unknown;
+    }
+    match apartment {
+        value if value == APTTYPE_STA => ComApartmentKind::Sta,
+        value if value == APTTYPE_MTA => ComApartmentKind::Mta,
+        value if value == APTTYPE_NA => ComApartmentKind::Neutral,
+        value if value == APTTYPE_MAINSTA => ComApartmentKind::MainSta,
+        _ => ComApartmentKind::Unknown,
+    }
+}
+
+fn owned_window_count(thread_id: u32) -> usize {
+    unsafe extern "system" fn enum_window(_hwnd: HWND, lparam: LPARAM) -> BOOL {
+        let count = unsafe { &mut *(lparam.0 as *mut usize) };
+        *count = count.saturating_add(1);
+        BOOL(1)
+    }
+
+    let mut count = 0_usize;
+    let _ = unsafe {
+        EnumThreadWindows(
+            thread_id,
+            Some(enum_window),
+            LPARAM((&raw mut count).cast::<c_void>() as isize),
+        )
+    };
+    count
 }
 
 pub(super) fn create_cache_request(

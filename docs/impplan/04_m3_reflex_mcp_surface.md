@@ -428,7 +428,7 @@ Throw helper stays `mcp_error(code, msg)` from `crates/synapse-mcp/src/m1.rs:369
 |---|---|---|
 | 0a | `refactor(action): split emitter.rs / vigem.rs / invoke.rs / software.rs to ≤ 500 LoC` | All files under cap; `cargo test --workspace` green; no public API change; insta snapshots unchanged |
 | 0b | `refactor(mcp): split m2/click.rs (506) and m2/press.rs (545) to ≤ 500 LoC` | same |
-| 0c | `fix(a11y): widen TreeWalker to RawView for packaged Notepad MenuBar (#244)` | `synapse_a11y::snapshot()` returns the menu-bar children on Win11 22H2+ packaged Notepad; manual #352 Notepad/File-menu evidence covers the invoke path |
+| 0c | `fix(a11y): widen TreeWalker to RawView for packaged Notepad MenuBar (#244)` | The UIA snapshot data APIs return the menu-bar children on Win11 22H2+ packaged Notepad; manual #352 Notepad/File-menu evidence covers the invoke path |
 | 0d | `fix(action): SoftwareBackend mouse_move uses Win32 GetCursorPos in DPI-aware mode (#234)` | proptest: `(cursor_after - cursor_before) == (dx, dy)` within ±1 px across 100 random DPI scales |
 | 0e | `fix(action): thread dynamics through text_dispatch.rs (#233)` | Notepad receives every char of a 1000-char paste; recording backend events count == 2 × text length under `Natural::FAST` |
 | 0f | `fix(action): held-key auto-release calls backend KeyUp (#231)` | external `WH_KEYBOARD_LL` hook observes `KeyUp(a)` within 50 ms of timer expiry; existing `STUCK_KEY_AUTO_RELEASED` log line unchanged |

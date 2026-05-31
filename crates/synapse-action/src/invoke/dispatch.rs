@@ -1,51 +1,19 @@
-#[cfg(windows)]
-use synapse_core::ElementId;
 use synapse_core::MouseButton;
 #[cfg(any(test, windows))]
 use synapse_core::{Action, AimCurve, AimNaturalParams, Backend, ButtonAction, MouseTarget};
 
-#[cfg(windows)]
-use synapse_a11y::{UIElement, uiautomation::patterns::UIInvokePattern};
+#[cfg(test)]
+use crate::ActionError;
+use crate::{ActionBackend, ActionResult, EmitState};
 
-use crate::{ActionBackend, ActionError, ActionResult, EmitState};
-
-use super::{CoordinateFallbackPlan, ElementClickOutcome};
-#[cfg(windows)]
-use crate::invoke::resolver::{invoke_pattern_failed, invoke_pattern_unavailable};
+use super::CoordinateFallbackPlan;
+#[cfg(test)]
+use super::ElementClickOutcome;
 
 #[cfg(any(test, windows))]
 pub(super) const FALLBACK_MOVE_DURATION_MS: u32 = 50;
 
-#[cfg(windows)]
-pub(super) fn invoke_resolved_element(
-    element_id: &ElementId,
-    element: &UIElement,
-) -> ActionResult<()> {
-    match try_invoke_resolved_element(element_id, element) {
-        Ok(()) => Ok(()),
-        Err(InvokeAttemptError::MissingPattern) => Err(invoke_pattern_unavailable(
-            element_id,
-            "pattern not available",
-        )),
-        Err(InvokeAttemptError::InvokeFailed(error)) => Err(error),
-    }
-}
-
-#[cfg(windows)]
-pub(super) fn try_invoke_resolved_element(
-    element_id: &ElementId,
-    element: &UIElement,
-) -> Result<(), InvokeAttemptError> {
-    let pattern: UIInvokePattern = element
-        .get_pattern()
-        .map_err(|_err| InvokeAttemptError::MissingPattern)?;
-
-    pattern
-        .invoke()
-        .map_err(|err| InvokeAttemptError::InvokeFailed(invoke_pattern_failed(element_id, err)))
-}
-
-#[cfg(any(test, windows))]
+#[cfg(test)]
 pub(super) fn complete_click_attempt<B, F>(
     invoke_attempt: Result<(), InvokeAttemptError>,
     fallback_plan: F,
@@ -68,7 +36,7 @@ where
     }
 }
 
-#[cfg(any(test, windows))]
+#[cfg(test)]
 pub(super) enum InvokeAttemptError {
     MissingPattern,
     InvokeFailed(ActionError),

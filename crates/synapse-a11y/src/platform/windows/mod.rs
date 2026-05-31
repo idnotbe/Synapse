@@ -4,11 +4,22 @@ mod resolve;
 mod snapshot;
 mod window;
 
+pub fn uia_worker_readback() -> crate::A11yResult<crate::UiaWorkerReadback> {
+    common::worker_readback()
+}
+
 pub use events::{WinEventSubscription, subscribe_win_events};
-pub use resolve::{expand_state_of, re_resolve};
-pub use snapshot::{find_by_name_and_pattern, snapshot};
+pub use resolve::{
+    click_element_action, element_bounding_rect, expand_state_of, expand_state_of_id,
+    focus_element, re_resolve,
+};
+pub use snapshot::{
+    element_node_from_point, find_by_name_and_pattern, find_by_name_and_pattern_in_window,
+    focused_element_node, snapshot, snapshot_element, snapshot_window_from_hwnd,
+};
 pub use window::{
     close_window, current_foreground_context, element_from_point, focus_window, focused_element,
-    focused_window, foreground_context, is_window_minimized, visible_top_level_window_contexts,
+    focused_window, foreground_context, is_window_minimized, snapshot_focused_window,
+    snapshot_window_for_process, top_level_window_hwnd_by_name, visible_top_level_window_contexts,
     window_for_process, window_from_hwnd,
 };

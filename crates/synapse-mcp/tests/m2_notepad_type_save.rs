@@ -90,10 +90,7 @@ async fn notepad_type_save_writes_byte_correct_file_live() -> anyhow::Result<()>
             println!("readback=synapse_a11y::focus_window edge=window after_error={error}");
         }
     }
-    let editor = synapse_a11y::re_resolve(&editor_id)
-        .with_context(|| format!("re-resolve Notepad editor element {editor_id}"))?;
-    editor
-        .set_focus()
+    synapse_a11y::focus_element(&editor_id)
         .with_context(|| format!("set UIA focus on Notepad editor element {editor_id}"))?;
     println!(
         "readback=synapse_a11y::UIElement::set_focus edge=editor after=ok element_id={editor_id}"
@@ -876,10 +873,7 @@ fn focus_editor(hwnd: i64, editor_id: &ElementId) -> anyhow::Result<()> {
             println!("readback=synapse_a11y::focus_window edge=window after_error={error}");
         }
     }
-    let editor = synapse_a11y::re_resolve(editor_id)
-        .with_context(|| format!("re-resolve Notepad editor element {editor_id}"))?;
-    editor
-        .set_focus()
+    synapse_a11y::focus_element(editor_id)
         .with_context(|| format!("set UIA focus on Notepad editor element {editor_id}"))?;
     println!(
         "readback=synapse_a11y::UIElement::set_focus edge=editor after=ok element_id={editor_id}"
@@ -978,9 +972,7 @@ fn editor_from_uia_snapshot(hwnd: i64) -> anyhow::Result<ElementId> {
 
 #[cfg(windows)]
 fn editor_node_from_uia_snapshot(hwnd: i64) -> anyhow::Result<AccessibleNode> {
-    let window = synapse_a11y::window_from_hwnd(hwnd)
-        .with_context(|| format!("resolve Notepad hwnd 0x{hwnd:x}"))?;
-    let subtree = synapse_a11y::snapshot(&window, 4)
+    let subtree = synapse_a11y::snapshot_window_from_hwnd(hwnd, 4)
         .with_context(|| format!("snapshot Notepad hwnd 0x{hwnd:x}"))?;
     let target = subtree
         .nodes

@@ -1,9 +1,9 @@
 use std::{ffi::c_void, path::Path};
 
-use synapse_core::{ForegroundContext, Point, Rect};
+use synapse_core::{AccessibleSubtree, ForegroundContext, Point, Rect};
 use uiautomation::{
     UIElement,
-    types::{ElementMode, Handle, Point as UiaPoint},
+    types::{ElementMode, TreeScope},
 };
 use windows::{
     Win32::{
@@ -23,17 +23,21 @@ use windows::{
 
 use crate::{A11yError, A11yResult};
 
-use super::common::{TreeView, create_cache_request, map_uia_error, with_automation};
-
+use super::common::{TreeView, cached_hwnd, create_cache_request, map_uia_error, with_automation};
 pub fn focused_window() -> A11yResult<UIElement> {
+    Err(A11yError::internal(
+        "direct UIElement foreground lookup is disabled; use snapshot_focused_window so UIA stays on the dedicated MTA worker",
+    ))
+}
+
+pub fn snapshot_focused_window(depth: u32) -> A11yResult<AccessibleSubtree> {
     let hwnd = unsafe { GetForegroundWindow() };
     if hwnd.0.is_null() {
         return Err(A11yError::NoForeground {
             detail: "GetForegroundWindow returned null".to_owned(),
         });
     }
-
-    element_from_hwnd(hwnd)
+    super::snapshot::snapshot_window_from_hwnd(hwnd.0 as isize as i64, depth)
 }
 
 pub fn current_foreground_context() -> A11yResult<ForegroundContext> {
@@ -53,7 +57,9 @@ pub fn window_from_hwnd(hwnd: i64) -> A11yResult<UIElement> {
             detail: "HWND was null".to_owned(),
         });
     }
-    element_from_hwnd(hwnd)
+    Err(A11yError::internal(
+        "direct UIElement HWND lookup is disabled; use snapshot_window_from_hwnd so UIA stays on the dedicated MTA worker",
+    ))
 }
 
 pub fn focus_window(hwnd: i64) -> A11yResult<()> {
@@ -139,22 +145,37 @@ pub fn close_window(hwnd: i64) -> A11yResult<()> {
     })
 }
 
-fn element_from_hwnd(hwnd: HWND) -> A11yResult<UIElement> {
-    with_automation(|automation| {
-        automation
-            .element_from_handle(Handle::from(hwnd))
-            .map_err(map_uia_error)
-    })
+pub fn window_for_process(pid: u32) -> A11yResult<UIElement> {
+    let _ = pid;
+    Err(A11yError::internal(
+        "direct UIElement process-window lookup is disabled; use snapshot_window_for_process so UIA stays on the dedicated MTA worker",
+    ))
 }
 
-pub fn window_for_process(pid: u32) -> A11yResult<UIElement> {
+pub fn snapshot_window_for_process(pid: u32, depth: u32) -> A11yResult<AccessibleSubtree> {
     let hwnd = find_window_for_pid(pid).ok_or_else(|| A11yError::NoForeground {
         detail: format!("no visible top-level window for pid {pid}"),
     })?;
-    with_automation(|automation| {
-        automation
-            .element_from_handle(Handle::from(hwnd))
-            .map_err(map_uia_error)
+    super::snapshot::snapshot_window_from_hwnd(hwnd.0 as isize as i64, depth)
+}
+
+pub fn top_level_window_hwnd_by_name(name: String) -> A11yResult<Option<i64>> {
+    if name.is_empty() {
+        return Ok(None);
+    }
+    with_automation(move |automation| {
+        let cache = create_cache_request(automation, 0, ElementMode::Full, TreeView::Raw)?;
+        let root = automation
+            .get_root_element_build_cache(&cache)
+            .map_err(map_uia_error)?;
+        let condition = automation.create_true_condition().map_err(map_uia_error)?;
+        let children = root
+            .find_all_build_cache(TreeScope::Children, &condition, &cache)
+            .map_err(map_uia_error)?;
+        Ok(children
+            .into_iter()
+            .find(|element| element.get_cached_name().unwrap_or_default() == name)
+            .and_then(|element| cached_hwnd(&element)))
     })
 }
 
@@ -194,21 +215,16 @@ pub fn visible_top_level_window_contexts() -> A11yResult<Vec<ForegroundContext>>
 }
 
 pub fn focused_element() -> A11yResult<UIElement> {
-    with_automation(|automation| {
-        let cache = create_cache_request(automation, 0, ElementMode::Full, TreeView::Control)?;
-        automation
-            .get_focused_element_build_cache(&cache)
-            .map_err(map_uia_error)
-    })
+    Err(A11yError::internal(
+        "direct UIElement focused-element lookup is disabled; use focused_element_node so UIA stays on the dedicated MTA worker",
+    ))
 }
 
 pub fn element_from_point(point: Point) -> A11yResult<UIElement> {
-    with_automation(|automation| {
-        let cache = create_cache_request(automation, 0, ElementMode::Full, TreeView::Control)?;
-        automation
-            .element_from_point_build_cache(UiaPoint::new(point.x, point.y), &cache)
-            .map_err(map_uia_error)
-    })
+    let _ = point;
+    Err(A11yError::internal(
+        "direct UIElement point lookup is disabled; use element_node_from_point so UIA stays on the dedicated MTA worker",
+    ))
 }
 fn window_title(hwnd: HWND) -> String {
     let mut buffer = vec![0_u16; 512];

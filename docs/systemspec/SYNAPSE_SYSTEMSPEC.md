@@ -1052,8 +1052,8 @@ SynapseService::observe
         │   ├─ if state.force_observe_internal   → OBSERVE_INTERNAL
         │   └─ otherwise: m1/sources.rs::platform_input(depth, perception_mode)
         │       ├─ synapse_a11y::current_foreground_context
-        │       ├─ synapse_a11y::focused_element (optional)
-        │       ├─ synapse_a11y::snapshot(root, depth)  (A11y tree)
+        │       ├─ synapse_a11y::focused_element_node (optional plain-data node)
+        │       ├─ synapse_a11y::snapshot_focused_window(depth)  (A11y tree)
         │       └─ assembles ObservationInput { foreground, elements, entities, ... }
         └─ ObservationAssembler::new().assemble(ObserveInclude::default(), input)
            └─ returns synapse_core::Observation
@@ -2857,8 +2857,8 @@ Loop selects on the mpsc receiver against `shutdown_cancel`/`connection_closed_c
 
 `invoke.rs` + `invoke/dispatch.rs` + `invoke/resolver.rs`:
 
-- `invoke_element(element_id) -> ActionResult<ElementClickOutcome>` resolves the UIA element via `synapse_a11y::re_resolve(ElementId)` and tries `InvokePattern::Invoke`. Returns `ElementClickOutcome::InvokedPattern` on success.
-- `click_element_or_fallback(element_id, coord_plan: CoordinateFallbackPlan)` invokes if possible; otherwise falls back to a `MouseMove` to the element bbox center followed by a button click. Used by `act_click` with `use_invoke_pattern = true`.
+- `invoke_element(element_id) -> ActionResult<ElementClickOutcome>` asks `synapse_a11y::click_element_action(ElementId)` to resolve and invoke the UIA target on the dedicated MTA worker. Returns `ElementClickOutcome::InvokedPattern` on success.
+- `click_element_or_fallback(element_id, coord_plan: CoordinateFallbackPlan)` invokes if possible; otherwise uses the worker-returned element bbox for a `MouseMove` to the center followed by a button click. Used by `act_click` with `use_invoke_pattern = true`.
 
 ## 8. Click timing
 

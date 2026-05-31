@@ -16,9 +16,9 @@ fn bench_uia_snapshot_depth2_60elem(c: &mut Criterion) {
     {
         use std::hint::black_box;
 
-        if let Ok(root) = synapse_a11y::focused_window() {
+        if synapse_a11y::snapshot_focused_window(0).is_ok() {
             c.bench_function("uia_snapshot_depth2_60elem", |bencher| {
-                bencher.iter(|| black_box(synapse_a11y::snapshot(&root, 2)));
+                bencher.iter(|| black_box(synapse_a11y::snapshot_focused_window(2)));
             });
         }
     }
@@ -56,20 +56,20 @@ fn run_manual_bench() {
             .ok()
             .and_then(|value| value.parse::<usize>().ok())
             .unwrap_or(300);
-        let Ok(root) = synapse_a11y::focused_window() else {
+        if synapse_a11y::snapshot_focused_window(0).is_err() {
             println!("readback=a11y_snapshot_bench after=status:no_foreground");
             std::process::exit(2);
-        };
+        }
 
         for _ in 0..10 {
-            let _ = black_box(synapse_a11y::snapshot(&root, 2));
+            let _ = black_box(synapse_a11y::snapshot_focused_window(2));
         }
 
         let mut samples = Vec::with_capacity(iterations);
         let mut last_nodes = 0_usize;
         for _ in 0..iterations {
             let start = Instant::now();
-            match black_box(synapse_a11y::snapshot(&root, 2)) {
+            match black_box(synapse_a11y::snapshot_focused_window(2)) {
                 Ok(tree) => {
                     last_nodes = tree.nodes.len();
                     samples.push(start.elapsed());

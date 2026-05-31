@@ -1,9 +1,9 @@
 //! Real-data Full-State-Verification for cross-process UWP accessibility
 //! traversal. No mocks: this launches the real Windows Calculator (a
 //! `Windows.UI.Core.CoreWindow`-hosted UWP app whose XAML content runs in a
-//! separate process) and asserts that the production `synapse_a11y::snapshot`
-//! reaches the in-process source-of-truth display element across the
-//! cross-process boundary.
+//! separate process) and asserts that the production
+//! `synapse_a11y::snapshot_window_from_hwnd` reaches the in-process
+//! source-of-truth display element across the cross-process boundary.
 //!
 //! Ignored by default because it requires an interactive Windows desktop
 //! session. Run manually on a real host:
@@ -24,30 +24,10 @@ use std::process::Command;
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 
-use uiautomation::{
-    UIAutomation,
-    types::{ElementMode, TreeScope, UIProperty},
-    variants::Variant,
-};
-
-/// Resolve a top-level window HWND by its UIA Name among desktop-root children.
+/// Resolve a top-level window HWND by its UIA name through the production
+/// MTA worker.
 fn hwnd_for_window(name: &str) -> Result<Option<i64>, Box<dyn Error>> {
-    let automation = UIAutomation::new().or_else(|_| UIAutomation::new_direct())?;
-    let cache = automation.create_cache_request()?;
-    cache.add_property(UIProperty::NativeWindowHandle)?;
-    cache.set_tree_filter(automation.create_true_condition()?)?;
-    cache.set_tree_scope(TreeScope::Element)?;
-    cache.set_element_mode(ElementMode::Full)?;
-    let root = automation.get_root_element_build_cache(&cache)?;
-    let condition =
-        automation.create_property_condition(UIProperty::Name, Variant::from(name), None)?;
-    match root.find_first_build_cache(TreeScope::Children, &condition, &cache) {
-        Ok(element) => {
-            let handle: isize = element.get_native_window_handle()?.into();
-            Ok(Some(handle as i64))
-        }
-        Err(_not_found) => Ok(None),
-    }
+    Ok(synapse_a11y::top_level_window_hwnd_by_name(name)?)
 }
 
 #[test]
@@ -72,8 +52,7 @@ fn calculator_uwp_display_is_reachable_via_snapshot() -> Result<(), Box<dyn Erro
         sleep(Duration::from_millis(250));
     };
 
-    let root = synapse_a11y::window_from_hwnd(hwnd)?;
-    let tree = synapse_a11y::snapshot(&root, 12)?;
+    let tree = synapse_a11y::snapshot_window_from_hwnd(hwnd, 12)?;
 
     // Source of truth: the CoreWindow-hosted XAML display element, which lives
     // in a different process than the ApplicationFrameHost window.

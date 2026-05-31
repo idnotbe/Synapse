@@ -84,6 +84,84 @@
 - #588 closed after #589 and #590 readback showed both concrete follow-ups closed.
 
 ## Next
-- Continue #585.
-- Read the `synapse-a11y` and MCP UIA call surfaces before changing code.
-- Preserve manual FSV discipline: repo-built MCP daemon, strict Inspector `tools/list`, real MCP trigger for any exposed behavior, then UI/process/storage SoT readback.
+- #585 implementation and manual MCP/runtime FSV are complete.
+- Commit was created as `49359d0` but its message lacks `[skip ci]`; amend the commit message to include `[skip ci]`, force-with-lease the single HEAD rewrite, then post #585 RESOLVED evidence and close the issue.
+
+## #585 Implementation In Working Tree
+- `synapse-a11y` now initializes one long-lived `synapse-a11y-uia-mta` worker thread on first use.
+  - The worker calls `CoInitializeEx(COINIT_MULTITHREADED)`, owns the `UIAutomation` object, and processes a channel of `FnOnce(&UIAutomation) -> A11yResult<T>` jobs where `T: Send`.
+  - `uia_worker_readback()` reads the worker thread id, COM apartment, and owned window count from the worker itself.
+  - Initialization is protected by a `OnceLock` plus mutex so concurrent first calls do not race.
+- Direct `UIElement` APIs on Windows now fail closed with structured internal errors and point callers to data-returning APIs.
+- New data-returning APIs keep COM pointers thread-local:
+  - `snapshot_focused_window`, `snapshot_window_from_hwnd`, `snapshot_window_for_process`, `snapshot_element`
+  - `focused_element_node`, `element_node_from_point`
+  - `find_by_name_and_pattern_in_window`, `top_level_window_hwnd_by_name`
+  - `element_bounding_rect`, `click_element_action`, `focus_element`, `expand_state_of_id`
+- Runtime call sites were migrated:
+  - MCP `observe` uses `snapshot_focused_window`.
+  - HUD text fallback uses `element_node_from_point`.
+  - M2 drag and action invoke use data-returning bbox/invoke helpers.
+  - Notepad/perception/a11y regression tests use the data APIs.
+- Snapshot cache now includes the root `ElementId` as well as depth to avoid a fresh-depth cache hit from the wrong window.
+- Docs were updated so live impplan/systemspec references describe worker-owned data APIs rather than direct `UIElement` handoff.
+
+## #585 Supporting Checks Completed
+- `cargo fmt --check`
+- `cargo check -p synapse-a11y`
+- `cargo check -p synapse-action`
+- `cargo check -p synapse-mcp`
+- `cargo check -p synapse-perception --tests`
+- `cargo test -p synapse-a11y --lib -- --nocapture`
+- `cargo test -p synapse-a11y --test uwp_snapshot_fsv -- --ignored --nocapture`
+- `cargo clippy -p synapse-a11y -p synapse-action --all-targets -- -D warnings`
+- `cargo clippy -p synapse-mcp --all-targets -- -D warnings`
+- `cargo test -p synapse-action --lib invoke -- --nocapture`
+- `cargo test -p synapse-mcp --test m2_notepad_type_save --no-run`
+- `pwsh scripts\check_docs.ps1`
+- `git diff --check`
+- `cargo build --release -p synapse-mcp`
+
+## #585 Manual FSV Evidence Captured
+- Repo-built daemon:
+  - PID `43940`
+  - binary `C:\code\Synapse\target\release\synapse-mcp.exe`
+  - bind `127.0.0.1:7795`
+  - isolated DB `C:\code\Synapse\.runs\585\http-fsv-20260531T1001\db`
+  - logs and captured tool outputs under `C:\code\Synapse\.runs\585\http-fsv-20260531T1001`
+- Runtime precondition:
+  - process/socket read showed PID `43940` from the repo release binary listening on `127.0.0.1:7795`.
+  - authenticated `/health` with the configured `%APPDATA%\synapse\token.txt` token returned `ok=true`.
+  - official MCP Inspector CLI `tools/list` exited 0, loaded 80 tools, and included `health`, `observe`, `storage_inspect`, `act_click`, and `act_drag`.
+  - real MCP `health` tool call returned `ok=true`.
+- Worker SoT:
+  - daemon log line: `A11Y_UIA_WORKER_READY thread_id=45584 apartment=Mta owned_window_count=0`.
+  - separate OS read after observe load: process thread `45584` still existed in PID `43940`; `EnumThreadWindows(45584)` returned `0`.
+  - only one `A11Y_UIA_WORKER_READY` line appeared after concurrent load.
+- Happy path:
+  - foreground was manually set to Calculator HWND `0xc0bc8`.
+  - before storage: `CF_OBSERVATIONS=4`, `CF_EVENTS=4`, `CF_ACTION_LOG=10`.
+  - trigger: real MCP `observe` with `depth=6`, `max_elements=500`, `include=["focused","elements","diagnostics"]`.
+  - after storage: `CF_OBSERVATIONS=5`, `CF_EVENTS=5`; stored observation row contained `ApplicationFrameHost.exe`, `window_title:"Calculator"`, `profile_id:"calculator"`, 89 elements, and `CalculatorResults` / `Display is 0`.
+- Edge 1, depth boundary:
+  - before: `CF_OBSERVATIONS=5`, `CF_EVENTS=5`.
+  - trigger: real MCP `observe depth=0`.
+  - after: `CF_OBSERVATIONS=6`, `CF_EVENTS=6`; stored row contained Calculator and exactly one root element.
+- Edge 2, over-large depth/node request:
+  - before: `CF_OBSERVATIONS=6`, `CF_EVENTS=6`.
+  - trigger: real MCP `observe depth=999 max_elements=9999`; service clamped to documented limits.
+  - after: `CF_OBSERVATIONS=7`, `CF_EVENTS=7`; stored row contained Calculator, 89 elements, and `CalculatorResults`.
+- Edge 3, structurally invalid params:
+  - before: `CF_OBSERVATIONS=7`, `CF_EVENTS=7`, `CF_ACTION_LOG=10`.
+  - trigger: Inspector real MCP `observe depth=bad`.
+  - result: exit 1, `failed to deserialize parameters: invalid type: string "bad", expected u32`.
+  - after: `CF_OBSERVATIONS=7`, `CF_EVENTS=7`, `CF_ACTION_LOG=10`; daemon health remained `ok=true`.
+- Edge 4, concurrent observe load:
+  - before: `CF_OBSERVATIONS=7`, `CF_EVENTS=7`.
+  - trigger: four explicit concurrent official Inspector `observe depth=6 max_elements=500` calls.
+  - each returned `ApplicationFrameHost.exe`, HWND `789448`, 89 elements, and `CalculatorResults`.
+  - after: `CF_OBSERVATIONS=11`, `CF_EVENTS=11`; worker thread readback stayed one MTA/windowless thread.
+- Cleanup:
+  - real MCP `release_all` returned `released_keys=0`, `released_buttons=0`, `neutralized_pads=0`.
+  - final real MCP `health` returned `ok=true`.
+  - repo-built daemon PID `43940` was stopped; process/socket read showed no PID and no listener on `127.0.0.1:7795`.

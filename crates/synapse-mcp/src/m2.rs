@@ -75,6 +75,10 @@ impl M2State {
         )
     }
 
+    #[expect(
+        clippy::unnecessary_wraps,
+        reason = "keeps the fallible constructor contract aligned with try_from_env/try_from_config"
+    )]
     pub fn try_from_config_with_shutdown_tokens(
         config: &M2ServiceConfig,
         shutdown_cancel: CancellationToken,

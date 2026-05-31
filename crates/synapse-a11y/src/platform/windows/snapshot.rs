@@ -1,11 +1,13 @@
 use std::time::{Duration, Instant};
 use std::{collections::HashSet, sync::Mutex};
 
-use synapse_core::{AccessibleNode, AccessibleSubtree, ElementId, UiaPattern, element_id};
+use synapse_core::{AccessibleNode, AccessibleSubtree, ElementId, Point, UiaPattern, element_id};
 use uiautomation::{
     UIAutomation, UIElement,
     core::{UICacheRequest, UICondition},
-    types::{ElementMode, PropertyConditionFlags, TreeScope, UIProperty},
+    types::{
+        ElementMode, Handle, Point as UiaPoint, PropertyConditionFlags, TreeScope, UIProperty,
+    },
     variants::Variant,
 };
 
@@ -37,6 +39,7 @@ const RAW_MENU_SUPPLEMENT_NAMES: [&str; 3] = ["File", "Edit", "View"];
 
 struct SnapshotCache {
     requested_depth: u32,
+    root: ElementId,
     captured_at: Instant,
     tree: AccessibleSubtree,
 }
@@ -53,32 +56,85 @@ struct SnapshotWalk<'a> {
 }
 
 pub fn snapshot(root: &UIElement, depth: u32) -> A11yResult<AccessibleSubtree> {
-    if let Some(tree) = cached_snapshot(depth) {
-        return Ok(tree);
-    }
+    let _ = root;
+    let _ = depth;
+    Err(A11yError::internal(
+        "direct UIElement snapshot is disabled; use snapshot_focused_window, snapshot_window_from_hwnd, or snapshot_element so UIA stays on the dedicated MTA worker",
+    ))
+}
 
+pub fn snapshot_window_from_hwnd(hwnd: i64, depth: u32) -> A11yResult<AccessibleSubtree> {
+    if hwnd == 0 {
+        return Err(A11yError::NoForeground {
+            detail: "HWND was null".to_owned(),
+        });
+    }
+    let hwnd = isize::try_from(hwnd).map_err(|err| A11yError::InvalidElementId {
+        detail: err.to_string(),
+    })?;
+    with_automation(move |automation| {
+        let root = automation
+            .element_from_handle(Handle::from(hwnd))
+            .map_err(map_uia_error)?;
+        snapshot_from_root(automation, &root, depth)
+    })
+}
+
+pub fn snapshot_element(id: &ElementId, depth: u32) -> A11yResult<AccessibleSubtree> {
+    let id = id.clone();
+    with_automation(move |automation| {
+        let root = super::resolve::re_resolve_on_worker(automation, &id)?;
+        snapshot_from_root(automation, &root, depth)
+    })
+}
+
+pub(super) fn snapshot_from_root(
+    automation: &UIAutomation,
+    root: &UIElement,
+    depth: u32,
+) -> A11yResult<AccessibleSubtree> {
+    let started = Instant::now();
+    let mut tree = snapshot_at_depth(automation, root, depth)?;
+    if depth >= RAW_SUPPLEMENT_DEPTH {
+        tree.truncated |= supplement_raw_pattern_nodes(automation, root, &mut tree.nodes)?;
+        tree.max_depth = tree.max_depth.max(RAW_SUPPLEMENT_DEPTH);
+    }
+    // Observability: `truncated` is also surfaced to callers (observe
+    // diagnostics) so an incomplete tree is never mistaken for a complete
+    // one. A truncated tree means the node budget/deadline was hit or a
+    // subtree errored (the per-subtree error is logged at warn separately).
+    tracing::debug!(
+        code = "A11Y_SNAPSHOT_ASSEMBLED",
+        requested_depth = depth,
+        nodes = tree.nodes.len(),
+        max_depth = tree.max_depth,
+        truncated = tree.truncated,
+        elapsed_ms = started.elapsed().as_millis(),
+        "a11y snapshot assembled"
+    );
+    store_snapshot(depth, &tree);
+    Ok(tree)
+}
+
+pub fn focused_element_node() -> A11yResult<AccessibleNode> {
     with_automation(|automation| {
-        let started = Instant::now();
-        let mut tree = snapshot_at_depth(automation, root, depth)?;
-        if depth >= RAW_SUPPLEMENT_DEPTH {
-            tree.truncated |= supplement_raw_pattern_nodes(automation, root, &mut tree.nodes)?;
-            tree.max_depth = tree.max_depth.max(RAW_SUPPLEMENT_DEPTH);
-        }
-        // Observability: `truncated` is also surfaced to callers (observe
-        // diagnostics) so an incomplete tree is never mistaken for a complete
-        // one. A truncated tree means the node budget/deadline was hit or a
-        // subtree errored (the per-subtree error is logged at warn separately).
-        tracing::debug!(
-            code = "A11Y_SNAPSHOT_ASSEMBLED",
-            requested_depth = depth,
-            nodes = tree.nodes.len(),
-            max_depth = tree.max_depth,
-            truncated = tree.truncated,
-            elapsed_ms = started.elapsed().as_millis(),
-            "a11y snapshot assembled"
-        );
-        store_snapshot(depth, &tree);
-        Ok(tree)
+        let cache = create_cache_request(automation, 0, ElementMode::Full, TreeView::Control)?;
+        let element = automation
+            .get_focused_element_build_cache(&cache)
+            .map_err(map_uia_error)?;
+        let root_hwnd = cached_hwnd(&element).unwrap_or(0);
+        node_from_cached_element(&element, None, 0, root_hwnd, 0)
+    })
+}
+
+pub fn element_node_from_point(point: Point) -> A11yResult<AccessibleNode> {
+    with_automation(move |automation| {
+        let cache = create_cache_request(automation, 0, ElementMode::Full, TreeView::Control)?;
+        let element = automation
+            .element_from_point_build_cache(UiaPoint::new(point.x, point.y), &cache)
+            .map_err(map_uia_error)?;
+        let root_hwnd = cached_hwnd(&element).unwrap_or(0);
+        node_from_cached_element(&element, None, 0, root_hwnd, 0)
     })
 }
 
@@ -91,38 +147,77 @@ pub fn find_by_name_and_pattern(
     if name.is_empty() {
         return Ok(None);
     }
+    let _ = root;
+    let _ = pattern;
+    let _ = scope;
 
-    with_automation(|automation| {
-        let cache = create_cache_request(automation, 0, ElementMode::Full, TreeView::Raw)?;
-        let name_condition = automation
-            .create_property_condition(
-                UIProperty::Name,
-                Variant::from(name),
-                Some(PropertyConditionFlags::IgnoreCase),
-            )
-            .map_err(map_uia_error)?;
-        let pattern_condition = automation
-            .create_property_condition(pattern_property(pattern), Variant::from(true), None)
-            .map_err(map_uia_error)?;
-        let condition = automation
-            .create_and_condition(name_condition, pattern_condition)
-            .map_err(map_uia_error)?;
-        let elements = root
-            .find_all_build_cache(scope.into(), &condition, &cache)
-            .map_err(map_uia_error)?;
-        let root_hwnd = root
-            .build_updated_cache(&cache)
-            .ok()
-            .and_then(|cached_root| cached_hwnd(&cached_root))
-            .unwrap_or(0);
+    Err(A11yError::internal(
+        "direct UIElement search is disabled; use a data-returning worker API so UIA stays on the dedicated MTA worker",
+    ))
+}
 
-        elements
-            .into_iter()
-            .filter(|element| element.is_cached_enabled().unwrap_or(true))
-            .map(|element| node_from_cached_element(&element, None, 0, root_hwnd, 0))
-            .next()
-            .transpose()
+pub fn find_by_name_and_pattern_in_window(
+    hwnd: i64,
+    name: String,
+    pattern: UiaPattern,
+    scope: ElementSearchScope,
+) -> A11yResult<Option<AccessibleNode>> {
+    if hwnd == 0 {
+        return Err(A11yError::NoForeground {
+            detail: "HWND was null".to_owned(),
+        });
+    }
+    let hwnd = isize::try_from(hwnd).map_err(|err| A11yError::InvalidElementId {
+        detail: err.to_string(),
+    })?;
+    with_automation(move |automation| {
+        let root = automation
+            .element_from_handle(Handle::from(hwnd))
+            .map_err(map_uia_error)?;
+        find_by_name_and_pattern_from_root(automation, &root, &name, pattern, scope)
     })
+}
+
+fn find_by_name_and_pattern_from_root(
+    automation: &UIAutomation,
+    root: &UIElement,
+    name: &str,
+    pattern: UiaPattern,
+    scope: ElementSearchScope,
+) -> A11yResult<Option<AccessibleNode>> {
+    if name.is_empty() {
+        return Ok(None);
+    }
+
+    let cache = create_cache_request(automation, 0, ElementMode::Full, TreeView::Raw)?;
+    let name_condition = automation
+        .create_property_condition(
+            UIProperty::Name,
+            Variant::from(name),
+            Some(PropertyConditionFlags::IgnoreCase),
+        )
+        .map_err(map_uia_error)?;
+    let pattern_condition = automation
+        .create_property_condition(pattern_property(pattern), Variant::from(true), None)
+        .map_err(map_uia_error)?;
+    let condition = automation
+        .create_and_condition(name_condition, pattern_condition)
+        .map_err(map_uia_error)?;
+    let elements = root
+        .find_all_build_cache(scope.into(), &condition, &cache)
+        .map_err(map_uia_error)?;
+    let root_hwnd = root
+        .build_updated_cache(&cache)
+        .ok()
+        .and_then(|cached_root| cached_hwnd(&cached_root))
+        .unwrap_or(0);
+
+    elements
+        .into_iter()
+        .filter(|element| element.is_cached_enabled().unwrap_or(true))
+        .map(|element| node_from_cached_element(&element, None, 0, root_hwnd, 0))
+        .next()
+        .transpose()
 }
 fn snapshot_at_depth(
     automation: &UIAutomation,
@@ -133,6 +228,10 @@ fn snapshot_at_depth(
     let true_condition = automation.create_true_condition().map_err(map_uia_error)?;
     let cached_root = root.build_updated_cache(&cache).map_err(map_uia_error)?;
     let root_hwnd = cached_hwnd(&cached_root).unwrap_or(0);
+    let root_id = element_id_from_cached_element(&cached_root, root_hwnd)?;
+    if let Some(tree) = cached_snapshot(depth, &root_id) {
+        return Ok(tree);
+    }
     let mut nodes = Vec::new();
     let mut truncated = false;
     let walk = SnapshotWalk {
@@ -226,11 +325,12 @@ fn supplement_raw_pattern_nodes(
     Ok(truncated)
 }
 
-fn cached_snapshot(depth: u32) -> Option<AccessibleSubtree> {
+fn cached_snapshot(depth: u32, root: &ElementId) -> Option<AccessibleSubtree> {
     let guard = SNAPSHOT_CACHE.lock().ok()?;
     let cache = guard.as_ref()?;
-    let is_fresh =
-        cache.requested_depth == depth && cache.captured_at.elapsed() <= Duration::from_millis(50);
+    let is_fresh = cache.requested_depth == depth
+        && cache.root == *root
+        && cache.captured_at.elapsed() <= Duration::from_millis(50);
     let tree = is_fresh.then(|| cache.tree.clone());
     drop(guard);
     tree
@@ -240,6 +340,7 @@ fn store_snapshot(depth: u32, tree: &AccessibleSubtree) {
     if let Ok(mut guard) = SNAPSHOT_CACHE.lock() {
         *guard = Some(SnapshotCache {
             requested_depth: depth,
+            root: tree.root.clone(),
             captured_at: Instant::now(),
             tree: tree.clone(),
         });
@@ -316,13 +417,11 @@ fn node_from_cached_element(
     root_hwnd: i64,
     children_count: usize,
 ) -> A11yResult<AccessibleNode> {
-    let runtime_id = cached_runtime_id(element)?;
-    let runtime_id_hex = runtime_id_hex(&runtime_id);
     let hwnd = cached_hwnd(element)
         .filter(|value| *value != 0)
         .unwrap_or(root_hwnd);
     Ok(AccessibleNode {
-        element_id: element_id(hwnd, &runtime_id_hex),
+        element_id: element_id_from_cached_element(element, hwnd)?,
         parent,
         name: element.get_cached_name().unwrap_or_default(),
         role: cached_role(element),
@@ -335,4 +434,9 @@ fn node_from_cached_element(
         children_count: u32::try_from(children_count).unwrap_or(u32::MAX),
         depth,
     })
+}
+
+fn element_id_from_cached_element(element: &UIElement, hwnd: i64) -> A11yResult<ElementId> {
+    let runtime_id = cached_runtime_id(element)?;
+    Ok(element_id(hwnd, &runtime_id_hex(&runtime_id)))
 }

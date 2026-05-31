@@ -1,9 +1,8 @@
 use std::fmt::Display;
 
-use synapse_core::{ElementId, Point};
-
 #[cfg(windows)]
-use synapse_a11y::{UIElement, uiautomation::types::Rect as UiaRect};
+use synapse_core::Rect;
+use synapse_core::{ElementId, Point};
 
 use crate::{ActionError, ActionResult};
 
@@ -11,21 +10,11 @@ use crate::{ActionError, ActionResult};
 use super::CoordinateFallbackPlan;
 
 #[cfg(windows)]
-pub(super) fn resolve_element(element_id: &ElementId) -> ActionResult<UIElement> {
-    synapse_a11y::re_resolve(element_id).map_err(element_not_resolved)
-}
-
-#[cfg(windows)]
 pub(super) fn coordinate_fallback_plan(
     element_id: &ElementId,
-    element: &UIElement,
+    rect: Rect,
 ) -> ActionResult<CoordinateFallbackPlan> {
     let parts = element_id.parts().map_err(target_invalid)?;
-    let rect = element.get_bounding_rectangle().map_err(|err| {
-        target_invalid(format!(
-            "element {element_id} bounding rectangle unavailable: {err}"
-        ))
-    })?;
     let screen_point = center_from_rect_edges(RectEdges::from(rect))?;
     let window_point =
         synapse_capture::screen_to_window(screen_point, parts.hwnd).map_err(|err| {
@@ -60,7 +49,7 @@ pub(super) fn invoke_pattern_unavailable(
 }
 
 #[must_use]
-#[cfg(any(test, windows))]
+#[cfg(test)]
 pub(super) fn invoke_pattern_failed(element_id: &ElementId, error: impl Display) -> ActionError {
     ActionError::TargetInvalid {
         detail: format!("InvokePattern.invoke failed for element {element_id}: {error}"),
@@ -85,13 +74,13 @@ pub(super) struct RectEdges {
 }
 
 #[cfg(windows)]
-impl From<UiaRect> for RectEdges {
-    fn from(value: UiaRect) -> Self {
+impl From<Rect> for RectEdges {
+    fn from(value: Rect) -> Self {
         Self {
-            left: value.get_left(),
-            top: value.get_top(),
-            right: value.get_right(),
-            bottom: value.get_bottom(),
+            left: value.x,
+            top: value.y,
+            right: value.x.saturating_add(value.w),
+            bottom: value.y.saturating_add(value.h),
         }
     }
 }

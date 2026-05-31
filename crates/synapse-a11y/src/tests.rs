@@ -217,10 +217,32 @@ fn windows_win_event_hook_apartment_readback_is_sta() -> Result<(), Box<dyn std:
 
 #[cfg(windows)]
 #[test]
+fn windows_uia_worker_readback_is_mta_windowless() -> Result<(), Box<dyn std::error::Error>> {
+    println!("readback=uia_worker edge=threading before=uninitialized_or_existing");
+    let readback = uia_worker_readback()?;
+    println!("readback=uia_worker edge=threading after={readback:?}");
+    assert!(readback.is_mta_windowless());
+    Ok(())
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_direct_uielement_api_fails_closed() {
+    println!("readback=uia_direct_api edge=focused_window before=call");
+    let after = focused_window();
+    println!("readback=uia_direct_api edge=focused_window after={after:?}");
+    let Err(error) = after else {
+        panic!("direct UIElement API unexpectedly returned a COM element");
+    };
+    assert_eq!(error.code(), error_codes::OBSERVE_INTERNAL);
+    assert!(error.to_string().contains("direct UIElement"));
+}
+
+#[cfg(windows)]
+#[test]
 fn windows_foreground_snapshot_round_trips_element_id() -> Result<(), Box<dyn std::error::Error>> {
-    let root = focused_window()?;
     println!("readback=uia_snapshot edge=depth2 before=focused_window_resolved");
-    let tree = snapshot(&root, 2)?;
+    let tree = snapshot_focused_window(2)?;
     println!(
         "readback=uia_snapshot edge=depth2 after=root:{} nodes:{} max_depth:{}",
         tree.root,
@@ -228,8 +250,7 @@ fn windows_foreground_snapshot_round_trips_element_id() -> Result<(), Box<dyn st
         tree.max_depth
     );
     assert!(!tree.nodes.is_empty());
-    let resolved = re_resolve(&tree.root)?;
-    let round_trip = snapshot(&resolved, 0)?;
+    let round_trip = snapshot_element(&tree.root, 0)?;
     println!(
         "readback=uia_snapshot edge=round_trip after=root:{} nodes:{}",
         round_trip.root,

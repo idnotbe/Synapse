@@ -70,6 +70,17 @@ pub fn window_for_process(pid: u32) -> A11yResult<UIElement> {
     platform::window_for_process(pid)
 }
 
+/// Resolves a top-level UIA window name to its native HWND without returning
+/// COM elements.
+///
+/// # Errors
+///
+/// Returns a structured UIA error for OS failures, or `A11Y_NOT_AVAILABLE` on
+/// non-Windows platforms.
+pub fn top_level_window_hwnd_by_name(name: impl Into<String>) -> A11yResult<Option<i64>> {
+    platform::top_level_window_hwnd_by_name(name.into())
+}
+
 /// Returns foreground-window process, title, bounds, and display metadata.
 ///
 /// # Errors

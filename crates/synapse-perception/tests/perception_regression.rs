@@ -511,8 +511,7 @@ fn winrt_text_window_region_read_text_native() -> TestResult {
         regression_log(format_args!(
             "regression_check=ocr edge=winrt_text_window hwnd_readback={hwnd}"
         ))?;
-        let root = synapse_a11y::window_from_hwnd(hwnd)?;
-        let tree = synapse_a11y::snapshot(&root, 2)?;
+        let tree = synapse_a11y::snapshot_window_from_hwnd(hwnd, 2)?;
         let target = tree
             .nodes
             .iter()
@@ -619,9 +618,8 @@ fn winrt_ocr_capture_vs_recognize_timing_native() -> TestResult {
 #[cfg(windows)]
 fn wait_for_window_hwnd(pid: u32) -> Result<i64, Box<dyn Error>> {
     for _ in 0..20 {
-        match synapse_a11y::window_for_process(pid) {
-            Ok(root) => {
-                let tree = synapse_a11y::snapshot(&root, 0)?;
+        match synapse_a11y::snapshot_window_for_process(pid, 0) {
+            Ok(tree) => {
                 return Ok(tree.root.parts()?.hwnd);
             }
             Err(_) => {

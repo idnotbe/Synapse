@@ -521,8 +521,8 @@ SynapseService::observe
         │   ├─ if state.force_observe_internal   → OBSERVE_INTERNAL
         │   └─ otherwise: m1/sources.rs::platform_input(depth, perception_mode)
         │       ├─ synapse_a11y::current_foreground_context
-        │       ├─ synapse_a11y::focused_element (optional)
-        │       ├─ synapse_a11y::snapshot(root, depth)  (A11y tree)
+        │       ├─ synapse_a11y::focused_element_node (optional plain-data node)
+        │       ├─ synapse_a11y::snapshot_focused_window(depth)  (A11y tree)
         │       └─ assembles ObservationInput { foreground, elements, entities, ... }
         └─ ObservationAssembler::new().assemble(ObserveInclude::default(), input)
            └─ returns synapse_core::Observation

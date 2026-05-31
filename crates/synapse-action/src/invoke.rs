@@ -35,8 +35,12 @@ pub struct CoordinateFallbackPlan {
 /// through to coordinate click handling.
 #[cfg(windows)]
 pub fn invoke_element(element_id: &ElementId) -> ActionResult<()> {
-    let element = resolver::resolve_element(element_id)?;
-    dispatch::invoke_resolved_element(element_id, &element)
+    match synapse_a11y::click_element_action(element_id).map_err(a11y_error_to_action)? {
+        synapse_a11y::ElementClickAction::Invoked => Ok(()),
+        synapse_a11y::ElementClickAction::CoordinateFallback { .. } => Err(
+            resolver::invoke_pattern_unavailable(element_id, "pattern not available"),
+        ),
+    }
 }
 
 /// Non-Windows builds expose the same API but fail closed before any action is
@@ -73,15 +77,14 @@ pub fn click_element_or_fallback<B>(
 where
     B: ActionBackend,
 {
-    let element = resolver::resolve_element(element_id)?;
-
-    dispatch::complete_click_attempt(
-        dispatch::try_invoke_resolved_element(element_id, &element),
-        || resolver::coordinate_fallback_plan(element_id, &element),
-        backend,
-        state,
-        button,
-    )
+    match synapse_a11y::click_element_action(element_id).map_err(a11y_error_to_action)? {
+        synapse_a11y::ElementClickAction::Invoked => Ok(ElementClickOutcome::Invoked),
+        synapse_a11y::ElementClickAction::CoordinateFallback { bbox } => {
+            let plan = resolver::coordinate_fallback_plan(element_id, bbox)?;
+            dispatch::emit_coordinate_fallback_click(backend, state, button, plan)?;
+            Ok(ElementClickOutcome::CoordinateFallback(plan))
+        }
+    }
 }
 
 /// Non-Windows builds expose the same API but fail closed before any action is
@@ -112,8 +115,8 @@ where
     reason = "reserved for element-target action paths that need screen-point readback"
 )]
 pub(crate) fn element_screen_point(element_id: &ElementId) -> ActionResult<Point> {
-    let element = resolver::resolve_element(element_id)?;
-    resolver::coordinate_fallback_plan(element_id, &element).map(|plan| plan.screen_point)
+    let rect = synapse_a11y::element_bounding_rect(element_id).map_err(a11y_error_to_action)?;
+    resolver::coordinate_fallback_plan(element_id, rect).map(|plan| plan.screen_point)
 }
 
 #[cfg(not(windows))]
@@ -125,4 +128,18 @@ pub(crate) fn element_screen_point(element_id: &ElementId) -> ActionResult<Point
     Err(ActionError::BackendUnavailable {
         detail: format!("UI Automation element target requires Windows for element {element_id}"),
     })
+}
+
+#[cfg(windows)]
+fn a11y_error_to_action(error: synapse_a11y::A11yError) -> crate::ActionError {
+    match error {
+        synapse_a11y::A11yError::ElementStale { .. }
+        | synapse_a11y::A11yError::InvalidElementId { .. }
+        | synapse_a11y::A11yError::NoForeground { .. } => resolver::element_not_resolved(error),
+        synapse_a11y::A11yError::NotAvailable { detail } => {
+            crate::ActionError::BackendUnavailable { detail }
+        }
+        synapse_a11y::A11yError::CdpUnreachable { .. }
+        | synapse_a11y::A11yError::Internal { .. } => resolver::target_invalid(error),
+    }
 }
