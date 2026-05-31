@@ -21,9 +21,8 @@ Tracked benches (local/manual perf-regression gate):
 | `reflex_tick_jitter_under_load` | ≤ 500 µs | M3 |
 | `aim_curve_step_calc_natural` | ≤ 1 µs/step | M2 |
 | `action_software_press` | ≤ 3 ms | M2 |
-| `action_hardware_press` | ≤ 5 ms | M4 |
-| `hid_combo_timing` | ≤ 0.5 ms step-interval deviation from firmware timing telemetry | M4 |
-| `hid_high_volume` | 10k commands ≤ 15 s, zero drops/CRC errors | M4 |
+| `action_software_click` | ≤ 5 ms | M5 / #590 |
+| `action_vigem_pad_report` | ≤ 5 ms and ≥ 500 reports/s | M5 / #590 |
 | `detection_rtdetr_v2_s_coco_640` | ≤ 25 ms DirectML / ≤ 8 ms CUDA | M4 default per ADR-0010 |
 | `ocr_winrt_120x32` | ≤ 8 ms | M1 |
 | `serialize_observation_typical` | ≤ 5 ms | M1 |
@@ -83,7 +82,7 @@ Per `13_testing_strategy.md`.
 | Property | filter eval, aim curves, keystroke, coord transforms, JSON round-trip | `proptest` |
 | Snapshot | tool schemas, observation shape, error response shape | `insta` |
 | Bench | tracked perf bench list (§1 above) | `criterion`, `critcmp`, local exported JSON delta gate |
-| E2E | each milestone's demo scenario | real Notepad, real Minecraft, real RP2040 |
+| E2E | each milestone's demo scenario | real Notepad, real Minecraft/Luanti, real SendInput, real ViGEm |
 | Fuzz | protocol parsers (MCP JSON-RPC, HID serial, EventFilter, Profile TOML) | `cargo-fuzz` 10 min/target nightly |
 | Soak | weekly per `13 §12` | 8 h synthetic workload |
 
@@ -204,7 +203,7 @@ Per `13_testing_strategy.md` §14. Repeated for forcing function:
 | `scripts/check_docs.ps1` | configured host PowerShell | doc changes |
 | `e2e-real-windows` | configured Windows host | issue-specific manual evidence / release candidate |
 | `bench-regression` | configured Windows host | manual/local exported `critcmp` delta gate |
-| `hardware-in-loop` | configured host with Pico | hardware work-items / release candidate |
+| retired `hardware-in-loop` | n/a | physical HID/RP2040 path retired by #588/#589; use software/ViGEm real-host checks |
 | `soak` | configured Windows host | release candidate |
 | `fuzz` | configured host | parser/protocol changes |
 

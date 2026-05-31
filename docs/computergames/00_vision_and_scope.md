@@ -27,7 +27,7 @@ Synapse is the missing primitive.
 | **Accessibility tooling builder** | Programmatic operation of inaccessible apps | Use UIA path for accessible apps, capture+OCR fallback for the rest |
 | **QA / automation engineer** | Replace flaky pixel-matching with structured action | Use a11y path for stable element references; replay test logs from RocksDB |
 | **Hobbyist letting Claude play their game** | Set it up once, let the agent loop on a game while they watch | Install via `cargo install`, point Claude Desktop at it, give a goal |
-| **Speedrunning / TAS-adjacent research** | Frame-perfect inputs with structured state | Hardware HID gateway + reflex runtime |
+| **Speedrunning / TAS-adjacent research** | Frame-perfect inputs with structured state | Reflex runtime + software/ViGEm input |
 
 **Not** target users:
 - Mass-account operators running parallel unattended sessions. Single-machine system.
@@ -61,8 +61,8 @@ When the agent connects to `synapse-mcp`, it gains these capabilities for any fo
 
 ### Act (action)
 
-- Click, double-click, right-click, drag, scroll (mouse — software, virtual driver, or hardware HID)
-- Type text, press keys, hold modifiers, send chord combos (keyboard — same three paths)
+- Click, double-click, right-click, drag, scroll (mouse — software SendInput)
+- Type text, press keys, hold modifiers, send chord combos (keyboard — software SendInput)
 - Drive virtual Xbox 360 / DualShock 4 controller (ViGEm)
 - Send analog stick deltas, trigger pressures, button presses
 - Move cursor with smooth aim curves (Bezier with micro-tremor + variable timing)
@@ -95,7 +95,7 @@ Out of scope. NEVER accept feature requests for these without an ADR.
 1. **No goal planning, no MCTS, no GOAP, no skill libraries.** Agent is the planner. We do not invent per-game skill ontologies, do not maintain skill graphs, do not run plan-space search. Multi-step composition lives in agent tokens, not ours.
 2. **No inner LLM.** Synapse loads no large model. Optional vision models stay small (≤100M params). The connecting agent is the only "intelligence."
 3. **No prediction / world model / learning head.** No future-state prediction, no reward signal, no runtime weight adaptation. Optional model inference is perception (detection / OCR), not prediction or RL.
-4. **No unsupported process-manipulation or device-identity features.** Hardware HID supports accessibility, QA, research, simulation, and local game-control workflows; bundled firmware identifies itself plainly.
+4. **No unsupported process-manipulation or device-identity features.** Physical HID/device-identity work is retired; supported input is software SendInput plus ViGEm virtual controllers.
 5. **No general-purpose RPA / web scraping framework.** Browser CDP ships because games and apps have web subviews; not a Playwright competitor.
 6. **No mobile, console, embedded.** Windows desktop only at v1. Linux/macOS v2.
 7. **No multiplayer / multi-machine orchestration.** One agent, one machine, one Synapse server.
@@ -119,7 +119,7 @@ Synapse v1 is successful when:
 |---|---|
 | Screenshot-loop fallback masquerading as "structured" perception | Hard rule: `observe()` returns structured data; if both a11y and detection fail, return `OBSERVE_NO_PERCEPTION_AVAILABLE` error with diagnostics, never silently include a screenshot |
 | Slow path becoming the only path | Per-tool p99 latency budgets enforced through local benchmark exports and manual review; perf regressions block merge |
-| Sensitive input paths enabled by accident | Hardware HID, shell, process launch, non-loopback networking, and redaction changes require explicit operator configuration |
+| Sensitive input paths enabled by accident | Shell, process launch, non-loopback networking, and redaction changes require explicit operator configuration |
 | Tool-bloat (200+ MCP tools, agent confused) | Hard cap: current approved live surface is 79 tools after M4/M5 registry/audit expansion, EverQuest world-model/runtime tools, ContextGraph ingest/search, and delta-first reality tools. Anything else is a profile, a parameter, or a sub-command of an existing tool unless an ADR approves the cap change |
 | Token bloat per observation | Hard cap: `observe()` returns ≤ 1500 tokens by default; agent must `expand(slot)` for more |
 | Per-game special-casing in core code | Per-game logic lives in declarative profiles (`profiles/<id>.toml`), not Rust code |
@@ -140,7 +140,7 @@ Synapse v1 is successful when:
 | Windows 11 / Windows 10 21H2+ | Linux Wayland/X11, macOS |
 | stdio + Streamable HTTP MCP transports | WebSocket, IPC pipes |
 | UIA, CDP (Chromium), file watch, clipboard, processes | AT-SPI (Linux), AX (macOS), Wayland-specific |
-| Software input, ViGEm virtual pad, RP2040 HID | Interception driver, kernel-level hooks |
+| Software input, ViGEm virtual pad | Physical HID, Interception driver, kernel-level hooks |
 | YOLO + ConvNeXt detection, WinRT OCR | Custom segmentation, depth-from-stereo, large VLM inference |
 | WASAPI loopback + simple direction estimate | HRTF-accurate spatial audio, room acoustics |
 | Per-app / per-game profile TOML | Profile auto-generation from one-shot bootstrap session |
@@ -153,11 +153,11 @@ Synapse v1 is successful when:
 | Risk | Impact | Mitigation |
 |---|---|---|
 | Microsoft tightens GPU capture permissioning in a future Windows update | High — perception breaks | Maintain DXGI Output Duplication fallback in addition to Graphics Capture API |
-| A game ignores or mishandles virtual controller input | Medium — some game support narrows | Hardware HID remains an optional physical-input path for accessibility, rigs, and local game profiles |
+| A game ignores or mishandles virtual controller input | Medium — some game support narrows | Keep keyboard/mouse SendInput, ViGEm, and profile-specific control modes explicit; physical HID is retired |
 | MCP transport spec changes again | Low — minor refactor | Stay on official `rmcp` crate; track spec releases |
 | Vision-model dependency on bundled ONNX files | Medium — install size, licensing | Default-bundle only models with permissive licenses; download larger models on first run with explicit consent |
 | RocksDB on Windows is sometimes finicky | Low | Pin a known-good `rocksdb` crate version; M3 uses RocksDB only per ADR-0002 |
-| Hardware HID requires user to solder/buy a $4 board | Low | Make the gateway optional; document the use case clearly; ship pre-built firmware images |
+| Physical HID would require user hardware | Low | Do not ship the physical HID gateway; keep input software-only |
 | Claude/Codex/Cursor change MCP client behavior | Low | Local compatibility checks against each client; don't depend on undocumented behavior |
 
 ## 12. The single line that decides everything

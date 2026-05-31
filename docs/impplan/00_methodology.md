@@ -81,7 +81,7 @@ Test pyramid: `13_testing_strategy.md` §2.
 | `insta review --check` | every PR |
 | `cargo bench` perf-regression (tracked benches only) | local configured-host run + exported `critcmp` JSON delta ≤ 20% |
 | E2E real Windows | nightly self-hosted |
-| Hardware-in-loop (RP2040) | weekly self-hosted |
+| Retired physical-HID loop | n/a; replaced by real SendInput + ViGEm checks |
 | Fuzz (`cargo-fuzz`) | nightly, 10 min/target |
 | Soak (8h) | weekly |
 

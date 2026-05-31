@@ -219,7 +219,7 @@ Listed in `05_mcp_tool_surface.md`; aggregated here as the contract.
 | `act_aim` (non-track) | 100 ms (depends on duration) | duration + 30 ms |
 | `act_drag` | duration + 20 ms | duration + 50 ms |
 | `act_scroll` | 10 ms | 20 ms |
-| `act_pad` | 5 ms (ViGEm) / 10 ms (hardware) | 10/20 ms |
+| `act_pad` | 5 ms (ViGEm) | 10 ms |
 | `act_combo` | scheduled by reflex runtime; combo length + 10 ms | combo + 30 ms |
 | `act_clipboard` read/write | 5 ms | 10 ms |
 | `act_run_shell` | wall-time dependent; tool overhead ≤ 20 ms | 50 ms |
@@ -260,10 +260,9 @@ SERVER-SIDE latencies, measured from request parse to response send. Network and
 - `bench_event_to_subscriber_p99`: 50 ms target
 - `bench_reflex_tick_jitter`: 200 µs p99 jitter
 - `bench_aim_curve_step_calc`: <1 µs per step
-- `bench_action_software_press`: 1 ms p99
-- `bench_action_hardware_press`: 5 ms p99 (requires HW gateway attached)
-- `bench_hid_combo_timing`: ≤0.5 ms scheduled-step deviation from firmware timing telemetry (requires HW gateway attached)
-- `bench_hid_high_volume`: 10k moves ≤15 s, zero drops/CRC errors (requires HW gateway attached)
+- `bench_action_software_press`: 3 ms p99
+- `bench_action_software_click`: 5 ms p99
+- `bench_action_vigem_pad_report`: 5 ms p99 and ≥500 reports/s
 - `bench_detection_rtdetr_v2_s_coco_640`: 25 ms p99 DirectML / 8 ms p99 CUDA (GPU dependent)
 - `bench_ocr_winrt_120x32`: 8 ms p99
 

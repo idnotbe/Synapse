@@ -266,7 +266,6 @@ For users without Rust. Signed Windows MSI from `wix-installer`:
 - Start menu shortcuts
 - Bundled ONNX models for default detection + OCR + STT
 - Bundled profiles
-- Bundled RP2040 firmware `.uf2`
 - Visual C++ runtime redistributable (RocksDB dep)
 - Optional checkbox: launch the Nefarius signed ViGEmBus installer for an
   operator-completed GUI install
@@ -302,9 +301,8 @@ Air-gapped installs: `.zip` with binaries + bundled models + profiles. Extract a
 4. **Model selection.** Show detection / OCR / STT models with sizes. Operator picks which to download.
 5. **Profile selection.** Show profiles; default = enable all bundled.
 6. **Bearer token generation.** For HTTP mode; store in `%APPDATA%\synapse\token.txt`.
-7. **Optional hardware HID.** Detect connected RP2040 boards; offer to flash one.
-8. **Start configuration.** Write `%APPDATA%\synapse\config.toml`.
-9. **First server start.** Launches `synapse-mcp --mode stdio` and prompts operator to configure their agent client.
+7. **Start configuration.** Write `%APPDATA%\synapse\config.toml`.
+8. **First server start.** Launches `synapse-mcp --mode stdio` and prompts operator to configure their agent client.
 
 Supports `--non-interactive --accept-defaults` for headless installs except
 for ViGEmBus provisioning on current Win11. The Nefarius 1.22.0 installer is

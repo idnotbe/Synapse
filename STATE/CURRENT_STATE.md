@@ -1,77 +1,82 @@
 # CURRENT STATE - Synapse
 
 ## 2026-05-31
-- Required doctrine re-read after compaction from:
+- Required wake-up context was re-read after compaction:
   - `C:\code\Synapse\docs\AICodingAgentSuperPrompt.md`
   - `C:\Users\hotra\Downloads\AICodingAgentSuperPrompt.md`
   - `AGENTS.md`
   - #351 manual-FSV/no-CI decision
-- GitHub issue queue read after closing #589: open issues are #590, #588, and #585.
-- `main` and `origin/main` are both at `d9edad8 docs(state): update session state after docs alignment commit [skip ci]`.
-- Worktree is clean after pushing `828eec2`.
-- #589 implementation commits already on `main`:
-  - `e0e9993 refactor: retire physical hardware-HID path for software-only input (#588)`
-  - `a44d845 docs: align documentation with software-only input refactor [skip ci]`
-  - `d9edad8 docs(state): update session state after docs alignment commit [skip ci]`
-  - `828eec2 test(profiles): update signed manifest digest after HID removal [skip ci]`
-- #589 removed the dead RP2040/Pico and serial hardware-HID path while retaining hardware enum/profile tokens as fail-closed compatibility tags through `HardwareUnavailableBackend`.
-- Uncommitted fix: signed package manifest expected digest updated to `sha256:4013ce772c32c5ba641d78848ba1b04add3224fe7fab12822572e6343b5b38c7` after hardware metadata removal changed the deterministic signature payload.
+  - open queue and active issue comments
+- Open GitHub queue at wake-up: #590, #588, #585.
+- Active work: #590 is implemented and locally verified; commit/push and RESOLVED comment are next.
 
-## #589 Manual FSV Evidence Captured
-- Repo-built daemon launched from `C:\code\Synapse\target\release\synapse-mcp.exe`.
-- Runtime SoT:
-  - PID `56908`
-  - command line: `"C:\code\Synapse\target\release\synapse-mcp.exe" --mode http --bind 127.0.0.1:7791`
-  - socket: `127.0.0.1:7791` listening, owning process `56908`
-  - isolated DB: `C:\code\Synapse\.runs\589\http-fsv\db`
-  - bearer token source in startup log: `env`
-- Authenticated health SoT:
-  - direct `/health` and MCP `health` returned `ok=true`
-  - subsystems are `action,audio,http,profiles,reflex,storage`
-  - `hid_host` subsystem is absent
-  - action detail has no `hardware_hid`, `--hardware-hid`, or `SYNAPSE_HARDWARE_HID`
-- Strict client-parity SoT:
-  - official MCP Inspector CLI was used against `http://127.0.0.1:7791/mcp`
-  - `tools/list` exited 0 with 80 tools, including `health`, `storage_inspect`, and `act_press`
-  - no tool names matched `hid|hardware`
-  - tools-list output did not mention `InputHardwareHid`, `INPUT_HARDWARE_HID`, `--hardware-hid`, `SYNAPSE_HARDWARE_HID`, or `hid_host`
-- Storage/action SoT using real MCP `tools/call`:
-  - Before happy path, `storage_inspect` read `CF_ACTION_LOG=0`.
-  - Happy path trigger: `act_press` with `keys=["shift"]`, `hold_ms=1`, `backend=software`; result `ok=true`, `backend_used=software`, `keys_pressed=1`.
-  - After happy path, `storage_inspect` read `CF_ACTION_LOG=2` with `act_press` rows `started` and `ok`.
-  - Edge 1 trigger: `act_press` with `keys=["shift"]`, `hold_ms=1`, `backend=hardware`; Inspector exited 1 with `ACTION_BACKEND_UNAVAILABLE` and detail `hardware backend removed; use backend=software or backend=vigem action_kind=key_down`.
-  - After edge 1, `storage_inspect` read `CF_ACTION_LOG=4` with new rows `started` and `error` / `ACTION_BACKEND_UNAVAILABLE`.
-  - Edge 2 trigger: `act_press` with `keys=[]`, `hold_ms=1`, `backend=hardware`; Inspector exited 1 with `TOOL_PARAMS_INVALID` / `act_press keys must contain at least one key`.
-  - After edge 2, `storage_inspect` read `CF_ACTION_LOG=6` with new rows `started` and `error` / `TOOL_PARAMS_INVALID`.
-  - Edge 3 trigger: `act_press` with `keys=["definitely-not-a-key"]`, `hold_ms=1`, `backend=hardware`; Inspector exited 1 with `ACTION_UNSUPPORTED_KEY`.
-  - After edge 3, `storage_inspect` read `CF_ACTION_LOG=8` with new rows `started` and `error` / `ACTION_UNSUPPORTED_KEY`.
-- CLI/operator-surface SoT:
-  - `target\release\synapse-mcp.exe --help` contains no `--hardware-hid`, no `SYNAPSE_HARDWARE_HID`, and no `--reset-hardware-consent`.
-  - `target\release\synapse-mcp.exe --mode http --bind 127.0.0.1:7792 --hardware-hid auto` exited 2 with `unexpected argument '--hardware-hid'`; before/after socket reads on port 7792 were empty.
-  - `SYNAPSE_MCP_ALLOWED_PERMISSIONS=INPUT_HARDWARE_HID target\release\synapse-mcp.exe --mode http --bind 127.0.0.1:7793` exited 1 with `unknown M3 permission "INPUT_HARDWARE_HID"`; before/after socket reads on port 7793 were empty.
-- Cleanup SoT:
-  - repo-built FSV daemon PID `56908` was stopped after evidence capture
-  - follow-up process/socket read showed PID `56908` absent and no listener on port 7791
-  - pre-existing installed `%USERPROFILE%\.cargo\bin\synapse-mcp.exe` stdio daemons were left untouched
-- File/dependency SoT:
-  - `Test-Path` false for `crates\synapse-hid-host`, `firmware\pico-hid`, `crates\synapse-action\src\backend\hardware`, and `crates\synapse-mcp\src\safety\hardware_consent.rs`.
-  - live-reference scan returned no matches for removed hardware-HID flags/crates/deps/permissions after excluding historical changelog text, retired-plan stubs, and absence assertion tests.
-  - `Cargo.toml` / `Cargo.lock` scan returned no matches for `synapse-hid-host`, `serialport`, `crc16`, or `pico-hid`.
+## #590 Implementation
+- Added `crates/synapse-action/benches/action_software_click.rs`.
+  - Safe recording-backed default Criterion bench.
+  - Opt-in real Windows SendInput path gated by `SYNAPSE_ACTION_SOFTWARE_CLICK_REAL=1`.
+  - Local target constant: p99 <= 5 ms for real SendInput.
+- Added `crates/synapse-action/benches/action_vigem_pad_report.rs`.
+  - Safe recording-backed default Criterion bench.
+  - Opt-in real ViGEm/XInput path gated by `SYNAPSE_ACTION_VIGEM_PAD_REAL=1`.
+  - Local targets: p99 <= 5 ms and throughput >= 500 reports/s.
+- Registered both benches in `crates/synapse-action/Cargo.toml`.
+- Updated live docs to retire abandoned physical-HID benches and track SendInput/ViGEm software benches:
+  - `docs/impplan/07_cross_cutting.md`
+  - `docs/computergames/10_performance_budget.md`
+  - `docs/computergames/13_testing_strategy.md`
+  - `docs/impplan/00_methodology.md`
+  - `docs/computergames/00_vision_and_scope.md`
+  - `docs/computergames/14_build_and_packaging.md`
+  - `docs/computergames/README.md`
+  - `docs/systemspec/14_test_suite.md`
+  - `docs/systemspec/SYNAPSE_SYSTEMSPEC.md`
+- Added an explicit `#[expect(dead_code)]` on `element_screen_point` because it is reserved for element-target action paths and clippy `-D warnings` would otherwise fail.
+
+## #590 Manual FSV Evidence Captured
+- Repo-built daemon:
+  - PID `43376`
+  - binary `C:\code\Synapse\target\release\synapse-mcp.exe`
+  - bind `127.0.0.1:7794`
+  - isolated DB `C:\code\Synapse\.runs\590\http-fsv\db2`
+  - bearer token from env
+- Runtime precondition:
+  - process/socket read showed PID `43376` listening on `127.0.0.1:7794`.
+  - authenticated `/health` and MCP `health` returned `ok=true`.
+  - subsystems were `action,audio,http,profiles,reflex,storage`; no `hid_host`.
+  - official MCP Inspector CLI `tools/list` exited 0 with 80 tools.
+  - Required tools present: `health`, `storage_inspect`, `act_press`, `act_click`, `act_pad`, `release_all`.
+  - No tool names matched `hid|hardware`.
+- Happy path SoTs:
+  - `act_press` via real MCP `tools/call`: before `CF_ACTION_LOG=0`, Shift up; during hold Shift down; after Shift up; result `ok=true`, `backend_used=software`; after `CF_ACTION_LOG=2` with `act_press started/ok`.
+  - `act_click` via real MCP `tools/call`: before `CF_ACTION_LOG=2`, left button up; during hold left button down; after left button up; result `ok=true`, `backend_used=software`, `used_invoke_pattern=false`; after `CF_ACTION_LOG=4` with `act_click started/ok`.
+  - `act_pad` via real MCP `tools/call`: before `CF_ACTION_LOG=4`, ViGEm PnP `Nefarius Virtual Gamepad Emulation Bus` `OK`, XInput slots disconnected; after `act_pad`, XInput slot 0 connected with `buttons_hex=0x1000` / A down and `CF_ACTION_LOG=6` with `act_pad started/ok`; after real MCP `release_all`, slot 0 `buttons_hex=0x0000`, `neutralized_pads=1`, `CF_ACTION_LOG=7`.
+- Edge cases:
+  - Edge 1 `act_press keys=[]`: before `CF_ACTION_LOG=7`; trigger exited 1 with `act_press keys must contain at least one key`; after `CF_ACTION_LOG=9` with `TOOL_PARAMS_INVALID`.
+  - Edge 2 `act_click clicks=0`: before `CF_ACTION_LOG=9` and left button up; trigger exited 1 with `act_click clicks must be in 1..=3, got 0`; after `CF_ACTION_LOG=11` with `TOOL_PARAMS_INVALID` and left button still up.
+  - Edge 3 `act_pad thumb_l=[1.5,0]`: before `CF_ACTION_LOG=11`, XInput slot 0 neutral; trigger exited 1 with invalid axis message; after `CF_ACTION_LOG=13` with `TOOL_PARAMS_INVALID` and XInput unchanged neutral.
+  - Edge 4 `act_pad backend=hardware`: before `CF_ACTION_LOG=13`; trigger exited 1 with removed-hardware backend message; after `CF_ACTION_LOG=15` with `ACTION_BACKEND_UNAVAILABLE` and XInput unchanged neutral.
+- Cleanup:
+  - final real MCP `release_all` returned `released_keys=0`, `released_buttons=0`, `neutralized_pads=0`.
+  - final OS read: Shift up and left button up.
+  - final post-bench XInput read: slot 0 connected neutral, slots 1-3 disconnected.
+  - repo-built FSV daemon PID `43376` was stopped; process/socket read showed no PID and no listener on port `7794`.
 
 ## Supporting Checks
-- `cargo fmt`
-- `cargo check -p synapse-mcp` (passes; warning only: pre-existing `element_screen_point` dead-code warning in `synapse-action`)
-- `pwsh scripts/check_docs.ps1`
-- `cargo test -p synapse-mcp --test cli_modes help_lists_m4_policy_flags_and_omits_removed_hardware_hid`
-- `cargo test -p synapse-mcp register_permissions_do_not_add_removed_hardware_backend_gate`
-- `cargo test -p synapse-action --test hardware_unavailable`
-- `cargo test -p synapse-core --test error_codes_literal`
-- `cargo test -p synapse-profiles --test parse_bundled`
-- `cargo test -p synapse-profiles --test package_manifest` after digest fix: 12 passed
-- `git diff --check` passes with line-ending warnings only.
+- `cargo bench -p synapse-action --bench action_software_click`
+  - recording p50 `27300 ns`, p99 `63800 ns`, max `233700 ns`, pass.
+  - real SendInput bench intentionally skipped because `SYNAPSE_ACTION_SOFTWARE_CLICK_REAL` was unset; real SendInput was manually FSV-verified through MCP.
+- `SYNAPSE_ACTION_VIGEM_PAD_REAL=1 cargo bench -p synapse-action --bench action_vigem_pad_report`
+  - recording p50 `41400 ns`, p99 `138200 ns`, max `248900 ns`, `650 reports/s`, pass.
+  - real ViGEm p50 `83700 ns`, p99 `284500 ns`, max `4989300 ns`, `638 reports/s`, pass against 5 ms / 500 reports/s target.
+- `cargo fmt --check`
+- `cargo clippy -p synapse-action --bench action_software_click --bench action_vigem_pad_report -- -D warnings`
+- `cargo check -p synapse-mcp`
+- `pwsh scripts\check_docs.ps1`
+- `git diff --check` returned only line-ending warnings.
+- No GitHub Actions/CI were run or used.
 
-## Open Queue Snapshot
-- #589: RESOLVED comment posted and issue closed.
-- #590: active next issue; add software-backend input fidelity benchmarks for SendInput and ViGEm timing.
-- #585: hardening, move UIA calls to a dedicated MTA worker thread.
-- #588: context issue, close after #589 and #590 are resolved.
+## Next
+- Commit and push #590 changes with `[skip ci]`.
+- Post #590 RESOLVED evidence comment and close #590.
+- Continue #585.
+- Close #588 only after #590 and #585 disposition no longer leave it open as context.

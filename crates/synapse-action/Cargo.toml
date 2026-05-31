@@ -44,6 +44,14 @@ name = "action_software_press"
 harness = false
 
 [[bench]]
+name = "action_software_click"
+harness = false
+
+[[bench]]
+name = "action_vigem_pad_report"
+harness = false
+
+[[bench]]
 name = "action_recording_round_trip"
 harness = false
 

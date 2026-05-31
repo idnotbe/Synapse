@@ -50,7 +50,7 @@ make it real, then verify the physical source of truth.
 | **Snapshot** | 10s | `insta` for stable outputs | Yes |
 | **Performance regression** | dozens of benches | `criterion` + `critcmp` exported JSON | Local manual gate |
 | **End-to-end on real Windows** | ~10 scenarios | Manual configured-host runs driven through `synapse-mcp` | Configured-host FSV |
-| **Hardware-in-the-loop** | ~5 scenarios | RP2040 attached to host | Hardware work-items |
+| **Retired hardware-in-the-loop** | 0 active scenarios | Physical HID/RP2040 path retired by #588/#589 | Use software/ViGEm real-host checks |
 | **Profile validation** | Per profile | Auto-generated from `profiles/*.toml` | Yes |
 
 ---
@@ -206,9 +206,8 @@ Tracked benches:
 | `reflex_tick_jitter_under_load` | ≤ 500 µs |
 | `aim_curve_step_calc_natural` | ≤ 1 µs |
 | `action_software_press` | ≤ 3 ms |
-| `action_hardware_press` | ≤ 5 ms |
-| `hid_combo_timing` | ≤ 0.5 ms step-interval deviation, read from firmware timing telemetry |
-| `hid_high_volume` | 10k commands ≤ 15 s, zero drops/CRC errors |
+| `action_software_click` | ≤ 5 ms |
+| `action_vigem_pad_report` | ≤ 5 ms and ≥500 reports/s |
 | `detection_rtdetr_v2_s_coco_640` | ≤ 25 ms DirectML / ≤ 8 ms CUDA |
 | `ocr_winrt_120x32` | ≤ 8 ms |
 | `serialize_observation_typical` | ≤ 5 ms |
@@ -268,11 +267,8 @@ Game E2E doesn't require GPU + game on the runner:
 The RP2040 hardware-in-the-loop rig is retired with #588/#589. Software
 backend and ViGEm timing evidence now comes from the real runtime, action audit
 rows, OS-visible input state, and dedicated local benchmarks.
-| `hid_reflash` | Reset to bootloader, flash, verify new identity |
-
-Run as hardware work-items or release-candidate checks on the configured host.
-If the hardware is absent, the work item is not accepted until the operator's
-target hardware is present or the issue explicitly scopes it out.
+No active release gate requires a physical Pico, serial HID host, firmware flash,
+or HID telemetry readback.
 
 ---
 

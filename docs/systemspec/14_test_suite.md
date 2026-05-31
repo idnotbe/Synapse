@@ -114,13 +114,15 @@ Source files covered:
 
 `#[test]` + `#[tokio::test]` attributes across `crates/`: **385** (counted via `awk` on the tree; includes both unit `mod tests` blocks and integration test files).
 
-## 4. Bench inventory (14 files)
+## 4. Bench inventory (16 files)
 
 | Crate | Bench | Tests budget |
 |---|---|---|
 | `synapse-a11y` | `uia_snapshot_depth2_60elem.rs` | UIA tree snapshot p99 ≤ 10 ms |
 | `synapse-action` | `action_curve_step_calc_natural.rs` | Curve sampling cost |
 | `synapse-action` | `action_software_press.rs` | Software backend key press latency (`act_press` to electrical signal ≤ 2 ms) |
+| `synapse-action` | `action_software_click.rs` | Software backend mouse-button dispatch latency (`act_click` SendInput path ≤ 5 ms) |
+| `synapse-action` | `action_vigem_pad_report.rs` | ViGEm virtual-pad report p99 ≤ 5 ms and throughput ≥ 500 reports/s |
 | `synapse-action` | `action_recording_round_trip.rs` | Recording backend overhead |
 | `synapse-capture` | `capture_loop.rs` | Frame capture p99 ≤ 3 ms |
 | `synapse-perception` | `observe_warm_a11y_only.rs` | `observe()` p99 ≤ 30 ms (a11y_only) |
