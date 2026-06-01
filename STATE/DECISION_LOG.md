@@ -571,3 +571,17 @@ Evidence:
 Outcome:
 - Posted #625 BLOCKED evidence at https://github.com/ChrisRoyse/Synapse/issues/625#issuecomment-4596839011 and label readback shows `status:blocked`.
 - Remaining action is for the operator to personally handle the Daybreak EULA/account/login/character in-world state; the agent must not click legal/account/login/character-select/chat controls.
+
+# 2026-06-01T17:00:00-05:00 - #626 follows #625 as next numbered showcase child
+
+Decision: Take #626 next after blocking #625, because #626 is the next unblocked child in the current numbered #594 campaign sequence and has reversible local/audio/browser work available.
+
+Evidence:
+- #625 readback shows `status:blocked` and evidence comment https://github.com/ChrisRoyse/Synapse/issues/625#issuecomment-4596839011.
+- `git status --short --branch` read clean after pushing commit `0c854e8`.
+- Live queue still contains #626 and later showcase/stress issues plus earlier #595-#604 children.
+- #626 requires real `act_launch`, `act_combo`, `audio_tail`, and `observe` SoT evidence.
+- Posted #626 START comment at https://github.com/ChrisRoyse/Synapse/issues/626#issuecomment-4596846733 and labeled it `status:in-progress`, `agent:codex`.
+
+Outcome:
+- Inspect #626 audio/action/browser paths, then launch an audio-enabled repo-built Synapse MCP runtime for manual FSV.

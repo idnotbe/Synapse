@@ -1,5 +1,19 @@
 # CURRENT STATE - Synapse
 
+## 2026-06-01T17:00:00-05:00
+- #625 is now posted and labeled blocked:
+  - BLOCKED evidence: https://github.com/ChrisRoyse/Synapse/issues/625#issuecomment-4596839011
+  - Label readback shows `status:blocked`; `status:in-progress` was removed.
+  - State commit pushed: `0c854e8 docs(state): record issue 625 block [skip ci]`.
+  - Worktree was clean after push.
+- Active issue is now #626 `scenario(showcase): autonomous pianist - act_combo song verified by audio_tail`.
+  - START comment: https://github.com/ChrisRoyse/Synapse/issues/626#issuecomment-4596846733
+  - #626 is assigned to `ChrisRoyse` and labeled `status:in-progress`, `agent:codex`.
+  - Goal: use real `act_launch`/Chrome navigation, `act_press`/`act_combo`, `audio_tail`, and `observe` to prove a recognizable piano melody with audio and visual readbacks.
+  - Required edges from issue body: tempo at combo step limit, silent/muted audio confirms no output, wrong-key recovery, back-to-back combos, plus empty/boundary/structurally invalid inputs.
+  - Current wired Synapse MCP `health` reports audio disabled in the stdio runtime, so #626 likely needs an isolated repo-built daemon launched with `--enable-audio` before audio FSV can be accepted.
+  - Next: inspect audio/combo/launch/Chrome/profile/observe implementations and tests, then launch an audio-enabled isolated repo-built MCP daemon with strict tools-list/client parity.
+
 ## 2026-06-01T16:56:00-05:00
 - User's `Issue615FanoutTarget` window/button concern was rechecked after compaction:
   - OS process/window readback found no live `Issue615` or fanout process/window.

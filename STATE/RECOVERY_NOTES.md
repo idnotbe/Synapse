@@ -1,5 +1,27 @@
 # RECOVERY NOTES - Synapse
 
+## Current Resume Point - 2026-06-01T17:00:00-05:00
+- #625 is blocked and state was committed/pushed:
+  - BLOCKED evidence: https://github.com/ChrisRoyse/Synapse/issues/625#issuecomment-4596839011
+  - commit `0c854e8 docs(state): record issue 625 block [skip ci]`
+  - `git status --short --branch` read clean after push.
+- Active issue is #626:
+  - title `scenario(showcase): autonomous pianist - act_combo song verified by audio_tail`
+  - START comment: https://github.com/ChrisRoyse/Synapse/issues/626#issuecomment-4596846733
+  - assigned to `ChrisRoyse`, labeled `status:in-progress`, `agent:codex`.
+- #626 FSV target:
+  - Launch/navigate Chrome to an online or local piano surface.
+  - Map notes to keys and trigger a recognizable melody using real `act_press`/`act_combo`.
+  - Read separate SoTs: loopback `audio_tail`, visible key highlight through `observe`/UIA/pixels where available, storage/action logs, and browser/process state.
+  - Edges: tempo at combo step limit, muted/silent audio, wrong-key recovery, back-to-back combos, empty sequence, boundary/step-limit, structurally invalid params.
+- Current known setup:
+  - wired stdio MCP runtime is healthy, but `health.subsystems.audio.status=disabled`; #626 likely needs a repo-built isolated daemon launched with `--enable-audio`.
+- Exact next actions:
+  1. Inspect audio_tail/audio_transcribe, act_combo/act_press, act_launch/Chrome profile, and observe/pixel/UIA implementations/tests.
+  2. Identify a deterministic piano target, preferably local HTML if it avoids network flakiness while still using Chrome and real audio output.
+  3. Build/launch isolated repo-built `synapse-mcp` with audio enabled, strict Inspector tools-list, and separate process/socket/auth SoT readbacks.
+  4. Run #626 manual MCP FSV and patch any defects exposed.
+
 ## Current Resume Point - 2026-06-01T16:56:00-05:00
 - #625 reversible evidence is complete and GitHub disposition is posted.
 - User's `Issue615FanoutTarget` question:
