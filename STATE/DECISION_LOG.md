@@ -415,3 +415,16 @@ Evidence:
 
 Outcome:
 - #621 is ready for RESOLVED comment and closure.
+
+# 2026-06-01T13:43:30-05:00 - #622 follows #621 in the authoring/quality campaign
+
+Decision: Take #622 next after closing #621 because it is the next open profile/telemetry child under #594.
+
+Evidence:
+- `gh issue view 621` read back `state=CLOSED`, `closedAt=2026-06-01T18:42:45Z`.
+- Live queue after #621 closure lists #594 plus #595-#604 and #622-#634 open.
+- #622 is open and requires authoring generate/list/inspect/accept/reject/export plus profile quality refresh evidence.
+- Posted #622 START comment at https://github.com/ChrisRoyse/Synapse/issues/622#issuecomment-4595477096 and labeled it `status:in-progress`, `agent:codex`.
+
+Outcome:
+- Next action is implementation/test inspection before launching a repo-built isolated daemon for #622 manual MCP FSV.

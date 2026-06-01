@@ -1,5 +1,18 @@
 # CURRENT STATE - Synapse
 
+## 2026-06-01T13:43:30-05:00
+- #621 `scenario(stress): registry scale - install/search/export/import/rollback, digest, poison quarantine` is closed.
+  - No product-code patch was required.
+  - State/evidence commit: `f9ab56e docs(state): record issue 621 evidence [skip ci]`.
+  - RESOLVED evidence: https://github.com/ChrisRoyse/Synapse/issues/621#issuecomment-4595473988
+  - Closure readback: issue state `CLOSED`, closed at `2026-06-01T18:42:45Z`.
+  - Final release binary SHA256 from #621 supporting build: `08FEC90BE80C37B940AF9549335F901A8DACE52863FDA9F7990049F0A4A94890`.
+- Active issue is now #622 `scenario(stress): authoring loop - generate/accept/reject/export + quality_refresh`.
+  - START comment: https://github.com/ChrisRoyse/Synapse/issues/622#issuecomment-4595477096
+  - #622 is assigned to `ChrisRoyse` and labeled `status:in-progress`, `agent:codex`.
+  - #622 requires real MCP triggers and separate SoT readbacks for real action/observation/event evidence, `profile_authoring_generate`, candidate list/inspect, accept one candidate, reject another with reason, export bundle with SHA256, `profile_quality_refresh`, zero-evidence generation, accept-already-accepted, stale-after expiry, max authoring rows, and empty/boundary/structurally invalid inputs.
+  - Next: inspect profile authoring, quality refresh, replay, and evidence-row implementations/tests before launching an isolated repo-built daemon.
+
 ## 2026-06-01T13:41:30-05:00
 - Active issue #621 `scenario(stress): registry scale - install/search/export/import/rollback, digest, poison quarantine` has manual MCP FSV complete; no product-code patch was required.
 - Manual FSV run directory: `.runs\621\registry-fsv-20260601T1324`.

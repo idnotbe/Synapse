@@ -1,5 +1,15 @@
 # RECOVERY NOTES - Synapse
 
+## Current Resume Point - 2026-06-01T13:43:30-05:00
+- #621 is closed.
+  - RESOLVED evidence: https://github.com/ChrisRoyse/Synapse/issues/621#issuecomment-4595473988
+  - Closure readback: state `CLOSED`, closed at `2026-06-01T18:42:45Z`.
+  - State/evidence commit: `f9ab56e docs(state): record issue 621 evidence [skip ci]`.
+- Active issue is #622 `scenario(stress): authoring loop - generate/accept/reject/export + quality_refresh`.
+  - START comment: https://github.com/ChrisRoyse/Synapse/issues/622#issuecomment-4595477096
+  - Claimed with `status:in-progress`, `agent:codex`, assigned to `ChrisRoyse`.
+  - Current exact next action: inspect `profile_authoring`, `profile_quality_refresh`, `replay_record`, evidence scanning/storage row formats, and supporting tests. Then launch a repo-built isolated daemon for manual MCP FSV.
+
 ## Current Resume Point - 2026-06-01T13:41:30-05:00
 - Active issue #621 has manual MCP FSV and supporting checks complete; no product-code patch was required.
 - FSV evidence directory: `.runs\621\registry-fsv-20260601T1324`.
