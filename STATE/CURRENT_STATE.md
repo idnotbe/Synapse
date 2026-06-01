@@ -1,5 +1,19 @@
 # CURRENT STATE - Synapse
 
+## 2026-06-01T07:13:00-05:00
+- #613 `scenario(stress): subscribe firehose - 4096 ring, EVENTS_DROPPED, one-per-event, deep filters` is closed.
+  - Implementation commit: `e95a656 fix(mcp): harden subscribe firehose path (#613) [skip ci]`.
+  - State commit: `e792ea0 docs(state): record issue 613 evidence [skip ci]`.
+  - RESOLVED evidence: https://github.com/ChrisRoyse/Synapse/issues/613#issuecomment-4592454588
+  - Closure readback: issue state `CLOSED`, closed at `2026-06-01T12:12:21Z`.
+- Post-close git readback: `main...origin/main`, clean, HEAD `e792ea0`.
+- Refreshed live open queue now lists #594 plus #595-#604 and #614-#634.
+- Active issue is now #614 `scenario(stress): reality baseline→delta→audit full loop across all sensors`.
+  - START comment: https://github.com/ChrisRoyse/Synapse/issues/614#issuecomment-4592477025
+  - Issue requires proving the delta-first reality model end to end across sensor feeds: baseline rows, foreground/focus/UIA/HUD/entity/audio/clipboard/filesystem/diagnostics changes, ordered `observe_delta` cursor walks, `reality_delta` SSE events, `CF_KV/reality/delta/*` rows, and no-change/missing/stale/future cursor edges.
+  - Post-compaction wired Synapse MCP client readback succeeded: `health ok=true`, `storage_inspect` returned CF counts and reality retention prefixes, `reflex_list include_expired=true` returned the prior cancelled reflex, `reflex_history limit=5` read terminal rows, and `observe depth=0` returned the live VS Code foreground/focused SoT.
+  - Next: inspect reality baseline/delta/audit implementation and existing tests, then launch a repo-built isolated daemon for manual MCP FSV.
+
 ## 2026-06-01T07:09:36-05:00
 - Active issue #613 `scenario(stress): subscribe firehose - 4096 ring, EVENTS_DROPPED, one-per-event, deep filters` has implementation and manual FSV evidence complete; commit/issue closure is next.
 - #613 patch in worktree:

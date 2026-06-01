@@ -155,3 +155,16 @@ Outcome:
 - Added ring-overflow metric/drop accounting for per-subscription SSE ring eviction.
 - Manual patched FSV under `.runs\613\subscribe-firehose-fsv-20260601T062230-patched` proved one-per-event delivery, 8-deep filters, 5000-event firehose drops, invalid edges, empty filter All, cancel behavior, cleanup, and strict Inspector tools-list.
 - Supporting checks and final release build passed; next action is commit and close #613.
+
+# 2026-06-01T07:16:00-05:00 - #614 reality-delta full-loop work starts after #613 closure
+
+Decision: Take #614 next in the #594 stress campaign and inspect the reality baseline/delta/audit code before changing behavior.
+
+Evidence:
+- Live GitHub readback after compaction shows #613 closed and #614 open with no previous comments.
+- #614 requires real MCP `reality_baseline`, `observe_delta`, and `reality_audit` triggers plus separate CF_KV/SSE/physical SoT reads for baseline, head, delta, audit, and sensor state.
+- Posted #614 START comment at https://github.com/ChrisRoyse/Synapse/issues/614#issuecomment-4592477025.
+- Wired `mcp__synapse` client readback succeeded for `health`, `storage_inspect`, `reflex_list`, `reflex_history`, and `observe`.
+
+Outcome:
+- Next action is implementation/test inspection for reality baseline/delta/audit, followed by a repo-built isolated daemon and manual MCP FSV.

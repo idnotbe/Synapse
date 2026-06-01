@@ -1,23 +1,20 @@
 # RECOVERY NOTES - Synapse
 
-## Current Resume Point - 2026-06-01T07:09:36-05:00
-- Active issue #613 `scenario(stress): subscribe firehose - 4096 ring, EVENTS_DROPPED, one-per-event, deep filters` has code, supporting checks, and manual MCP FSV complete.
-- Do not rerun from scratch unless evidence is missing. Current next action is commit/push `[skip ci]`, post RESOLVED evidence on #613, close #613, refresh the live queue, then start #614 or the next open issue.
+## Current Resume Point - 2026-06-01T07:16:00-05:00
+- #613 is closed and recorded. Implementation commit `e95a656`; evidence/state commit `e792ea0`; RESOLVED evidence https://github.com/ChrisRoyse/Synapse/issues/613#issuecomment-4592454588; closure readback `CLOSED` at `2026-06-01T12:12:21Z`.
+- Active issue is #614 `scenario(stress): reality baseline→delta→audit full loop across all sensors`.
+  - START comment: https://github.com/ChrisRoyse/Synapse/issues/614#issuecomment-4592477025
+  - Live queue after #613 closure: #594 plus #595-#604 and #614-#634.
+  - Post-compaction wired MCP readback succeeded with `health`, `storage_inspect`, `reflex_list include_expired=true`, `reflex_history limit=5`, and `observe depth=0`.
+- Current next action: inspect the reality baseline/delta/audit implementation and existing tests before launching the isolated repo-built #614 daemon.
 
-## #613 Worktree Scope
-- Modified source/test files:
-  - `Cargo.lock`
-  - `crates/synapse-core/src/types/event.rs`
-  - `crates/synapse-core/tests/event_filter_types.rs`
-  - `crates/synapse-mcp/Cargo.toml`
-  - `crates/synapse-mcp/src/http/sse.rs`
-  - `crates/synapse-mcp/src/http/sse/ring.rs`
-  - `crates/synapse-mcp/src/http/sse/tests.rs`
-  - `crates/synapse-mcp/tests/m3_subscribe_tool.rs`
-- Patch summary:
-  - Data event filters now validate JSON Pointer paths and regex patterns.
-  - Existing empty SSE subscriptions are reused when the client reconnects with `Last-Event-ID: 0`.
-  - SSE ring overflow now records per-subscriber dropped-event metrics/readback.
+## #614 Scope
+- Goal: prove the delta-first reality model end to end across every sensor feed.
+- Required runtime evidence:
+  - real repo-built `synapse-mcp` daemon process/bind/auth/health/session/strict Inspector `tools/list`;
+  - real MCP `tools/call` triggers for `reality_baseline`, `observe_delta`, `reality_audit`, and event-producing tools;
+  - separate SoT readbacks for `CF_KV/reality/baseline/*`, `reality/head/*`, `reality/delta/*`, `reality/audit/*`, `reality_delta` SSE frames, and physical foreground/focus/UIA/HUD/entity/audio/clipboard/filesystem/diagnostics changes where available;
+  - happy path plus missing baseline, stale epoch, profile-change mid-walk, future/overflow `since_seq`, empty/no-change, boundary, and structurally invalid params.
 
 ## #613 Manual FSV Evidence
 - Final run directory: `.runs\613\subscribe-firehose-fsv-20260601T062230-patched`
