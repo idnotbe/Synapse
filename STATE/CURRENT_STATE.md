@@ -1,5 +1,37 @@
 # CURRENT STATE - Synapse
 
+## 2026-06-01T13:41:30-05:00
+- Active issue #621 `scenario(stress): registry scale - install/search/export/import/rollback, digest, poison quarantine` has manual MCP FSV complete; no product-code patch was required.
+- Manual FSV run directory: `.runs\621\registry-fsv-20260601T1324`.
+  - Repo-built daemon: PID `58848`, binary `C:\code\Synapse\target\release\synapse-mcp.exe`, bind `127.0.0.1:7849`, isolated DB `.runs\621\registry-fsv-20260601T1324\db`, isolated token file `.runs\621\registry-fsv-20260601T1324\appdata\synapse\token.txt`, token `synapse-621-token`.
+  - Precondition/readback passed: process path and command line matched repo release binary; socket `127.0.0.1:7849` listened under PID `58848`; unauth `/health=401`; auth `/health=200 ok=true`; official MCP Inspector `0.21.2` strict `tools/list` exited 0 with 80 tools and all profile registry tools + `storage_inspect` present. Inspector stderr only had `unknown format "uint*"` warnings.
+  - Initial SoT: isolated `storage_inspect` read `CF_PROFILES=0`, `CF_KV=0`; `profile_registry_report` scanned 0 registry rows and pointed at the isolated DB path.
+  - Happy install with digest: real Inspector `profile_registry_install` on `curated_notepad_package_manifest.toml` with expected digest `sha256:f173036bcc58401a5eff5a539c74cae20b6e714829e84249b67571b19eaa6cd6` wrote 6 `CF_PROFILES` rows and 1 `CF_KV` head row. Separate storage readback: `CF_PROFILES=6`, `CF_KV=1`; separate inspect readbacks confirmed package, installed profile, and head rows with active/local-validated state.
+  - Digest mismatch edge: same manifest with wrong digest failed closed with `manifest digest mismatch`; before/after storage stayed `CF_PROFILES=6`, `CF_KV=1`, `CF_ACTION_LOG=0`.
+  - Scale import/search/report: synthetic setup bundle with 600 known registry rows was imported through real `profile_registry_import`; storage moved `CF_PROFILES=6 -> 606`, `CF_KV=1`; `profile_registry_search query=issue621.synthetic row_kind=profile_package limit=1000` returned all 600; `profile_registry_report limit=1000` scanned 606 rows and returned 601 package summaries.
+  - Export/import round trip: real `profile_registry_export limit=1000` wrote `.runs\621\registry-fsv-20260601T1324\exports\registry-export-after-scale.json`, 607 rows, 489118 bytes, deterministic hash `sha256:e7c953e5a31ee4d5fc60ac6aa1561543fa0510a76b7730d76013204402d3788f`; file SHA256 `DA50F010913B3240CD1A956BC9219721BBD09C098C4B04C8BD5255F00DE0341C`. Re-import skipped 607 duplicates and left storage unchanged.
+  - Conflict import edge: same-key modified bundle failed closed with `registry_bundle_conflict`; before/after storage stayed `CF_PROFILES=606`, `CF_KV=1`.
+  - Disable/inspect edge: `profile_registry_disable profile_id=notepad state=disabled` rewrote installed row; separate inspect read `state=disabled`, `activation_state=disabled`, `disable_reason=issue621-disable-edge`, counts unchanged.
+  - Rollback: synthetic Notepad package `0.2.0`/profile `1.1.0` installed with expected digest `sha256:a1e012640d9ccb6c1d6853a2cde42992abece7577f89f3d0b0c692aaa07c709e`; installed row moved to `0.2.0`; real `profile_registry_rollback profile_id=notepad` rewrote installed row back to `0.1.0`, wrote `profile_registry/v1/rollback/notepad/...`, and storage moved `CF_PROFILES=609 -> 610`. Separate inspect/report confirmed rollback row from `0.2.0` to `0.1.0`.
+  - Rollback no-prior edge: single-version terminal install succeeded, then `profile_registry_rollback profile_id=terminal` failed closed with `rollback_prior_package_missing`; before/after storage stayed `CF_PROFILES=615`, `CF_KV=1`.
+  - Poison contribution: valid contribution bundle containing `ignore previous instructions` imported through real `profile_registry_import`; only contribution row was written (`CF_PROFILES=615 -> 616`), inspect read `state=quarantined`, `accepted=0`, `rejected=1`, risk flags `metadata_prompt_injection_text` and `low_quality_no_success_evidence`.
+  - `>1000` contribution rows edge: valid 1001-row contribution bundle imported through real tool; only contribution row was written (`CF_PROFILES=616 -> 617`), inspect read `state=quarantined`, `accepted=0`, `rejected=1001`, risk flag `contribution_registry_rows_limit_exceeded`.
+  - Generic edges: `profile_registry_search limit=0`, malformed import JSON, and contribution export without `profile_id` failed closed; before/after storage stayed `CF_PROFILES=617`, `CF_KV=1`, `CF_ACTION_LOG=0`; missing-profile export wrote no file. An attempted empty-string CLI arg was rejected by Inspector before Synapse and is not counted as product behavior evidence.
+  - Final SoT: `storage_inspect` read `CF_PROFILES=617`, `CF_KV=1`, `CF_ACTION_LOG=0`; report scanned 617 rows, packages 603, installed 2, curated 2, rollback 1, heads 1; contribution search with `include_disabled=true` found two quarantined contribution rows. Log readback had 0 panics and only expected fail-closed response errors.
+  - Cleanup: real Inspector `release_all` returned zero held state; daemon PID `58848` stopped; port `7849` no longer listens.
+- Supporting checks passed:
+  - `cargo fmt --check`
+  - `git diff --check` (line-ending warning only)
+  - `cargo check -p synapse-mcp -j 2`
+  - `cargo test -p synapse-mcp --test m5_curated_registry_tool -- --nocapture`
+  - `cargo test -p synapse-mcp --test m5_registry_report_tool -- --nocapture`
+  - `cargo test -p synapse-profiles --test package_manifest -- --nocapture`
+  - `cargo test -p synapse-mcp --bin synapse-mcp schema_sanitize -- --nocapture`
+  - `cargo test -p synapse-mcp --test m3_tools_list -- --nocapture`
+  - `cargo build --release -p synapse-mcp -j 2`
+- Final release binary readback: `target\release\synapse-mcp.exe`, length `46406144`, SHA256 `08FEC90BE80C37B940AF9549335F901A8DACE52863FDA9F7990049F0A4A94890`, `LastWriteTimeUtc=2026-06-01T18:40:29Z`.
+- Next: commit state update with `[skip ci]`, post #621 RESOLVED evidence, close #621, refresh queue, and take #622 unless GitHub changes.
+
 ## 2026-06-01T13:16:11-05:00
 - #620 `scenario(stress): activate all 30 profiles - keymap/HUD/capture/mode apply` is closed.
   - Commit: `6895746 fix(mcp): apply profile runtime config (#620) [skip ci]`.

@@ -1,5 +1,20 @@
 # RECOVERY NOTES - Synapse
 
+## Current Resume Point - 2026-06-01T13:41:30-05:00
+- Active issue #621 has manual MCP FSV and supporting checks complete; no product-code patch was required.
+- FSV evidence directory: `.runs\621\registry-fsv-20260601T1324`.
+  - Repo-built daemon was PID `58848`, bind `127.0.0.1:7849`, isolated DB `.runs\621\registry-fsv-20260601T1324\db`, official Inspector strict `tools/list` count 80.
+  - Covered install with expected digest, digest mismatch, scale 600-row registry import/search/report at `limit=1000`, deterministic export and duplicate import, conflicting import, disable+inspect, second-version install and rollback, rollback with no prior, poison contribution quarantine, >1000 contribution quarantine, malformed import, missing-profile contribution export, and invalid limit.
+  - Final storage readback: `CF_PROFILES=617`, `CF_KV=1`, `CF_ACTION_LOG=0`; report scanned 617 registry rows and contribution search found two quarantined contribution rows.
+  - Cleanup completed: `release_all` zero, daemon stopped, port `7849` closed.
+- Supporting checks passed: fmt, diff check, MCP check, curated registry test, registry report test, package manifest test, schema sanitize, m3 tools-list, and release build.
+- Final release binary SHA256: `08FEC90BE80C37B940AF9549335F901A8DACE52863FDA9F7990049F0A4A94890`.
+- Exact next actions:
+  1. Commit state update with `[skip ci]`.
+  2. Post #621 RESOLVED evidence and close #621.
+  3. Refresh live queue.
+  4. Take #622 next unless GitHub state changes.
+
 ## Current Resume Point - 2026-06-01T13:16:11-05:00
 - #620 is closed.
   - Commit: `6895746 fix(mcp): apply profile runtime config (#620) [skip ci]`.

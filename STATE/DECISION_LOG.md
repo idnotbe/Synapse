@@ -398,3 +398,20 @@ Evidence:
 
 Outcome:
 - Next action is code/schema/test inspection for profile registry storage, manifest digest, export/import, rollback, disable/inspect, and quarantine paths before launching a repo-built isolated daemon for manual MCP FSV.
+
+# 2026-06-01T13:41:30-05:00 - #621 registry scale passes without product-code patch
+
+Decision: Resolve #621 with manual MCP FSV evidence and no product-code patch.
+
+Evidence:
+- Isolated repo-built daemon PID `58848` on `127.0.0.1:7849` passed process/socket/auth/health and official Inspector strict `tools/list` with 80 tools.
+- Real Inspector `profile_registry_install` with the expected Notepad manifest digest wrote 6 `CF_PROFILES` rows and 1 `CF_KV` head row; separate storage/report/inspect readbacks matched expected package, installed, and head rows.
+- Scale behavior held at 600 imported registry rows and `limit=1000`: search returned all 600 synthetic rows and report scanned 606 registry rows.
+- Registry export wrote a deterministic 607-row bundle; re-import skipped 607 duplicates; modified same-key import failed closed with `registry_bundle_conflict`.
+- Disable rewrote the installed row; second-version install plus rollback rewrote installed Notepad back to the prior package and wrote a rollback audit row; single-version terminal rollback failed closed.
+- Poison and >1000-row contribution bundles wrote quarantine contribution rows only, with separate inspect readbacks showing rejected counts and risk flags.
+- Invalid edges (`limit=0`, malformed import JSON, contribution export without `profile_id`) failed closed with unchanged storage.
+- Supporting checks and release build passed; final release binary SHA256 `08FEC90BE80C37B940AF9549335F901A8DACE52863FDA9F7990049F0A4A94890`.
+
+Outcome:
+- #621 is ready for RESOLVED comment and closure.
