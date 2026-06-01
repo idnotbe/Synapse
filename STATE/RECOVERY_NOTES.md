@@ -1,5 +1,16 @@
 # RECOVERY NOTES - Synapse
 
+## Current Resume Point - 2026-06-01T10:21:23-05:00
+- #616 is closed.
+  - Commit: `79f735f fix(mcp): classify reality audit drift (#616) [skip ci]`.
+  - RESOLVED evidence: https://github.com/ChrisRoyse/Synapse/issues/616#issuecomment-4593986844
+  - Closure readback: issue state `CLOSED`, closed at `2026-06-01T15:20:44Z`.
+- Active issue is #617 `scenario(stress): storage CF saturation to hard cap + GC eviction`.
+  - START comment: https://github.com/ChrisRoyse/Synapse/issues/617#issuecomment-4593992720
+  - Live queue after #616 closure: #594 plus #595-#604 and #617-#634.
+  - #617 requires manual MCP FSV of `storage_put_probe_rows`, `storage_inspect`, and `storage_gc_once` against isolated CF row/size SoT under storage pressure and eviction edges.
+- Current next action: inspect storage tool/cap/GC implementation and supporting tests, then launch a repo-built isolated daemon for #617 FSV.
+
 ## Current Resume Point - 2026-06-01T10:12:14-05:00
 - Active issue #616 has implementation, manual MCP FSV evidence, cleanup, final supporting checks, and diff review complete; commit, RESOLVED comment, close, and queue continuation are next.
 - Patch in `crates/synapse-mcp/src/server/reality.rs` makes `reality_audit` classify concrete compact-state drift instead of treating every physical mismatch as generic `rebase_required`.

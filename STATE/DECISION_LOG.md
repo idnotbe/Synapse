@@ -276,3 +276,16 @@ Outcome:
 - Temporary `.runs\616\issue616_major_target.ps1` was used only as FSV setup.
 - Physical before/after readback showed child texts changed from `major-baseline-state|AddMajor|CloseTarget` to `major-baseline-state|AddMajor|CloseTarget|major-new-control`.
 - Real Inspector `tools/call reality_audit` returned `drift_status=major_drift`, `rebase_required=true`, and persisted `reality/audit/v1/powershell/audit-01780326554678039600-0000000006`.
+
+# 2026-06-01T10:21:23-05:00 - #617 follows #616 in the stress campaign
+
+Decision: Take #617 next after closing #616 because it is the next open P1 storage child under #594.
+
+Evidence:
+- `gh issue view 616` read back `state=CLOSED`, `closedAt=2026-06-01T15:20:44Z`.
+- Live queue after #616 closure lists #594 plus #595-#604 and #617-#634 open.
+- #617 is open, has no prior comments, and requires storage CF saturation/GC eviction evidence.
+- Posted #617 START comment at https://github.com/ChrisRoyse/Synapse/issues/617#issuecomment-4593992720.
+
+Outcome:
+- Next action is code/test inspection for storage pressure, probe rows, and GC cap behavior before launching a repo-built isolated daemon for manual MCP FSV.

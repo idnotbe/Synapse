@@ -77,4 +77,5 @@
 - 2026-06-01T09:31:17-05:00 iteration #615-close-616-start: pushed #615 commit fad86c9, posted RESOLVED evidence, closed #615, refreshed queue to #594 plus #595-#604/#616-#634, and posted #616 START.
 - 2026-06-01T09:39:21-05:00 iteration #616-audit-classification: patched reality_audit to itemize compact-state drift and classify in-sync/minor/major/rebase/source-unavailable states; focused audit checks passed.
 - 2026-06-01T10:12:14-05:00 iteration #616-manual-fsv: completed manual MCP evidence for source-unavailable, baseline+delta in-sync, minor drift, immediate rebase, major UI-structure drift, stale epoch, and invalid depth; cleaned target windows and daemon.
-- 2026-06-01T10:22:00-05:00 iteration #616-final-checks: final fmt/check/reality tests/schema sanitize/release build/diff check passed and diff review completed; release synapse-mcp SHA256 86D55735BD2FA893E22B16E955D431474147B5F3CE1F616BCBD4EB1E047B201B.
+- 2026-06-01T10:20:00-05:00 iteration #616-final-checks: final fmt/check/reality tests/schema sanitize/release build/diff check passed and diff review completed; release synapse-mcp SHA256 86D55735BD2FA893E22B16E955D431474147B5F3CE1F616BCBD4EB1E047B201B.
+- 2026-06-01T10:21:23-05:00 iteration #616-close-617-start: pushed #616 commit 79f735f, posted RESOLVED evidence, closed #616, refreshed queue, and posted #617 START.
