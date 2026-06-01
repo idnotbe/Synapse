@@ -1,5 +1,35 @@
 # RECOVERY NOTES - Synapse
 
+## Current Resume Point - 2026-06-01T17:45:00-05:00
+- #626 manual evidence is complete and cleanup/supporting checks passed; no product-code patch was required.
+- Evidence directory: `.runs\626\pianist-fsv-20260601T1709`.
+- Key accepted behavior:
+  - Isolated audio-enabled repo-built daemon PID `79620`, bind `127.0.0.1:7854`, strict Inspector tools-list 80 tools, required #626 tools present.
+  - Local Chrome piano target showed `Audio: armed` and clean counters after Arm/Clear.
+  - Happy Ode run: `14_act_combo_happy_ode.json` scheduled 15 steps; OCR after showed `Audio notes: 15`, `Play count: 15`, `Wrong keys: 0`, and exact Ode melody.
+  - Overlapped audio run: `19_audio_tail_mid_long_ode48.json` showed nonzero loopback PCM (`peak=5809`, `rms_db=-33.3`, 49 active buckets); OCR after showed `Audio notes: 48`, `Play count: 48`.
+  - Empty and non-monotonic combos failed closed and left page/storage unchanged.
+  - Muted run showed visible `Muted notes: 4` while `audio_tail` stayed all zero.
+  - Wrong-key recovery showed `wrong key x` followed by `C4 recovered after x`.
+  - Back-to-back combos produced `C4 D4 E4 G4 F4 E4`.
+  - 256-step boundary used the wired MCP client because Inspector CLI hit Windows command-line length; `mcp__synapse.act_combo` accepted `scheduled_steps=256`, OCR showed `Play count: 256`, `Muted notes: 256`, `Audio notes: 0`, and wired storage/reflex rows recorded combo active->expired.
+- Cleanup:
+  - Isolated and wired `release_all` returned zero held inputs.
+  - Stopped #626-owned Chrome, Python server, and isolated daemon; ports `7854`/`8762` closed; no `Issue626PianoTarget` or `Issue615FanoutTarget` visible.
+- Supporting checks passed:
+  - `cargo fmt --check`
+  - `cargo test -p synapse-mcp --test m3_audio_tail_tool -- --nocapture`
+  - `cargo test -p synapse-mcp --test m4_tools_list -- --nocapture`
+  - `cargo test -p synapse-mcp --bin synapse-mcp schema_sanitize -- --nocapture`
+  - `cargo check -p synapse-mcp -j 2`
+  - `cargo build --release -p synapse-mcp -j 2`
+  - `git diff --check`
+- Release binary: `target\release\synapse-mcp.exe`, length `46392320`, SHA256 `FC4003D69AA84712112DEBC3534F113B15F89E69046E23D4064D01CFFAECBE4F`.
+- Exact next actions:
+  1. Post #626 RESOLVED evidence and close #626.
+  2. Refresh the open queue.
+  3. Take the next open unblocked issue.
+
 ## Current Resume Point - 2026-06-01T17:00:00-05:00
 - #625 is blocked and state was committed/pushed:
   - BLOCKED evidence: https://github.com/ChrisRoyse/Synapse/issues/625#issuecomment-4596839011

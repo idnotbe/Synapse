@@ -1,5 +1,43 @@
 # CURRENT STATE - Synapse
 
+## 2026-06-01T17:45:00-05:00
+- #626 manual evidence is complete; no product-code patch was required.
+  - Active issue: `scenario(showcase): autonomous pianist - act_combo song verified by audio_tail`.
+  - Evidence directory: `.runs\626\pianist-fsv-20260601T1709`.
+  - Deterministic local browser target: `.runs\626\piano-target\index.html` served on `127.0.0.1:8762` during FSV; target was stopped during cleanup.
+  - Isolated repo-built MCP daemon:
+    - PID `79620`, bind `127.0.0.1:7854`, DB `.runs\626\pianist-fsv-20260601T1709\db`, `--enable-audio`, `SYNAPSE_AUDIO_LOOPBACK=true`.
+    - Auth health readback showed `audio loopback running`, active profile `chrome`, and isolated DB.
+    - Official MCP Inspector strict `tools/list` after compaction returned `ToolCount=80`; required tools `health`, `act_launch`, `act_combo`, `act_press`, `act_click`, `audio_tail`, `observe`, `read_text`, `storage_inspect`, and `release_all` were present.
+  - Happy-path visual/audio evidence:
+    - `14_act_combo_happy_ode.json`: `scheduled_steps=15`, `backend=software`.
+    - `15_read_text_after_happy.json`: page showed `Audio notes: 15`, `Play count: 15`, `Muted notes: 0`, `Wrong keys: 0`, and melody `E4 E4 F4 G4 G4 F4 E4 D4 C4 C4 D4 E4 E4 D4 D4`.
+    - First late `audio_tail` read returned valid all-zero PCM because the 5-second ring had already aged out; repeated with overlapped playback.
+    - `19_act_combo_long_ode48.json`: `scheduled_steps=48`; `19_audio_tail_mid_long_ode48.json` reduced readback showed `format=s16le`, `sample_rate=48000`, `channels=2`, `pcm_bytes=960000`, `peak=5809`, `rms_db=-33.3`, and 49 active 50 ms buckets from about `1750..4900 ms`.
+    - `20_read_text_after_long_ode48.json`: page showed `Audio notes: 48`, `Play count: 48`, `Muted notes: 0`, `Wrong keys: 0`, and repeated Ode motif.
+  - Edge evidence:
+    - Empty combo: `21_act_combo_empty_steps.stderr.txt` failed closed with `act_combo steps must contain at least one step`; page/storage readbacks stayed unchanged.
+    - Structurally invalid order: `22_act_combo_nonmonotonic.stderr.txt` failed closed with `act_combo steps[1].at_ms must be monotonic`; page/storage readbacks stayed unchanged.
+    - Muted/silent: `25_read_text_muted_baseline.json` showed muted clean baseline and `25_audio_tail_muted_baseline.json` had 192000 bytes with zero nonzero samples; `26_act_combo_muted4.json` scheduled 4 steps; `27_read_text_after_muted4.json` showed `Play count: 4`, `Muted notes: 4`, `Audio notes: 0`, melody `C4 D4 E4 F4`; `27_audio_tail_after_muted4.json` stayed zero nonzero samples.
+    - Wrong-key recovery: `31_act_press_wrong_x.json` sent unmapped `x`; `32_read_text_after_wrong_x.json` showed `Last event: wrong key x`, `Play count: 0`, `Melody: empty`; `33_act_combo_recovery_c4.json` scheduled a C4 recovery note; `34_read_text_after_recovery_c4.json` showed `Last event: C4 recovered after x`, `Play count: 1`, `Audio notes: 1`, `Melody: C4`.
+    - Back-to-back combos: `36_act_combo_backtoback_first.json` and `37_act_combo_backtoback_second.json` each scheduled 3 steps; `38_read_text_after_backtoback.json` showed `Play count: 6`, `Audio notes: 6`, `Wrong keys: 0`, melody `C4 D4 E4 G4 F4 E4`.
+    - 256-step boundary/tempo: Inspector CLI hit Windows command-line length for the large payload, so the wired production MCP client was used for this one boundary trigger. Wired daemon PID `66040` plus stdio child `70072` was healthy; `mcp__synapse.act_combo` accepted `scheduled_steps=256`. Separate `mcp__synapse.read_text` showed `Play count: 256`, `Muted notes: 256`, `Audio notes: 0`, `Wrong keys: 0`, `Last note: C4`; wired `storage_inspect` showed `CF_ACTION_LOG=188`, `CF_REFLEX_AUDIT=5`, with action row `scheduled_steps=256` and reflex audit active->expired for combo id `019e8551-9c75-7680-9925-085d07519433`.
+  - Cleanup:
+    - Isolated Inspector `release_all` returned zero released inputs; wired `mcp__synapse.release_all` returned zero released inputs.
+    - Stopped #626-owned Chrome profile children, isolated MCP PID `79620`, and Python server PID `51064`.
+    - Port readback for `127.0.0.1:7854` and `127.0.0.1:8762` returned no listeners; Synapse `find` returned no `Issue626PianoTarget` or `Issue615FanoutTarget`.
+  - Supporting checks passed:
+    - `cargo fmt --check`
+    - `cargo test -p synapse-mcp --test m3_audio_tail_tool -- --nocapture`
+    - `cargo test -p synapse-mcp --test m4_tools_list -- --nocapture`
+    - `cargo test -p synapse-mcp --bin synapse-mcp schema_sanitize -- --nocapture`
+    - `cargo check -p synapse-mcp -j 2`
+    - `cargo build --release -p synapse-mcp -j 2` after an initial timeout was waited out and rerun for a clean exit code
+    - `git diff --check`
+  - Release binary readback: `target\release\synapse-mcp.exe`, length `46392320`, SHA256 `FC4003D69AA84712112DEBC3534F113B15F89E69046E23D4064D01CFFAECBE4F`, `LastWriteTimeUtc=2026-06-01T22:42:23.6432547Z`.
+  - Current worktree readback remains clean: `## main...origin/main`.
+  - Next: post #626 RESOLVED evidence, close #626, refresh the queue, and continue to the next open issue.
+
 ## 2026-06-01T17:00:00-05:00
 - #625 is now posted and labeled blocked:
   - BLOCKED evidence: https://github.com/ChrisRoyse/Synapse/issues/625#issuecomment-4596839011

@@ -585,3 +585,19 @@ Evidence:
 
 Outcome:
 - Inspect #626 audio/action/browser paths, then launch an audio-enabled repo-built Synapse MCP runtime for manual FSV.
+
+# 2026-06-01T17:45:00-05:00 - #626 resolved by local Chrome piano evidence
+
+Decision: Resolve #626 with no product-code patch because real MCP evidence proved `act_combo`, browser action, visual readback, and audio loopback behavior for the autonomous pianist scenario.
+
+Evidence:
+- Isolated repo-built audio-enabled daemon PID `79620` on `127.0.0.1:7854` passed auth health with loopback running and strict Inspector `tools/list` with 80 tools and all #626 tools present.
+- Local Chrome piano target was launched by real MCP `act_launch`; after real `act_click` Arm, OCR showed `Audio: armed`, `Focus: yes`, and zero counters.
+- Happy-path `act_combo` scheduled 15 Ode-to-Joy steps; OCR showed 15 audio notes, 15 play count, zero wrong/muted notes, and the expected melody.
+- Overlapped 48-step playback plus `audio_tail` read returned nonzero 48 kHz stereo `s16le` PCM: `peak=5809`, `rms_db=-33.3`, with active 50 ms buckets from about 1.75s to 4.9s; OCR showed 48 audio notes.
+- Edges passed: empty steps rejected, non-monotonic steps rejected, muted four-note run produced zero PCM and four muted visual notes, wrong-key `x` recovered with C4, back-to-back combos produced the expected six-note melody, and the wired production MCP client accepted the 256-step boundary with storage/reflex readback active->expired.
+- Cleanup stopped all #626-owned local processes/ports and both release_all paths returned zero held input.
+- Supporting checks passed: fmt, audio-tail test, M4 tools-list test, schema_sanitize, synapse-mcp check, release build, and diff check. Release binary SHA256 `FC4003D69AA84712112DEBC3534F113B15F89E69046E23D4064D01CFFAECBE4F`.
+
+Outcome:
+- Post RESOLVED evidence to #626, close it, refresh queue, and continue.
