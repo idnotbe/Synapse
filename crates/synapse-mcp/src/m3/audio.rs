@@ -5,9 +5,10 @@ use schemars::{Schema, SchemaGenerator, json_schema};
 use serde::{Deserialize, Serialize};
 use synapse_audio::{
     AudioError, AudioRuntime, AudioWindow, MAX_RING_SECONDS, Transcription,
+    direction::estimate_direction,
     ring::{DEFAULT_SAMPLE_RATE_HZ, STEREO_CHANNELS},
 };
-use synapse_core::{AudioContext, SensorStatus, error_codes};
+use synapse_core::{AudioContext, AudioEvent, DirectionEstimate, SensorStatus, error_codes};
 use synapse_perception::ObservationInput;
 
 use crate::{
@@ -18,15 +19,17 @@ use crate::{
     },
 };
 
-const DEFAULT_SECONDS: u32 = 5;
+const DEFAULT_SECONDS: f64 = 5.0;
 const DEFAULT_LANGUAGE: &str = "en";
 const PCM_FORMAT: &str = "s16le";
 const WHISPER_TINY_MODEL_ID: &str = "whisper_tiny_int8";
 const BYTES_PER_SAMPLE: usize = 2;
 const SUMMARY_SECONDS: f32 = 1.0;
 const MAX_SUMMARY_EVENTS: usize = 5;
+const VAD_FRAME_SECONDS: f32 = 0.02;
+const VAD_SPEECH_DB: f32 = -35.0;
 
-const fn default_seconds() -> u32 {
+const fn default_seconds() -> f64 {
     DEFAULT_SECONDS
 }
 
@@ -36,8 +39,7 @@ fn default_language() -> String {
 
 fn seconds_schema(_: &mut SchemaGenerator) -> Schema {
     json_schema!({
-        "type": "integer",
-        "format": "uint32",
+        "type": "number",
         "minimum": 0,
         "maximum": MAX_RING_SECONDS,
         "default": DEFAULT_SECONDS
@@ -56,16 +58,24 @@ fn language_schema(_: &mut SchemaGenerator) -> Schema {
 pub struct AudioTailParams {
     #[serde(default = "default_seconds")]
     #[schemars(schema_with = "seconds_schema")]
-    pub seconds: u32,
+    pub seconds: f64,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, JsonSchema)]
+#[derive(Clone, Debug, PartialEq, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AudioTailResponse {
     pub pcm: Vec<u8>,
     pub sample_rate: u32,
     pub channels: u16,
     pub format: String,
+    pub requested_seconds: f64,
+    pub captured_seconds: f64,
+    pub frames: usize,
+    pub rms_db: f32,
+    pub vad_speech_pct: f32,
+    pub recent_events: Vec<AudioEvent>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub direction_estimate: Option<DirectionEstimate>,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema)]
@@ -73,7 +83,7 @@ pub struct AudioTailResponse {
 pub struct AudioTranscribeParams {
     #[serde(default = "default_seconds")]
     #[schemars(schema_with = "seconds_schema")]
-    pub seconds: u32,
+    pub seconds: f64,
     #[serde(default = "default_language")]
     #[schemars(schema_with = "language_schema")]
     pub language: String,
@@ -113,12 +123,19 @@ pub fn tail_audio(
     params: &AudioTailParams,
 ) -> Result<AudioTailResponse, ErrorData> {
     validate_seconds(params.seconds)?;
-    if params.seconds == 0 {
+    if params.seconds <= 0.0 {
         return Ok(AudioTailResponse {
             pcm: Vec::new(),
             sample_rate: DEFAULT_SAMPLE_RATE_HZ,
             channels: STEREO_CHANNELS,
             format: PCM_FORMAT.to_owned(),
+            requested_seconds: 0.0,
+            captured_seconds: 0.0,
+            frames: 0,
+            rms_db: synapse_audio::detectors::silence_db(),
+            vad_speech_pct: 0.0,
+            recent_events: Vec::new(),
+            direction_estimate: None,
         });
     }
 
@@ -192,14 +209,19 @@ pub fn audio_context_from_runtime(runtime: &AudioRuntime) -> Result<AudioContext
 
 pub fn tail_audio_from_runtime(
     runtime: &AudioRuntime,
-    seconds: u32,
+    seconds: f64,
 ) -> Result<AudioTailResponse, ErrorData> {
     validate_seconds(seconds)?;
-    let seconds_f32 = seconds_to_f32(seconds)?;
+    let runtime_seconds = runtime_seconds(seconds);
     let window = runtime
-        .tail_seconds(seconds_f32)
+        .tail_seconds(runtime_seconds)
         .map_err(|error| mcp_error(error.code(), error.to_string()))?;
-    Ok(response_from_window(&window, seconds))
+    let mut recent_events = runtime.detector_snapshot().context.recent_events;
+    if recent_events.len() > MAX_SUMMARY_EVENTS {
+        let keep_from = recent_events.len() - MAX_SUMMARY_EVENTS;
+        recent_events.drain(0..keep_from);
+    }
+    Ok(response_from_window(&window, seconds, recent_events))
 }
 
 pub fn transcribe_audio(
@@ -223,45 +245,54 @@ pub fn transcribe_audio(
 
 pub fn transcribe_audio_from_runtime(
     runtime: &AudioRuntime,
-    seconds: u32,
+    seconds: f64,
     language: &str,
 ) -> Result<AudioTranscribeResponse, ErrorData> {
     validate_seconds(seconds)?;
     let language = normalize_language_param(language)?;
-    let seconds_f32 = seconds_to_f32(seconds)?;
     let transcription = runtime
-        .transcribe_tail(seconds_f32, language)
+        .transcribe_tail(runtime_seconds(seconds), language)
         .map_err(|error| mcp_error(error.code(), error.to_string()))?;
     Ok(response_from_transcription(transcription))
 }
 
-fn response_from_window(window: &AudioWindow, seconds: u32) -> AudioTailResponse {
+fn response_from_window(
+    window: &AudioWindow,
+    seconds: f64,
+    recent_events: Vec<AudioEvent>,
+) -> AudioTailResponse {
     let requested_samples = requested_samples(window, seconds);
     let mut pcm = Vec::with_capacity(requested_samples.saturating_mul(BYTES_PER_SAMPLE));
     let missing_samples = requested_samples.saturating_sub(window.samples.len());
     pcm.resize(missing_samples.saturating_mul(BYTES_PER_SAMPLE), 0);
     pcm.extend_from_slice(&window.pcm_i16_le());
+    let direction = estimate_direction(window);
 
     AudioTailResponse {
         pcm,
         sample_rate: window.format.sample_rate_hz,
         channels: window.format.channels,
         format: PCM_FORMAT.to_owned(),
+        requested_seconds: seconds,
+        captured_seconds: captured_seconds(window),
+        frames: window.frames,
+        rms_db: window.rms_db,
+        vad_speech_pct: vad_speech_pct(window),
+        recent_events,
+        direction_estimate: (direction.confidence > 0.0).then_some(direction),
     }
 }
 
-fn requested_samples(window: &AudioWindow, seconds: u32) -> usize {
-    usize::try_from(window.format.sample_rate_hz)
-        .unwrap_or(usize::MAX)
-        .saturating_mul(seconds as usize)
+fn requested_samples(window: &AudioWindow, seconds: f64) -> usize {
+    requested_frames(seconds, window.format.sample_rate_hz)
         .saturating_mul(usize::from(window.format.channels))
 }
 
-fn validate_seconds(seconds: u32) -> Result<(), ErrorData> {
-    if seconds > MAX_RING_SECONDS {
+fn validate_seconds(seconds: f64) -> Result<(), ErrorData> {
+    if !seconds.is_finite() || seconds < 0.0 || seconds > f64::from(MAX_RING_SECONDS) {
         return Err(mcp_error(
             error_codes::TOOL_PARAMS_INVALID,
-            format!("audio_tail seconds must be <= {MAX_RING_SECONDS}; got {seconds}"),
+            format!("audio seconds must be between 0 and {MAX_RING_SECONDS}; got {seconds}"),
         ));
     }
     Ok(())
@@ -279,21 +310,55 @@ fn normalize_language_param(language: &str) -> Result<&'static str, ErrorData> {
     }
 }
 
-fn seconds_to_f32(seconds: u32) -> Result<f32, ErrorData> {
-    u16::try_from(seconds).map(f32::from).map_err(|_error| {
-        mcp_error(
-            error_codes::TOOL_PARAMS_INVALID,
-            format!("audio_tail seconds must fit u16; got {seconds}"),
-        )
-    })
-}
-
 fn response_from_transcription(transcription: Transcription) -> AudioTranscribeResponse {
     AudioTranscribeResponse {
         text: transcription.text,
         confidence: transcription.confidence,
         latency_ms: u64::try_from(transcription.elapsed_ms).unwrap_or(u64::MAX),
         model_id: WHISPER_TINY_MODEL_ID.to_owned(),
+    }
+}
+
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn requested_frames(seconds: f64, sample_rate_hz: u32) -> usize {
+    (seconds * f64::from(sample_rate_hz)).round() as usize
+}
+
+#[allow(clippy::cast_precision_loss)]
+fn captured_seconds(window: &AudioWindow) -> f64 {
+    window.frames as f64 / f64::from(window.format.sample_rate_hz.max(1))
+}
+
+#[allow(clippy::cast_possible_truncation)]
+fn runtime_seconds(seconds: f64) -> f32 {
+    seconds as f32
+}
+
+#[allow(clippy::cast_precision_loss)]
+fn vad_speech_pct(window: &AudioWindow) -> f32 {
+    if window.frames == 0 || window.samples.is_empty() {
+        return 0.0;
+    }
+    let channels = usize::from(window.format.channels.max(1));
+    let frame_count = ((f64::from(window.format.sample_rate_hz) * f64::from(VAD_FRAME_SECONDS))
+        .round() as usize)
+        .max(1);
+    let samples_per_chunk = frame_count.saturating_mul(channels).max(channels);
+    let mut total = 0_usize;
+    let mut speech = 0_usize;
+    for chunk in window.samples.chunks(samples_per_chunk) {
+        if chunk.len() < channels {
+            continue;
+        }
+        total = total.saturating_add(1);
+        if synapse_audio::detectors::rms_db(chunk) >= VAD_SPEECH_DB {
+            speech = speech.saturating_add(1);
+        }
+    }
+    if total == 0 {
+        0.0
+    } else {
+        (speech as f32 / total as f32) * 100.0
     }
 }
 
@@ -318,12 +383,17 @@ mod tests {
         });
         ring.push_interleaved(&vec![0.25; 48_000 * 2]);
 
-        let response = tail_audio_from_runtime(&runtime, 2)
+        let response = tail_audio_from_runtime(&runtime, 2.0)
             .map_err(|error| anyhow::anyhow!("tail_audio failed: {error:?}"))?;
 
         assert_eq!(response.sample_rate, 48_000);
         assert_eq!(response.channels, 2);
         assert_eq!(response.format, PCM_FORMAT);
+        assert_eq!(response.requested_seconds, 2.0);
+        assert_eq!(response.captured_seconds, 1.0);
+        assert_eq!(response.frames, 48_000);
+        assert!(response.rms_db > -13.0);
+        assert!(response.vad_speech_pct > 0.0);
         assert_eq!(response.pcm.len(), 2 * 48_000 * 2 * BYTES_PER_SAMPLE);
         assert!(
             response.pcm[..48_000 * 2 * BYTES_PER_SAMPLE]
@@ -369,14 +439,14 @@ mod tests {
     fn transcribe_maps_silence_without_model_load_and_rejects_language() -> anyhow::Result<()> {
         let runtime = AudioRuntime::spawn(AudioConfig::default())?;
 
-        let blank = transcribe_audio_from_runtime(&runtime, 5, "en")
+        let blank = transcribe_audio_from_runtime(&runtime, 5.0, "en")
             .map_err(|error| anyhow::anyhow!("transcribe silence failed: {error:?}"))?;
         assert_eq!(blank.text, "");
         assert_eq!(blank.confidence, 0.0);
         assert_eq!(blank.latency_ms, 0);
         assert_eq!(blank.model_id, WHISPER_TINY_MODEL_ID);
 
-        let invalid = transcribe_audio_from_runtime(&runtime, 5, "xx")
+        let invalid = transcribe_audio_from_runtime(&runtime, 5.0, "xx")
             .expect_err("unsupported language should fail before STT");
         assert_eq!(
             error_data_code(&invalid),
@@ -398,7 +468,7 @@ mod tests {
         });
         ring.push_interleaved(&vec![0.5; 16_000]);
 
-        let error = transcribe_audio_from_runtime(&runtime, 1, "en")
+        let error = transcribe_audio_from_runtime(&runtime, 1.0, "en")
             .expect_err("missing model should fail for non-silent audio");
         assert_eq!(
             error_data_code(&error),

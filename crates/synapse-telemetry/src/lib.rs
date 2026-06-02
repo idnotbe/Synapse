@@ -23,6 +23,7 @@ const DEFAULT_MAX_DIR_BYTES: u64 = 500 * 1024 * 1024;
 const DEFAULT_KEEP_DAYS: u32 = 7;
 const DEFAULT_GC_INTERVAL: Duration = Duration::from_hours(6);
 const GC_INTERVAL_ENV: &str = "SYNAPSE_LOG_GC_INTERVAL_S";
+const PAYLOAD_LOG_TARGETS: &[&str] = &["rmcp", "rmcp::service", "rmcp::transport"];
 
 #[derive(Clone, Debug)]
 pub struct TelemetryConfig {
@@ -199,6 +200,7 @@ pub fn init_tracing(cfg: TelemetryConfig) -> Result<TelemetryGuard, TelemetryErr
 
     let file_appender = tracing_appender::rolling::daily(&log_dir, "synapse.log");
     let (file_writer, file_guard) = tracing_appender::non_blocking(file_appender);
+    let file_filter = payload_safe_filter(level_directive(cfg.file_level));
     let file_layer = fmt::layer()
         .json()
         .with_target(true)
@@ -209,11 +211,11 @@ pub fn init_tracing(cfg: TelemetryConfig) -> Result<TelemetryGuard, TelemetryErr
         .with_current_span(true)
         .with_span_list(true)
         .with_writer(file_writer)
-        .with_filter(cfg.file_level);
+        .with_filter(file_filter);
 
-    let env_filter = EnvFilter::builder()
-        .with_default_directive(cfg.console_level.into())
-        .from_env_lossy();
+    let env_filter = payload_safe_filter(
+        &env::var("RUST_LOG").unwrap_or_else(|_| level_directive(cfg.console_level).to_owned()),
+    );
     let console_layer = fmt::layer()
         .with_writer(std::io::stderr)
         .with_target(true)
@@ -239,6 +241,54 @@ pub fn init_tracing(cfg: TelemetryConfig) -> Result<TelemetryGuard, TelemetryErr
         _file_guard: file_guard,
         _gc_worker: gc_worker,
     })
+}
+
+fn payload_safe_filter(base_directives: &str) -> EnvFilter {
+    let mut directives = base_directives.trim().to_owned();
+    if directives.is_empty() {
+        directives.push_str("info");
+    }
+    let dependency_level = payload_dependency_level(default_level_from_directives(&directives));
+    for target in PAYLOAD_LOG_TARGETS {
+        directives.push(',');
+        directives.push_str(target);
+        directives.push('=');
+        directives.push_str(dependency_level);
+    }
+    EnvFilter::try_new(&directives).unwrap_or_else(|_| EnvFilter::new(format!("info,rmcp=info")))
+}
+
+fn default_level_from_directives(directives: &str) -> LevelFilter {
+    directives
+        .split(',')
+        .find_map(|directive| {
+            let trimmed = directive.trim();
+            if trimmed.is_empty() || trimmed.contains('=') {
+                return None;
+            }
+            trimmed.parse::<LevelFilter>().ok()
+        })
+        .unwrap_or(LevelFilter::INFO)
+}
+
+fn payload_dependency_level(default: LevelFilter) -> &'static str {
+    match default {
+        LevelFilter::OFF => "off",
+        LevelFilter::ERROR => "error",
+        LevelFilter::WARN => "warn",
+        LevelFilter::INFO | LevelFilter::DEBUG | LevelFilter::TRACE => "info",
+    }
+}
+
+fn level_directive(level: LevelFilter) -> &'static str {
+    match level {
+        LevelFilter::OFF => "off",
+        LevelFilter::ERROR => "error",
+        LevelFilter::WARN => "warn",
+        LevelFilter::INFO => "info",
+        LevelFilter::DEBUG => "debug",
+        LevelFilter::TRACE => "trace",
+    }
 }
 
 /// Pick the effective GC interval: explicit `Some(non-zero)` wins, otherwise the

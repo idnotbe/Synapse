@@ -1417,11 +1417,11 @@ Recording cadence: observations sampled every `OBSERVATION_SAMPLE_INTERVAL = 250
 
 | Parameter | Type | Required | Default | Range | Description |
 |---|---|---|---|---|---|
-| `seconds` | `u32` | no | `5` | `0..=MAX_RING_SECONDS=5` | `0` returns an empty PCM body |
+| `seconds` | JSON number (`f64`) | no | `5` | `0..=MAX_RING_SECONDS=30` | `0` returns an empty PCM body without starting the runtime |
 
-**Returns:** `AudioTailResponse { pcm: Vec<u8>, sample_rate: u32, channels: u16, format: "s16le" }`. The PCM is **left-padded with zeros** when the ring contains fewer samples than requested, so `pcm.len() == seconds * sample_rate * channels * 2`.
+**Returns:** `AudioTailResponse { pcm: Vec<u8>, sample_rate: u32, channels: u16, format: "s16le", requested_seconds: f64, captured_seconds: f64, frames: usize, rms_db: f32, vad_speech_pct: f32, recent_events: Vec<AudioEvent>, direction_estimate: Option<DirectionEstimate> }`. The PCM is **left-padded with zeros** when the ring contains fewer samples than requested, so `pcm.len() == round(seconds * sample_rate) * channels * 2`. Raw PCM is returned only to the caller and is not persisted by observe/reality rows.
 
-**Errors:** `TOOL_PARAMS_INVALID` (seconds > 5), `AUDIO_LOOPBACK_INIT_FAILED`, `AUDIO_DEVICE_LOST`.
+**Errors:** `TOOL_PARAMS_INVALID` (seconds outside `0..=30`), `AUDIO_LOOPBACK_INIT_FAILED`, `AUDIO_DEVICE_LOST`.
 
 ## 26. `audio_transcribe`
 
@@ -1431,7 +1431,7 @@ Recording cadence: observations sampled every `OBSERVATION_SAMPLE_INTERVAL = 250
 
 | Parameter | Type | Required | Default | Range | Description |
 |---|---|---|---|---|---|
-| `seconds` | `u32` | no | `5` | `0..=5` | Window size |
+| `seconds` | JSON number (`f64`) | no | `5` | `0..=30` | Window size |
 | `language` | `String` | no | `"en"` | `"en"` only (case-insensitive, empty → `"en"`) | Anything else → `TOOL_PARAMS_INVALID` |
 
 **Returns:** `AudioTranscribeResponse { text: String, confidence: f32, latency_ms: u64, model_id: "whisper_tiny_int8" }`.

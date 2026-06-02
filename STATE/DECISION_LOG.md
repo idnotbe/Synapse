@@ -996,3 +996,33 @@ Evidence:
 
 Outcome:
 - Commit with `[skip ci]`, push, post #598 RESOLVED evidence, close #598, refresh queue.
+
+# 2026-06-02T05:49:18-05:00 - #599 audio tool contract must support the issue stress window directly
+
+Decision: Patch the M3 audio tool contract before FSV instead of treating #599 as a pure verification issue.
+
+Evidence:
+- #599 requires `audio_tail` over `0.1..=30` second windows and names RMS/VAD/events/azimuth as acceptance values.
+- Current code exposed `seconds: u32` and `MAX_RING_SECONDS = 5`, so a strict MCP client could not call the 100 ms window and the runtime could not satisfy the 30 s boundary.
+- Current `audio_tail` returned PCM only; compact audio metadata was reachable through `observe include audio`, but not through the named tool surface.
+- Host Whisper prerequisite exists and matched the pinned SHA256; missing model is not the current blocker.
+
+Outcome:
+- Extend the ring/tool max to 30 seconds.
+- Accept numeric seconds at the MCP boundary.
+- Add compact metadata to `audio_tail` while preserving raw PCM as non-persisted tool response data.
+- Continue with focused checks, release build, and real loopback manual MCP/SoT FSV.
+
+# 2026-06-02T06:58:40-05:00 - #599 audio behavior accepted after post-telemetry manual MCP/SoT FSV
+
+Decision: Accept the #599 implementation after the post-telemetry isolated daemon run and cleanup.
+
+Evidence:
+- Accepted daemon `.runs\599\audio-fsv-20260602T0647-accepted`: PID `76024`, bind `127.0.0.1:7877`, release SHA256 `A5B88B6B1048EB64AB9A7E8CEB77979D8FB4EF26112964F3DCB27F634DDBEC09`, strict Inspector `tools/list=80`.
+- `audio_tail` covered zero, 100ms, silence, left/center/right panning, speech+music, overlapping speech, loud transient, and 30s boundary using known WAV fixture hashes and real loopback playback.
+- `audio_transcribe` exact English happy path was the 6s rerun: `Hello world. This is Synapse.` with confidence `0.86`; the first 5s partial result was rejected.
+- Edges failed closed: unsupported non-English language, nonnumeric seconds, seconds over 30, and audio-disabled daemon.
+- Final storage readbacks stayed all zero; product log/DB byte scans found no transcript, `CallToolResult`, response payload, or `pcm` persistence. Host audio mutes restored to original unmuted state.
+
+Outcome:
+- Proceed to final supporting checks, diff review, commit, RESOLVED comment, close #599, then continue the live queue.

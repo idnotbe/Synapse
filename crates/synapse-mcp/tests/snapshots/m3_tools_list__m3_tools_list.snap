@@ -1,5 +1,6 @@
 ---
 source: crates/synapse-mcp/tests/m3_tools_list.rs
+assertion_line: 85
 expression: snapshot
 ---
 {
@@ -168,12 +169,12 @@ expression: snapshot
       "tool": "replay_record"
     },
     {
-      "actual": 5,
+      "actual": 5.0,
       "path": "inputSchema.properties.seconds.default",
       "tool": "audio_tail"
     },
     {
-      "actual": 5,
+      "actual": 5.0,
       "path": "inputSchema.properties.seconds.default",
       "tool": "audio_transcribe"
     },

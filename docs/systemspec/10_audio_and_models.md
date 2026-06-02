@@ -18,8 +18,8 @@ Source files covered:
 ### 1.1 Public surface
 
 ```rust
-pub const DEFAULT_RING_SECONDS: u32 = 5;
-pub const MAX_RING_SECONDS: u32 = 5;
+pub const DEFAULT_RING_SECONDS: u32 = 30;
+pub const MAX_RING_SECONDS: u32 = 30;
 
 pub type AudioEventSink = Arc<dyn Fn(Event) + Send + Sync + 'static>;
 
@@ -38,7 +38,7 @@ Re-exports: `AudioError`, `AudioResult` (error.rs); `LoopbackStatus` (loopback.r
 ### 1.2 `AudioRuntime::spawn(config)` / `spawn_with_event_sink(config, sink)`
 
 1. `validate_config`:
-   - `ring_seconds` must be in `1..=MAX_RING_SECONDS = 5`; else `AudioError::LoopbackInitFailed`.
+   - `ring_seconds` must be in `1..=MAX_RING_SECONDS = 30`; else `AudioError::LoopbackInitFailed`.
    - `detectors_enabled = true && start_loopback = false` → `AudioError::LoopbackInitFailed` ("audio detectors require loopback startup").
 2. Build `AudioRing::new(ring_seconds)` — see §1.4.
 3. If `start_loopback`, call `loopback::start_loopback(ring, optional DetectorProcessor)`:
@@ -68,7 +68,7 @@ Re-exports: `AudioError`, `AudioResult` (error.rs); `LoopbackStatus` (loopback.r
 
 `AudioRing`:
 
-- Holds a `Vec<f32>` capable of storing `ring_seconds * DEFAULT_SAMPLE_RATE_HZ * STEREO_CHANNELS` samples (default `5 * 48000 * 2 = 480 000`).
+- Holds a `Vec<f32>` capable of storing `ring_seconds * DEFAULT_SAMPLE_RATE_HZ * STEREO_CHANNELS` samples (default `30 * 48000 * 2 = 2 880 000`).
 - Lock-free `push_interleaved(samples: &[f32])` updates an `AtomicUsize` write index; readers (`tail_seconds`) snapshot the index and copy out the trailing N frames.
 - `set_format(AudioFormat)` updates the negotiated `{ sample_rate_hz, channels }` (default `48000 Hz, 2 ch`).
 
@@ -195,8 +195,8 @@ The crate maintains a process-wide `AtomicU64 NEXT_SESSION_ID = 1` used to label
 
 | Tool | Behavior |
 |---|---|
-| `audio_tail(seconds: u32)` | `0..=MAX_RING_SECONDS = 5`. `0` returns an empty PCM body with `sample_rate = 48_000`, `channels = 2`, `format = "s16le"`. Otherwise pulls `AudioRuntime::tail_seconds(seconds)`, converts to little-endian s16 (`AudioWindow::pcm_i16_le`), and **pads with zeros** if the ring has less data than requested (so the returned `pcm.len() == seconds * sample_rate * channels * 2`). |
-| `audio_transcribe(seconds: u32, language: String)` | Same `seconds` bounds. `language` accepts `"en"` or empty (mapped to `"en"`); anything else → `TOOL_PARAMS_INVALID`. Calls `AudioRuntime::transcribe_tail`. Returns `{ text, confidence, latency_ms, model_id: "whisper_tiny_int8" }`. |
+| `audio_tail(seconds: f64)` | JSON-number window `0..=MAX_RING_SECONDS = 30`. `0` returns an empty PCM body with `sample_rate = 48_000`, `channels = 2`, `format = "s16le"`, and zeroed metadata without initializing the runtime. Otherwise pulls `AudioRuntime::tail_seconds(seconds)`, converts to little-endian s16 (`AudioWindow::pcm_i16_le`), and **pads with zeros** if the ring has less data than requested (so the returned `pcm.len() == round(seconds * sample_rate) * channels * 2`). The response also includes `requested_seconds`, `captured_seconds`, `frames`, `rms_db`, `vad_speech_pct`, at most five recent detector events, and optional stereo `direction_estimate`. |
+| `audio_transcribe(seconds: f64, language: String)` | Same JSON-number `seconds` bounds. `language` accepts `"en"` or empty (mapped to `"en"`); anything else → `TOOL_PARAMS_INVALID`. Calls `AudioRuntime::transcribe_tail`. Returns `{ text, confidence, latency_ms, model_id: "whisper_tiny_int8" }`. |
 
 Both require permission `READ_AUDIO`, which is only granted by default when `--enable-audio` is set (see [03_configuration.md §4.4](03_configuration.md)).
 
@@ -206,7 +206,7 @@ Lazy init: `M3State::ensure_audio_runtime` (`crates/synapse-mcp/src/m3.rs::364`)
 AudioConfig {
     ring_seconds: DEFAULT_RING_SECONDS,
     start_loopback: audio_loopback_enabled()?,  // reads SYNAPSE_AUDIO_LOOPBACK
-    detectors_enabled: false,                   // detectors are not wired into the M3 tools yet
+    detectors_enabled: start_loopback,          // detector metadata/events are wired into observe/audio_tail
     stt_model_path: None,                       // uses synapse-audio's default lookup
 }
 ```

@@ -42,6 +42,8 @@ struct DetectorState {
     vad_speech_recent: bool,
     speech_active: bool,
     music_active: bool,
+    loud_active: bool,
+    quiet_loud_frames: u64,
     silent_speech_frames: u64,
     silent_music_frames: u64,
     recent_events: VecDeque<AudioEvent>,
@@ -55,6 +57,8 @@ impl Default for DetectorState {
             vad_speech_recent: false,
             speech_active: false,
             music_active: false,
+            loud_active: false,
+            quiet_loud_frames: 0,
             silent_speech_frames: 0,
             silent_music_frames: 0,
             recent_events: VecDeque::new(),
@@ -135,9 +139,15 @@ impl DetectorProcessor {
             state.rms_db = rms_db;
             state.moving_rms = state.moving_rms.mul_add(0.95, rms * 0.05);
 
-            if rms >= LOUD_ABSOLUTE_RMS || (rms > prior_moving * LOUD_RATIO && rms_db > -24.0) {
+            let loud_surge = rms > prior_moving * LOUD_RATIO && rms_db > -24.0;
+            let loud_absolute_onset =
+                rms >= LOUD_ABSOLUTE_RMS && prior_moving < LOUD_ABSOLUTE_RMS / LOUD_RATIO;
+            if (loud_surge || loud_absolute_onset) && !state.loud_active {
+                state.loud_active = true;
+                state.quiet_loud_frames = 0;
                 events.push(detector_event(LOUD_TRANSIENT, rms_db, 0.95));
             }
+            update_loud_reset(&mut state, rms_db, frames, format);
             update_speech(&mut state, &mut events, rms_db, frames, format);
             update_music(&mut state, &mut events, rms_db, crest, frames, format);
             for event in &events {
@@ -170,6 +180,18 @@ impl DetectorProcessor {
             correlations: Vec::new(),
         };
         (self.sink)(event);
+    }
+}
+
+fn update_loud_reset(state: &mut DetectorState, rms_db: f32, frames: u64, format: AudioFormat) {
+    if rms_db <= MUSIC_END_DB {
+        state.quiet_loud_frames = state.quiet_loud_frames.saturating_add(frames);
+        if state.quiet_loud_frames >= u64::from(format.sample_rate_hz) / 4 {
+            state.loud_active = false;
+            state.quiet_loud_frames = 0;
+        }
+    } else {
+        state.quiet_loud_frames = 0;
     }
 }
 

@@ -382,14 +382,14 @@ fn read_schema_defaults(readbacks: &mut Vec<Value>, tools: &[Value]) -> anyhow::
         tools,
         "audio_tail",
         "inputSchema.properties.seconds.default",
-        &json!(5),
+        &json!(5.0),
     )?;
     read_default(
         readbacks,
         tools,
         "audio_transcribe",
         "inputSchema.properties.seconds.default",
-        &json!(5),
+        &json!(5.0),
     )?;
     read_default(
         readbacks,

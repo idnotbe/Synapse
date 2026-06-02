@@ -36,13 +36,21 @@ async fn audio_transcribe_schema_defaults_silence_and_edges() -> anyhow::Result<
     assert_eq!(silence["latency_ms"], 0);
     assert_eq!(silence["model_id"], "whisper_tiny_int8");
 
+    let short_silence = structured(
+        &client
+            .tools_call("audio_transcribe", json!({"seconds": 0.1}))
+            .await?,
+    )?;
+    assert_eq!(short_silence["text"], "");
+    assert_eq!(short_silence["confidence"], 0.0);
+
     let bad_language = client
         .tools_call_error("audio_transcribe", json!({"language": "xx"}))
         .await?;
     assert_eq!(bad_language["data"]["code"], "TOOL_PARAMS_INVALID");
 
     let too_large = client
-        .tools_call_error("audio_transcribe", json!({"seconds": 6}))
+        .tools_call_error("audio_transcribe", json!({"seconds": 31}))
         .await?;
     assert_eq!(too_large["data"]["code"], "TOOL_PARAMS_INVALID");
 
@@ -73,8 +81,11 @@ fn assert_audio_transcribe_schema(tool: &Value) {
         "outputSchema": tool.get("outputSchema").cloned().unwrap_or(Value::Null),
     });
     assert_eq!(shape["inputSchema"]["additionalProperties"], false);
-    assert_eq!(shape["inputSchema"]["properties"]["seconds"]["default"], 5);
-    assert_eq!(shape["inputSchema"]["properties"]["seconds"]["maximum"], 5);
+    assert_eq!(
+        shape["inputSchema"]["properties"]["seconds"]["default"],
+        5.0
+    );
+    assert_eq!(shape["inputSchema"]["properties"]["seconds"]["maximum"], 30);
     assert_eq!(
         shape["inputSchema"]["properties"]["language"]["default"],
         "en"

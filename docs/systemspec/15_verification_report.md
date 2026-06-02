@@ -169,8 +169,8 @@ Files exceeding the 500-LoC impplan rule on `main` (M3 carry-over per `docs/impp
 | `DEFAULT_SAMPLE_LIMIT` (scheduler) | `4096` | `synapse_reflex::scheduler` |
 | Scheduler target/fallback intervals | `1 ms` / `2 ms` | `synapse_reflex::scheduler::SchedulerConfig::default` |
 | `STARVATION_AFTER` (reflex) | (see `synapse_reflex::conflict`) | — |
-| `DEFAULT_RING_SECONDS` | `5` | `synapse_audio` |
-| `MAX_RING_SECONDS` | `5` | `synapse_audio` |
+| `DEFAULT_RING_SECONDS` | `30` | `synapse_audio` |
+| `MAX_RING_SECONDS` | `30` | `synapse_audio` |
 | `DEFAULT_SAMPLE_RATE_HZ` | `48_000` | `synapse_audio::ring` |
 | `STEREO_CHANNELS` | `2` | `synapse_audio::ring` |
 | `WHISPER_TINY_MODEL_ID` | `"whisper_tiny_int8"` | `synapse_mcp::m3::audio` |

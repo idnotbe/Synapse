@@ -1,5 +1,56 @@
 # RECOVERY NOTES - Synapse
 
+## Current Resume Point - 2026-06-02T06:58:40-05:00
+- Active issue #599 has implementation, manual MCP/SoT FSV, final supporting checks, and diff review complete; commit, push, RESOLVED comment, closeout, and queue refresh remain.
+- Accepted run: `.runs\599\audio-fsv-20260602T0647-accepted`.
+  - Daemon PID `76024`, bind `127.0.0.1:7877`, release SHA256 `A5B88B6B1048EB64AB9A7E8CEB77979D8FB4EF26112964F3DCB27F634DDBEC09`, strict Inspector `tools/list=80`.
+  - Covered zero/100ms/silence, panning left/center/right, speech+tone, overlapping speech, loud transient, exact English transcription via 6s window, non-English fail-closed, invalid seconds, overmax seconds, 30s boundary, and metadata-only log/DB scans.
+  - Accepted disabled-edge run: `.runs\599\audio-fsv-20260602T065621-disabled-final3`; daemon PID `44472` on `127.0.0.1:7878`, audio disabled health, `audio_tail` refused with `READ_AUDIO`, storage before/after zero.
+  - Cleanup done: release_all zero on both daemons, PIDs stopped, ports `7877`/`7878` closed, no `ffplay`, Chrome/pulseaudio mutes restored to unmuted.
+- Rejected evidence to remember:
+  - `.runs\599\audio-fsv-20260602T0610` had Chrome/YouTube contamination;
+  - center/right panning files `07_audio_tail_center_stdout.json` and `08_audio_tail_right_stdout.json` overlapped because they were launched in parallel; use `07b` and `08b`;
+  - `12_audio_transcribe_hello_stdout.json` missed `Hello world`; use `12b_audio_transcribe_hello_6s_stdout.json`;
+  - disabled-edge `final`/`final2` failed setup due wrong token env name; `final3` is accepted.
+- Final supporting checks passed:
+  - `cargo fmt --check`;
+  - `git diff --check` with line-ending warnings only;
+  - stale audio docs scan for old `f32`/`u32`/5s wording;
+  - focused/full `synapse-audio`, `synapse-telemetry`, MCP audio, M3 audio snapshot/tool-list, schema-sanitize, touched-crate check, and release build.
+- Final release build readback: length `46730240`, SHA256 `5DA77B06F1E100B2E4049B460E56240B782C6162157FDFCA7AEC89E0B8D6A04A`, timestamp `2026-06-02T12:13:43Z`; accepted FSV daemon binary SHA was `A5B88B6B1048EB64AB9A7E8CEB77979D8FB4EF26112964F3DCB27F634DDBEC09`.
+- Diff review completed; tracked diff token scan found no actual bearer token values.
+- Exact next actions:
+  1. Commit with `[skip ci]`.
+  2. Push, post #599 RESOLVED evidence, close issue, remove stale labels, refresh queue.
+
+## Current Resume Point - 2026-06-02T05:49:18-05:00
+- Active issue #599 is patched locally but not yet checked, built, manually FSV-verified, committed, or closed.
+- Wake context/GitHub/git were re-read after compaction:
+  - #351 decision still binds manual FSV only, no GitHub Actions/CI, commits `[skip ci]`;
+  - #594 parent remains open;
+  - #599 is the current in-progress child;
+  - #624/#625 remain blocked;
+  - `git status --short --branch` was clean before #599 edits.
+- Root contract gaps found:
+  - audio ring/tool cap was 5 seconds, conflicting with #599's `0.1..=30` stress window;
+  - `audio_tail.seconds` / `audio_transcribe.seconds` were `u32`, blocking fractional 100 ms probes through strict clients;
+  - `audio_tail` returned PCM only, while #599 requires direct RMS/VAD/event/azimuth verification on the audio tool surface.
+- Local patch in progress:
+  - `synapse-audio` default/max ring is 30 seconds;
+  - M3 audio params use numeric `f32` seconds with finite `0..=30` validation;
+  - `audio_tail` now returns PCM plus compact metadata (`requested_seconds`, `captured_seconds`, `frames`, `rms_db`, `vad_speech_pct`, recent events, optional direction);
+  - zero-second `audio_tail` still returns empty PCM and zeroed metadata without initializing the runtime;
+  - focused tests/docs are updated but checks have not yet run.
+- Host model prerequisite readback already done:
+  - `%LOCALAPPDATA%\synapse\models\whisper-tiny-int8.onnx` exists and SHA256 matches `147AFAC751F89AD8E8F82133464EDC81ECFF9391E98CCDCAE2474384BE68EC86`;
+  - `%LOCALAPPDATA%\synapse\models\ort-extensions` exists.
+- Exact next actions:
+  1. Run `cargo fmt`.
+  2. Run focused audio tests and schema/tool-list checks; update snapshots if the new schema is accepted.
+  3. Build release `synapse-mcp`.
+  4. Create `.runs\599\...`, copy/read model + extension SoTs into isolated `LOCALAPPDATA`, launch repo-built daemon with `--enable-audio`, verify process/socket/auth/health/strict Inspector `tools/list`.
+  5. Perform manual #599 FSV: silence, 0.1s boundary, 30s boundary, panned stereo direction, music/transient, English speech transcription, non-English fail-closed edge, audio disabled, and structural invalid input, with separate physical SoT/log/storage readbacks.
+
 ## Current Resume Point - 2026-06-02T05:36:10-05:00
 - Active issue #598 has implementation, accepted manual MCP/SoT FSV, cleanup, final supporting checks, release build/readback, and diff review complete.
 - Main accepted run: `.runs\598\detection-fsv-20260602T0513`.

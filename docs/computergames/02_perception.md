@@ -323,7 +323,7 @@ trigger.
 
 ### Loopback capture
 
-Uses the system-default audio render device through WASAPI loopback on Windows. The M3 MCP audio tools require `--enable-audio` / `SYNAPSE_ENABLE_AUDIO=true`; the runtime is initialized lazily when `audio_tail` or `audio_transcribe` needs it. When audio is enabled, loopback capture and the lightweight detector processor start by default unless `SYNAPSE_AUDIO_LOOPBACK=0` / `false`. Buffers the last N seconds in a ring buffer; M3 supports 1-5 seconds and defaults to 5s.
+Uses the system-default audio render device through WASAPI loopback on Windows. The M3 MCP audio tools require `--enable-audio` / `SYNAPSE_ENABLE_AUDIO=true`; the runtime is initialized lazily when `audio_tail` or `audio_transcribe` needs it. When audio is enabled, loopback capture and the lightweight detector processor start by default unless `SYNAPSE_AUDIO_LOOPBACK=0` / `false`. Buffers the last N seconds in a ring buffer; M3 supports numeric 0-30 second windows and defaults to a 30s ring.
 
 ```rust
 pub struct AudioConfig {
@@ -345,7 +345,7 @@ impl AudioRuntime {
 pub fn start_loopback(ring: Arc<AudioRing>, detectors: Option<DetectorProcessor>) -> AudioResult<LoopbackHandle>;
 ```
 
-`AudioWindow` stores interleaved f32 samples with the active loopback format. The MCP `audio_tail` response converts the requested window to padded `s16le`, reports the sample rate and channel count, and returns an empty PCM buffer for `seconds = 0` without initializing the runtime. Live `observe` / `reality_baseline` / `observe_delta` calls that include `audio` do not return or persist PCM; they populate only a bounded one-second `AudioContext` summary with RMS, VAD, at most five detector events, and optional direction estimate.
+`AudioWindow` stores interleaved f32 samples with the active loopback format. The MCP `audio_tail` response converts the requested window to padded `s16le`, reports the sample rate and channel count, and includes compact RMS, VAD percentage, recent detector events, and optional direction estimate. It returns an empty PCM buffer for `seconds = 0` without initializing the runtime. Live `observe` / `reality_baseline` / `observe_delta` calls that include `audio` do not return or persist PCM; they populate only a bounded one-second `AudioContext` summary with RMS, VAD, at most five detector events, and optional direction estimate.
 
 ### STT
 

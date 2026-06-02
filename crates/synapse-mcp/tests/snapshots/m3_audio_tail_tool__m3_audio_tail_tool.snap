@@ -1,5 +1,6 @@
 ---
 source: crates/synapse-mcp/tests/m3_audio_tail_tool.rs
+assertion_line: 138
 expression: shape
 ---
 {
@@ -8,11 +9,10 @@ expression: shape
     "additionalProperties": false,
     "properties": {
       "seconds": {
-        "default": 5,
-        "format": "uint32",
-        "maximum": 5,
+        "default": 5.0,
+        "maximum": 30,
         "minimum": 0,
-        "type": "integer"
+        "type": "number"
       }
     },
     "title": "AudioTailParams",
@@ -20,17 +20,85 @@ expression: shape
   },
   "name": "audio_tail",
   "outputSchema": {
+    "$defs": {
+      "AudioEvent": {
+        "additionalProperties": false,
+        "properties": {
+          "at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "azimuth_deg": {
+            "format": "float",
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "confidence": {
+            "format": "float",
+            "type": "number"
+          },
+          "kind": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "at",
+          "kind",
+          "confidence"
+        ],
+        "type": "object"
+      },
+      "DirectionEstimate": {
+        "additionalProperties": false,
+        "properties": {
+          "azimuth_deg": {
+            "format": "float",
+            "type": "number"
+          },
+          "confidence": {
+            "format": "float",
+            "type": "number"
+          }
+        },
+        "required": [
+          "azimuth_deg",
+          "confidence"
+        ],
+        "type": "object"
+      }
+    },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "additionalProperties": false,
     "properties": {
+      "captured_seconds": {
+        "format": "double",
+        "type": "number"
+      },
       "channels": {
         "format": "uint16",
         "maximum": 65535,
         "minimum": 0,
         "type": "integer"
       },
+      "direction_estimate": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/DirectionEstimate"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
       "format": {
         "type": "string"
+      },
+      "frames": {
+        "format": "uint",
+        "minimum": 0,
+        "type": "integer"
       },
       "pcm": {
         "items": {
@@ -41,17 +109,41 @@ expression: shape
         },
         "type": "array"
       },
+      "recent_events": {
+        "items": {
+          "$ref": "#/$defs/AudioEvent"
+        },
+        "type": "array"
+      },
+      "requested_seconds": {
+        "format": "double",
+        "type": "number"
+      },
+      "rms_db": {
+        "format": "float",
+        "type": "number"
+      },
       "sample_rate": {
         "format": "uint32",
         "minimum": 0,
         "type": "integer"
+      },
+      "vad_speech_pct": {
+        "format": "float",
+        "type": "number"
       }
     },
     "required": [
       "pcm",
       "sample_rate",
       "channels",
-      "format"
+      "format",
+      "requested_seconds",
+      "captured_seconds",
+      "frames",
+      "rms_db",
+      "vad_speech_pct",
+      "recent_events"
     ],
     "title": "AudioTailResponse",
     "type": "object"

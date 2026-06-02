@@ -238,7 +238,7 @@ submodules (declared via `#[tool_router]`). Grouped by milestone:
 | `profile_list` | List loaded profiles + active id | `server.rs::profile_list`, `m3/profile.rs` |
 | `profile_activate` | Activate a profile id (use_scope=unknown allowed by default; `--restrict-unknown-profile` fails closed) | `server.rs::profile_activate`, `m3/profile.rs` |
 | `replay_record` | Stream observations and/or events to a JSONL file under `%LOCALAPPDATA%/synapse/replays` | `server.rs::replay_record`, `m3/replay.rs` |
-| `audio_tail` | Return the most-recent loopback audio tail as PCM s16le bytes (max 5 s; `synapse_audio::MAX_RING_SECONDS`) | `server.rs::audio_tail`, `m3/audio.rs` |
+| `audio_tail` | Return the most-recent loopback audio tail as PCM s16le bytes plus compact RMS/VAD/event/direction metadata (max 30 s; `synapse_audio::MAX_RING_SECONDS`) | `server.rs::audio_tail`, `m3/audio.rs` |
 | `audio_transcribe` | Transcribe the loopback tail via Whisper-tiny (language pinned to `"en"`) | `server.rs::audio_transcribe`, `m3/audio.rs` |
 | `storage_inspect` | Return per-CF row counts/byte sizes plus audit-retention policy metadata from RocksDB for the operator-visible CFs | `server.rs::storage_inspect`, `m3/storage.rs` |
 | `storage_put_probe_rows` | Insert bounded probe rows into a chosen CF so manual FSV can trigger storage writes, then separately read the RocksDB/log SoT | `server.rs::storage_put_probe_rows`, `m3/storage.rs` |
@@ -473,7 +473,7 @@ Windows UI Automation tree walker (`uiautomation` crate), WinEvent hook for focu
 DXGI duplication and Windows.Graphics.Capture backends with a single `CaptureBackendPreference::Auto` resolver. Exposes `D3D11Texture` references via `SendablePtr<T>`, `CapturedFrame { texture, width, height, format, captured_at, frame_seq, dirty_region }`, `screen_region_to_software_bitmap`, DPI-awareness initialization (`init_process_dpi_awareness`, `is_per_monitor_v2_dpi_aware`), and screen↔window coord helpers. Capture loop runs on a high-priority thread and pushes frames into a bounded `crossbeam` channel (`CAPTURE_CHANNEL_CAPACITY=2`). See [09_perception_and_capture.md](#file-09).
 
 ### 9.9 synapse-audio (WASAPI + STT)
-`AudioRuntime` (`crates/synapse-audio/src/lib.rs`) holds a ring buffer (default 5 s, max 5 s — `DEFAULT_RING_SECONDS = MAX_RING_SECONDS = 5`), a WASAPI loopback handle (started only when `--enable-audio` or `SYNAPSE_AUDIO_LOOPBACK=1`), optional event-emitting detectors (`detectors::DetectorProcessor`), and a Whisper-tiny STT engine (`WhisperTinyStt`). Provides `tail_seconds`, `transcribe_tail`, ring-format negotiation, direction estimate (azimuth + confidence). See [10_audio_and_models.md](#file-10).
+`AudioRuntime` (`crates/synapse-audio/src/lib.rs`) holds a ring buffer (default 30 s, max 30 s — `DEFAULT_RING_SECONDS = MAX_RING_SECONDS = 30`), a WASAPI loopback handle (started only when `--enable-audio` or `SYNAPSE_AUDIO_LOOPBACK=1`), optional event-emitting detectors (`detectors::DetectorProcessor`), and a Whisper-tiny STT engine (`WhisperTinyStt`). Provides `tail_seconds`, `transcribe_tail`, ring-format negotiation, direction estimate (azimuth + confidence). See [10_audio_and_models.md](#file-10).
 
 ### 9.10 synapse-profiles (TOML loader + live reload)
 `ProfileRuntime::spawn` parses every `.toml` file in the profile directory at startup, registers a `notify` recursive watcher with a 200 ms debounce, and refreshes parsed profiles on filesystem events. Bundled profile dir is auto-discovered (`bundled_profiles_dir`); operator override is `SYNAPSE_PROFILE_DIR`. Resolves the active profile against the current foreground window via `resolve_active_profile`. Profiles with `use_scope=unknown` (and unprofiled foregrounds) are actionable by default; pass `--restrict-unknown-profile` to fail closed. See [11_profiles_hid_telemetry.md](#file-11) (or section in subsystem deep-dives).
@@ -822,7 +822,7 @@ crates/synapse-capture/
 crates/synapse-audio/
 ├── Cargo.toml
 └── src/
-    ├── lib.rs                      # AudioRuntime, AudioConfig, DEFAULT_RING_SECONDS=5, AudioEventSink
+    ├── lib.rs                      # AudioRuntime, AudioConfig, DEFAULT_RING_SECONDS=30, AudioEventSink
     ├── error.rs                    # AudioError with .code() mapping to AUDIO_*
     ├── detectors.rs                # DetectorProcessor: VAD/transient/RMS detectors that emit Events
     ├── direction.rs                # Azimuth estimate from stereo magnitude/phase
@@ -1222,7 +1222,7 @@ Sentinel values `NONE` / `DENY_ALL` produce an empty grants set (every M3 tool w
 - Action dispatch on a `use_scope = unknown` / unprofiled foreground is allowed by default (permissive). With `--restrict-unknown-profile` it returns `SAFETY_PROFILE_ACTION_DENIED`. (`crates/synapse-mcp/src/m3/profile.rs::activate_profile`, `server/context.rs::ensure_profile_scope_allows_action`)
 
 ### 4.7 Audio
-- `audio_tail.seconds` ≤ `synapse_audio::MAX_RING_SECONDS = 5`; larger → `TOOL_PARAMS_INVALID`.
+- `audio_tail.seconds` and `audio_transcribe.seconds` are numeric windows in `0..=synapse_audio::MAX_RING_SECONDS = 30`; larger, negative, or non-finite values → `TOOL_PARAMS_INVALID`. `audio_tail.seconds = 0` returns an empty PCM body without starting the runtime.
 - `audio_transcribe.language` accepts `"en"` (or trimmed-empty, which means `"en"`); other values → `TOOL_PARAMS_INVALID`.
 
 ### 4.8 Action
@@ -1288,7 +1288,7 @@ There is no merge step: CLI/env values configure individual subsystems independe
 | `MAX_ON_EVENT_FIRINGS_PER_TICK` | `4` | `crates/synapse-reflex/src/kinds/on_event.rs` |
 | `MAX_REFLEX_PRIORITY` / `MAX_SCHEDULED_REFLEXES` / `DEFAULT_REFLEX_PRIORITY` | `1000` / `32` / `100` | `crates/synapse-reflex/src/scheduler.rs` |
 | `STARVATION_AFTER` / `REFLEX_STARVED_KIND` | conflict-resolver constants | `crates/synapse-reflex/src/conflict.rs` |
-| `DEFAULT_RING_SECONDS` / `MAX_RING_SECONDS` | `5` / `5` | `crates/synapse-audio/src/lib.rs` |
+| `DEFAULT_RING_SECONDS` / `MAX_RING_SECONDS` | `30` / `30` | `crates/synapse-audio/src/lib.rs` |
 | `DEFAULT_SAMPLE_RATE_HZ` / `STEREO_CHANNELS` | `48_000` / `2` | `crates/synapse-audio/src/ring.rs` |
 | `WHISPER_TINY_MODEL_ID` | `"whisper_tiny_int8"` | `crates/synapse-mcp/src/m3/audio.rs` |
 | `CARDINALITY_LIMIT` (metrics) | `1000` | `crates/synapse-telemetry/src/metrics.rs` |
@@ -3362,8 +3362,8 @@ Source files covered:
 ### 1.1 Public surface
 
 ```rust
-pub const DEFAULT_RING_SECONDS: u32 = 5;
-pub const MAX_RING_SECONDS: u32 = 5;
+pub const DEFAULT_RING_SECONDS: u32 = 30;
+pub const MAX_RING_SECONDS: u32 = 30;
 
 pub type AudioEventSink = Arc<dyn Fn(Event) + Send + Sync + 'static>;
 
@@ -3382,7 +3382,7 @@ Re-exports: `AudioError`, `AudioResult` (error.rs); `LoopbackStatus` (loopback.r
 ### 1.2 `AudioRuntime::spawn(config)` / `spawn_with_event_sink(config, sink)`
 
 1. `validate_config`:
-   - `ring_seconds` must be in `1..=MAX_RING_SECONDS = 5`; else `AudioError::LoopbackInitFailed`.
+   - `ring_seconds` must be in `1..=MAX_RING_SECONDS = 30`; else `AudioError::LoopbackInitFailed`.
    - `detectors_enabled = true && start_loopback = false` → `AudioError::LoopbackInitFailed` ("audio detectors require loopback startup").
 2. Build `AudioRing::new(ring_seconds)` — see §1.4.
 3. If `start_loopback`, call `loopback::start_loopback(ring, optional DetectorProcessor)`:
@@ -3539,8 +3539,8 @@ The crate maintains a process-wide `AtomicU64 NEXT_SESSION_ID = 1` used to label
 
 | Tool | Behavior |
 |---|---|
-| `audio_tail(seconds: u32)` | `0..=MAX_RING_SECONDS = 5`. `0` returns an empty PCM body with `sample_rate = 48_000`, `channels = 2`, `format = "s16le"`. Otherwise pulls `AudioRuntime::tail_seconds(seconds)`, converts to little-endian s16 (`AudioWindow::pcm_i16_le`), and **pads with zeros** if the ring has less data than requested (so the returned `pcm.len() == seconds * sample_rate * channels * 2`). |
-| `audio_transcribe(seconds: u32, language: String)` | Same `seconds` bounds. `language` accepts `"en"` or empty (mapped to `"en"`); anything else → `TOOL_PARAMS_INVALID`. Calls `AudioRuntime::transcribe_tail`. Returns `{ text, confidence, latency_ms, model_id: "whisper_tiny_int8" }`. |
+| `audio_tail(seconds: f64)` | JSON-number window `0..=MAX_RING_SECONDS = 30`. `0` returns an empty PCM body with `sample_rate = 48_000`, `channels = 2`, `format = "s16le"`, and zeroed metadata without initializing the runtime. Otherwise pulls `AudioRuntime::tail_seconds(seconds)`, converts to little-endian s16 (`AudioWindow::pcm_i16_le`), and **pads with zeros** if the ring has less data than requested (so the returned `pcm.len() == round(seconds * sample_rate) * channels * 2`). The response also includes `requested_seconds`, `captured_seconds`, `frames`, `rms_db`, `vad_speech_pct`, at most five recent detector events, and optional stereo `direction_estimate`. |
+| `audio_transcribe(seconds: f64, language: String)` | Same JSON-number `seconds` bounds. `language` accepts `"en"` or empty (mapped to `"en"`); anything else → `TOOL_PARAMS_INVALID`. Calls `AudioRuntime::transcribe_tail`. Returns `{ text, confidence, latency_ms, model_id: "whisper_tiny_int8" }`. |
 
 Both require permission `READ_AUDIO`, which is only granted by default when `--enable-audio` is set (see [03_configuration.md §4.4](#file-03)).
 
@@ -3550,7 +3550,7 @@ Lazy init: `M3State::ensure_audio_runtime` (`crates/synapse-mcp/src/m3.rs::364`)
 AudioConfig {
     ring_seconds: DEFAULT_RING_SECONDS,
     start_loopback: audio_loopback_enabled()?,  // reads SYNAPSE_AUDIO_LOOPBACK
-    detectors_enabled: false,                   // detectors are not wired into the M3 tools yet
+    detectors_enabled: start_loopback,          // detector metadata/events are wired into observe/audio_tail
     stt_model_path: None,                       // uses synapse-audio's default lookup
 }
 ```
@@ -3976,7 +3976,7 @@ M3 closed 2026-05-25 (`v0.1.0-m3` @ `97019ec`). What landed on `main`:
 - `synapse-storage` — RocksDB open + 11 CFs + per-CF TTL filter + 5 min GC + 4-level disk-pressure responder + JSON codecs (ADR-0001/0002)
 - `synapse-reflex` — `EventBus` (bounded crossbeam per subscriber, configurable cap), 1 ms time-critical scheduler (Windows: `THREAD_PRIORITY_TIME_CRITICAL` + MMCSS Pro Audio), 5 reflex kinds (`AimTrack`/`HoldMove`/`HoldButton`/`Combo`/`OnEvent`), recursion guard (ADR-0003), priority resolution (ADR-0004), `CF_REFLEX_AUDIT` persistence
 - `synapse-profiles` — TOML parser + `notify`-debounced watcher (200 ms) + match resolver (ADR-0006) + 4 bundled profiles (`notepad`, `vscode`, `chrome`, `terminal`, all Natural defaults)
-- `synapse-audio` — WASAPI loopback (5 s ring) + detectors (loud-transient / speech start-end / Silero VAD) + Whisper-tiny-int8 STT + GCC-PHAT stereo direction
+- `synapse-audio` — WASAPI loopback (30 s ring) + detectors (loud-transient / speech start-end / RMS-backed VAD metadata) + Whisper-tiny-int8 STT + stereo direction
 - HTTP transport — streamable HTTP + SSE (ADR-0007 per-event notifications); Bearer auth via `subtle::ConstantTimeEq`; Origin/Host loopback allow-list; `Mcp-Session-Id` enforcement
 - 15 M3 tools (11 PRD M3 tools + 4 operator-only `storage_*` diagnostics added during M3 — see §3)
 - Operator panic hotkey (`Ctrl+Alt+Shift+P`) wired with 50 ms `ReleaseAll` budget
@@ -5717,11 +5717,11 @@ Recording cadence: observations sampled every `OBSERVATION_SAMPLE_INTERVAL = 250
 
 | Parameter | Type | Required | Default | Range | Description |
 |---|---|---|---|---|---|
-| `seconds` | `u32` | no | `5` | `0..=MAX_RING_SECONDS=5` | `0` returns an empty PCM body |
+| `seconds` | JSON number (`f64`) | no | `5` | `0..=MAX_RING_SECONDS=30` | `0` returns an empty PCM body without starting the runtime |
 
-**Returns:** `AudioTailResponse { pcm: Vec<u8>, sample_rate: u32, channels: u16, format: "s16le" }`. The PCM is **left-padded with zeros** when the ring contains fewer samples than requested, so `pcm.len() == seconds * sample_rate * channels * 2`.
+**Returns:** `AudioTailResponse { pcm: Vec<u8>, sample_rate: u32, channels: u16, format: "s16le", requested_seconds: f64, captured_seconds: f64, frames: usize, rms_db: f32, vad_speech_pct: f32, recent_events: Vec<AudioEvent>, direction_estimate: Option<DirectionEstimate> }`. The PCM is **left-padded with zeros** when the ring contains fewer samples than requested, so `pcm.len() == round(seconds * sample_rate) * channels * 2`. Raw PCM is returned only to the caller and is not persisted by observe/reality rows.
 
-**Errors:** `TOOL_PARAMS_INVALID` (seconds > 5), `AUDIO_LOOPBACK_INIT_FAILED`, `AUDIO_DEVICE_LOST`.
+**Errors:** `TOOL_PARAMS_INVALID` (seconds outside `0..=30`), `AUDIO_LOOPBACK_INIT_FAILED`, `AUDIO_DEVICE_LOST`.
 
 ## 26. `audio_transcribe`
 
@@ -5731,7 +5731,7 @@ Recording cadence: observations sampled every `OBSERVATION_SAMPLE_INTERVAL = 250
 
 | Parameter | Type | Required | Default | Range | Description |
 |---|---|---|---|---|---|
-| `seconds` | `u32` | no | `5` | `0..=5` | Window size |
+| `seconds` | JSON number (`f64`) | no | `5` | `0..=30` | Window size |
 | `language` | `String` | no | `"en"` | `"en"` only (case-insensitive, empty → `"en"`) | Anything else → `TOOL_PARAMS_INVALID` |
 
 **Returns:** `AudioTranscribeResponse { text: String, confidence: f32, latency_ms: u64, model_id: "whisper_tiny_int8" }`.
@@ -6242,8 +6242,8 @@ Files exceeding the 500-LoC impplan rule on `main` (M3 carry-over per `docs/impp
 | `DEFAULT_SAMPLE_LIMIT` (scheduler) | `4096` | `synapse_reflex::scheduler` |
 | Scheduler target/fallback intervals | `1 ms` / `2 ms` | `synapse_reflex::scheduler::SchedulerConfig::default` |
 | `STARVATION_AFTER` (reflex) | (see `synapse_reflex::conflict`) | — |
-| `DEFAULT_RING_SECONDS` | `5` | `synapse_audio` |
-| `MAX_RING_SECONDS` | `5` | `synapse_audio` |
+| `DEFAULT_RING_SECONDS` | `30` | `synapse_audio` |
+| `MAX_RING_SECONDS` | `30` | `synapse_audio` |
 | `DEFAULT_SAMPLE_RATE_HZ` | `48_000` | `synapse_audio::ring` |
 | `STEREO_CHANNELS` | `2` | `synapse_audio::ring` |
 | `WHISPER_TINY_MODEL_ID` | `"whisper_tiny_int8"` | `synapse_mcp::m3::audio` |

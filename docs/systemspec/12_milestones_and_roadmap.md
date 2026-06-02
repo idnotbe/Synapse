@@ -47,7 +47,7 @@ M3 closed 2026-05-25 (`v0.1.0-m3` @ `97019ec`). What landed on `main`:
 - `synapse-storage` — RocksDB open + 11 CFs + per-CF TTL filter + 5 min GC + 4-level disk-pressure responder + JSON codecs (ADR-0001/0002)
 - `synapse-reflex` — `EventBus` (bounded crossbeam per subscriber, configurable cap), 1 ms time-critical scheduler (Windows: `THREAD_PRIORITY_TIME_CRITICAL` + MMCSS Pro Audio), 5 reflex kinds (`AimTrack`/`HoldMove`/`HoldButton`/`Combo`/`OnEvent`), recursion guard (ADR-0003), priority resolution (ADR-0004), `CF_REFLEX_AUDIT` persistence
 - `synapse-profiles` — TOML parser + `notify`-debounced watcher (200 ms) + match resolver (ADR-0006) + 4 bundled profiles (`notepad`, `vscode`, `chrome`, `terminal`, all Natural defaults)
-- `synapse-audio` — WASAPI loopback (5 s ring) + detectors (loud-transient / speech start-end / Silero VAD) + Whisper-tiny-int8 STT + GCC-PHAT stereo direction
+- `synapse-audio` — WASAPI loopback (30 s ring) + detectors (loud-transient / speech start-end / RMS-backed VAD metadata) + Whisper-tiny-int8 STT + stereo direction
 - HTTP transport — streamable HTTP + SSE (ADR-0007 per-event notifications); Bearer auth via `subtle::ConstantTimeEq`; Origin/Host loopback allow-list; `Mcp-Session-Id` enforcement
 - 15 M3 tools (11 PRD M3 tools + 4 operator-only `storage_*` diagnostics added during M3 — see §3)
 - Operator panic hotkey (`Ctrl+Alt+Shift+P`) wired with 50 ms `ReleaseAll` budget

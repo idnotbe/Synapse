@@ -18,8 +18,8 @@ pub use ring::{AudioFormat, AudioRing, AudioWindow};
 pub use stt::{Transcription, WhisperTinyStt};
 pub use synapse_core::DirectionEstimate;
 
-pub const DEFAULT_RING_SECONDS: u32 = 5;
-pub const MAX_RING_SECONDS: u32 = 5;
+pub const DEFAULT_RING_SECONDS: u32 = 30;
+pub const MAX_RING_SECONDS: u32 = 30;
 
 pub type AudioEventSink = Arc<dyn Fn(Event) + Send + Sync + 'static>;
 

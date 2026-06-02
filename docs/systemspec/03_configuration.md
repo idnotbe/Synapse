@@ -132,7 +132,7 @@ Sentinel values `NONE` / `DENY_ALL` produce an empty grants set (every M3 tool w
 - Action dispatch on a `use_scope = unknown` / unprofiled foreground is allowed by default (permissive). With `--restrict-unknown-profile` it returns `SAFETY_PROFILE_ACTION_DENIED`. (`crates/synapse-mcp/src/m3/profile.rs::activate_profile`, `server/context.rs::ensure_profile_scope_allows_action`)
 
 ### 4.7 Audio
-- `audio_tail.seconds` ≤ `synapse_audio::MAX_RING_SECONDS = 5`; larger → `TOOL_PARAMS_INVALID`.
+- `audio_tail.seconds` and `audio_transcribe.seconds` are numeric windows in `0..=synapse_audio::MAX_RING_SECONDS = 30`; larger, negative, or non-finite values → `TOOL_PARAMS_INVALID`. `audio_tail.seconds = 0` returns an empty PCM body without starting the runtime.
 - `audio_transcribe.language` accepts `"en"` (or trimmed-empty, which means `"en"`); other values → `TOOL_PARAMS_INVALID`.
 
 ### 4.8 Action
@@ -198,7 +198,7 @@ There is no merge step: CLI/env values configure individual subsystems independe
 | `MAX_ON_EVENT_FIRINGS_PER_TICK` | `4` | `crates/synapse-reflex/src/kinds/on_event.rs` |
 | `MAX_REFLEX_PRIORITY` / `MAX_SCHEDULED_REFLEXES` / `DEFAULT_REFLEX_PRIORITY` | `1000` / `32` / `100` | `crates/synapse-reflex/src/scheduler.rs` |
 | `STARVATION_AFTER` / `REFLEX_STARVED_KIND` | conflict-resolver constants | `crates/synapse-reflex/src/conflict.rs` |
-| `DEFAULT_RING_SECONDS` / `MAX_RING_SECONDS` | `5` / `5` | `crates/synapse-audio/src/lib.rs` |
+| `DEFAULT_RING_SECONDS` / `MAX_RING_SECONDS` | `30` / `30` | `crates/synapse-audio/src/lib.rs` |
 | `DEFAULT_SAMPLE_RATE_HZ` / `STEREO_CHANNELS` | `48_000` / `2` | `crates/synapse-audio/src/ring.rs` |
 | `WHISPER_TINY_MODEL_ID` | `"whisper_tiny_int8"` | `crates/synapse-mcp/src/m3/audio.rs` |
 | `CARDINALITY_LIMIT` (metrics) | `1000` | `crates/synapse-telemetry/src/metrics.rs` |

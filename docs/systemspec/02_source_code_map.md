@@ -291,7 +291,7 @@ crates/synapse-capture/
 crates/synapse-audio/
 ├── Cargo.toml
 └── src/
-    ├── lib.rs                      # AudioRuntime, AudioConfig, DEFAULT_RING_SECONDS=5, AudioEventSink
+    ├── lib.rs                      # AudioRuntime, AudioConfig, DEFAULT_RING_SECONDS=30, AudioEventSink
     ├── error.rs                    # AudioError with .code() mapping to AUDIO_*
     ├── detectors.rs                # DetectorProcessor: VAD/transient/RMS detectors that emit Events
     ├── direction.rs                # Azimuth estimate from stereo magnitude/phase

@@ -109,6 +109,31 @@ fn loud_transient_fixture_emits_exactly_one_loud_event() -> Result<(), Box<dyn s
     Ok(())
 }
 
+#[test]
+fn sustained_loud_signal_emits_one_loud_transient_on_onset() {
+    let events = Arc::new(Mutex::new(Vec::<Event>::new()));
+    let sink_events = Arc::clone(&events);
+    let sink: AudioEventSink = Arc::new(move |event| {
+        lock_events(&sink_events).push(event);
+    });
+    let mut detector = DetectorProcessor::new(SharedDetectorState::default(), sink);
+    let format = AudioFormat {
+        sample_rate_hz: 48_000,
+        channels: 2,
+    };
+
+    detector.process(&vec![0.0; 480 * 2], format);
+    for _ in 0..20 {
+        detector.process(&vec![0.5; 480 * 2], format);
+    }
+
+    let loud_count = lock_events(&events)
+        .iter()
+        .filter(|event| event.kind == "loud_transient")
+        .count();
+    assert_eq!(loud_count, 1);
+}
+
 fn lock_events(events: &Mutex<Vec<Event>>) -> MutexGuard<'_, Vec<Event>> {
     match events.lock() {
         Ok(guard) => guard,

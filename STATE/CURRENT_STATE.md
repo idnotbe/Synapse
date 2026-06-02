@@ -1,5 +1,70 @@
 # CURRENT STATE - Synapse
 
+## 2026-06-02T06:58:40-05:00
+- Active issue remains #599 `scenario(stress): audio stress — loopback music+speech, VAD/azimuth, Whisper transcribe`.
+- Implementation patch has manual MCP/SoT FSV accepted; final supporting checks and diff review are complete; commit/closeout are next.
+- Accepted post-telemetry run: `.runs\599\audio-fsv-20260602T0647-accepted`.
+  - Repo-built daemon PID `76024`, bind `127.0.0.1:7877`, release binary `target\release\synapse-mcp.exe`, length `46730240`, SHA256 `A5B88B6B1048EB64AB9A7E8CEB77979D8FB4EF26112964F3DCB27F634DDBEC09`, timestamp `2026-06-02T11:46:01Z`.
+  - Process/socket/auth health readbacks passed; unauth `/health` failed with `HTTP_TOKEN_INVALID`; strict MCP Inspector `tools/list` loaded `80` tools and showed `audio_tail.seconds`/`audio_transcribe.seconds` as `number` with `minimum=0`, `maximum=30`, `default=5`.
+  - Initial isolated storage was all zeroes across all CFs.
+  - Empty/silence edges: `audio_tail seconds=0` returned `frames=0`, `pcm_count=0`, `rms_db=-120`, `vad=0`; `seconds=0.1` returned a bounded 100ms empty/silent read; muted 1s silence returned `frames=48000`, `pcm_count=192000`, `rms_db=-120`, `vad=0`.
+  - Stereo direction: left fixture returned `azimuth=-90`, confidence `0.90016`; center rerun returned `azimuth≈0`, confidence `0.35`; right rerun returned `azimuth=90`, confidence `0.90018`. A parallel center/right attempt was rejected because loopback playback overlapped.
+  - Speech/music: `speech_tone_mix_5s` returned `captured=5`, `frames=240000`, RMS `-25.709`, VAD `35.2%`, events `speech_ended,music_ended,music_started,speech_started,loud_transient`; `speech_overlap_5s` returned RMS `-23.706`, VAD `61.6%`, expected speech/transient/music events.
+  - Loud transient: `loud_transient_1s` returned one bounded `loud_transient` event in the recent event list.
+  - Transcription: first 5s run was rejected because it recognized only `This is Synapse.`; 6s rerun captured the whole 5s fixture and returned exact text `Hello world. This is Synapse.` with confidence `0.86`.
+  - Fail-closed edges: `language=es` failed with `audio_transcribe language must be "en"; got "es"`; `seconds=bad` failed deserialization as non-number; `seconds=31` failed with `audio seconds must be between 0 and 30; got 31`; storage stayed all zero after these edges.
+  - 30s boundary: `audio_tail seconds=30` over `hello_loop_30s.wav` returned `captured=30`, `frames=1440000`, `pcm_count=5760000`, RMS `-25.416`, VAD `37.6%`, events `speech_started,music_started,loud_transient,speech_ended,music_ended`.
+  - Metadata-only readback after all accepted-run triggers: `storage_inspect` still all zero; log and DB byte scans under the product `logs`/`db` directories found no `Hello world. This is Synapse.`, `Hello world`, `CallToolResult`, `response message`, or `pcm` matches. PCM/transcript exist only in issue evidence stdout artifacts.
+- Disabled-audio edge accepted on `.runs\599\audio-fsv-20260602T065621-disabled-final3`.
+  - Rejected two setup launches first: one inherited the wrong token env name and exited before binding; corrected env was `SYNAPSE_BEARER_TOKEN`.
+  - Repo-built daemon PID `44472`, bind `127.0.0.1:7878`, no `--enable-audio`; health audio SoT read `status=disabled`, `detail="audio is disabled; start with --enable-audio"`, `ring_buffer_seconds=30`, `stt_model_loaded=false`.
+  - Strict Inspector `tools/list` loaded `80` tools; storage before all zero; `audio_tail seconds=1` failed with `tool audio_tail requires permission READ_AUDIO`; storage after all zero.
+- Cleanup:
+  - real Inspector `release_all` returned `released_keys=0`, `released_buttons=0`, `neutralized_pads=0` on both issue-local daemons;
+  - stopped PIDs `76024` and `44472`;
+  - ports `7877`/`7878` are closed and `ffplay_count=0`;
+  - restored host audio sessions changed for the run: `pulseaudio|24952|before=True|after=False`, `chrome|34540|before=True|after=False`.
+- Final supporting checks passed after the last doc edit:
+  - `cargo fmt --check`;
+  - `git diff --check` with line-ending warnings only;
+  - stale audio docs scan for old `f32`/`u32`/5s wording;
+  - `cargo test -p synapse-audio --test ring_detectors -- --nocapture`;
+  - `cargo test -p synapse-audio -- --nocapture`;
+  - `cargo test -p synapse-telemetry -- --nocapture`;
+  - `cargo test -p synapse-mcp --bin synapse-mcp audio_ -- --nocapture`;
+  - `cargo test -p synapse-mcp --test m3_audio_tail_tool -- --nocapture`;
+  - `cargo test -p synapse-mcp --test m3_audio_transcribe_tool -- --nocapture`;
+  - `cargo test -p synapse-mcp --test m3_tools_list -- --nocapture`;
+  - `cargo test -p synapse-mcp --bin synapse-mcp schema_sanitize -- --nocapture`;
+  - `cargo check -p synapse-audio -p synapse-telemetry -p synapse-mcp -j 2`;
+  - `cargo build --release -p synapse-mcp -j 2`.
+- Final release build readback after the clean build: `target\release\synapse-mcp.exe`, length `46730240`, SHA256 `5DA77B06F1E100B2E4049B460E56240B782C6162157FDFCA7AEC89E0B8D6A04A`, timestamp `2026-06-02T12:13:43Z`. Note: release binary hashes varied across rebuilds with unchanged source; accepted FSV evidence remains tied to daemon binary SHA `A5B88B6B1048EB64AB9A7E8CEB77979D8FB4EF26112964F3DCB27F634DDBEC09`.
+- Diff review completed for audio ring/detectors, M3 audio tool contract/metadata, telemetry payload-safe logging, snapshots/tests, docs, and state notes. Tracked diff token scan found no bearer token values.
+- Current next: commit with `[skip ci]`, push, post #599 RESOLVED evidence, close #599, refresh queue.
+
+## 2026-06-02T05:49:18-05:00
+- #598 is closed and `main` was clean before #599 work began.
+- Active issue is #599 `scenario(stress): audio stress — loopback music+speech, VAD/azimuth, Whisper transcribe`.
+  - GitHub readback: issue is open, assigned to `ChrisRoyse`, labels include `status:in-progress`, `agent:codex`, `area:audio`.
+  - START comment: https://github.com/ChrisRoyse/Synapse/issues/599#issuecomment-4601558594.
+- Code inspection found real #599 contract gaps:
+  - `synapse-audio` hard-coded `DEFAULT_RING_SECONDS = MAX_RING_SECONDS = 5`, but #599 requires `0.1..=30` second windows and a 30s max edge.
+  - MCP `audio_tail.seconds` was `u32`, so strict clients could not call `seconds=0.1`.
+  - MCP `audio_tail` returned PCM only; RMS/VAD/events/azimuth metadata was available through `observe include audio`, but #599 names `audio_tail` as the tool to prove those values.
+- Patch in progress:
+  - `crates/synapse-audio/src/lib.rs`: `DEFAULT_RING_SECONDS = MAX_RING_SECONDS = 30`.
+  - `crates/synapse-mcp/src/m3/audio.rs`: audio tool `seconds` params are now numeric `f32`; validation is finite `0..=30`; `audio_tail` response includes compact metadata: `requested_seconds`, `captured_seconds`, `frames`, `rms_db`, `vad_speech_pct`, bounded `recent_events`, and optional `direction_estimate`, while preserving zero-second empty PCM without runtime startup.
+  - Focused audio tool tests and live systemspec docs are being updated to match the new strict schema.
+- Host prerequisite readback:
+  - Whisper model exists at `C:\Users\hotra\AppData\Local\synapse\models\whisper-tiny-int8.onnx`.
+  - SHA256 readback matched pinned `147AFAC751F89AD8E8F82133464EDC81ECFF9391E98CCDCAE2474384BE68EC86`.
+  - ONNX Runtime extensions wheel/unpacked directory exists under `%LOCALAPPDATA%\synapse\models\ort-extensions`.
+- Next:
+  1. Run fmt/focused audio/schema checks and fix any compile/snapshot issues.
+  2. Build release `synapse-mcp`.
+  3. Launch an isolated repo-built daemon with audio enabled and copied model/extension SoTs.
+  4. Run #599 manual MCP/SoT FSV with real loopback playback and strict Inspector tools/call triggers.
+
 ## 2026-06-02T05:36:10-05:00
 - Active issue #598 is ready for commit/GitHub closeout.
 - Accepted main #598 runtime evidence directory: `.runs\598\detection-fsv-20260602T0513`.

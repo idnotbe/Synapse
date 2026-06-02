@@ -1,5 +1,6 @@
 ---
 source: crates/synapse-mcp/tests/m3_audio_transcribe_tool.rs
+assertion_line: 97
 expression: shape
 ---
 {
@@ -12,11 +13,10 @@ expression: shape
         "type": "string"
       },
       "seconds": {
-        "default": 5,
-        "format": "uint32",
-        "maximum": 5,
+        "default": 5.0,
+        "maximum": 30,
         "minimum": 0,
-        "type": "integer"
+        "type": "number"
       }
     },
     "title": "AudioTranscribeParams",
