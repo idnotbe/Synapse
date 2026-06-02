@@ -2,7 +2,7 @@ use std::{ffi::c_void, thread, time::Duration};
 
 use synapse_core::Rect;
 use windows_capture::{
-    capture::{Context, GraphicsCaptureApiHandler},
+    capture::{CaptureControlError, Context, GraphicsCaptureApiError, GraphicsCaptureApiHandler},
     dxgi_duplication_api::{DxgiDuplicationApi, DxgiDuplicationFormat, Error as DxgiError},
     frame::{DirtyRegion, Frame},
     graphics_capture_api::InternalCaptureControl,
@@ -19,7 +19,11 @@ use crate::{
     controller::{CaptureThreadContext, push_frame},
 };
 
-use super::{common::capture_unsupported, target::validate_hwnd};
+use super::{
+    common::capture_unsupported,
+    dpi::{current_thread_priority, set_capture_thread_priority},
+    target::validate_hwnd,
+};
 
 pub fn run_graphics_capture(
     config: CaptureConfig,
@@ -113,7 +117,7 @@ fn start_graphics_capture_with_item<T>(
     ctx: CaptureThreadContext,
 ) -> Result<(), CaptureError>
 where
-    T: TryInto<windows_capture::settings::GraphicsCaptureItemType>,
+    T: TryInto<windows_capture::settings::GraphicsCaptureItemType> + Send + 'static,
 {
     let settings = Settings::new(
         item,
@@ -137,11 +141,20 @@ where
             DirtyRegionSettings::Default
         },
         ColorFormat::Bgra8,
-        GraphicsHandlerFlags { ctx },
+        GraphicsHandlerFlags { ctx: ctx.clone() },
     );
-    GraphicsHandler::start(settings).map_err(|err| CaptureError::ThreadFailed {
-        detail: err.to_string(),
-    })
+    let control = GraphicsHandler::start_free_threaded(settings).map_err(graphics_capture_error)?;
+    let poll_interval = Duration::from_millis(config.min_update_interval_ms.max(1));
+
+    while !ctx.stop.load(std::sync::atomic::Ordering::Relaxed) && !control.is_finished() {
+        thread::sleep(poll_interval);
+    }
+
+    if ctx.stop.load(std::sync::atomic::Ordering::Relaxed) && !control.is_finished() {
+        control.stop().map_err(capture_control_error)
+    } else {
+        control.wait().map_err(capture_control_error)
+    }
 }
 
 struct GraphicsHandlerFlags {
@@ -158,6 +171,11 @@ impl GraphicsCaptureApiHandler for GraphicsHandler {
     type Error = CaptureError;
 
     fn new(ctx: Context<Self::Flags>) -> Result<Self, Self::Error> {
+        set_capture_thread_priority()?;
+        ctx.flags
+            .ctx
+            .stats
+            .set_thread_priority(current_thread_priority());
         Ok(Self {
             ctx: ctx.flags.ctx,
             frame_seq: 0,
@@ -197,6 +215,26 @@ impl GraphicsCaptureApiHandler for GraphicsHandler {
             .stop
             .store(true, std::sync::atomic::Ordering::Relaxed);
         Ok(())
+    }
+}
+
+fn capture_control_error(err: CaptureControlError<CaptureError>) -> CaptureError {
+    match err {
+        CaptureControlError::StoppedHandlerError(err) => err,
+        CaptureControlError::GraphicsCaptureApiError(err) => graphics_capture_error(err),
+        err => CaptureError::ThreadFailed {
+            detail: err.to_string(),
+        },
+    }
+}
+
+fn graphics_capture_error(err: GraphicsCaptureApiError<CaptureError>) -> CaptureError {
+    match err {
+        GraphicsCaptureApiError::NewHandlerError(err)
+        | GraphicsCaptureApiError::FrameHandlerError(err) => err,
+        err => CaptureError::ThreadFailed {
+            detail: err.to_string(),
+        },
     }
 }
 

@@ -1,5 +1,53 @@
 # RECOVERY NOTES - Synapse
 
+## Current Resume Point - 2026-06-02T02:27:37-05:00
+- Active issue remains #596.
+- Latest accepted/rejected runtime evidence:
+  - prior isolated daemon PID `30420` / `127.0.0.1:7865` hung during real Inspector `tools/call set_capture_target` for `element_window`;
+  - separate `/health` read timed out while the process still owned the socket, so the run was rejected after proving primary/monitor/window readbacks only;
+  - PID `30420` was stopped and port `7865` is closed.
+- Root cause and patch:
+  - `CaptureController::switch_to` synchronously joined the previous capture thread;
+  - WGC had been started with `GraphicsHandler::start(settings)`, where external shutdown can only happen from a later frame callback;
+  - `crates/synapse-capture/src/platform/windows/capture.rs` now uses `GraphicsHandler::start_free_threaded(settings)` and `CaptureControl::stop()` so stop requests post `WM_QUIT` to the WGC message-loop thread;
+  - `GraphicsHandler::new` sets and records the actual callback thread priority.
+- Supporting checks passed after the patch:
+  - `cargo fmt`;
+  - `cargo check -p synapse-capture -p synapse-mcp -j 2`;
+  - `cargo test -p synapse-capture switching_capture_target_stops_previous_session -- --nocapture`;
+  - `cargo test -p synapse-capture dxgi_backend_rejects_window_targets_before_thread_spawn -- --nocapture`;
+  - `cargo test -p synapse-capture capture_thread_priority_is_recorded -- --nocapture`.
+- Exact next actions:
+  1. Run `cargo fmt --check`, `git diff --check`, relevant focused tests/schema checks, and `cargo build --release -p synapse-mcp -j 2`.
+  2. Start a fresh isolated #596 repo-built HTTP daemon, verify process/binary/socket, unauth/auth health, and strict Inspector `tools/list`.
+  3. Recreate/read physical SoTs: monitors/DPI, WPF target HWND/bounds/DWM bounds, target UIA element id/bbox, storage/log counts.
+  4. Trigger real MCP `set_capture_target` primary -> monitor0 -> window -> element_window -> monitor1 and read separate health/observe/physical SoTs after each.
+  5. Cover forced DXGI monitor path plus edges: invalid monitor index, disappeared element, closed HWND, min interval floor, and structurally invalid target.
+
+## Current Resume Point - 2026-06-02T01:31:06-05:00
+- Active issue is #596.
+- Patch in progress:
+  - M1 `set_capture_target` now drives a real `CaptureController` and exposes `capture_runtime` through set response, `health`, and `observe` diagnostics.
+  - capture controller readback includes status, target, selected/effective backend, generation, min interval, cursor/dirty flags, frames captured/dropped, channel len/capacity, thread priority, and stop flag.
+  - min update interval is floored at 16 ms for manual/profile observation metadata.
+  - monitor targets are prevalidated on Windows; forced DXGI rejects window targets; `element_window` re-resolves the UIA element before using its HWND.
+- Supporting checks already passed:
+  - capture DXGI/window validation test;
+  - M1 interval floor test;
+  - M1 inactive runtime readback test;
+  - touched-crate cargo check;
+  - schema sanitize;
+  - m4 tools-list.
+- Current dirty files are #596-owned code/model/test changes plus unrelated `README.md`.
+- Exact next actions:
+  1. Run `cargo fmt --check`, `git diff --check`, focused checks as needed, and `cargo build --release -p synapse-mcp -j 2`.
+  2. Start an isolated HTTP daemon from `target\release\synapse-mcp.exe` with issue-local DB/logs on a fresh port.
+  3. Verify process/binary/socket, unauth/auth health, and strict MCP Inspector `tools/list` for `set_capture_target`, `observe`, `health`, `find`, `storage_inspect`, and `release_all`.
+  4. Create/read physical SoTs: monitor geometry/DPI, deterministic target window title/HWND/bounds, target UIA element IDs/bboxes, storage/log counts.
+  5. Trigger real MCP `set_capture_target` primary/monitor/window/element_window cycles and read separate health/observe/runtime/physical SoTs after each.
+  6. Cover edges: invalid monitor index, closed window HWND, disappeared element_window, `min_update_interval_ms=1` floor to 16, structurally invalid target, and forced DXGI monitor path.
+  7. If manual FSV passes, update state, commit with `[skip ci]`, post #596 RESOLVED evidence, close #596, remove stale in-progress label, and continue the queue.
+
 ## Current Resume Point - 2026-06-02T01:09:41-05:00
 - #595 is closed with evidence:
   - commit `098e8d5 fix(a11y): stream UIA fanout snapshots (#595) [skip ci]`;

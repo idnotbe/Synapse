@@ -9,8 +9,9 @@ use std::{
 use crossbeam::channel::{self, Receiver, Sender, TrySendError};
 
 use crate::{
-    CAPTURE_CHANNEL_CAPACITY, CaptureBackendPreference, CaptureConfig, CaptureError, CaptureStats,
-    CaptureTarget, CapturedFrame, FRAMES_DROPPED_METRIC, ResolvedCaptureTarget,
+    CAPTURE_CHANNEL_CAPACITY, CaptureBackend, CaptureBackendPreference, CaptureConfig,
+    CaptureError, CaptureStats, CaptureTarget, CapturedFrame, FRAMES_DROPPED_METRIC,
+    ResolvedCaptureTarget,
     backend::{backend_after_fallback, should_fallback_to_dxgi},
     dpi::current_thread_priority,
     platform,
@@ -23,6 +24,7 @@ pub struct CaptureHandle {
     pub(crate) stats: Arc<CaptureStats>,
     join: Option<JoinHandle<Result<(), CaptureError>>>,
     target: ResolvedCaptureTarget,
+    config: CaptureConfig,
 }
 
 impl CaptureHandle {
@@ -37,8 +39,23 @@ impl CaptureHandle {
     }
 
     #[must_use]
+    pub fn channel_len(&self) -> usize {
+        self.rx.len()
+    }
+
+    #[must_use]
+    pub const fn channel_capacity(&self) -> usize {
+        CAPTURE_CHANNEL_CAPACITY
+    }
+
+    #[must_use]
     pub const fn target(&self) -> &ResolvedCaptureTarget {
         &self.target
+    }
+
+    #[must_use]
+    pub const fn config(&self) -> &CaptureConfig {
+        &self.config
     }
 
     #[must_use]
@@ -84,18 +101,21 @@ impl CaptureController {
         }
     }
 
-    /// Stops any active session and starts a new capture target.
+    /// Starts a new capture target, then stops the previous session.
     ///
     /// # Errors
     ///
-    /// Returns [`CaptureError`] if the old session cannot be stopped or the new
-    /// target cannot be resolved/opened.
+    /// Returns [`CaptureError`] if the new target cannot be resolved/opened or
+    /// the old session cannot be stopped.
     pub fn switch_to(&mut self, config: CaptureConfig) -> Result<u64, CaptureError> {
-        if let Some(handle) = self.active.take() {
-            handle.stop()?;
+        let handle = spawn_capture_loop(config)?;
+        if let Some(previous) = self.active.take() {
+            if let Err(error) = previous.stop() {
+                let _ = handle.stop();
+                return Err(error);
+            }
         }
 
-        let handle = spawn_capture_loop(config)?;
         self.generation = self.generation.saturating_add(1);
         self.active = Some(handle);
         Ok(self.generation)
@@ -104,6 +124,11 @@ impl CaptureController {
     #[must_use]
     pub const fn active(&self) -> Option<&CaptureHandle> {
         self.active.as_ref()
+    }
+
+    #[must_use]
+    pub const fn generation(&self) -> u64 {
+        self.generation
     }
 }
 
@@ -122,10 +147,18 @@ pub fn register_capture_metrics() {
 pub fn resolve_capture_target(
     config: &CaptureConfig,
 ) -> Result<ResolvedCaptureTarget, CaptureError> {
+    let backend = config.selected_backend();
+    if matches!(backend, CaptureBackend::DxgiDuplication)
+        && matches!(config.target, CaptureTarget::Window { .. })
+    {
+        return Err(CaptureError::TargetInvalid {
+            detail: "DXGI duplication supports monitor targets only".to_owned(),
+        });
+    }
     validate_target(&config.target)?;
     Ok(ResolvedCaptureTarget {
         target: config.target.clone(),
-        backend: config.selected_backend(),
+        backend,
     })
 }
 
@@ -147,7 +180,7 @@ pub fn spawn_capture_loop(config: CaptureConfig) -> Result<CaptureHandle, Captur
         stop: stop.clone(),
         stats: stats.clone(),
     };
-    let thread_config = config;
+    let thread_config = config.clone();
     let join = thread::Builder::new()
         .name("synapse-capture".to_owned())
         .spawn(move || run_capture_thread(thread_config, ctx))
@@ -161,6 +194,7 @@ pub fn spawn_capture_loop(config: CaptureConfig) -> Result<CaptureHandle, Captur
         stats,
         join: Some(join),
         target,
+        config,
     })
 }
 #[derive(Clone)]
@@ -179,9 +213,13 @@ fn run_capture_thread(
     ctx.stats.set_thread_priority(current_thread_priority());
     match config.backend_preference {
         CaptureBackendPreference::Auto => {
+            ctx.stats
+                .set_effective_backend(CaptureBackend::GraphicsCaptureApi);
             match platform::run_graphics_capture(config.clone(), ctx.clone()) {
                 Ok(()) => Ok(()),
                 Err(err) if should_fallback_to_dxgi(config.backend_preference, &err) => {
+                    ctx.stats
+                        .set_effective_backend(CaptureBackend::DxgiDuplication);
                     tracing::warn!(
                         code = "CAPTURE_GRAPHICS_API_UNSUPPORTED",
                         fallback_backend = ?backend_after_fallback(config.backend_preference, &err),
@@ -193,12 +231,21 @@ fn run_capture_thread(
                 Err(err) => Err(err),
             }
         }
-        CaptureBackendPreference::GraphicsCaptureApi => platform::run_graphics_capture(config, ctx),
-        CaptureBackendPreference::DxgiDuplication => platform::run_dxgi_capture(config, ctx),
+        CaptureBackendPreference::GraphicsCaptureApi => {
+            ctx.stats
+                .set_effective_backend(CaptureBackend::GraphicsCaptureApi);
+            platform::run_graphics_capture(config, ctx)
+        }
+        CaptureBackendPreference::DxgiDuplication => {
+            ctx.stats
+                .set_effective_backend(CaptureBackend::DxgiDuplication);
+            platform::run_dxgi_capture(config, ctx)
+        }
     }
 }
 pub fn push_frame(ctx: &CaptureThreadContext, frame: CapturedFrame) -> Result<(), CaptureError> {
-    ctx.stats.increment_captured();
+    ctx.stats
+        .record_captured_frame(frame.frame_seq, frame.width, frame.height);
     match ctx.tx.try_send(frame) {
         Ok(()) => Ok(()),
         Err(TrySendError::Full(frame)) => {
@@ -218,7 +265,8 @@ pub fn push_frame(ctx: &CaptureThreadContext, frame: CapturedFrame) -> Result<()
 
 fn validate_target(target: &CaptureTarget) -> Result<(), CaptureError> {
     match target {
-        CaptureTarget::Primary | CaptureTarget::Monitor { .. } => Ok(()),
+        CaptureTarget::Primary => Ok(()),
+        CaptureTarget::Monitor { monitor_index } => validate_monitor(*monitor_index),
         CaptureTarget::Window { hwnd } => validate_hwnd(*hwnd),
     }
 }
@@ -231,4 +279,8 @@ pub fn validate_hwnd(hwnd: i64) -> Result<(), CaptureError> {
     }
 
     platform::validate_hwnd_impl(hwnd)
+}
+
+pub fn validate_monitor(monitor_index: u32) -> Result<(), CaptureError> {
+    platform::validate_monitor_impl(monitor_index)
 }

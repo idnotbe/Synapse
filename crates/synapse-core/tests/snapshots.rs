@@ -216,6 +216,7 @@ fn sample_observation() -> Observation {
             detection_status: SensorStatus::Unavailable,
             audio_status: SensorStatus::Disabled,
             capture_config: None,
+            capture_runtime: None,
             elements_truncated: false,
             entities_truncated: false,
             size_bytes: 2048,

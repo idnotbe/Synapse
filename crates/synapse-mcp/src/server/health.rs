@@ -237,6 +237,7 @@ impl SynapseService {
                 detail: Some("perception runtime initialized".to_owned()),
                 perception_mode: Some(state.perception_mode),
                 capture_config: Some(state.active_capture_config.clone()),
+                capture_runtime: Some(state.capture_runtime_readback()),
                 ..SubsystemHealth::default()
             },
             Err(_err) => SubsystemHealth {

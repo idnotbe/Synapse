@@ -176,10 +176,10 @@ impl SynapseService {
                             );
                         } else {
                             input.mode_override = Some(profile.mode);
-                            input.capture_config = self
-                                .m1_state()
-                                .ok()
-                                .map(|state| state.active_capture_config.clone());
+                            if let Ok(state) = self.m1_state() {
+                                input.capture_config = Some(state.active_capture_config.clone());
+                                input.capture_runtime = Some(state.capture_runtime_readback());
+                            }
                         }
                         if include_hud {
                             populate_profile_hud(input, &profile, runtime.profile_dir());

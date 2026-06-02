@@ -10,11 +10,14 @@ use std::{
 use rmcp::{ErrorData, handler::server::common, model::JsonObject, schemars::JsonSchema};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use synapse_capture::{CaptureBackend, CaptureConfig, CaptureTarget, resolve_capture_target};
+use synapse_capture::{
+    CAPTURE_CHANNEL_CAPACITY, CaptureBackend, CaptureConfig, CaptureController, CaptureTarget,
+    CaptureThreadPriority, resolve_capture_target,
+};
 use synapse_core::{
-    AccessibleNode, ElementId, FocusedElement, ForegroundContext, ObservationCaptureConfig,
-    ObservationCaptureTarget, OcrBackend, PerceptionMode, Profile, ProfileCapture,
-    ProfileCaptureTarget, Rect, error_codes,
+    AccessibleNode, CaptureRuntimeReadback, ElementId, FocusedElement, ForegroundContext,
+    ObservationCaptureConfig, ObservationCaptureTarget, OcrBackend, PerceptionMode, Profile,
+    ProfileCapture, ProfileCaptureTarget, Rect, error_codes,
 };
 use synapse_perception::{ObservationInput, ObserveInclude, parse_perception_mode};
 
@@ -24,10 +27,13 @@ pub use sources::{FsRecentTracker, populate_clipboard_summary, populate_fs_recen
 use sources::{platform_input, synthetic_notepad_input, window_input_from_hwnd};
 
 pub type SharedM1State = Arc<Mutex<M1State>>;
+const MIN_CAPTURE_UPDATE_INTERVAL_MS: u64 = 16;
+const MIN_CAPTURE_UPDATE_INTERVAL_MS_U32: u32 = 16;
 
 #[derive(Debug)]
 pub struct M1State {
     pub capture_config: CaptureConfig,
+    pub capture_controller: CaptureController,
     pub capture_generation: u64,
     pub active_capture_config: ObservationCaptureConfig,
     pub perception_mode: PerceptionMode,
@@ -53,6 +59,7 @@ impl M1State {
             .is_ok_and(|value| value == "1" || value.eq_ignore_ascii_case("true"));
         Self {
             capture_config: CaptureConfig::default().with_env_backend(),
+            capture_controller: CaptureController::new(),
             capture_generation: 0,
             active_capture_config: default_observation_capture_config(),
             perception_mode: PerceptionMode::Auto,
@@ -63,6 +70,68 @@ impl M1State {
             everquest_log_cursor: None,
             everquest_event_seq: 0,
             fs_recent_tracker: FsRecentTracker::from_env(),
+        }
+    }
+
+    #[must_use]
+    pub fn capture_runtime_readback(&self) -> CaptureRuntimeReadback {
+        let Some(handle) = self.capture_controller.active() else {
+            return CaptureRuntimeReadback {
+                status: "inactive".to_owned(),
+                target: None,
+                backend: None,
+                selected_backend: Some(
+                    capture_backend_name(self.capture_config.selected_backend()).to_owned(),
+                ),
+                generation: self.capture_controller.generation(),
+                min_update_interval_ms: Some(
+                    u32::try_from(self.capture_config.min_update_interval_ms)
+                        .unwrap_or(u32::MAX)
+                        .max(MIN_CAPTURE_UPDATE_INTERVAL_MS_U32),
+                ),
+                cursor_visible: Some(self.capture_config.cursor_visible),
+                dirty_region_only: Some(self.capture_config.dirty_region_only),
+                frames_captured: 0,
+                frames_dropped: 0,
+                latest_frame_seq: None,
+                latest_frame_width: None,
+                latest_frame_height: None,
+                channel_len: 0,
+                channel_capacity: CAPTURE_CHANNEL_CAPACITY,
+                thread_priority: None,
+                stop_requested: false,
+            };
+        };
+
+        let stats = handle.stats();
+        let active_config = handle.config();
+        let latest_frame = stats.latest_frame();
+        CaptureRuntimeReadback {
+            status: "running".to_owned(),
+            target: Some(observation_target_from_capture_target(
+                &handle.target().target,
+            )),
+            backend: stats
+                .effective_backend()
+                .map(|backend| capture_backend_name(backend).to_owned()),
+            selected_backend: Some(capture_backend_name(handle.target().backend).to_owned()),
+            generation: self.capture_controller.generation(),
+            min_update_interval_ms: Some(
+                u32::try_from(active_config.min_update_interval_ms)
+                    .unwrap_or(u32::MAX)
+                    .max(MIN_CAPTURE_UPDATE_INTERVAL_MS_U32),
+            ),
+            cursor_visible: Some(active_config.cursor_visible),
+            dirty_region_only: Some(active_config.dirty_region_only),
+            frames_captured: stats.frames_captured(),
+            frames_dropped: stats.frames_dropped(),
+            latest_frame_seq: latest_frame.map(|frame| frame.frame_seq),
+            latest_frame_width: latest_frame.map(|frame| frame.width),
+            latest_frame_height: latest_frame.map(|frame| frame.height),
+            channel_len: handle.channel_len(),
+            channel_capacity: handle.channel_capacity(),
+            thread_priority: Some(capture_thread_priority_name(stats.thread_priority())),
+            stop_requested: handle.is_stop_requested(),
         }
     }
 }
@@ -214,6 +283,7 @@ pub struct SetCaptureTargetResponse {
     pub current: CaptureTargetWire,
     pub generation: u64,
     pub backend: String,
+    pub capture_runtime: CaptureRuntimeReadback,
 }
 
 #[derive(Clone, Debug, Serialize, JsonSchema)]
@@ -303,10 +373,12 @@ pub fn current_input(state: &M1State, depth: u32) -> Result<ObservationInput, Er
             input.mode_override = Some(state.perception_mode);
         }
         input.capture_config = Some(state.active_capture_config.clone());
+        input.capture_runtime = Some(state.capture_runtime_readback());
         return Ok(input);
     }
     let mut input = platform_input(depth, state.perception_mode)?;
     input.capture_config = Some(state.active_capture_config.clone());
+    input.capture_runtime = Some(state.capture_runtime_readback());
     Ok(input)
 }
 
@@ -349,6 +421,7 @@ pub fn find_in_state(state: &M1State, params: &FindParams) -> Result<FindRespons
     let input = if let Some(hwnd) = params.window_hwnd {
         let mut input = window_input_from_hwnd(hwnd, FIND_SNAPSHOT_DEPTH, state.perception_mode)?;
         input.capture_config = Some(state.active_capture_config.clone());
+        input.capture_runtime = Some(state.capture_runtime_readback());
         input
     } else {
         current_input(state, FIND_SNAPSHOT_DEPTH)?
@@ -390,7 +463,7 @@ pub fn set_capture_target_in_state(
     let mut config = state.capture_config.clone();
     config.target = capture_target_from_param(params.target)?;
     if let Some(interval) = params.min_update_interval_ms {
-        config.min_update_interval_ms = interval.max(1);
+        config.min_update_interval_ms = clamp_capture_interval(interval);
     }
     if let Some(cursor_visible) = params.cursor_visible {
         config.cursor_visible = cursor_visible;
@@ -400,8 +473,12 @@ pub fn set_capture_target_in_state(
     }
     let resolved =
         resolve_capture_target(&config).map_err(|err| mcp_error(err.code(), err.to_string()))?;
+    let generation = state
+        .capture_controller
+        .switch_to(config.clone())
+        .map_err(|err| mcp_error(err.code(), err.to_string()))?;
     state.capture_config = config;
-    state.capture_generation = state.capture_generation.saturating_add(1);
+    state.capture_generation = generation;
     state.active_capture_config = observation_capture_from_capture_config(
         &state.capture_config,
         state.capture_generation,
@@ -412,6 +489,7 @@ pub fn set_capture_target_in_state(
         current: capture_target_wire(&resolved.target),
         generation: state.capture_generation,
         backend: capture_backend_name(resolved.backend).to_owned(),
+        capture_runtime: state.capture_runtime_readback(),
     })
 }
 
@@ -422,7 +500,12 @@ pub fn apply_profile_runtime_config_in_state(
     state.perception_mode = profile.mode;
 
     let mut config = state.capture_config.clone();
-    config.min_update_interval_ms = u64::from(profile.capture.min_update_interval_ms.max(1));
+    config.min_update_interval_ms = u64::from(
+        profile
+            .capture
+            .min_update_interval_ms
+            .max(MIN_CAPTURE_UPDATE_INTERVAL_MS_U32),
+    );
     config.cursor_visible = profile.capture.cursor_visible;
     if let Some(target) = capture_target_from_profile_target(&profile.capture.target) {
         config.target = target;
@@ -485,7 +568,7 @@ fn observation_capture_from_capture_config(
         target: observation_target_from_capture_target(&config.target),
         min_update_interval_ms: u32::try_from(config.min_update_interval_ms)
             .unwrap_or(u32::MAX)
-            .max(1),
+            .max(MIN_CAPTURE_UPDATE_INTERVAL_MS_U32),
         cursor_visible: config.cursor_visible,
         dirty_region_only: config.dirty_region_only,
         generation,
@@ -501,7 +584,9 @@ fn observation_capture_from_profile_capture(
 ) -> ObservationCaptureConfig {
     ObservationCaptureConfig {
         target: observation_target_from_profile_target(&capture.target),
-        min_update_interval_ms: capture.min_update_interval_ms.max(1),
+        min_update_interval_ms: capture
+            .min_update_interval_ms
+            .max(MIN_CAPTURE_UPDATE_INTERVAL_MS_U32),
         cursor_visible: capture.cursor_visible,
         dirty_region_only,
         generation,
@@ -556,6 +641,14 @@ fn capture_config_without_generation_eq(
         && left.source == right.source
 }
 
+const fn clamp_capture_interval(interval_ms: u64) -> u64 {
+    if interval_ms < MIN_CAPTURE_UPDATE_INTERVAL_MS {
+        MIN_CAPTURE_UPDATE_INTERVAL_MS
+    } else {
+        interval_ms
+    }
+}
+
 fn capture_target_from_param(param: CaptureTargetParam) -> Result<CaptureTarget, ErrorData> {
     match param {
         CaptureTargetParam::Primary => Ok(CaptureTarget::Primary),
@@ -565,10 +658,18 @@ fn capture_target_from_param(param: CaptureTargetParam) -> Result<CaptureTarget,
         CaptureTargetParam::Window { window_hwnd } => {
             Ok(CaptureTarget::Window { hwnd: window_hwnd })
         }
-        CaptureTargetParam::ElementWindow { element_id } => element_id
-            .parts()
-            .map(|parts| CaptureTarget::Window { hwnd: parts.hwnd })
-            .map_err(|err| mcp_error(error_codes::CAPTURE_TARGET_INVALID, err.to_string())),
+        CaptureTargetParam::ElementWindow { element_id } => {
+            synapse_a11y::element_bounding_rect(&element_id).map_err(|err| {
+                mcp_error(
+                    error_codes::CAPTURE_TARGET_INVALID,
+                    format!("element_window target could not be re-resolved: {err}"),
+                )
+            })?;
+            element_id
+                .parts()
+                .map(|parts| CaptureTarget::Window { hwnd: parts.hwnd })
+                .map_err(|err| mcp_error(error_codes::CAPTURE_TARGET_INVALID, err.to_string()))
+        }
     }
 }
 
@@ -589,11 +690,72 @@ const fn capture_backend_name(backend: CaptureBackend) -> &'static str {
     }
 }
 
+fn capture_thread_priority_name(priority: CaptureThreadPriority) -> String {
+    match priority {
+        CaptureThreadPriority::TimeCritical => "time_critical".to_owned(),
+        CaptureThreadPriority::Unsupported => "unsupported".to_owned(),
+        CaptureThreadPriority::Unknown => "unknown".to_owned(),
+        CaptureThreadPriority::Other(value) => format!("other:{value}"),
+    }
+}
+
 const fn mode_rationale(mode: PerceptionMode) -> &'static str {
     match mode {
         PerceptionMode::Auto => "auto_select_by_foreground_and_a11y_density",
         PerceptionMode::A11yOnly => "manual_a11y_only",
         PerceptionMode::PixelOnly => "manual_pixel_only",
         PerceptionMode::Hybrid => "manual_hybrid",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn capture_interval_floor_applies_to_manual_and_profile_metadata() {
+        let config = CaptureConfig {
+            min_update_interval_ms: 1,
+            ..CaptureConfig::default()
+        };
+        let manual = observation_capture_from_capture_config(&config, 42, "manual-test".to_owned());
+        assert_eq!(
+            manual.min_update_interval_ms,
+            MIN_CAPTURE_UPDATE_INTERVAL_MS_U32
+        );
+
+        let profile = ProfileCapture {
+            target: ProfileCaptureTarget::PrimaryMonitor,
+            min_update_interval_ms: 1,
+            cursor_visible: true,
+        };
+        let from_profile =
+            observation_capture_from_profile_capture(&profile, true, 43, "profile:test".to_owned());
+        assert_eq!(
+            from_profile.min_update_interval_ms,
+            MIN_CAPTURE_UPDATE_INTERVAL_MS_U32
+        );
+    }
+
+    #[test]
+    fn inactive_capture_runtime_readback_reports_controller_state() {
+        let mut state = M1State::default();
+        state.capture_config.min_update_interval_ms = 1;
+
+        let readback = state.capture_runtime_readback();
+
+        assert_eq!(readback.status, "inactive");
+        assert!(readback.target.is_none());
+        assert!(readback.backend.is_none());
+        assert_eq!(readback.generation, 0);
+        assert_eq!(
+            readback.min_update_interval_ms,
+            Some(MIN_CAPTURE_UPDATE_INTERVAL_MS_U32)
+        );
+        assert_eq!(readback.frames_captured, 0);
+        assert_eq!(readback.frames_dropped, 0);
+        assert_eq!(readback.channel_len, 0);
+        assert_eq!(readback.channel_capacity, CAPTURE_CHANNEL_CAPACITY);
+        assert!(!readback.stop_requested);
     }
 }

@@ -1,5 +1,65 @@
 # CURRENT STATE - Synapse
 
+## 2026-06-02T02:27:37-05:00
+- Active issue remains #596 `scenario(stress): capture-target thrash - Graphics->DXGI fallback, multi-monitor, DPI`.
+- Manual FSV after the latest-frame readback patch exposed a real shutdown defect:
+  - isolated #596 daemon PID `30420` / bind `127.0.0.1:7865` became unresponsive during `set_capture_target target=element_window`;
+  - the tool call timed out and a separate `/health` read also timed out while the process still owned the socket;
+  - accepted evidence before the hang already proved primary/monitor/window capture frame dimensions and 16ms interval floor, but the run is not accepted until the hang is fixed and rerun.
+- Root cause:
+  - `CaptureController::switch_to` called `previous.stop()` synchronously while M1 held its state mutex;
+  - Windows Graphics Capture was started with `GraphicsHandler::start(settings)`, so shutdown was only observed from `on_frame_arrived`;
+  - a quiet/static window can emit one frame and then no callback, leaving `join()` blocked and wedging all M1 tools behind the mutex.
+- Patch added after the hang:
+  - `crates/synapse-capture/src/platform/windows/capture.rs` now starts WGC through `GraphicsHandler::start_free_threaded(settings)`;
+  - the outer Synapse capture loop polls the shared stop flag and uses `CaptureControl::stop()` to post `WM_QUIT` to the WGC message-loop thread;
+  - handler construction sets and records the actual WGC callback thread priority, preserving the `time_critical` readback.
+- Supporting checks after the shutdown patch:
+  - `cargo fmt`
+  - `cargo check -p synapse-capture -p synapse-mcp -j 2`
+  - `cargo test -p synapse-capture switching_capture_target_stops_previous_session -- --nocapture`
+  - `cargo test -p synapse-capture dxgi_backend_rejects_window_targets_before_thread_spawn -- --nocapture`
+  - `cargo test -p synapse-capture capture_thread_priority_is_recorded -- --nocapture`
+- Cleanup:
+  - stopped the wedged isolated daemon PID `30420`;
+  - `Get-NetTCPConnection` on `127.0.0.1:7865` returned no listener.
+- Current worktree:
+  - #596 product/model/test files dirty, including the WGC stop-control patch;
+  - `README.md` remains unrelated/user-owned and must not be staged.
+- Next:
+  1. Run final supporting checks and rebuild `target\release\synapse-mcp.exe`.
+  2. Launch a fresh isolated #596 daemon and redo process/socket/auth/health/strict Inspector `tools/list`.
+  3. Rerun manual MCP FSV from clean SoTs for primary, monitor, window, element_window, multi-monitor, DXGI, invalid monitor, disappeared element, closed HWND, min interval floor, and structurally invalid input.
+
+## 2026-06-02T01:31:06-05:00
+- Active issue remains #596 `scenario(stress): capture-target thrash - Graphics->DXGI fallback, multi-monitor, DPI`.
+- Code inspection found the root cause for the issue's current untestability:
+  - `set_capture_target` only resolved the requested target and updated M1 observation metadata.
+  - It did not start or switch `synapse-capture::CaptureController`, so the MCP trigger could not prove the 2-frame capture channel, active backend, frame drops, or DXGI fallback.
+  - Monitor targets were not prevalidated, and `element_window` trusted the HWND embedded in a possibly stale `ElementId`.
+- Patch currently dirty for #596:
+  - `synapse-capture`: `CaptureController::switch_to` starts the new handle before stopping the old one; capture stats record effective backend; monitor validation uses the same Windows monitor-index path as capture; forced DXGI rejects window targets before spawning a doomed thread.
+  - `synapse-core`/`synapse-perception`: added optional `CaptureRuntimeReadback` to health/observation diagnostics.
+  - `synapse-mcp`: `M1State` owns a real `CaptureController`; `set_capture_target` validates, clamps `min_update_interval_ms` to 16ms, switches the controller, and returns runtime readback; `health` and `observe` expose `capture_runtime`; `element_window` re-resolves through the UIA worker before accepting the target.
+- Supporting checks passed so far:
+  - `cargo test -p synapse-capture dxgi_backend_rejects_window_targets_before_thread_spawn -- --nocapture`
+  - `cargo test -p synapse-mcp capture_interval_floor -- --nocapture`
+  - `cargo test -p synapse-mcp inactive_capture_runtime_readback -- --nocapture`
+  - `cargo check -p synapse-core -p synapse-perception -p synapse-capture -p synapse-mcp -j 2`
+  - `cargo test -p synapse-mcp --bin synapse-mcp schema_sanitize -- --nocapture`
+  - `cargo test -p synapse-mcp --test m4_tools_list -- --nocapture`
+- Web/source context read via Exa:
+  - Microsoft Learn Windows Graphics Capture docs describe capture items/frame pools for windows/displays.
+  - Microsoft Learn DXGI Desktop Duplication docs describe monitor/output frame acquisition through `AcquireNextFrame`.
+  - Microsoft high-DPI docs state Per-Monitor V2 apps see raw pixels and `GetDpiForWindow` returns per-monitor DPI for per-monitor-aware windows.
+- Current worktree:
+  - #596 code/model/test files dirty.
+  - `README.md` remains unrelated/user-owned and must not be staged.
+- Next:
+  1. Run final supporting checks/release build after any compile fixes.
+  2. Launch an isolated repo-built #596 daemon, verify process/socket/auth/health/strict Inspector tools-list.
+  3. Run manual MCP FSV for primary/monitor/window/element_window target cycles plus invalid monitor, closed HWND, disappeared element, min interval floor, structurally invalid input, DXGI monitor path, and available DPI/physical-pixel readbacks.
+
 ## 2026-06-02T01:09:41-05:00
 - #595 is closed:
   - commit `098e8d5 fix(a11y): stream UIA fanout snapshots (#595) [skip ci]` pushed to `origin/main`.

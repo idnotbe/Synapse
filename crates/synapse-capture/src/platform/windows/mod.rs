@@ -18,4 +18,4 @@ pub use dpi::{
     init_process_dpi_awareness as init_process_dpi_awareness_impl,
     is_per_monitor_v2_dpi_aware as is_per_monitor_v2_dpi_aware_impl, set_capture_thread_priority,
 };
-pub use target::validate_hwnd as validate_hwnd_impl;
+pub use target::{validate_hwnd as validate_hwnd_impl, validate_monitor as validate_monitor_impl};

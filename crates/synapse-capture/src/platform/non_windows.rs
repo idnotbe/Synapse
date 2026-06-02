@@ -79,3 +79,9 @@ pub fn set_capture_thread_priority() -> Result<(), CaptureError> {
 pub fn validate_hwnd_impl(_hwnd: i64) -> Result<(), CaptureError> {
     Ok(())
 }
+
+#[cfg(not(windows))]
+#[allow(clippy::missing_const_for_fn, clippy::unnecessary_wraps)]
+pub fn validate_monitor_impl(_monitor_index: u32) -> Result<(), CaptureError> {
+    Ok(())
+}

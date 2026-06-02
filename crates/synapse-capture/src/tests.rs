@@ -172,6 +172,27 @@ fn invalid_hwnd_surfaces_capture_target_invalid() {
 }
 
 #[test]
+fn dxgi_backend_rejects_window_targets_before_thread_spawn() {
+    let config = CaptureConfig {
+        target: CaptureTarget::Window { hwnd: 1 },
+        backend_preference: CaptureBackendPreference::DxgiDuplication,
+        ..CaptureConfig::default()
+    };
+    println!(
+        "before dxgi_window target={:?} selected_backend={:?}",
+        config.target,
+        config.selected_backend()
+    );
+
+    let err = resolve_capture_target(&config)
+        .err()
+        .unwrap_or_else(|| panic!("DXGI window target should fail"));
+    println!("after dxgi_window error_code={} error={err}", err.code());
+    assert_eq!(err.code(), error_codes::CAPTURE_TARGET_INVALID);
+    assert!(err.to_string().contains("monitor targets only"));
+}
+
+#[test]
 fn target_lost_error_surfaces_code() {
     let err = CaptureError::TargetLost {
         detail: "synthetic target loss".to_owned(),

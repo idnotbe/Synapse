@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use super::{ObservationCaptureConfig, PerceptionMode, ProfileId};
+use super::{CaptureRuntimeReadback, ObservationCaptureConfig, PerceptionMode, ProfileId};
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -66,4 +66,6 @@ pub struct SubsystemHealth {
     pub perception_mode: Option<PerceptionMode>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capture_config: Option<ObservationCaptureConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capture_runtime: Option<CaptureRuntimeReadback>,
 }

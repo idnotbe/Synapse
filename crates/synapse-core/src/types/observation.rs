@@ -288,6 +288,8 @@ pub struct ObservationDiagnostics {
     pub audio_status: SensorStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capture_config: Option<ObservationCaptureConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capture_runtime: Option<CaptureRuntimeReadback>,
     pub elements_truncated: bool,
     pub entities_truncated: bool,
     pub size_bytes: u32,
@@ -312,6 +314,38 @@ pub enum ObservationCaptureTarget {
     PrimaryMonitor,
     MonitorIndex { index: u32 },
     Window { window_hwnd: i64 },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CaptureRuntimeReadback {
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<ObservationCaptureTarget>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backend: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_backend: Option<String>,
+    pub generation: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_update_interval_ms: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor_visible: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dirty_region_only: Option<bool>,
+    pub frames_captured: u64,
+    pub frames_dropped: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest_frame_seq: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest_frame_width: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest_frame_height: Option<u32>,
+    pub channel_len: usize,
+    pub channel_capacity: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_priority: Option<String>,
+    pub stop_requested: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]

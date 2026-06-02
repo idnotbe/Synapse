@@ -95,6 +95,7 @@ fn synthetic_notepad_input(mode_override: Option<PerceptionMode>) -> Observation
         audio_status: SensorStatus::Disabled,
         mode_override,
         capture_config: None,
+        capture_runtime: None,
     }
 }
 

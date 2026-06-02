@@ -802,3 +802,34 @@ Evidence:
 
 Outcome:
 - Begin #596 with code inspection of capture-target, fallback, and DPI paths before any implementation or FSV setup.
+
+# 2026-06-02T01:31:06-05:00 - #596 set_capture_target must drive the real capture controller
+
+Decision: Fix #596 by wiring M1 `set_capture_target` to `synapse-capture::CaptureController` and exposing runtime capture readback in `set_capture_target`, `health`, and `observe`, rather than accepting config-only metadata updates.
+
+Evidence:
+- Code inspection showed `set_capture_target_in_state` only called `resolve_capture_target`, incremented a generation counter, and updated `active_capture_config`.
+- `M1State` did not own a `CaptureController`, so no real capture thread, 2-frame channel, frame/drop counters, thread priority, or effective backend could be observed through the MCP tool.
+- `resolve_capture_target` accepted arbitrary monitor indices; failures would occur only inside the background capture path.
+- `element_window` only parsed the HWND from the element id; a disappeared element could still be accepted if the window lived.
+- Exa/Microsoft docs confirm Windows Graphics Capture and DXGI Desktop Duplication are frame-producing APIs, DXGI duplication is output/monitor oriented, and Per-Monitor V2 DPI awareness exposes raw pixels for DPI-sensitive comparisons.
+
+Outcome:
+- Patch M1/capture/core/perception to provide real controller switching and runtime readbacks.
+- Keep manual FSV acceptance on a fresh repo-built MCP daemon; supporting tests/checks remain regression evidence only.
+
+# 2026-06-02T02:27:37-05:00 - #596 WGC shutdown must use an external stop control
+
+Decision: Replace Synapse's WGC `GraphicsHandler::start(settings)` path with `start_free_threaded(settings)` plus `CaptureControl::stop()` for Windows Graphics Capture target switches.
+
+Evidence:
+- The #596 isolated daemon PID `30420` timed out during `set_capture_target target=element_window`; a separate `/health` read also timed out while PID `30420` still owned `127.0.0.1:7865`.
+- Code inspection showed `CaptureController::switch_to` joined the previous capture thread synchronously while M1 held its state mutex.
+- The local `windows-capture` crate shows `start(settings)` runs a message loop on the current thread and only lets user code call `InternalCaptureControl::stop()` from `on_frame_arrived`.
+- For quiet/static WGC window targets, another frame callback may not arrive after Synapse sets its stop flag, so the join can block indefinitely.
+- The same crate's `start_free_threaded()` returns `CaptureControl`, whose `stop()` sets the halt flag, posts `WM_QUIT` to the capture thread, and joins the message-loop thread.
+- Focused supporting checks after the patch passed for capture target switching, DXGI-window rejection, capture thread priority, and capture/MCP crate typechecking.
+
+Outcome:
+- Use the crate-provided external WGC stop mechanism and record the actual callback thread priority.
+- Restart #596 FSV from a fresh daemon; the prior run remains defect evidence, not acceptance evidence.
