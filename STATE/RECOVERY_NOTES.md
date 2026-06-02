@@ -1,5 +1,13 @@
 # RECOVERY NOTES - Synapse
 
+## Current Resume Point - 2026-06-02T18:10:00-05:00
+- Open GitHub issues progress this session (chrisroyse/synapse):
+  - #631 (J6 voice-reactive reflex): CLOSED. Patch `audio_event_sink` already committed in `992d069`; re-verified full on-disk FSV (happy + 5 edges + cleanup) and final checks (fmt, audio_event_sink test, m3 audio/subscribe/reflex/tools-list, release build SHA `75ECE572…`).
+  - #632 (J7 Rube Goldberg): CLOSED. Full chain on wired daemon: act_run_shell→file→act_launch→read_text OCR→act_clipboard→act_type(UIA into_element)→file→act_run_shell verify (`RUBE632-WIRED-X9F4`). Edges incl. clipboard contention fail-closed, unicode integrity, hop-fail. Gap: Win11 tabbed Notepad + operator unsaved doc → owned TopMost WinForms windows for GUI hops.
+  - #634 (K2 DPI scaled monitors): CLOSED. observe bbox→act_click center→DPI-aware GetCursorPos dx=dy=0 on 150% and 100% monitors, straddle-boundary, exact corner, element_id invoke, coord aim/drag. Out-of-bounds + stale element_id fail-closed. Gaps: 125%/200% not physical; runtime scale change; act_aim element-target unwired.
+  - #633 (K1 multi-hour soak): ONLY REMAINING. Needs hours of sustained load + periodic manual FSV readbacks — pending operator decision on approach (stimulus generator vs fully-manual) and duration.
+- Env fixes (operator request): Windows `~/.cargo/config.toml` + repo `Cargo.toml [profile.dev]` `incremental=false`; reclaimed 257 GB (free 215→473 GB); `~/.cargo/bin/synapse-mcp.exe` refreshed to latest; 4 stale daemons killed; WSL already protected. Committed `7d4d9a6`.
+
 ## Current Resume Point - 2026-06-02T16:02:40-05:00
 - Active issue #631 has code patch, accepted happy path, accepted edge cases, and cleanup. Final supporting checks/commit/GitHub closeout remain.
 - Accepted evidence:
