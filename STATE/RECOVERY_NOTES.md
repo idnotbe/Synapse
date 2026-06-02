@@ -1,5 +1,19 @@
 # RECOVERY NOTES - Synapse
 
+## Current Resume Point - 2026-06-01T19:13:00-05:00
+- #627 is resolved and closed:
+  - RESOLVED evidence: https://github.com/ChrisRoyse/Synapse/issues/627#issuecomment-4597519110
+  - closure readback: `state=CLOSED`, `closedAt=2026-06-02T00:11:22Z`
+  - commit `c3b83b2 fix(a11y): handle Office RuntimeId fallback (#627) [skip ci]` pushed to `origin/main`.
+- Active issue is #628:
+  - title `scenario(showcase): browser marathon - Chrome workflow with Playwright MCP as oracle`
+  - START comment: https://github.com/ChrisRoyse/Synapse/issues/628#issuecomment-4597523219
+  - assigned to `ChrisRoyse`, labeled `status:in-progress`, `agent:codex`
+- #628 exact next actions:
+  1. Inspect Synapse Chrome profiles/action/perception surfaces and any Playwright MCP/client availability in this repo/host.
+  2. Pick a deterministic local browser target that can cover search, form fill, submit, dynamic late-loading controls, moved element after scroll, modal dialog, and iframe content without external flakiness.
+  3. Launch a repo-built `synapse-mcp` daemon for #628, verify process/socket/auth/strict `tools/list`/`health`, then run manual FSV through real MCP triggers with Playwright DOM SoT readbacks.
+
 ## Current Resume Point - 2026-06-01T18:59:20-05:00
 - #627 Excel workbook FSV evidence has reached the saved-file SoT readback.
 - Evidence directory: `.runs\627\excel-runtime-check-20260601T1810`.

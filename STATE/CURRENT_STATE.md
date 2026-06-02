@@ -1,5 +1,20 @@
 # CURRENT STATE - Synapse
 
+## 2026-06-01T19:13:00-05:00
+- #627 is closed:
+  - RESOLVED evidence: https://github.com/ChrisRoyse/Synapse/issues/627#issuecomment-4597519110
+  - closed at `2026-06-02T00:11:22Z`
+  - pushed commit `c3b83b2 fix(a11y): handle Office RuntimeId fallback (#627) [skip ci]`
+  - `status:in-progress` label was removed from the closed issue after closure.
+  - Worktree readback after push was clean at `## main...origin/main`.
+- Active issue is now #628 `scenario(showcase): browser marathon - Chrome workflow with Playwright MCP as oracle`.
+  - START comment: https://github.com/ChrisRoyse/Synapse/issues/628#issuecomment-4597523219
+  - #628 is assigned to `ChrisRoyse` and labeled `status:in-progress`, `agent:codex`.
+  - Goal: drive deterministic Chrome workflow through real Synapse MCP `observe`/`find`/`act_click`/`act_type`/`act_scroll`, and use Playwright as independent DOM oracle.
+  - Required edges: dynamic/late-loading elements, element moved between observe/click by scroll/DPI movement, modal dialog, iframe content, plus empty/boundary/structurally-invalid inputs.
+  - SoTs: browser DOM/page state via Playwright oracle, Synapse UI/read_text/observe readbacks, any local server/page state, and `CF_ACTION_LOG`.
+  - Next: inspect browser/action/profile/Playwright surfaces and verify local Playwright MCP/runtime availability or acquire/setup reversible prerequisites.
+
 ## 2026-06-01T18:59:20-05:00
 - #627 manual Excel workbook evidence is now complete through the save/readback step.
   - Isolated repo-built MCP daemon remains PID `34556`, bind `127.0.0.1:7855`, binary `target\release\synapse-mcp.exe`, SHA256 `24757F067CBDBE4E5871BDCAB44DF735A47C1788CD53E126D4680B358032B245`.

@@ -655,3 +655,17 @@ Evidence:
 
 Outcome:
 - Post #627 RESOLVED evidence, close #627, commit/push with `[skip ci]`, then continue the open queue.
+
+# 2026-06-01T19:13:00-05:00 - #628 follows #627 as next showcase child
+
+Decision: Take #628 next after closing #627, because #628 is the next open unblocked numbered showcase child in the #594 campaign and has reversible local Chrome/Playwright work available.
+
+Evidence:
+- #627 readback shows `state=CLOSED`, closed at `2026-06-02T00:11:22Z`, with RESOLVED evidence comment https://github.com/ChrisRoyse/Synapse/issues/627#issuecomment-4597519110.
+- `git status --short --branch` read clean after pushing commit `c3b83b2`.
+- Live open queue still contains #628 and later showcase/stress issues plus #595-#604, while #624/#625 remain blocked on the operator-only Daybreak boundary.
+- #628 requires Synapse real MCP browser action/perception triggers plus Playwright as independent DOM oracle.
+- Posted #628 START comment at https://github.com/ChrisRoyse/Synapse/issues/628#issuecomment-4597523219 and labeled it `status:in-progress`, `agent:codex`.
+
+Outcome:
+- Inspect browser/action/Playwright surfaces and prepare deterministic local #628 FSV target.
