@@ -1,5 +1,30 @@
 # CURRENT STATE - Synapse
 
+## 2026-06-02T04:22:34-05:00
+- #597 is closed:
+  - commit `d64c6a2 fix(mcp): cache read_text OCR by captured pixels (#597) [skip ci]`;
+  - RESOLVED evidence https://github.com/ChrisRoyse/Synapse/issues/597#issuecomment-4600960919;
+  - closure readback `state=CLOSED`, `closedAt=2026-06-02T09:21:57Z`;
+  - stale `status:in-progress` label removed.
+- Git state after #597 close:
+  - `HEAD == origin/main == d64c6a2`;
+  - `git status --short --branch` read `## main...origin/main` before claiming #598.
+- Live queue after #597:
+  - #594 parent remains open;
+  - #624/#625 remain `status:blocked` on the Daybreak operator-only boundary;
+  - unblocked children still open include #598-#604 and #629-#634.
+- Active issue is now #598 `scenario(stress): detection + entity tracking on fast-moving scene (pixel_only/hybrid)`.
+  - START comment https://github.com/ChrisRoyse/Synapse/issues/598#issuecomment-4600966276;
+  - assigned to `ChrisRoyse`, labeled `status:in-progress`, `agent:codex`.
+  - Goal: prove RT-DETR/entity tracking under a fast moving visible scene in `pixel_only` and `hybrid`, including stable `track_id`, sane `velocity_px_s`, and `find` by entity/class.
+  - Planned SoTs: deterministic visible scene/frame evidence, target process/window/frame state, real MCP `observe` entity output, real MCP `find` entity output, isolated storage/log/process state, and cleanup readbacks.
+  - Required edges: object leaves/re-enters frame, confidence threshold floor, max detections cap, black/empty frame, structurally invalid params.
+- Next:
+  1. Inspect detection/entity tracking implementation and model availability paths.
+  2. Determine whether a real configured model/runtime exists; if missing, acquire/setup locally per D4.
+  3. Build/launch a repo-built isolated daemon for #598, verify process/socket/auth/health/strict Inspector `tools/list`.
+  4. Create deterministic fast-moving visual target and run manual MCP/SoT FSV.
+
 ## 2026-06-02T04:19:35-05:00
 - Active issue #597 has implementation, manual MCP/SoT FSV, cleanup, and final supporting checks complete; commit/RESOLVED posting/closeout are next.
 - Patch accepted for #597:

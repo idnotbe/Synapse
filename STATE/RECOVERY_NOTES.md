@@ -1,40 +1,30 @@
 # RECOVERY NOTES - Synapse
 
-## Current Resume Point - 2026-06-02T04:19:35-05:00
-- #597 is ready for commit and RESOLVED posting.
-- Patch:
-  - honors `ReadTextParams.backend`;
-  - fails closed for unwired CRNN;
-  - validates OCR regions and live element bboxes;
-  - adds focused-window fallback;
-  - uses one captured BGRA bitmap for OCR recognition and pixel-hash cache keys;
-  - writes/read-validates `CF_OCR_CACHE` rows.
-- Accepted manual FSV run: `.runs\597\ocr-fsv-20260602T035659`.
-  - repo-built daemon PID `42136`, bind `127.0.0.1:7870`, strict Inspector `tools/list=80`;
-  - target PID `3408`, title `Issue597OcrTarget`, UIA text box bboxes/elements read via isolated `observe`;
-  - dense WinRT miss then hit: cache `0->1->1`, log `OCR_CACHE_MISS_RECORDED` then `OCR_CACHE_HIT`;
-  - auto backend wrote separate row, CRNN failed closed with cache unchanged;
-  - tiny/multilingual winrt+auto produced OCR and cache rows through `CF_OCR_CACHE=6`;
-  - rapid changed pixels did not return stale cached BETA; occluded element id returned overlay text and wrote a different bitmap-hash row;
-  - zero-size, off-screen, and invalid-region edges all failed closed with cache unchanged;
-  - focused-window fallback wrote final row; final `CF_OCR_CACHE=10`;
-  - release_all returned zero; target/daemon/port cleaned up.
-- Final supporting checks passed:
-  - `cargo fmt --check`;
-  - `git diff --check`;
-  - focused `read_text_`, `ocr_cache_key`, and perception upscaling tests;
-  - touched-crate check;
-  - schema sanitize and `m4_tools_list`;
-  - release build.
-- Final release binary:
-  - SHA256 `11C259BD288FC5C71B50CCB6AA025826BD40428E842E93A4D93D4A351B20F674`;
-  - length `46692864`;
-  - `LastWriteTimeUtc=2026-06-02T09:19:26Z`.
+## Current Resume Point - 2026-06-02T04:22:34-05:00
+- #597 is closed:
+  - commit `d64c6a2 fix(mcp): cache read_text OCR by captured pixels (#597) [skip ci]`;
+  - evidence https://github.com/ChrisRoyse/Synapse/issues/597#issuecomment-4600960919;
+  - closure readback `state=CLOSED`, `closedAt=2026-06-02T09:21:57Z`;
+  - `status:in-progress` removed.
+- Active issue is #598:
+  - title `scenario(stress): detection + entity tracking on fast-moving scene (pixel_only/hybrid)`;
+  - START comment https://github.com/ChrisRoyse/Synapse/issues/598#issuecomment-4600966276;
+  - assigned to `ChrisRoyse`, labels include `status:in-progress` and `agent:codex`.
+- #598 intent:
+  - prove real MCP `set_perception_mode`, `observe`, and `find` behavior for detection/entity tracking on a fast-moving scene;
+  - cover `pixel_only` and `hybrid`, stable `track_id`, `velocity_px_s`, and entity `find`;
+  - read separate physical SoTs from target/frame evidence, process/window state, isolated storage/logs, and observed entity output.
+- Required #598 edges:
+  - object leaves/re-enters frame;
+  - confidence threshold floor;
+  - max_detections cap;
+  - black/empty frame;
+  - structurally invalid params.
 - Exact next actions:
-  1. Review final diff.
-  2. Stage scoped #597 files plus `STATE/*`.
-  3. Commit `fix(mcp): cache read_text OCR by captured pixels (#597) [skip ci]`.
-  4. Push, post #597 RESOLVED evidence, close #597, remove `status:in-progress`, refresh queue, and continue to #598 unless GitHub changed.
+  1. Inspect detection/entity tracking implementation, model/runtime dependency paths, and profile/perception mode wiring.
+  2. If a model/runtime prerequisite is missing, acquire/configure it locally and read its physical SoT.
+  3. Build/launch a repo-built isolated #598 daemon, verify process/socket/auth/health/strict Inspector `tools/list`.
+  4. Create a deterministic moving visual target and run manual MCP/SoT FSV.
 
 ## Current Resume Point - 2026-06-02T03:21:12-05:00
 - Active issue #596 is ready for commit/RESOLVED posting.

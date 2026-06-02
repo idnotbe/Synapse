@@ -127,3 +127,4 @@
 - 2026-06-02T03:26:47-05:00 iteration #596-close-597-start: pushed #596 commit 6051fb3, posted RESOLVED evidence, closed #596, removed stale in-progress label, refreshed queue, and claimed #597 with START.
 - 2026-06-02T03:54:52-05:00 iteration #597-post-compact-resume: re-read required wake context/GitHub/git/MCP, reconciled dirty OCR/cache patch and failed first daemon launch, and recorded the fresh isolated FSV resume point.
 - 2026-06-02T04:19:35-05:00 iteration #597-final-fsv-checks: completed #597 manual OCR/cache FSV on isolated repo-built daemon, cleaned target/daemon, passed final supporting checks and release build, and recorded final SHA256 11C259BD288FC5C71B50CCB6AA025826BD40428E842E93A4D93D4A351B20F674.
+- 2026-06-02T04:22:34-05:00 iteration #597-close-598-start: pushed #597 commit d64c6a2, posted RESOLVED evidence, closed #597, removed stale in-progress label, refreshed queue, and claimed #598 with START.

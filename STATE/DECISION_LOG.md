@@ -911,3 +911,17 @@ Evidence:
 
 Outcome:
 - Commit/push with `[skip ci]`, post #597 RESOLVED evidence, close #597, refresh the queue, then continue to the next unblocked issue.
+
+# 2026-06-02T04:22:34-05:00 - #598 follows #597 as next unblocked child
+
+Decision: Take #598 after closing #597 because it is the lowest-number open unblocked child under #594; #624/#625 remain blocked on the Daybreak operator-only boundary.
+
+Evidence:
+- #597 readback shows `state=CLOSED`, `closedAt=2026-06-02T09:21:57Z`, RESOLVED comment https://github.com/ChrisRoyse/Synapse/issues/597#issuecomment-4600960919, and no remaining `status:in-progress` label.
+- `git log -5` shows `d64c6a2` at `HEAD`, `origin/main`, and `origin/HEAD`; `git status --short --branch` read `## main...origin/main`.
+- Live open queue contains #594, #598-#604, blocked #624/#625, and #629-#634.
+- #598 was open/unassigned before claim and requires real MCP detection/entity tracking FSV.
+- Posted #598 START comment at https://github.com/ChrisRoyse/Synapse/issues/598#issuecomment-4600966276 and labeled/assigned it to this agent.
+
+Outcome:
+- Begin #598 with code inspection of detection/entity tracking and runtime/model setup before any FSV setup.
