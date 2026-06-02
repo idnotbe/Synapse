@@ -1,5 +1,24 @@
 # RECOVERY NOTES - Synapse
 
+## Current Resume Point - 2026-06-02T11:42:49-05:00
+- Required wake-up context was re-read and reconciled with live GitHub/git state.
+- #602 is closed.
+  - Commit: `f0f8dc9 fix(mcp): support drag curves and modifiers (#602) [skip ci]`.
+  - RESOLVED evidence: https://github.com/ChrisRoyse/Synapse/issues/602#issuecomment-4604591472.
+  - Closure readback: `state=CLOSED`, `closedAt=2026-06-02T16:40:00Z`.
+  - Worktree readback after push: `## main...origin/main`.
+- Active issue is #603 `scenario(stress): ViGEm gamepad full sweep - X360 + DS4 buttons/sticks/triggers`.
+  - START comment: https://github.com/ChrisRoyse/Synapse/issues/603#issuecomment-4604616630.
+  - GitHub labels/assignee updated with `status:in-progress`, `agent:codex`, and `ChrisRoyse`.
+- #603 acceptance target:
+  - real MCP `tools/call act_pad` through strict client-parity `tools/list`;
+  - separate SoT reads from a real controller-observation surface (Windows/gamepad tester and/or browser Gamepad API), action/storage rows, ViGEm/device/process state, and cleanup neutral state;
+  - X360 and DS4 full button/stick/trigger sweeps, neutral/readback behavior, both controllers concurrently, rapid lifecycle edge, rate-limit edge where physically reachable, empty/boundary/structurally invalid params, and missing ViGEmBus setup/readback if needed.
+- Exact next actions:
+  1. Inspect `act_pad` implementation/tests and existing ViGEm constraints.
+  2. Patch only if code or FSV exposes a real gap.
+  3. Run supporting checks, build release `synapse-mcp`, launch isolated daemon, verify process/socket/auth/health/strict Inspector tools-list, then run #603 manual FSV.
+
 ## Current Resume Point - 2026-06-02T11:45:00-05:00
 - Active issue #602 has implementation, accepted manual MCP/SoT FSV, cleanup, final supporting checks, release build, and diff review complete. Commit/push/RESOLVED closeout are next.
 - Patch:

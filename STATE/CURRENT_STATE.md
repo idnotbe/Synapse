@@ -1,5 +1,35 @@
 # CURRENT STATE - Synapse
 
+## 2026-06-02T11:42:49-05:00
+- Required wake-up context was re-read after compaction:
+  - `C:\code\Synapse\docs\AICodingAgentSuperPrompt.md`;
+  - `C:\Users\hotra\Downloads\AICodingAgentSuperPrompt.md`;
+  - `AGENTS.md`;
+  - all `STATE/*` files;
+  - #351, #594, #602, #603, live open queue, git status/log/branch.
+- #602 is closed:
+  - commit `f0f8dc9 fix(mcp): support drag curves and modifiers (#602) [skip ci]`;
+  - RESOLVED evidence https://github.com/ChrisRoyse/Synapse/issues/602#issuecomment-4604591472;
+  - closure readback `state=CLOSED`, `closedAt=2026-06-02T16:40:00Z`;
+  - stale claim labels are removed.
+- Git state after #602 close:
+  - branch `main`;
+  - `git status --short --branch` read `## main...origin/main`;
+  - latest commit `f0f8dc9`.
+- Live open queue after #602:
+  - #594 parent remains open;
+  - #624/#625 remain `status:blocked` on the Daybreak/operator boundary;
+  - unblocked children currently open include #603, #604, and #629-#634.
+- Active issue is #603 `scenario(stress): ViGEm gamepad full sweep - X360 + DS4 buttons/sticks/triggers`.
+  - START comment: https://github.com/ChrisRoyse/Synapse/issues/603#issuecomment-4604616630.
+  - Labels/assignee updated with `status:in-progress`, `agent:codex`, and `ChrisRoyse`.
+  - Issue goal: prove the real `act_pad` ViGEm backend across X360 and DS4 buttons, sticks, triggers, neutralization, concurrent controllers, lifecycle/rate-limit/fail-closed edges, and real physical game/controller readback.
+  - Planned SoTs: repo-built daemon process/socket/auth/health/strict Inspector `tools/list`; real `act_pad` calls; physical controller-observation surface (Windows/gamepad tester and/or browser Gamepad API via strict client-safe workflow); action/storage audit rows; ViGEm/device/process state; cleanup `release_all` and pad neutral state.
+- Current next:
+  1. Inspect `act_pad` MCP params, schema, validation, ViGEm backend dispatch, button/stick/trigger mapping, neutralization, lifecycle handling, rate limiting, and tests.
+  2. Patch only if code or FSV exposes a real gap.
+  3. Build/launch isolated repo-built daemon and perform manual MCP/SoT FSV for #603.
+
 ## 2026-06-02T11:45:00-05:00
 - Active issue #602 `scenario(stress): act_drag boundary + Paint drawing + Explorer drag-drop` has implementation, manual MCP/SoT FSV, runtime cleanup, final supporting checks, release build, and diff review complete. Commit/push and GitHub closeout are next.
 - Patch in `crates/synapse-mcp/src/m2/drag.rs`:

@@ -1174,3 +1174,17 @@ Outcome:
 - Final release binary SHA256 `8432EEC297778C356BF0B006EABE9D0FA3AA94A6F0ADFF93BC4A3452A1D66826`.
 - Final supporting checks passed; only `git diff --check` CRLF warning remains.
 - Next: token scan, commit/push with `[skip ci]`, post #602 RESOLVED evidence, close #602, refresh queue for #603.
+
+# 2026-06-02T11:42:49-05:00 - #603 starts after #602 closure
+
+Decision: Claim #603 as the next unblocked #594 child after verifying #602 closed and `main` is clean.
+
+Evidence:
+- #602 GitHub readback showed `state=CLOSED`, `closedAt=2026-06-02T16:40:00Z`, RESOLVED evidence comment, and stale claim labels removed.
+- `git status --short --branch` read `## main...origin/main`; `HEAD` and `origin/main` are `f0f8dc9`.
+- Live open queue shows #603 as the next unblocked child before #604 and #629-#634; #624/#625 remain blocked.
+- #603 requires real MCP `act_pad` FSV for ViGEm X360 + DS4 buttons, sticks, triggers, controller observation, concurrent controllers, lifecycle/rate-limit/fail-closed edges, and cleanup neutralization.
+
+Outcome:
+- Posted #603 START comment and labeled/assigned the issue.
+- Inspect `act_pad`/ViGEm implementation next.
