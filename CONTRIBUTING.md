@@ -33,8 +33,7 @@ contribute under these terms before doing so.
 
 For anything larger than a small fix, **open an issue first** to discuss the
 approach. This avoids wasted work on changes that don't fit the architecture or
-the roadmap (see the README "What's left on the docket" section and
-[docs/](docs/)).
+the roadmap (see the README "What's left on the docket" section).
 
 ## Development workflow
 
@@ -48,10 +47,10 @@ the roadmap (see the README "What's left on the docket" section and
    ```
 3. Synapse is **Windows-native** for its real perception/action paths (Win32
    `SendInput`, UI Automation, WGC/DXGI, ViGEmBus). Behavior that touches those
-   surfaces should be verified on Windows — see
-   [AGENTS.md](AGENTS.md) for the project's manual Full State Verification (FSV)
-   expectations. Automated tests and CI are supporting evidence, not a substitute
-   for verifying real behavior.
+   surfaces should be verified on Windows — the project uses manual Full State
+   Verification (FSV) on the configured Windows host as the shipping gate (see the
+   README "Agent Doctrine" section). Automated tests are supporting evidence, not a
+   substitute for verifying real behavior.
 4. Keep commits focused and write clear messages. Reference the issue number
    where applicable.
 

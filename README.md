@@ -1,18 +1,215 @@
-# Synapse
+<p align="center">
+  <img src="docs/assets/hero.png" alt="Synapse — give your AI agent a real body on your Windows PC" width="100%">
+</p>
 
-[![Software Input + M5 Registry/Audit Moat](https://img.shields.io/badge/status-software_input_%2B_M5_registry_audit_moat-blue)](https://github.com/ChrisRoyse/Synapse/issues/588)
+<h1 align="center">Synapse</h1>
 
-Synapse is a Rust MCP server that gives AI agents a local computer-use body:
-structured perception, action, and low-latency reflexes live in Synapse while the
-connected model stays the brain. It speaks the Model Context Protocol over stdio
-or loopback HTTP, so it drops into Claude Code, Codex, and the Claude Desktop app
-as a tool server. Synapse is Windows-native (Win32 `SendInput`, UI Automation,
-WGC/DXGI capture, ViGEmBus virtual controllers).
+<p align="center">
+  <strong>Give your AI agent a real body on your Windows PC.</strong><br>
+  Structured perception, precise action, and sub-millisecond reflexes — as a local MCP server.
+</p>
 
-## Install Synapse (paste this prompt to your AI agent)
+<p align="center">
+  <img src="https://img.shields.io/badge/status-live-22c55e?style=for-the-badge" alt="Status: Live">
+  <img src="https://img.shields.io/badge/platform-Windows%2010%20%2F%2011-0078D6?style=for-the-badge&logo=windows" alt="Windows">
+  <img src="https://img.shields.io/badge/built%20with-Rust-CE412B?style=for-the-badge&logo=rust" alt="Rust">
+  <img src="https://img.shields.io/badge/protocol-MCP-7C3AED?style=for-the-badge" alt="MCP">
+  <img src="https://img.shields.io/badge/MCP%20tools-80-0ea5e9?style=for-the-badge" alt="80 MCP tools">
+</p>
+
+<p align="center">
+  <a href="https://www.youtube.com/@Leapableai"><img src="https://img.shields.io/badge/YouTube-@Leapableai-FF0000?style=flat-square&logo=youtube&logoColor=white" alt="YouTube"></a>
+  <a href="https://x.com/ChrisRoyseAI1"><img src="https://img.shields.io/badge/X-@ChrisRoyseAI1-000000?style=flat-square&logo=x&logoColor=white" alt="X / Twitter"></a>
+  <a href="https://www.linkedin.com/in/christopher-royse-b624b596/"><img src="https://img.shields.io/badge/LinkedIn-Chris%20Royse-0A66C2?style=flat-square&logo=linkedin&logoColor=white" alt="LinkedIn"></a>
+</p>
+
+---
+
+## The idea in one line
+
+> **Your AI model is the brain. Synapse is the body.**
+
+Large language models can reason brilliantly — but on their own they can't *see*
+your screen, *move* your mouse, *press* a key, or *react* in time. Synapse is the
+missing body. It's a fast, local **Rust** server that speaks the
+[Model Context Protocol](https://modelcontextprotocol.io) and plugs straight into
+**Claude Code, Codex, and the Claude Desktop app**, giving the connected model a
+real, low-latency interface to your Windows machine.
+
+<p align="center">
+  <img src="docs/assets/brain-body.png" alt="The model is the brain; Synapse is the body that sees, acts, and reacts" width="92%">
+</p>
+
+Everything runs **on your machine**. No screen-scraping cloud service, no remote
+agent, no data leaving your PC. Synapse is Windows-native to the metal: Win32
+`SendInput`, UI Automation, Windows Graphics Capture / DXGI, WASAPI audio, and
+ViGEmBus virtual controllers.
+
+---
+
+## What you can do with it
+
+Synapse exposes **80 live MCP tools**. Here's what that unlocks.
+
+### 👁️ It can see — structured perception
+
+<img src="docs/assets/perception.png" alt="Synapse perceives the screen as structured data" align="right" width="42%">
+
+Synapse hands the model the screen as **clean, low-token structured data**, not a
+giant screenshot it has to squint at:
+
+- **`observe`** — the focused window, the full UI Automation element tree (every
+  button, field, and menu with its on-screen box), detected entities, and HUD.
+- **`find`** — locate any element or on-screen entity by name, role, or free text.
+- **`read_text`** — OCR any region or element. Reads pixels directly, so it works
+  even where the accessibility API can't reach (games, canvases, custom UIs).
+- **`audio_tail` / `audio_transcribe`** — capture and transcribe system audio
+  (Whisper) so the agent can *hear* what's happening.
+- **`set_perception_mode`** — switch between accessibility, raw-pixel, or hybrid
+  sensing on demand.
+
+<br clear="all">
+
+### 🖱️ It can act — precise, human-like control
+
+<img src="docs/assets/action.png" alt="Synapse moves the mouse, types, draws, and uses a controller" align="left" width="42%">
+
+Real input, synthesized through Win32 — not brittle macros:
+
+- **`act_click`, `act_aim`, `act_drag`, `act_scroll`** — mouse control with
+  natural, instant, linear, or eased motion curves.
+- **`act_type`, `act_press`, `act_keymap`** — type Unicode text with *human-like*
+  keystroke dynamics, press chords, or fire profile-defined key aliases.
+- **`act_pad`** — a full **virtual Xbox / DualShock controller** via ViGEmBus.
+- **`act_clipboard`, `act_combo`, `act_launch`, `act_run_shell`** — clipboard
+  round-trips, timed input sequences, and launching apps.
+- **`release_all`** — one call instantly releases every held key, button, and
+  axis. There's also an operator panic hotkey for a hard stop.
+
+<br clear="all">
+
+### ⚡ It can react — sub-millisecond reflexes
+
+<img src="docs/assets/reflex.png" alt="In-process reflexes react in well under a millisecond" align="right" width="42%">
+
+A network round-trip to an LLM takes hundreds of milliseconds. Some things can't
+wait that long. Synapse runs an **in-process reflex scheduler on a 1ms tick** so
+it can react *the instant* an event fires — no round-trip to the model:
+
+- **`reflex_register`** — arm an `AimTrack`, `HoldMove`, `HoldButton`, `Combo`,
+  or `OnEvent` reflex that fires automatically on the conditions you set.
+- **`reflex_list`, `reflex_history`, `reflex_cancel`** — inspect, audit, and
+  disarm. Every fire is timestamped to a scheduler tick (typical p99 jitter is
+  **single-digit microseconds**) and written to durable storage.
+
+<br clear="all">
+
+### 🔭 It tracks change — delta-first reality
+
+<img src="docs/assets/delta-reality.png" alt="Delta-first reality streams only what changed" align="left" width="42%">
+
+Re-sending the whole screen on every step is slow and expensive. Synapse takes a
+**baseline**, then streams the agent **only what changed** — and audits its own
+assumptions against physical reality:
+
+- **`reality_baseline`** — a compact, redacted snapshot (~hundreds of tokens).
+- **`observe_delta`** — ordered, field-level changes since a cursor. Change a
+  clipboard, a window, a value — you get back *just that delta*.
+- **`reality_audit`** — re-reads the real machine and reports drift, forcing a
+  rebase when the agent's mental model has gone stale.
+
+<br clear="all">
+
+### 🧠 It learns — the profile + audit flywheel
+
+<img src="docs/assets/learning-moat.png" alt="Synapse compounds knowledge through a profile and audit flywheel" align="right" width="42%">
+
+Synapse ships **29 app/game profiles** that encode how to operate Notepad, Chrome,
+Excel, Paint, Explorer, Terminal, and more — and it gets *better with use*:
+
+- Every action is logged to a local **RocksDB** audit trail.
+- **`profile_quality_refresh`** turns those real outcomes into a quality score
+  (Wilson-bounded success rate) per profile.
+- **`audit_intelligence_query`** summarizes what worked, by app and by tool.
+- The **`profile_registry_*`** and **`profile_authoring_*`** families let you
+  author, sign, install, roll back, and share profile packages — with consent and
+  provenance built in.
+
+This is the compounding loop: *profile used → outcome audited → quality learned →
+profile improved → better profile distributed → more evidence.*
+
+<br clear="all">
+
+### 🎮 It plays games
+
+<img src="docs/assets/games.png" alt="Synapse can drive real games" align="left" width="42%">
+
+Pixel-perception, virtual controllers, and reflexes make Synapse a serious game
+agent. It ships a full **EverQuest** domain pack — 20+ tools spanning live state
+estimation, map sensing, hazard/safe-area memory, route planning, a planner
+guard, trajectory/episode export, a ContextGraph memory bridge, a transparent
+predictive model, and surprise detection — a complete
+**perceive → remember → plan → act → learn** loop, plus benchmark profiles for
+Minecraft and Luanti/Minetest.
+
+<br clear="all">
+
+### 🔒 It stays yours — 100% local & private
+
+<img src="docs/assets/local-private.png" alt="Everything runs locally and privately" align="right" width="42%">
+
+- Runs entirely on your machine over **stdio** or **loopback HTTP** (bearer-auth,
+  loopback-only by default).
+- Sensitive fields are **hash-redacted** before they're ever persisted — raw
+  clipboard text, window titles, chat bodies, and secrets never hit storage.
+- Audit export is **off unless you consent**, with a redaction report.
+- The profile registry works **offline and account-free**.
+
+<br clear="all">
+
+---
+
+## How it works
+
+```mermaid
+flowchart LR
+    A["🧠 AI Model<br/>(Claude / Codex)"] <-->|MCP over stdio<br/>or loopback HTTP| B
+    subgraph B["⚙️ Synapse — Rust MCP server (local)"]
+        P["👁️ Perception<br/>UIA · capture · OCR · audio"]
+        ACT["🖱️ Action<br/>SendInput · ViGEm"]
+        RX["⚡ Reflex runtime<br/>1ms scheduler"]
+        ST["💾 Storage<br/>RocksDB audit trail"]
+        PR["🧩 Profiles + registry"]
+    end
+    B <-->|sees & controls| W["🖥️ Your Windows desktop,<br/>apps & games"]
+    P --- ST
+    ACT --- ST
+    RX --- ST
+    PR --- ST
+```
+
+The model stays the planner. Synapse owns the fast, native, stateful parts —
+perception assembly, input emission, reflexes, and a durable audit trail — so the
+agent gets crisp senses, reliable hands, and a memory of what worked.
+
+### The learning flywheel
+
+```mermaid
+flowchart LR
+    U["Profile used"] --> O["Outcome audited<br/>(RocksDB)"]
+    O --> Q["Quality &amp; compatibility<br/>learned"]
+    Q --> I["Profile improved"]
+    I --> D["Better profile<br/>distributed"]
+    D --> E["More real evidence"]
+    E --> U
+```
+
+---
+
+## Install
 
 Open Claude Code, Codex, or any coding agent **on the Windows machine you want
-Synapse to control**, then paste this prompt:
+Synapse to control**, and paste this:
 
 ```text
 Install Synapse for me and wire it into my AI tools.
@@ -40,136 +237,20 @@ I'm on Windows. Use the real absolute Cargo bin path, don't invent one, and tell
 me anything that needs my approval (e.g. installing the Rust toolchain).
 ```
 
-The agent needs a stable Rust toolchain (`rustup` / `cargo`). If `cargo` is
-missing, let the agent install it, or grab it from <https://rustup.rs> first.
+You'll need a stable **Rust toolchain** (`rustup` / `cargo`). If `cargo` is
+missing, grab it from <https://rustup.rs> first, or let the agent install it.
 
-## What's left on the docket
-
-M0–M4 are complete and tagged (`v0.1.0-m0` … `v0.1.0-m4`); the M1 and M2
-milestones are fully closed (49 and 82 issues). Active work is **M5 — Production
-polish**, which has two threads:
-
-1. **Profile-registry / audit-data moat** — the compounding learning loop
-   (profile used → runtime outcome audited → quality/compatibility learned →
-   profile improved → registry distributes better profile → more evidence).
-   Strategy lives in [issue #454](https://github.com/ChrisRoyse/Synapse/issues/454),
-   child work in #455–#470. The registry, audit-export, profile-authoring, and
-   quality tools are already live in the tool surface.
-2. **Whole-body stress & showcase campaign** —
-   [issue #594](https://github.com/ChrisRoyse/Synapse/issues/594) and its
-   children prove every Synapse tool under load and in real end-to-end demos.
-   These are the bulk of the open queue:
-
-   | Open scenarios | Issues |
-   |---|---|
-   | Stress / torture (UIA fanout, capture thrash, OCR, detection, audio, SendInput rate-limit, combo precision, drag, ViGEm sweep, clipboard, soak, DPI) | #595–#604, #633, #634 |
-   | Showcase end-to-end demos (Paint art-bot, real game session, voice-reactive reflex, Rube Goldberg chain, browser marathon) | #628–#632 |
-   | EverQuest full-loop + autocombat soak — **blocked** on an operator-only Daybreak EULA/account decision; all reversible work is done | #624, #625 |
-
-The physical-HID strategy is retired by the software-only input decision in
-[issue #588](https://github.com/ChrisRoyse/Synapse/issues/588). The active
-architecture direction is **delta-first reality** ([#536](https://github.com/ChrisRoyse/Synapse/issues/536)):
-Synapse feeds the agent ordered changes after a baseline snapshot, then
-periodically audits the accumulated assumption against full physical reality and
-forces a rebase when drift is found (live via `reality_baseline`,
-`observe_delta`, `reality_audit`).
-
-## Capabilities
-
-Synapse exposes **79 live MCP tools**. The full registry is in
-[docs/computergames/05_mcp_tool_surface.md](docs/computergames/05_mcp_tool_surface.md)
-and [docs/systemspec/13_mcp_tool_reference.md](docs/systemspec/13_mcp_tool_reference.md).
-At a glance:
-
-- **Perception** — `observe`, `find`, `read_text` (OCR), `audio_tail`,
-  `audio_transcribe`, `subscribe`, plus `set_capture_target` /
-  `set_perception_mode` to steer A11y/pixel/hybrid capture.
-- **Delta-first reality** — `reality_baseline`, `observe_delta`, `reality_audit`.
-- **Action** — `act_click`, `act_type`, `act_press`, `act_keymap`, `act_aim`,
-  `act_drag`, `act_scroll`, `act_pad` (gamepad), `act_clipboard`, `act_combo`
-  (timed sequences), `act_run_shell`, `act_launch`, and `release_all`.
-- **Reflexes** — low-latency in-process triggers: `reflex_register`,
-  `reflex_cancel`, `reflex_list`, `reflex_history`.
-- **Profiles & registry/audit moat** — `profile_list`, `profile_activate`,
-  the `profile_authoring_*`, `profile_registry_*`, `profile_quality_refresh`,
-  and `audit_*` tool families.
-- **Storage / health** — `health`, `storage_inspect`, `storage_gc_once`,
-  `replay_record`, and probe tools.
-- **EverQuest domain pack** — an `everquest_*` family (state, memory, planner
-  guard, route plan, trajectory/episode export, ContextGraph bridge, predictive
-  model, surprise detection, action-prior scorecard) demonstrating a full
-  perception→memory→planner→learning loop.
-
-The M1 starter surface, for quick orientation:
-
-| Tool | Description | Milestone | Status |
-|---|---|---:|---|
-| `health` | Reports server version, build, uptime, and subsystem health. | [M0](https://github.com/ChrisRoyse/Synapse/milestone/1) | Done |
-| `observe` | Returns the current structured perception snapshot. | [M1](https://github.com/ChrisRoyse/Synapse/milestone/2) | Done |
-| `find` | Searches accessible elements and detected entities by role/name/query. | [M1](https://github.com/ChrisRoyse/Synapse/milestone/2) | Done |
-| `read_text` | Reads OCR text from a region or element target. | [M1](https://github.com/ChrisRoyse/Synapse/milestone/2) | Done |
-| `set_capture_target` | Sets the active primary, monitor, window, or element-window capture target. | [M1](https://github.com/ChrisRoyse/Synapse/milestone/2) | Done |
-| `set_perception_mode` | Overrides perception mode between auto, a11y-only, pixel-only, and hybrid. | [M1](https://github.com/ChrisRoyse/Synapse/milestone/2) | Done |
-
-## Build
-
-Use the current installed stable Rust toolchain. The repository is verified with
-Rust 1.95 and intentionally does not pin an older toolchain.
+### Build it yourself
 
 ```bash
 cargo build --release --workspace
+cargo install --path crates/synapse-mcp --force   # -> %USERPROFILE%\.cargo\bin\synapse-mcp.exe
 ```
 
-The release binary is written to `target/release/synapse-mcp` (`synapse-mcp.exe`
-on Windows). To install it globally (the path the install prompt uses):
+### Wire it up manually
 
-```bash
-cargo install --path crates/synapse-mcp --force
-```
-
-This places the binary in your Cargo bin directory
-(`%USERPROFILE%\.cargo\bin\synapse-mcp.exe` on Windows).
-
-## Input Backends
-
-Synapse ships two live input backends:
-
-| Backend | Purpose |
-|---|---|
-| `software` | Keyboard and mouse through Win32 `SendInput`; default for keyboard, mouse, click, type, aim, drag, scroll, combo, and release-all paths. |
-| `vigem` | Software-only virtual Xbox/DS4 controller reports through ViGEmBus; default for pad actions. |
-
-The legacy `hardware` backend token still parses for profile/package
-compatibility, but it is not a live backend. Requests that resolve to `hardware`
-fail closed with `ACTION_BACKEND_UNAVAILABLE` and guidance to use `software` or
-`vigem`.
-
-## Run
-
-For MCP clients, run stdio mode (this is what the client configs below launch):
-
-```bash
-synapse-mcp --mode stdio
-```
-
-For a process/socket/log source of truth under repo control, run the loopback
-HTTP transport with an isolated DB and log directory:
-
-```bash
-SYNAPSE_BEARER_TOKEN=local-token synapse-mcp --mode http --bind 127.0.0.1:7700 --db .runs/issue/db
-```
-
-Inspect available flags:
-
-```bash
-synapse-mcp --help
-```
-
-## Configure MCP Clients (manual)
-
-The install prompt above does this for you. To wire it up by hand, point each
-client at the installed `synapse-mcp` binary in stdio mode. Substitute your real
-Cargo bin path for `<cargo-bin>` (Windows: `%USERPROFILE%\.cargo\bin`).
+<details>
+<summary><strong>Claude Code, Codex, and Claude Desktop config</strong></summary>
 
 Claude Code (user scope):
 
@@ -177,7 +258,7 @@ Claude Code (user scope):
 claude mcp add --scope user synapse -- <cargo-bin>\synapse-mcp.exe --mode stdio
 ```
 
-Codex user config at `~/.codex/config.toml`:
+Codex (`~/.codex/config.toml`):
 
 ```toml
 [mcp_servers.synapse]
@@ -185,7 +266,7 @@ command = "C:\\Users\\you\\.cargo\\bin\\synapse-mcp.exe"
 args = ["--mode", "stdio"]
 ```
 
-Claude Desktop on Windows (`%APPDATA%\Claude\claude_desktop_config.json`):
+Claude Desktop (`%APPDATA%\Claude\claude_desktop_config.json`):
 
 ```jsonc
 {
@@ -198,79 +279,102 @@ Claude Desktop on Windows (`%APPDATA%\Claude\claude_desktop_config.json`):
 }
 ```
 
-After the client loads the server, ask it to call the Synapse `health` tool and
-confirm the response has the shape shown below.
+</details>
 
-## Quick Demo
+After the client loads the server, ask it to call the `health` tool — you should
+get back `{ "ok": true, "version": "0.1.0", ... }` with each subsystem's status.
 
-The stdio transport speaks newline-delimited JSON-RPC. A client initializes the
-server, sends `notifications/initialized`, then calls a tool:
+---
 
-```json
-{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"manual-demo","version":"0.1.0"}}}
-{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}
-{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"health","arguments":{}}}
-```
+## See it in action
 
-The health payload shape is:
+Once it's connected, just ask your agent in plain English. For example:
 
-```json
-{
-  "ok": true,
-  "version": "0.1.0",
-  "build": "dev",
-  "uptime_s": 0,
-  "subsystems": {
-    "action": { "status": "ok" },
-    "storage": { "status": "initializing" }
-  }
-}
-```
+> *"Open Notepad, type a short intro to Synapse, then select-all, copy, and read
+> the clipboard back to prove the text landed."*
 
-`uptime_s` is monotonic, subsystem details vary by enabled runtime surface, and
-`build` is `dev` unless a build SHA is injected.
+> *"Open Paint and draw a five-point star on the canvas with mouse drags."*
 
-## Agent Doctrine
+> *"Take a reality baseline, then tell me only what changed after I open a new
+> window."*
 
-Agents working in this repository must follow [AGENTS.md](AGENTS.md). Manual Full
-State Verification on the configured Windows host is the shipping gate. Scripts,
-tests, benchmarks, GitHub Actions, and CI are supporting evidence only; they are
-never FSV.
+> *"Register a reflex that reacts the instant a window-focus event fires, show me
+> it firing, then disarm it."*
 
-When a behavior has a Synapse MCP tool, agents must verify the real `synapse-mcp`
-runtime before FSV: process or stdio child, bind/socket, authenticated `health`,
-initialized MCP session, and `tools/list`. The trigger must be the real MCP
-`tools/call`, followed by a separate read of the physical source of truth such as
-RocksDB rows, file bytes, UI state, logs, or device state. Tool return values and
-`health` are liveness/attempt evidence only.
+Behind the scenes the agent calls `act_launch`, `act_type`, `act_drag`,
+`observe`, `read_text`, `reality_baseline`, `reflex_register`, and friends — and
+every action is captured to the local audit trail.
 
-Missing local tools, drivers, models, devices, files, or services are
-acquisition/setup work, not blockers. Agents use Synapse and normal OS/shell/
-browser/package-manager workflows to make the missing thing real, then read the
-physical source of truth directly. Nothing is `status:blocked` because a
-configured-host prerequisite is absent; the only blockable item is the exact
-operator-only, hard-to-reverse external action left after every reversible local
-step is exhausted.
+---
 
-The profile-registry / audit-data moat governance lives in
-[docs/computergames/20_profile_registry_governance.md](docs/computergames/20_profile_registry_governance.md)
-(contribution, attribution, provenance, licensing, consent, revocation), with the
-shared-registry protocol in
-[21_profile_registry_protocol.md](docs/computergames/21_profile_registry_protocol.md),
-the local storage model in
-[22_profile_registry_data_model.md](docs/computergames/22_profile_registry_data_model.md),
-and package manifests in
-[23_profile_package_manifest.md](docs/computergames/23_profile_package_manifest.md).
-Local registry use stays offline-capable and account-free.
+## The full tool surface
 
-## Documentation Map
+Call `tools/list` on the running `synapse-mcp` server for the complete registry.
+At a glance:
 
-- Product and architecture PRD: [docs/computergames/README.md](docs/computergames/README.md)
-- Implementation plan: [docs/impplan/README.md](docs/impplan/README.md)
-- MCP tool surface: [docs/computergames/05_mcp_tool_surface.md](docs/computergames/05_mcp_tool_surface.md)
-- MCP runtime FSV path: [docs/computergames/25_mcp_runtime_fsv_path.md](docs/computergames/25_mcp_runtime_fsv_path.md)
-- Current Rust/dependency decision: [docs/adr/0001-current-rust-and-dependencies.md](docs/adr/0001-current-rust-and-dependencies.md)
+| Group | Tools |
+|---|---|
+| **Perception** | `observe` · `find` · `read_text` · `audio_tail` · `audio_transcribe` · `subscribe` · `set_capture_target` · `set_perception_mode` |
+| **Delta-first reality** | `reality_baseline` · `observe_delta` · `reality_audit` |
+| **Action** | `act_click` · `act_type` · `act_press` · `act_keymap` · `act_aim` · `act_drag` · `act_scroll` · `act_pad` · `act_clipboard` · `act_combo` · `act_run_shell` · `act_launch` · `release_all` |
+| **Reflexes** | `reflex_register` · `reflex_cancel` · `reflex_list` · `reflex_history` |
+| **Profiles, registry & audit** | `profile_list` · `profile_activate` · `profile_quality_refresh` · `profile_authoring_*` · `profile_registry_*` · `audit_intelligence_query` · `audit_export_consent_set` · `audit_export_bundle` |
+| **Storage & health** | `health` · `storage_inspect` · `storage_gc_once` · `storage_pressure_sample` · `replay_record` |
+| **EverQuest domain pack** | `everquest_*` — state, memory, planner guard, route plan, map sensor, trajectory/episode export, ContextGraph bridge, predictive model, surprise detection, scorecard |
+
+---
+
+## Under the hood
+
+| Layer | Technology |
+|---|---|
+| Language / runtime | **Rust** (edition 2024), `tokio` |
+| Protocol | **MCP** via `rmcp` — stdio + streamable HTTP/SSE |
+| Perception | Windows UI Automation, Windows Graphics Capture / DXGI duplication, WinRT OCR |
+| Action | Win32 `SendInput` (`enigo`), **ViGEmBus** virtual controllers |
+| Audio | WASAPI loopback + Whisper-tiny STT |
+| Storage | **RocksDB** (11 column families, LZ4 + ZSTD), durable audit trail |
+| Models | ONNX Runtime (`ort`) for optional detection |
+
+Two live input backends: **`software`** (keyboard + mouse via `SendInput`) and
+**`vigem`** (virtual Xbox/DualShock via ViGEmBus). Reflexes, storage GC, and
+disk-pressure handling all run as background tasks inside the server.
+
+---
+
+## About the author
+
+Synapse is designed and built by **Chris Royse** — solo developer, founder of
+**Leapable AI**.
+
+<p align="center">
+  <a href="https://www.youtube.com/@Leapableai"><img src="https://img.shields.io/badge/YouTube-@Leapableai-FF0000?style=for-the-badge&logo=youtube&logoColor=white" alt="YouTube"></a>
+  <a href="https://x.com/ChrisRoyseAI1"><img src="https://img.shields.io/badge/X-@ChrisRoyseAI1-000000?style=for-the-badge&logo=x&logoColor=white" alt="X / Twitter"></a>
+  <a href="https://www.linkedin.com/in/christopher-royse-b624b596/"><img src="https://img.shields.io/badge/LinkedIn-Chris%20Royse-0A66C2?style=for-the-badge&logo=linkedin&logoColor=white" alt="LinkedIn"></a>
+</p>
+
+Follow along on **[YouTube @Leapableai](https://www.youtube.com/@Leapableai)** for
+demos and deep dives, and on **[X @ChrisRoyseAI1](https://x.com/ChrisRoyseAI1)**
+for updates.
+
+---
 
 ## License
 
-Synapse is licensed under either [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE).
+**Synapse is source-available, not open source.**
+
+- ✅ **Free for noncommercial use** under the
+  [PolyForm Noncommercial License 1.0.0](LICENSE.md).
+- 💼 **Commercial or business use** — using Synapse inside a company, or building
+  a product or service with it — requires a separate **paid commercial license**.
+  See [COMMERCIAL-LICENSE.md](COMMERCIAL-LICENSE.md) or email
+  **chrisroyseai@gmail.com**.
+
+Copyright © 2026 Chris Royse. See [LICENSE.md](LICENSE.md) for full terms.
+
+---
+
+<p align="center">
+  <em>Your AI has a brain. Now give it a body.</em><br>
+  <strong>⭐ Star the repo if Synapse is useful to you.</strong>
+</p>
