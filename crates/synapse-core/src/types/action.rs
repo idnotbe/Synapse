@@ -104,6 +104,15 @@ pub enum AimCurve {
     Natural { params: AimNaturalParams },
 }
 
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum VelocityProfile {
+    Constant,
+    Linear,
+    EaseInOut,
+    MinimumJerk,
+}
+
 #[derive(Copy, Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AimNaturalParams {

@@ -15,6 +15,7 @@ pub mod rate_limit;
 pub mod recovery;
 pub mod safety;
 pub mod validation;
+pub mod velocity;
 
 pub use backend::{
     ActionBackend, BackendResolutionPolicy, ResolvedBackend,
@@ -62,3 +63,8 @@ pub use recovery::{
 };
 pub use safety::install_panic_hook;
 pub use validation::{MAX_DRAG_DISTANCE_PX, validate_action};
+pub use velocity::{
+    TimedPathPoint, VelocityError, VelocityResult, fitts_law_duration_ms,
+    normalized_velocity_at_time, position_at_time, sample_timed_arclen_path, sample_timed_path,
+    time_at_position,
+};

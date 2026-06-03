@@ -1,5 +1,5 @@
 use serde_json::json;
-use synapse_core::{PathPoint, PathSpec};
+use synapse_core::{PathPoint, PathSpec, VelocityProfile};
 
 #[test]
 fn path_spec_json_round_trips_and_defaults_catmull_alpha() -> Result<(), Box<dyn std::error::Error>>
@@ -40,6 +40,25 @@ fn path_spec_json_round_trips_and_defaults_catmull_alpha() -> Result<(), Box<dyn
     });
     assert!(serde_json::from_value::<PathSpec>(unknown_field.clone()).is_err());
     println!("readback=path_types edge=unknown_field before={unknown_field} after=rejected");
+
+    Ok(())
+}
+
+#[test]
+fn velocity_profile_json_round_trips() -> Result<(), Box<dyn std::error::Error>> {
+    let cases = [
+        VelocityProfile::Constant,
+        VelocityProfile::Linear,
+        VelocityProfile::EaseInOut,
+        VelocityProfile::MinimumJerk,
+    ];
+
+    for profile in cases {
+        let json = serde_json::to_value(profile)?;
+        let parsed = serde_json::from_value::<VelocityProfile>(json.clone())?;
+        println!("readback=path_types edge=velocity_profile_round_trip after={json}");
+        assert_eq!(parsed, profile);
+    }
 
     Ok(())
 }

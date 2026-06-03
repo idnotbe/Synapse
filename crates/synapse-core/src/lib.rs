@@ -27,7 +27,7 @@ pub use types::{
     ReflexStatus, ReflexThen, SensorStatus, SessionId, Size, SourceRef, Stick, StoredAppContext,
     StoredAuditContext, StoredBackendPolicy, StoredEvent, StoredObservation,
     StoredProfileHistoryEntry, StoredRedaction, StoredReflexAudit, StoredReflexStep, StoredSession,
-    SubscriptionId, SubsystemHealth, Trigger, UiaPattern, WindowEdge,
+    SubscriptionId, SubsystemHealth, Trigger, UiaPattern, VelocityProfile, WindowEdge,
     default_hud_confidence_threshold, element_id, entity_id, new_reflex_id, new_session_id,
     new_subscription_id,
 };
