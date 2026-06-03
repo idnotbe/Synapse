@@ -27,11 +27,10 @@ pub async fn act_click_with_handle(
     let double_click_timing = cached_double_click_timing();
     // #686: a web element id (cdcd sentinel) routes through CDP instead of UIA.
     #[cfg(windows)]
-    if let ActClickTarget::Element(element) = &params.target {
-        if let Some(backend) = synapse_a11y::cdp_backend_from_element_id(&element.element_id) {
-            return execute_cdp_click(&params, element, backend, double_click_timing, started)
-                .await;
-        }
+    if let ActClickTarget::Element(element) = &params.target
+        && let Some(backend) = synapse_a11y::cdp_backend_from_element_id(&element.element_id)
+    {
+        return execute_cdp_click(&params, element, backend, double_click_timing, started).await;
     }
     if let ActClickTarget::Element(element) = &params.target {
         return element::execute_element_click(

@@ -3,7 +3,7 @@
 //! `Accessibility.getFullAXTree`, and print the mapped nodes + one box model.
 //!
 //! Usage (Windows only — CDP attach is a `cfg(windows)` capability):
-//!   cargo run -p synapse-a11y --example cdp_axtree_probe -- http://127.0.0.1:9222
+//!   `cargo run -p synapse-a11y --example cdp_axtree_probe -- <http://127.0.0.1:9222>`
 //!
 //! Synthetic known input → known expected output: the navigated page contains a
 //! heading "Hello FSV", a button "Apply", a link "YC Link", and an email

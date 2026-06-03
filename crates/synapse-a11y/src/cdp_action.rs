@@ -75,7 +75,7 @@ pub async fn cdp_click_node(
                 0,
             ))
             .await
-            .map_err(dispatch_err)?;
+            .map_err(|err| dispatch_err(&err))?;
             page.execute(mouse_event(
                 DispatchMouseEventType::MousePressed,
                 center,
@@ -83,7 +83,7 @@ pub async fn cdp_click_node(
                 click_count.max(1),
             ))
             .await
-            .map_err(dispatch_err)?;
+            .map_err(|err| dispatch_err(&err))?;
             page.execute(mouse_event(
                 DispatchMouseEventType::MouseReleased,
                 center,
@@ -91,7 +91,7 @@ pub async fn cdp_click_node(
                 click_count.max(1),
             ))
             .await
-            .map_err(dispatch_err)?;
+            .map_err(|err| dispatch_err(&err))?;
             Ok(center)
         },
     )
@@ -125,7 +125,7 @@ pub async fn cdp_type_node(
                 1,
             ))
             .await
-            .map_err(dispatch_err)?;
+            .map_err(|err| dispatch_err(&err))?;
             page.execute(mouse_event(
                 DispatchMouseEventType::MouseReleased,
                 center,
@@ -133,7 +133,7 @@ pub async fn cdp_type_node(
                 1,
             ))
             .await
-            .map_err(dispatch_err)?;
+            .map_err(|err| dispatch_err(&err))?;
             // The click above already places focus/caret in the field. DOM.focus is
             // a best-effort reinforcement — some nodes (e.g. the AX node maps to a
             // non-focusable wrapper) report "not focusable", which must not abort the
@@ -144,7 +144,7 @@ pub async fn cdp_type_node(
             let _ = page.execute(focus).await;
             page.execute(InsertTextParams::new(text))
                 .await
-                .map_err(dispatch_err)?;
+                .map_err(|err| dispatch_err(&err))?;
             Ok(center)
         },
     )
@@ -168,6 +168,35 @@ pub async fn cdp_node_viewport_center(
         page_title_hint,
         backend_node_id,
         |_page, center| async move { Ok(center) },
+    )
+    .await
+}
+
+/// Moves the in-page CDP pointer over a web node after scrolling it into view.
+///
+/// # Errors
+///
+/// As [`cdp_click_node`].
+pub async fn cdp_aim_node(
+    endpoint: &str,
+    page_title_hint: &str,
+    backend_node_id: i64,
+) -> A11yResult<CdpActionPoint> {
+    with_node_center(
+        endpoint,
+        page_title_hint,
+        backend_node_id,
+        |page, center| async move {
+            page.execute(mouse_event(
+                DispatchMouseEventType::MouseMoved,
+                center,
+                MouseButton::None,
+                0,
+            ))
+            .await
+            .map_err(|err| dispatch_err(&err))?;
+            Ok(center)
+        },
     )
     .await
 }
@@ -196,7 +225,7 @@ fn mouse_event(
     params
 }
 
-fn dispatch_err(err: chromiumoxide::error::CdpError) -> A11yError {
+fn dispatch_err(err: &chromiumoxide::error::CdpError) -> A11yError {
     A11yError::CdpAxtreeFailed {
         detail: format!("CDP input dispatch failed: {err}"),
     }
@@ -242,6 +271,8 @@ where
     let handler_task = tokio::spawn(async move { while handler.next().await.is_some() {} });
 
     let result = async {
+        use chromiumoxide::cdp::browser_protocol::dom::GetDocumentParams;
+
         // A fresh CDP connection discovers existing page targets asynchronously
         // via its handler, so pages() can briefly return empty — poll until the
         // browser's targets show up.
@@ -253,7 +284,6 @@ where
         // page is first primed with DOM.getDocument because a fresh CDP
         // connection has not been pushed the page's DOM (observe() and act_* use
         // separate connections, so priming is required, not optional).
-        use chromiumoxide::cdp::browser_protocol::dom::GetDocumentParams;
         let mut ordered = Vec::with_capacity(pages.len());
         let mut tail = Vec::new();
         for page in pages {
@@ -321,20 +351,46 @@ mod tests {
     #[test]
     fn mouse_event_buttons_bitmask_is_set_only_while_pressed() {
         let point = CdpActionPoint { x: 10.0, y: 20.0 };
-        let pressed = mouse_event(DispatchMouseEventType::MousePressed, point, MouseButton::Left, 1);
-        let released =
-            mouse_event(DispatchMouseEventType::MouseReleased, point, MouseButton::Left, 1);
-        let moved = mouse_event(DispatchMouseEventType::MouseMoved, point, MouseButton::Left, 0);
+        let pressed = mouse_event(
+            DispatchMouseEventType::MousePressed,
+            point,
+            MouseButton::Left,
+            1,
+        );
+        let released = mouse_event(
+            DispatchMouseEventType::MouseReleased,
+            point,
+            MouseButton::Left,
+            1,
+        );
+        let moved = mouse_event(
+            DispatchMouseEventType::MouseMoved,
+            point,
+            MouseButton::Left,
+            0,
+        );
+        let hover = mouse_event(
+            DispatchMouseEventType::MouseMoved,
+            point,
+            MouseButton::None,
+            0,
+        );
         println!(
-            "readback=mouse_event buttons pressed:{:?} released:{:?} moved:{:?}",
-            pressed.buttons, released.buttons, moved.buttons
+            "readback=mouse_event buttons pressed:{:?} released:{:?} moved:{:?} hover_button:{:?}",
+            pressed.buttons, released.buttons, moved.buttons, hover.button
         );
         assert_eq!(pressed.buttons, Some(1), "left press must hold bit 1");
         assert_eq!(released.buttons, Some(0), "release must clear the bitmask");
         assert_eq!(moved.buttons, Some(0), "move must not hold any button");
+        assert_eq!(hover.button, Some(MouseButton::None));
         assert_eq!(pressed.click_count, Some(1));
 
-        let right = mouse_event(DispatchMouseEventType::MousePressed, point, MouseButton::Right, 1);
+        let right = mouse_event(
+            DispatchMouseEventType::MousePressed,
+            point,
+            MouseButton::Right,
+            1,
+        );
         assert_eq!(right.buttons, Some(2), "right press must hold bit 2");
     }
 

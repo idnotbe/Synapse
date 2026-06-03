@@ -6,7 +6,9 @@ use serde::{Deserialize, Serialize};
 use synapse_action::{
     ActionBackend, ActionError, ActionHandle, EmitState, RecordedInput, RecordingBackend,
 };
-use synapse_core::{Action, AimCurve, AimNaturalParams, Backend, ElementId, MouseTarget, Point};
+use synapse_core::{
+    Action, AimCurve, AimNaturalParams, Backend, ElementId, MouseTarget, Point, error_codes,
+};
 
 use crate::m1::mcp_error;
 
@@ -91,6 +93,13 @@ pub async fn act_aim_with_handle(
     params: ActAimParams,
 ) -> Result<ActAimResponse, ErrorData> {
     let started = Instant::now();
+    #[cfg(windows)]
+    if let ActAimTarget::Element(element) = &params.target
+        && let Some(backend_node_id) =
+            synapse_a11y::cdp_backend_from_element_id(&element.element_id)
+    {
+        return execute_cdp_aim(&params, element, backend_node_id, started).await;
+    }
     let target = mouse_target(&params)?;
     let duration_ms = duration_ms(&params);
     let backend = params.backend.to_backend();
@@ -117,6 +126,57 @@ pub async fn act_aim_with_handle(
         style_used: params.style,
         duration_ms,
         backend_used: backend_used_name(backend).to_owned(),
+        elapsed_ms: u32::try_from(started.elapsed().as_millis()).unwrap_or(u32::MAX),
+    })
+}
+
+#[cfg(windows)]
+async fn execute_cdp_aim(
+    params: &ActAimParams,
+    element: &ActAimElementTarget,
+    backend_node_id: i64,
+    started: Instant,
+) -> Result<ActAimResponse, ErrorData> {
+    if params.style == AimStyleParam::Track {
+        return Err(track_unavailable());
+    }
+    let hwnd = element
+        .element_id
+        .parts()
+        .map_err(|err| {
+            mcp_error(
+                error_codes::ACTION_ELEMENT_NOT_RESOLVED,
+                format!("web element id is malformed: {err}"),
+            )
+        })?
+        .hwnd;
+    let endpoint = synapse_a11y::endpoint_for_window(hwnd).ok_or_else(|| {
+        mcp_error(
+            error_codes::A11Y_CDP_UNREACHABLE,
+            format!(
+                "no reachable CDP endpoint for web element {} (browser closed or debug port gone)",
+                element.element_id
+            ),
+        )
+    })?;
+    let title_hint = synapse_a11y::foreground_context(hwnd)
+        .map(|context| context.window_title)
+        .unwrap_or_default();
+    let landed = synapse_a11y::cdp_aim_node(&endpoint, &title_hint, backend_node_id)
+        .await
+        .map_err(|err| mcp_error(err.code(), err.to_string()))?;
+    tracing::info!(
+        code = "M2_ACT_AIM_CDP_MOVED",
+        element_id = %element.element_id,
+        x = landed.x,
+        y = landed.y,
+        "readback=act_aim element method=cdp_mouse_moved"
+    );
+    Ok(ActAimResponse {
+        ok: true,
+        style_used: params.style,
+        duration_ms: 0,
+        backend_used: "cdp".to_owned(),
         elapsed_ms: u32::try_from(started.elapsed().as_millis()).unwrap_or(u32::MAX),
     })
 }

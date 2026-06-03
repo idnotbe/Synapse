@@ -149,8 +149,10 @@ fn spawn_detached_daemon(bind: &str, db: Option<&Path>) -> anyhow::Result<()> {
         .chain(std::iter::once(0))
         .collect();
 
-    let mut startup_info = STARTUPINFOW::default();
-    startup_info.cb = u32::try_from(core::mem::size_of::<STARTUPINFOW>()).unwrap_or(0);
+    let startup_info = STARTUPINFOW {
+        cb: u32::try_from(core::mem::size_of::<STARTUPINFOW>()).unwrap_or(0),
+        ..Default::default()
+    };
     let mut process_info = PROCESS_INFORMATION::default();
 
     // SAFETY: command_line_w is a writable, NUL-terminated UTF-16 buffer kept

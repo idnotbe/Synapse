@@ -389,6 +389,7 @@ pub fn launch_request_details(params: &ActLaunchParams) -> serde_json::Value {
         "wait_for_window_title_regex": params.wait_for_window_title_regex,
         "timeout_ms": params.timeout_ms,
         "idempotency_key_present": params.idempotency_key.is_some(),
+        "cdp_debug": params.cdp_debug,
         "windows_new_console": launch_target_needs_new_console(&params.target),
         "request_sha256": launch_request_sha256(params).ok(),
     })
@@ -427,6 +428,10 @@ pub fn launch_process_history_row(
         "matched_title": response.matched_title,
         "launched_at": response.launched_at,
         "reason": response.reason,
+        "cdp_debug": params.cdp_debug,
+        "cdp_debug_port": response.cdp_debug_port,
+        "cdp_endpoint": response.cdp_endpoint,
+        "cdp_user_data_dir": response.cdp_user_data_dir,
     });
     encode_json(&row).map_err(|error| {
         mcp_error(
@@ -1446,19 +1451,7 @@ async fn wait_for_launch_window(
                     launch_target_name,
                     launch_args,
                 ) {
-                    // Best-effort foreground so the launched window is
-                    // immediately actionable/observable. Without this, a newly
-                    // launched window can open behind the caller's foreground
-                    // (Windows foreground-stealing prevention), leaving observe
-                    // pointed at the previous window.
-                    if let Err(error) = synapse_a11y::focus_window(context.hwnd) {
-                        tracing::warn!(
-                            code = "M4_ACT_LAUNCH_FOCUS_FAILED",
-                            hwnd = context.hwnd,
-                            error = %error,
-                            "act_launch matched the launched window but could not foreground it"
-                        );
-                    }
+                    focus_launch_window(context.hwnd).await;
                     return WindowWaitResult::matched(context.clone());
                 }
                 last_error = None;
@@ -1489,6 +1482,33 @@ async fn wait_for_launch_window(
         }
         tokio::time::sleep(Duration::from_millis(LAUNCH_WINDOW_POLL_INTERVAL_MS)).await;
     }
+}
+
+async fn focus_launch_window(hwnd: i64) {
+    let mut last_error = None;
+    for attempt in 1..=10 {
+        match synapse_a11y::focus_window(hwnd) {
+            Ok(()) => {
+                tracing::info!(
+                    code = "M4_ACT_LAUNCH_FOCUSED",
+                    hwnd,
+                    attempt,
+                    "act_launch foregrounded the matched window"
+                );
+                return;
+            }
+            Err(error) => {
+                last_error = Some(error.to_string());
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        }
+    }
+    tracing::warn!(
+        code = "M4_ACT_LAUNCH_FOCUS_FAILED",
+        hwnd,
+        error = ?last_error,
+        "act_launch matched the launched window but could not foreground it after retries"
+    );
 }
 
 fn select_launch_window<'a>(
@@ -2932,9 +2952,46 @@ mod tests {
         assert_eq!(value["hwnd"], 5678);
         assert_eq!(value["matched_title"], "launch.txt - Notepad");
         assert_eq!(value["env_keys"], json!(["SYNAPSE_LAUNCH_SECRET"]));
+        assert_eq!(value["cdp_debug"], serde_json::Value::Null);
+        assert_eq!(value["cdp_debug_port"], serde_json::Value::Null);
+        assert_eq!(value["cdp_endpoint"], serde_json::Value::Null);
+        assert_eq!(value["cdp_user_data_dir"], serde_json::Value::Null);
         assert!(!String::from_utf8_lossy(&row).contains("do-not-store"));
         assert!(
             String::from_utf8_lossy(&launch_process_history_row_key(&response)).contains("1234")
+        );
+    }
+
+    #[test]
+    fn launch_process_history_row_records_cdp_launch_fields() {
+        let mut params = launch_params("chrome.exe", vec!["https://example.test"], 10_000);
+        params.cdp_debug = Some(true);
+        let response = ActLaunchResponse {
+            pid: 2222,
+            hwnd: Some(3333),
+            matched_title: Some("Synthetic CDP Page - Google Chrome".to_owned()),
+            launched_at: "2026-06-03T23:00:00Z".to_owned(),
+            reason: None,
+            cdp_debug_port: Some(45678),
+            cdp_endpoint: Some("http://127.0.0.1:45678".to_owned()),
+            cdp_user_data_dir: Some("C:\\Temp\\synapse-cdp-profiles\\synthetic".to_owned()),
+        };
+
+        let row = launch_process_history_row(&params, &response)
+            .unwrap_or_else(|error| panic!("process history row should encode: {error}"));
+        let value: serde_json::Value = serde_json::from_slice(&row)
+            .unwrap_or_else(|error| panic!("process history row should decode: {error}"));
+
+        println!(
+            "readback=act_launch_history_cdp before=port:{:?} after=row_port:{} endpoint:{}",
+            response.cdp_debug_port, value["cdp_debug_port"], value["cdp_endpoint"]
+        );
+        assert_eq!(value["cdp_debug"], true);
+        assert_eq!(value["cdp_debug_port"], 45678);
+        assert_eq!(value["cdp_endpoint"], "http://127.0.0.1:45678");
+        assert_eq!(
+            value["cdp_user_data_dir"],
+            "C:\\Temp\\synapse-cdp-profiles\\synthetic"
         );
     }
 

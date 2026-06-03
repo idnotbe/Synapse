@@ -1,12 +1,12 @@
 //! Manual de-risking probe for #686 (NOT FSV-gated): drive the real CDP action
 //! functions against a live Chromium and verify the DOM actually changed.
 //!
-//! Usage (Windows only): cargo run -p synapse-a11y --example cdp_action_probe -- http://127.0.0.1:9222
+//! Usage (Windows only): `cargo run -p synapse-a11y --example cdp_action_probe -- <http://127.0.0.1:9222>`
 //!
-//! Known input → known output: a page with a button whose onclick sets
-//! `document.title='CLICKED'`, and a text input. We CDP-click the button and
-//! CDP-type into the input, then read the title and the input value back to
-//! prove the actions landed.
+//! Known input → known output: a page (title `FSVPAGE`) with a button whose
+//! onclick sets `body[data-clicked]=yes`, and a text input. We CDP-click the
+//! button and CDP-type into the input, then read the attribute and the input
+//! value back to prove the actions landed.
 
 #[cfg(windows)]
 #[tokio::main]
@@ -51,10 +51,10 @@ mod windows_impl {
             let role = ax_str(node.role.as_ref());
             match role.as_str() {
                 "button" => {
-                    button_backend = node.backend_dom_node_id.as_ref().map(|id| *id.inner())
+                    button_backend = node.backend_dom_node_id.as_ref().map(|id| *id.inner());
                 }
                 "textbox" => {
-                    input_backend = node.backend_dom_node_id.as_ref().map(|id| *id.inner())
+                    input_backend = node.backend_dom_node_id.as_ref().map(|id| *id.inner());
                 }
                 _ => {}
             }

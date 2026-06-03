@@ -77,10 +77,12 @@ pub fn cdp_backend_from_element_id(id: &ElementId) -> Option<i64> {
     Some(i64::from_ne_bytes(unsigned.to_ne_bytes()))
 }
 
-/// Pure mapping: CDP nodes → `AccessibleNode`s with stable ids, depth computed
-/// from the parent-backend chain, and bounds carried through. Nodes are returned
-/// in input order, capped at `max_nodes`. The mapping never invents data — a node
-/// with no box model gets a zero `bbox` (callers may filter on it).
+/// Pure mapping: CDP nodes → `AccessibleNode`s.
+///
+/// The mapper assigns stable ids, computes depth from the parent-backend chain,
+/// and carries bounds through. Nodes are returned in input order, capped at
+/// `max_nodes`. The mapping never invents data — a node with no box model gets a
+/// zero `bbox` (callers may filter on it).
 #[must_use]
 pub fn build_accessible_nodes(
     hwnd: i64,
@@ -192,9 +194,11 @@ pub struct CdpDomSnapshot {
     pub page_url: String,
 }
 
-/// Attaches CDP at `endpoint`, selects the page matching `foreground_title`
-/// (falling back to the first page), pulls `Accessibility.getFullAXTree` and
-/// per-node box models, and maps everything into queryable [`AccessibleNode`]s
+/// Attaches CDP at `endpoint` and maps the selected tab into web nodes.
+///
+/// The selected tab prefers the page matching `foreground_title`, falling back
+/// to the first page. The snapshot pulls `Accessibility.getFullAXTree` and
+/// per-node box models, then maps everything into queryable [`AccessibleNode`]s
 /// owned by `hwnd`.
 ///
 /// Fail-loud: any attach/tree failure returns an `A11yError` with a specific
@@ -207,7 +211,11 @@ pub struct CdpDomSnapshot {
 /// or no page target exists, and [`crate::A11yError::CdpAxtreeFailed`] when the
 /// accessibility tree cannot be retrieved.
 #[cfg(windows)]
-#[allow(clippy::future_not_send)]
+#[allow(
+    clippy::future_not_send,
+    clippy::too_many_lines,
+    reason = "single CDP attach/read transaction keeps browser handler lifetime explicit"
+)]
 pub async fn fetch_dom_snapshot(
     endpoint: &str,
     hwnd: i64,
@@ -232,17 +240,7 @@ pub async fn fetch_dom_snapshot(
     let handler_task = tokio::spawn(async move { while handler.next().await.is_some() {} });
 
     let result = async {
-        let pages = browser
-            .pages()
-            .await
-            .map_err(|err| A11yError::CdpAttachFailed {
-                detail: format!("list pages: {err}"),
-            })?;
-        if pages.is_empty() {
-            return Err(A11yError::CdpAttachFailed {
-                detail: "no page targets attached to the browser".to_owned(),
-            });
-        }
+        let pages = wait_for_pages(&browser).await?;
 
         // Prefer the page whose title matches the foreground window title; else the
         // first page target.
@@ -339,6 +337,28 @@ pub async fn fetch_dom_snapshot(
 
     handler_task.abort();
     result
+}
+
+#[cfg(windows)]
+async fn wait_for_pages(
+    browser: &chromiumoxide::Browser,
+) -> crate::A11yResult<Vec<chromiumoxide::Page>> {
+    use crate::A11yError;
+
+    for _ in 0..30 {
+        match browser.pages().await {
+            Ok(pages) if !pages.is_empty() => return Ok(pages),
+            Ok(_) => tokio::time::sleep(std::time::Duration::from_millis(100)).await,
+            Err(err) => {
+                return Err(A11yError::CdpAttachFailed {
+                    detail: format!("list pages: {err}"),
+                });
+            }
+        }
+    }
+    Err(A11yError::CdpAttachFailed {
+        detail: "no page targets became available within 3s".to_owned(),
+    })
 }
 
 /// Extracts the string value of a CDP `AxValue` (role/name/value), empty if none.

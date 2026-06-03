@@ -41,6 +41,9 @@ pub fn element_match(node: &AccessibleNode, params: &FindParams) -> Option<FindR
     if node.focused {
         score += 0.1;
     }
+    if synapse_a11y::cdp_backend_from_element_id(&node.element_id).is_some() {
+        score += 0.05;
+    }
     Some(FindResult {
         kind: FindResultKind::Element,
         element_id: Some(node.element_id.clone()),
@@ -73,4 +76,58 @@ fn contains_ascii_case(value: &str, needle: &str) -> bool {
     value
         .to_ascii_lowercase()
         .contains(&needle.to_ascii_lowercase())
+}
+
+#[cfg(test)]
+mod tests {
+    use synapse_core::{AccessibleNode, Rect, element_id};
+
+    use super::*;
+
+    fn node(element_id: synapse_core::ElementId, automation_id: &str) -> AccessibleNode {
+        AccessibleNode {
+            element_id,
+            parent: None,
+            name: "Apply".to_owned(),
+            role: "button".to_owned(),
+            automation_id: Some(automation_id.to_owned()),
+            value: None,
+            bbox: Rect {
+                x: 0,
+                y: 0,
+                w: 10,
+                h: 10,
+            },
+            enabled: true,
+            focused: false,
+            patterns: Vec::new(),
+            children_count: 0,
+            depth: 0,
+        }
+    }
+
+    #[test]
+    fn cdp_duplicate_scores_above_uia_duplicate_for_actionable_find_result() {
+        let params = FindParams {
+            role: Some("button".to_owned()),
+            name_substring: Some("Apply".to_owned()),
+            ..FindParams::default()
+        };
+        let uia = node(element_id(0x100, "0000002a00000008"), "apply");
+        let cdp = node(
+            synapse_a11y::cdp_element_id(0x100, 8),
+            "cdp:backendNodeId=8",
+        );
+
+        let uia_score = element_match(&uia, &params).expect("uia result").score;
+        let cdp_score = element_match(&cdp, &params).expect("cdp result").score;
+
+        println!(
+            "readback=find_score edge=cdp_duplicate before=uia:{uia_score} after=cdp:{cdp_score}"
+        );
+        assert!(
+            cdp_score > uia_score,
+            "find should prefer actionable CDP web nodes over UIA duplicates"
+        );
+    }
 }

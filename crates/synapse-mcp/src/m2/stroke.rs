@@ -366,7 +366,7 @@ fn current_virtual_screen_bounds() -> Result<Option<StrokeScreenBounds>, ErrorDa
                 ),
             ));
         }
-        return Ok(Some(StrokeScreenBounds {
+        Ok(Some(StrokeScreenBounds {
             rect: Rect {
                 x: left,
                 y: top,
@@ -374,7 +374,7 @@ fn current_virtual_screen_bounds() -> Result<Option<StrokeScreenBounds>, ErrorDa
                 h: height,
             },
             source: "GetSystemMetrics(SM_*VIRTUALSCREEN)",
-        }));
+        }))
     }
 
     #[cfg(not(windows))]

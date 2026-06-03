@@ -44,6 +44,23 @@ pub(super) async fn serve(
 ) -> anyhow::Result<ExitCode> {
     synapse_action::install_panic_hook();
 
+    // Validate the bind address first — a pure argument check with no side
+    // effects. Doing this before acquiring the single-instance lock means a
+    // misconfigured non-loopback bind always fails with HTTP_BIND_NON_LOOPBACK_
+    // REFUSED (exit 2), even when another daemon already holds the DB lock
+    // (which would otherwise short-circuit to exit 3 and mask the real problem).
+    let addr = bind
+        .parse::<SocketAddr>()
+        .with_context(|| format!("parse HTTP bind address {bind}"))?;
+    if !addr.ip().is_loopback() && !allow_non_loopback {
+        tracing::error!(
+            code = synapse_core::error_codes::HTTP_BIND_NON_LOOPBACK_REFUSED,
+            bind = %addr,
+            "refusing non-loopback HTTP bind without --allow-non-loopback"
+        );
+        return Ok(ExitCode::from(2));
+    }
+
     // Single-instance guard: at most one daemon may own a given RocksDB path.
     // Acquired before binding the port or opening storage so a duplicate launch
     // fails fast with a clear, holder-naming error instead of a cryptic RocksDB
@@ -81,18 +98,7 @@ pub(super) async fn serve(
         }
     };
 
-    let addr = bind
-        .parse::<SocketAddr>()
-        .with_context(|| format!("parse HTTP bind address {bind}"))?;
     if !addr.ip().is_loopback() {
-        if !allow_non_loopback {
-            tracing::error!(
-                code = synapse_core::error_codes::HTTP_BIND_NON_LOOPBACK_REFUSED,
-                bind = %addr,
-                "refusing non-loopback HTTP bind without --allow-non-loopback"
-            );
-            return Ok(ExitCode::from(2));
-        }
         tracing::warn!(
             code = "MCP_HTTP_NON_LOOPBACK_BIND_ALLOWED",
             bind = %addr,
