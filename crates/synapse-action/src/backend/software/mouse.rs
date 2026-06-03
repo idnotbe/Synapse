@@ -250,12 +250,12 @@ fn send_absolute_mouse_move(point: Point, detail: &'static str) -> Result<(), Ac
     }
 
     let compensation = dpi_compensation_for_point(point);
-    if let Some(compensation) = compensation {
-        if set_physical_cursor_pos(compensation.adjusted, detail) {
-            let compensated_actual = read_physical_cursor_position(detail)?;
-            if cursor_readback_matches(point, compensated_actual) {
-                return Ok(());
-            }
+    if let Some(compensation) = compensation
+        && set_physical_cursor_pos(compensation.adjusted, detail)
+    {
+        let compensated_actual = read_physical_cursor_position(detail)?;
+        if cursor_readback_matches(point, compensated_actual) {
+            return Ok(());
         }
     }
 
