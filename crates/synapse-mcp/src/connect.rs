@@ -40,6 +40,7 @@ async fn probe_health(bind: &str, token: &str) -> bool {
 /// Spawn the shared daemon detached (its own stdio = null so it never writes to
 /// the bridge's MCP stdout, and it outlives the bridge). The T1 single-instance
 /// guard ensures that if several bridges race to spawn, only one daemon wins.
+#[cfg(not(windows))]
 fn spawn_detached_daemon(bind: &str, db: Option<&Path>) -> anyhow::Result<()> {
     let exe = std::env::current_exe().context("resolve current executable path")?;
     let mut cmd = std::process::Command::new(exe);
@@ -50,15 +51,66 @@ fn spawn_detached_daemon(bind: &str, db: Option<&Path>) -> anyhow::Result<()> {
     cmd.stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        // DETACHED_PROCESS (no inherited console) | CREATE_NO_WINDOW.
-        const DETACHED_PROCESS: u32 = 0x0000_0008;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        cmd.creation_flags(DETACHED_PROCESS | CREATE_NO_WINDOW);
-    }
     cmd.spawn().context("spawn shared daemon process")?;
+    Ok(())
+}
+
+/// Spawn the daemon on Windows with `bInheritHandles = FALSE` via
+/// `CreateProcessW`. This is critical: `std::process::Command` spawns with
+/// handle inheritance enabled, which would leak the stdio pipe handles
+/// connecting an MCP client to this bridge into the long-lived daemon — keeping
+/// those pipes open so the client could never detect the bridge exiting. With
+/// inheritance disabled the detached daemon shares none of our handles.
+#[cfg(windows)]
+fn spawn_detached_daemon(bind: &str, db: Option<&Path>) -> anyhow::Result<()> {
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Threading::{
+        CREATE_NO_WINDOW, CreateProcessW, DETACHED_PROCESS, PROCESS_INFORMATION, STARTUPINFOW,
+    };
+    use windows::core::{PCWSTR, PWSTR};
+
+    let exe = std::env::current_exe().context("resolve current executable path")?;
+    let mut command_line = String::new();
+    command_line.push('"');
+    command_line.push_str(&exe.to_string_lossy());
+    command_line.push_str("\" --mode http --bind ");
+    command_line.push_str(bind);
+    if let Some(db) = db {
+        command_line.push_str(" --db \"");
+        command_line.push_str(&db.to_string_lossy());
+        command_line.push('"');
+    }
+    let mut command_line_w: Vec<u16> =
+        command_line.encode_utf16().chain(std::iter::once(0)).collect();
+
+    let mut startup_info = STARTUPINFOW::default();
+    startup_info.cb = u32::try_from(core::mem::size_of::<STARTUPINFOW>()).unwrap_or(0);
+    let mut process_info = PROCESS_INFORMATION::default();
+
+    // SAFETY: command_line_w is a writable, NUL-terminated UTF-16 buffer kept
+    // alive across the call; all optional pointers are null; bInheritHandles is
+    // false so the daemon inherits none of this process's handles.
+    let result = unsafe {
+        CreateProcessW(
+            PCWSTR::null(),
+            Some(PWSTR(command_line_w.as_mut_ptr())),
+            None,
+            None,
+            false,
+            DETACHED_PROCESS | CREATE_NO_WINDOW,
+            None,
+            PCWSTR::null(),
+            &startup_info,
+            &mut process_info,
+        )
+    };
+    result.context("CreateProcessW for shared daemon")?;
+
+    // SAFETY: handles from a successful CreateProcessW; we do not need them.
+    unsafe {
+        let _ = CloseHandle(process_info.hProcess);
+        let _ = CloseHandle(process_info.hThread);
+    }
     Ok(())
 }
 
@@ -158,7 +210,11 @@ pub async fn run_connect(bind: &str, db: Option<&Path>) -> anyhow::Result<ExitCo
         }
     }
 
-    let _ = daemon.close().await;
-    let _ = client.close().await;
+    // Bound shutdown: close() can block (e.g. HTTP session-delete, or a daemon
+    // transport whose worker never initialized). Never let cleanup hang the
+    // bridge — any lingering rmcp worker task is aborted when the runtime drops
+    // on return.
+    let _ = tokio::time::timeout(Duration::from_secs(3), daemon.close()).await;
+    let _ = tokio::time::timeout(Duration::from_secs(2), client.close()).await;
     Ok(ExitCode::SUCCESS)
 }
