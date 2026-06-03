@@ -411,6 +411,9 @@ fn collect_nodes(
     Ok(node_id)
 }
 
+// UIA tree-walk recursion threads the full walk context (depth/max_depth, parent id
+// and index, output sink, truncation flag); a wrapper struct would not improve clarity.
+#[allow(clippy::too_many_arguments)]
 fn collect_child_nodes(
     walk: &SnapshotWalk<'_>,
     element: &UIElement,
@@ -488,6 +491,8 @@ fn collect_child_nodes(
     }
 }
 
+// Mirrors `collect_child_nodes`' walk context (see above); same justified arg count.
+#[allow(clippy::too_many_arguments)]
 fn collect_child_nodes_from_bulk(
     walk: &SnapshotWalk<'_>,
     element: &UIElement,

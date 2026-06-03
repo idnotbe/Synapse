@@ -90,12 +90,12 @@ fn assert_impplan_defaults(tools: &[Value]) -> anyhow::Result<Vec<Value>> {
         (
             "audio_tail",
             "inputSchema.properties.seconds.default",
-            json!(5),
+            json!(5.0),
         ),
         (
             "audio_transcribe",
             "inputSchema.properties.seconds.default",
-            json!(5),
+            json!(5.0),
         ),
         (
             "audio_transcribe",
