@@ -161,6 +161,10 @@ pub struct M3State {
     pub allow_unknown_profile: bool,
     pub reflex_force_degraded: bool,
     pub storage_pressure_free_bytes_sample: Option<u64>,
+    /// Shared RocksDB handle. Opened once (eagerly at daemon startup, or lazily
+    /// on first reflex use) and reused by the reflex runtime so there is never
+    /// a second open of the same path within this process.
+    pub db: Option<Arc<Db>>,
     pub storage_last_error: Option<String>,
     pub reflex_last_error: Option<String>,
     pub profile_last_error: Option<String>,
@@ -280,6 +284,7 @@ impl M3State {
             allow_unknown_profile,
             reflex_force_degraded,
             storage_pressure_free_bytes_sample,
+            db: None,
             storage_last_error: None,
             reflex_last_error: None,
             profile_last_error: None,
@@ -321,6 +326,37 @@ impl M3State {
         Ok(runtime)
     }
 
+    /// Open the shared RocksDB handle once and cache it; subsequent callers
+    /// (including the reflex runtime) reuse the same handle, so the path is
+    /// never opened twice within this process. Called eagerly at daemon startup
+    /// for fail-fast lock/schema detection, and lazily otherwise.
+    ///
+    /// # Errors
+    ///
+    /// Returns the underlying [`synapse_storage::StorageError`] (lock held by
+    /// another process, schema mismatch, etc.) and records it in
+    /// `storage_last_error`.
+    pub fn ensure_storage(
+        &mut self,
+    ) -> std::result::Result<Arc<Db>, synapse_storage::StorageError> {
+        if let Some(db) = &self.db {
+            return Ok(Arc::clone(db));
+        }
+        let db_path = self.db_path.clone().unwrap_or_else(default_db_path);
+        match Db::open(&db_path, SCHEMA_VERSION) {
+            Ok(db) => {
+                let db = Arc::new(db);
+                self.db = Some(Arc::clone(&db));
+                self.storage_last_error = None;
+                Ok(db)
+            }
+            Err(error) => {
+                self.storage_last_error = Some(error.to_string());
+                Err(error)
+            }
+        }
+    }
+
     pub fn ensure_reflex_runtime(
         &mut self,
         action_handle: ActionHandle,
@@ -335,15 +371,7 @@ impl M3State {
             });
         }
 
-        let db_path = self.db_path.clone().unwrap_or_else(default_db_path);
-        let db = match Db::open(&db_path, SCHEMA_VERSION) {
-            Ok(db) => Arc::new(db),
-            Err(error) => {
-                self.storage_last_error = Some(error.to_string());
-                return Err(error.into());
-            }
-        };
-        self.storage_last_error = None;
+        let db = self.ensure_storage()?;
         if let Some(free_bytes) = self.storage_pressure_free_bytes_sample
             && let Err(error) = db.run_pressure_check_with_free_bytes_sample(free_bytes)
         {

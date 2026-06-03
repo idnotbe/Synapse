@@ -43,6 +43,7 @@ impl SynapseService {
             ok,
             version: env!("CARGO_PKG_VERSION").to_owned(),
             build: option_env!("VERGEN_GIT_SHA").unwrap_or("dev").to_owned(),
+            pid: std::process::id(),
             uptime_s: self.started_at.elapsed().as_secs(),
             subsystems,
         }
@@ -64,6 +65,17 @@ impl SynapseService {
                     };
                 }
                 let Some(runtime) = &state.reflex_runtime else {
+                    if state.db.is_some() {
+                        return SubsystemHealth {
+                            status: "ok".to_owned(),
+                            detail: Some(
+                                "storage opened at daemon startup (reflex runtime idle)".to_owned(),
+                            ),
+                            db_path,
+                            schema_version: Some(synapse_core::SCHEMA_VERSION),
+                            ..SubsystemHealth::default()
+                        };
+                    }
                     return SubsystemHealth {
                         status: "initializing".to_owned(),
                         detail: Some("storage opens on first reflex tool call".to_owned()),

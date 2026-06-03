@@ -117,6 +117,46 @@ pub(super) async fn serve(
         m4_config,
     )
     .context("initialize shared HTTP service state")?;
+
+    // Eager storage open: validate RocksDB at startup rather than lazily on the
+    // first reflex tool call, so a lock/schema fault fails fast with a clear
+    // error and the daemon refuses to start half-broken (instead of every tool
+    // call failing later). The handle is cached and reused by the reflex
+    // runtime, so there is no open-then-reopen race.
+    {
+        let m3_handle = service.m3_state_handle();
+        let open_result = {
+            let mut state = m3_handle.lock().map_err(|_poisoned| {
+                anyhow::anyhow!("m3 service state lock poisoned during startup storage open")
+            })?;
+            state.ensure_storage()
+        };
+        if let Err(error) = open_result {
+            let detail = error.to_string();
+            if detail.to_lowercase().contains("lock") {
+                tracing::error!(
+                    code = "STORAGE_LOCK_CONTENDED",
+                    db_path = %db_path.display(),
+                    detail = %detail,
+                    "refusing to start: RocksDB storage lock is held by another process; run `synapse-mcp doctor` to find and stop the holder, or point this daemon at a different --db path"
+                );
+            } else {
+                tracing::error!(
+                    code = "STORAGE_OPEN_FAILED",
+                    db_path = %db_path.display(),
+                    detail = %detail,
+                    "refusing to start: storage open failed at daemon startup"
+                );
+            }
+            return Ok(ExitCode::from(4));
+        }
+        tracing::info!(
+            code = "MCP_DAEMON_STORAGE_OPENED",
+            db_path = %db_path.display(),
+            "daemon storage opened eagerly at startup"
+        );
+    }
+
     let _operator_hotkey_guard = crate::safety::install_operator_hotkey(service.m3_state_handle())
         .context("install operator panic hotkey")?;
     let app = router(&shutdown_cancel, local_addr, sse_state, service)

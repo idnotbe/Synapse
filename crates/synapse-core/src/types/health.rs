@@ -11,6 +11,10 @@ pub struct Health {
     pub ok: bool,
     pub version: String,
     pub build: String,
+    /// OS process ID of the daemon serving this payload. Lets bridges and
+    /// `doctor` confirm which process answered and that all clients share one
+    /// daemon.
+    pub pid: u32,
     pub uptime_s: u64,
     pub subsystems: BTreeMap<String, SubsystemHealth>,
 }
