@@ -10,6 +10,7 @@ pub mod error;
 pub mod handle;
 pub mod hotkey;
 pub mod invoke;
+pub mod path;
 pub mod rate_limit;
 pub mod recovery;
 pub mod safety;
@@ -48,6 +49,7 @@ pub use hotkey::{
 pub use invoke::{
     CoordinateFallbackPlan, ElementClickOutcome, click_element_or_fallback, invoke_element,
 };
+pub use path::{PathError, PathResult, SpatialPath, path_point_at, sample_path};
 pub use rate_limit::{
     SOFTWARE_RATE_LIMIT_PER_S, TokenBucket, TokenBucketSnapshot, VIGEM_RATE_LIMIT_PER_S,
 };

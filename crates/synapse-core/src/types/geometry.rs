@@ -37,6 +37,93 @@ impl Point {
     }
 }
 
+#[derive(Copy, Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PathPoint {
+    pub x: f64,
+    pub y: f64,
+}
+
+impl PathPoint {
+    #[must_use]
+    pub const fn new(x: f64, y: f64) -> Self {
+        Self { x, y }
+    }
+
+    #[must_use]
+    pub fn distance_to(self, other: Self) -> f64 {
+        let dx = self.x - other.x;
+        let dy = self.y - other.y;
+        dx.hypot(dy)
+    }
+
+    #[must_use]
+    pub const fn is_finite(self) -> bool {
+        self.x.is_finite() && self.y.is_finite()
+    }
+
+    #[must_use]
+    pub fn lerp(self, other: Self, t: f64) -> Self {
+        Self {
+            x: (other.x - self.x).mul_add(t, self.x),
+            y: (other.y - self.y).mul_add(t, self.y),
+        }
+    }
+}
+
+impl From<Point> for PathPoint {
+    fn from(value: Point) -> Self {
+        Self {
+            x: f64::from(value.x),
+            y: f64::from(value.y),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum PathSpec {
+    Line {
+        from: PathPoint,
+        to: PathPoint,
+    },
+    Arc {
+        center: PathPoint,
+        radius: f64,
+        start_angle_rad: f64,
+        sweep_angle_rad: f64,
+    },
+    Circle {
+        center: PathPoint,
+        radius: f64,
+    },
+    CubicBezier {
+        p0: PathPoint,
+        p1: PathPoint,
+        p2: PathPoint,
+        p3: PathPoint,
+    },
+    Polyline {
+        points: Vec<PathPoint>,
+        #[serde(default)]
+        closed: bool,
+    },
+    CatmullRom {
+        waypoints: Vec<PathPoint>,
+        #[serde(default = "default_catmull_rom_alpha")]
+        #[schemars(default = "default_catmull_rom_alpha")]
+        alpha: f64,
+        #[serde(default)]
+        tension: f64,
+        #[serde(default)]
+        closed: bool,
+    },
+}
+
+const fn default_catmull_rom_alpha() -> f64 {
+    0.5
+}
+
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Rect {
