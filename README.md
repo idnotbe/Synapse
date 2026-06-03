@@ -374,6 +374,25 @@ Copyright © 2026 Chris Royse. See [LICENSE.md](LICENSE.md) for full terms.
 
 ---
 
+## 💛 Support Synapse
+
+Synapse is built and maintained by one solo developer. If it's useful to you — or
+you'd like to help fund new app/game profiles, features, and ongoing development —
+please consider sending a donation or a message of support.
+
+<p align="center">
+  <a href="https://www.paypal.com/paypalme/ChrisRoyseAI"><img src="https://img.shields.io/badge/Donate-PayPal-00457C?style=for-the-badge&logo=paypal&logoColor=white" alt="Donate via PayPal"></a>
+</p>
+
+<p align="center">
+  👉 <strong><a href="https://www.paypal.com/paypalme/ChrisRoyseAI">paypal.me/ChrisRoyseAI</a></strong> — donate or send a message to help support Synapse.
+</p>
+
+Every contribution directly funds buying apps/games to profile, token costs for
+testing, and the time to keep shipping. Thank you! 🙏
+
+---
+
 <p align="center">
   <em>Your AI has a brain. Now give it a body.</em><br>
   <strong>⭐ Star the repo if Synapse is useful to you.</strong>
