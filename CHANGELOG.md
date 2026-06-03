@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- Added the shared-daemon architecture so many agents can use Synapse at once
+  against one RocksDB without leaked/duplicate instances: a single `--mode http`
+  daemon owns the DB; stdio-only clients connect through a new `--mode connect`
+  bridge (auto-spawns the daemon, parent-death watchdog); a single-instance
+  guard (`<db>/daemon.lock` + `daemon.pid`) makes a duplicate daemon exit 3;
+  storage opens eagerly at startup (fail-fast `STORAGE_LOCK_CONTENDED`/
+  `STORAGE_OPEN_FAILED`, exit 4); `/health` reports `pid`; and a new
+  `--mode doctor [--kill-stray]` enumerates/classifies synapse-mcp processes and
+  cleans matching strays only after identifying the live lock-holder daemon. See
+  `docs/shared-daemon.md`. (#661)
 - Added the repository agent doctrine: manual FSV must be performed by the
   agent with direct source-of-truth readback; automated tests, scripts,
   benchmarks, GitHub Actions, and CI are supporting evidence only.
