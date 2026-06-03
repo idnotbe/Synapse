@@ -86,10 +86,7 @@ fn event_filter_validation_edges_have_readback() {
         path: "field".to_owned(),
         predicate: DataPredicate::Exists,
     };
-    println!(
-        "readback=event_filter_validation edge=invalid_path before=path:{}",
-        "field"
-    );
+    println!("readback=event_filter_validation edge=invalid_path before=path:field");
     let invalid_path_after = invalid_path.validate();
     println!("readback=event_filter_validation edge=invalid_path after={invalid_path_after:?}");
     assert_eq!(
