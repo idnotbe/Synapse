@@ -22,6 +22,70 @@ use rmcp::transport::{
 const DAEMON_READY_TIMEOUT: Duration = Duration::from_secs(15);
 const DAEMON_POLL_INTERVAL: Duration = Duration::from_millis(200);
 
+/// Arm a watchdog that exits the bridge if its parent (the MCP client) dies.
+///
+/// stdin EOF is the normal shutdown path, but on Windows an abrupt parent death
+/// does not always deliver EOF to an inherited stdin (the original orphan
+/// failure mode). This watchdog waits on the parent process handle and force
+/// exits when it dies, so a bridge can never outlive its client. The shared
+/// daemon is intentionally NOT subject to this — it must survive client churn.
+fn install_parent_watchdog() {
+    #[cfg(windows)]
+    {
+        let Some(parent_pid) = parent_process_id() else {
+            tracing::warn!(
+                code = "MCP_CONNECT_PARENT_UNKNOWN",
+                "could not determine parent pid; parent-death watchdog disabled"
+            );
+            return;
+        };
+        std::thread::spawn(move || {
+            use windows::Win32::Foundation::CloseHandle;
+            use windows::Win32::System::Threading::{
+                OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject,
+            };
+            // SAFETY: OpenProcess with SYNCHRONIZE, then block on the handle.
+            unsafe {
+                match OpenProcess(PROCESS_SYNCHRONIZE, false, parent_pid) {
+                    Ok(handle) => {
+                        WaitForSingleObject(handle, u32::MAX);
+                        let _ = CloseHandle(handle);
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            code = "MCP_CONNECT_PARENT_OPEN_FAILED",
+                            parent_pid,
+                            error = %error,
+                            "could not open parent process; watchdog inactive"
+                        );
+                        return;
+                    }
+                }
+            }
+            tracing::warn!(
+                code = "MCP_CONNECT_PARENT_EXITED",
+                parent_pid,
+                "parent client process exited; bridge shutting down"
+            );
+            std::process::exit(0);
+        });
+        tracing::info!(
+            code = "MCP_CONNECT_PARENT_WATCHDOG",
+            parent_pid,
+            "parent-death watchdog armed"
+        );
+    }
+}
+
+#[cfg(windows)]
+fn parent_process_id() -> Option<u32> {
+    use sysinfo::{ProcessesToUpdate, System, get_current_pid};
+    let current = get_current_pid().ok()?;
+    let mut system = System::new();
+    system.refresh_processes(ProcessesToUpdate::All, true);
+    Some(system.process(current)?.parent()?.as_u32())
+}
+
 /// Probe the daemon `/health` endpoint. Returns true only on a 2xx response.
 async fn probe_health(bind: &str, token: &str) -> bool {
     let url = format!("http://{bind}/health");
@@ -80,8 +144,10 @@ fn spawn_detached_daemon(bind: &str, db: Option<&Path>) -> anyhow::Result<()> {
         command_line.push_str(&db.to_string_lossy());
         command_line.push('"');
     }
-    let mut command_line_w: Vec<u16> =
-        command_line.encode_utf16().chain(std::iter::once(0)).collect();
+    let mut command_line_w: Vec<u16> = command_line
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
 
     let mut startup_info = STARTUPINFOW::default();
     startup_info.cb = u32::try_from(core::mem::size_of::<STARTUPINFOW>()).unwrap_or(0);
@@ -163,6 +229,10 @@ pub async fn run_connect(bind: &str, db: Option<&Path>) -> anyhow::Result<ExitCo
         daemon_uri = %uri,
         "starting stdio<->http bridge to shared daemon"
     );
+
+    // Arm the parent-death watchdog before anything else so the bridge can
+    // never outlive the client that launched it.
+    install_parent_watchdog();
 
     // Ensure exactly one shared daemon is up (spawn it if needed) before bridging.
     ensure_daemon_running(bind, db, &token)
