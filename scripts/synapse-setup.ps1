@@ -39,6 +39,11 @@
 .PARAMETER SkipBuild
   Do not build; require an already-installed synapse-mcp.exe at -ExePath.
 
+.PARAMETER BuildTimeoutMinutes
+  Maximum time to allow the release build to run. The build process tree is
+  launched inside a Windows Job Object with kill-on-close, so Cargo/rustc
+  children cannot survive if this setup process exits or is killed.
+
 .PARAMETER Bind
   Loopback address the daemon binds. Default 127.0.0.1:7700.
 
@@ -65,6 +70,7 @@ param(
     [string]$LogDir      = "$env:LOCALAPPDATA\synapse\logs",
     [string]$TokenPath   = "$env:APPDATA\synapse\token.txt",
     [string]$TaskName    = 'SynapseMcpDaemon',
+    [ValidateRange(1, 1440)][int]$BuildTimeoutMinutes = 90,
     [switch]$SkipClientWiring,
     [switch]$Remove,
     [switch]$Purge
@@ -90,6 +96,321 @@ function Get-ProcessLineage {
         $current = [int]$p.ParentProcessId
     }
     return $lineage
+}
+
+function Quote-WindowsCommandArgument {
+    param([Parameter(Mandatory=$true)][string]$Value)
+    if ($Value.Length -eq 0) { return '""' }
+    if ($Value -notmatch '[\s"]') { return $Value }
+    $escaped = $Value -replace '(\\*)"', '$1$1\"'
+    $escaped = $escaped -replace '(\\+)$', '$1$1'
+    return '"' + $escaped + '"'
+}
+
+function Ensure-SynapseSetupProcessJobType {
+    if ('SynapseSetup.ProcessJob' -as [type]) { return }
+
+    Add-Type -Language CSharp -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+using System.Text;
+
+namespace SynapseSetup
+{
+    public static class ProcessJob
+    {
+        private const uint CREATE_SUSPENDED = 0x00000004;
+        private const uint CREATE_NO_WINDOW = 0x08000000;
+        private const uint JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000;
+        private const int JobObjectExtendedLimitInformation = 9;
+        private const uint WAIT_OBJECT_0 = 0x00000000;
+        private const uint WAIT_TIMEOUT = 0x00000102;
+        private const uint WAIT_FAILED = 0xffffffff;
+        private const uint EXIT_TIMEOUT = 124;
+        private const uint EXIT_ASSIGN_FAILED = 125;
+        private const uint EXIT_RESUME_FAILED = 126;
+        private const uint INFINITE = 0xffffffff;
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct IO_COUNTERS
+        {
+            public ulong ReadOperationCount;
+            public ulong WriteOperationCount;
+            public ulong OtherOperationCount;
+            public ulong ReadTransferCount;
+            public ulong WriteTransferCount;
+            public ulong OtherTransferCount;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct JOBOBJECT_BASIC_LIMIT_INFORMATION
+        {
+            public long PerProcessUserTimeLimit;
+            public long PerJobUserTimeLimit;
+            public uint LimitFlags;
+            public UIntPtr MinimumWorkingSetSize;
+            public UIntPtr MaximumWorkingSetSize;
+            public uint ActiveProcessLimit;
+            public UIntPtr Affinity;
+            public uint PriorityClass;
+            public uint SchedulingClass;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct JOBOBJECT_EXTENDED_LIMIT_INFORMATION
+        {
+            public JOBOBJECT_BASIC_LIMIT_INFORMATION BasicLimitInformation;
+            public IO_COUNTERS IoInfo;
+            public UIntPtr ProcessMemoryLimit;
+            public UIntPtr JobMemoryLimit;
+            public UIntPtr PeakProcessMemoryUsed;
+            public UIntPtr PeakJobMemoryUsed;
+        }
+
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        private struct STARTUPINFO
+        {
+            public uint cb;
+            public string lpReserved;
+            public string lpDesktop;
+            public string lpTitle;
+            public uint dwX;
+            public uint dwY;
+            public uint dwXSize;
+            public uint dwYSize;
+            public uint dwXCountChars;
+            public uint dwYCountChars;
+            public uint dwFillAttribute;
+            public uint dwFlags;
+            public ushort wShowWindow;
+            public ushort cbReserved2;
+            public IntPtr lpReserved2;
+            public IntPtr hStdInput;
+            public IntPtr hStdOutput;
+            public IntPtr hStdError;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct PROCESS_INFORMATION
+        {
+            public IntPtr hProcess;
+            public IntPtr hThread;
+            public uint dwProcessId;
+            public uint dwThreadId;
+        }
+
+        [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+        private static extern IntPtr CreateJobObject(IntPtr lpJobAttributes, string lpName);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool SetInformationJobObject(
+            IntPtr hJob,
+            int jobObjectInfoClass,
+            IntPtr lpJobObjectInfo,
+            uint cbJobObjectInfoLength);
+
+        [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+        private static extern bool CreateProcess(
+            string lpApplicationName,
+            StringBuilder lpCommandLine,
+            IntPtr lpProcessAttributes,
+            IntPtr lpThreadAttributes,
+            bool bInheritHandles,
+            uint dwCreationFlags,
+            IntPtr lpEnvironment,
+            string lpCurrentDirectory,
+            ref STARTUPINFO lpStartupInfo,
+            out PROCESS_INFORMATION lpProcessInformation);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool AssignProcessToJobObject(IntPtr hJob, IntPtr hProcess);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern uint ResumeThread(IntPtr hThread);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern uint WaitForSingleObject(IntPtr hHandle, uint dwMilliseconds);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool GetExitCodeProcess(IntPtr hProcess, out uint lpExitCode);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool TerminateJobObject(IntPtr hJob, uint uExitCode);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool TerminateProcess(IntPtr hProcess, uint uExitCode);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool CloseHandle(IntPtr hObject);
+
+        public static int Run(
+            string applicationName,
+            string commandLine,
+            string workingDirectory,
+            uint timeoutMilliseconds,
+            out string failure)
+        {
+            failure = "";
+            IntPtr job = IntPtr.Zero;
+            IntPtr limitPointer = IntPtr.Zero;
+            PROCESS_INFORMATION processInfo = new PROCESS_INFORMATION();
+            try
+            {
+                job = CreateJobObject(IntPtr.Zero, null);
+                if (job == IntPtr.Zero)
+                {
+                    failure = "PROCESS_JOB_CREATE_FAILED: " + new Win32Exception(Marshal.GetLastWin32Error()).Message;
+                    return 127;
+                }
+
+                JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits = new JOBOBJECT_EXTENDED_LIMIT_INFORMATION();
+                limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+                int limitSize = Marshal.SizeOf(typeof(JOBOBJECT_EXTENDED_LIMIT_INFORMATION));
+                limitPointer = Marshal.AllocHGlobal(limitSize);
+                Marshal.StructureToPtr(limits, limitPointer, false);
+                if (!SetInformationJobObject(job, JobObjectExtendedLimitInformation, limitPointer, (uint)limitSize))
+                {
+                    failure = "PROCESS_JOB_LIMIT_FAILED: " + new Win32Exception(Marshal.GetLastWin32Error()).Message;
+                    return 127;
+                }
+
+                STARTUPINFO startupInfo = new STARTUPINFO();
+                startupInfo.cb = (uint)Marshal.SizeOf(typeof(STARTUPINFO));
+                StringBuilder mutableCommandLine = new StringBuilder(commandLine);
+                bool created = CreateProcess(
+                    applicationName,
+                    mutableCommandLine,
+                    IntPtr.Zero,
+                    IntPtr.Zero,
+                    false,
+                    CREATE_SUSPENDED | CREATE_NO_WINDOW,
+                    IntPtr.Zero,
+                    workingDirectory,
+                    ref startupInfo,
+                    out processInfo);
+                if (!created)
+                {
+                    failure = "PROCESS_JOB_CREATE_PROCESS_FAILED: " + new Win32Exception(Marshal.GetLastWin32Error()).Message;
+                    return 127;
+                }
+
+                if (!AssignProcessToJobObject(job, processInfo.hProcess))
+                {
+                    failure = "PROCESS_JOB_ASSIGN_FAILED: " + new Win32Exception(Marshal.GetLastWin32Error()).Message;
+                    TerminateProcess(processInfo.hProcess, EXIT_ASSIGN_FAILED);
+                    return (int)EXIT_ASSIGN_FAILED;
+                }
+
+                if (ResumeThread(processInfo.hThread) == 0xffffffff)
+                {
+                    failure = "PROCESS_JOB_RESUME_FAILED: " + new Win32Exception(Marshal.GetLastWin32Error()).Message;
+                    TerminateJobObject(job, EXIT_RESUME_FAILED);
+                    return (int)EXIT_RESUME_FAILED;
+                }
+
+                uint wait = WaitForSingleObject(
+                    processInfo.hProcess,
+                    timeoutMilliseconds == 0 ? INFINITE : timeoutMilliseconds);
+                if (wait == WAIT_TIMEOUT)
+                {
+                    TerminateJobObject(job, EXIT_TIMEOUT);
+                    WaitForSingleObject(processInfo.hProcess, 15000);
+                    failure = "PROCESS_JOB_TIMEOUT: child process tree exceeded timeout_ms=" + timeoutMilliseconds;
+                    return (int)EXIT_TIMEOUT;
+                }
+                if (wait == WAIT_FAILED)
+                {
+                    failure = "PROCESS_JOB_WAIT_FAILED: " + new Win32Exception(Marshal.GetLastWin32Error()).Message;
+                    TerminateJobObject(job, 127);
+                    return 127;
+                }
+                if (wait != WAIT_OBJECT_0)
+                {
+                    failure = "PROCESS_JOB_WAIT_UNEXPECTED: wait_result=" + wait;
+                    TerminateJobObject(job, 127);
+                    return 127;
+                }
+
+                uint exitCode;
+                if (!GetExitCodeProcess(processInfo.hProcess, out exitCode))
+                {
+                    failure = "PROCESS_JOB_EXIT_CODE_FAILED: " + new Win32Exception(Marshal.GetLastWin32Error()).Message;
+                    return 127;
+                }
+                return unchecked((int)exitCode);
+            }
+            finally
+            {
+                if (limitPointer != IntPtr.Zero)
+                {
+                    Marshal.FreeHGlobal(limitPointer);
+                }
+                if (processInfo.hThread != IntPtr.Zero)
+                {
+                    CloseHandle(processInfo.hThread);
+                }
+                if (processInfo.hProcess != IntPtr.Zero)
+                {
+                    CloseHandle(processInfo.hProcess);
+                }
+                if (job != IntPtr.Zero)
+                {
+                    CloseHandle(job);
+                }
+            }
+        }
+    }
+}
+'@ | Out-Null
+}
+
+function Invoke-SynapseProcessInKillOnCloseJob {
+    param(
+        [Parameter(Mandatory=$true)][string]$FilePath,
+        [string[]]$ArgumentList = @(),
+        [Parameter(Mandatory=$true)][string]$WorkingDirectory,
+        [Parameter(Mandatory=$true)][int]$TimeoutMinutes,
+        [string]$LogPath
+    )
+
+    Ensure-SynapseSetupProcessJobType
+    if (-not (Test-Path $FilePath)) { Die "Process job target missing: $FilePath" }
+    if (-not (Test-Path $WorkingDirectory)) { Die "Process job working directory missing: $WorkingDirectory" }
+
+    $argumentText = (($ArgumentList | ForEach-Object { Quote-WindowsCommandArgument $_ }) -join ' ').Trim()
+    $targetCommand = (Quote-WindowsCommandArgument $FilePath)
+    if (-not [string]::IsNullOrWhiteSpace($argumentText)) {
+        $targetCommand = "$targetCommand $argumentText"
+    }
+
+    $applicationPath = $FilePath
+    $commandLine = $targetCommand
+    if (-not [string]::IsNullOrWhiteSpace($LogPath)) {
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $LogPath) | Out-Null
+        if (Test-Path $LogPath) { Remove-Item $LogPath -Force }
+        $cmdPath = Join-Path $env:SystemRoot 'System32\cmd.exe'
+        $redirectCommand = "$targetCommand > $(Quote-WindowsCommandArgument $LogPath) 2>&1"
+        $applicationPath = $cmdPath
+        $commandLine = "$(Quote-WindowsCommandArgument $cmdPath) /d /s /c `"$redirectCommand`""
+    }
+
+    $timeoutMilliseconds = [uint32]([math]::Min([int64]$TimeoutMinutes * 60 * 1000, [uint32]::MaxValue))
+    $failure = ''
+    $exitCode = [SynapseSetup.ProcessJob]::Run(
+        $applicationPath,
+        $commandLine,
+        $WorkingDirectory,
+        $timeoutMilliseconds,
+        [ref]$failure)
+    if (-not [string]::IsNullOrWhiteSpace($failure)) {
+        $tail = ''
+        if ($LogPath -and (Test-Path $LogPath)) {
+            $tail = (Get-Content -Path $LogPath -Tail 40 -ErrorAction SilentlyContinue) -join "`n"
+        }
+        Die "PROCESS_JOB_FAILED command=$targetCommand exit=$exitCode reason=$failure log=$LogPath tail=`n$tail"
+    }
+    return $exitCode
 }
 
 function Install-CodexSynapseTokenLoader {
@@ -337,13 +658,20 @@ if (-not $SkipBuild) {
 # ---------------------------------------------------------------------------
 if (-not $SkipBuild) {
     Step "Building synapse-mcp (release) from $SourceDir"
-    New-Item -ItemType Directory -Force -Path $CargoTarget | Out-Null
+    New-Item -ItemType Directory -Force -Path $CargoTarget, $LogDir | Out-Null
     $env:CARGO_TARGET_DIR = $CargoTarget
-    Push-Location $SourceDir
-    try {
-        & $cargo build --release -p synapse-mcp
-        if ($LASTEXITCODE -ne 0) { Die "cargo build failed (exit $LASTEXITCODE). See output above." }
-    } finally { Pop-Location }
+    $buildLog = Join-Path $LogDir 'setup-build.log'
+    Info "Build process tree is job-owned; log: $buildLog"
+    $buildExit = Invoke-SynapseProcessInKillOnCloseJob `
+        -FilePath $cargo `
+        -ArgumentList @('build','--release','-p','synapse-mcp') `
+        -WorkingDirectory $SourceDir `
+        -TimeoutMinutes $BuildTimeoutMinutes `
+        -LogPath $buildLog
+    if ($buildExit -ne 0) {
+        $tail = if (Test-Path $buildLog) { (Get-Content -Path $buildLog -Tail 80 -ErrorAction SilentlyContinue) -join "`n" } else { '' }
+        Die "cargo build failed (exit $buildExit). Build log: $buildLog. Tail:`n$tail"
+    }
     $built = Join-Path $CargoTarget 'release\synapse-mcp.exe'
     if (-not (Test-Path $built)) { Die "Build reported success but $built is missing." }
     Info "Built: $built ($([math]::Round((Get-Item $built).Length/1MB,1)) MB)"
