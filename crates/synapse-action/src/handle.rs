@@ -364,12 +364,12 @@ const fn is_safety_action(action: &Action) -> bool {
     matches!(action, Action::ReleaseAll | Action::KeyUp { .. })
 }
 
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct SessionInputSnapshot {
     pub sessions: Vec<SessionInputSessionSnapshot>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SessionInputSessionSnapshot {
     pub session_id: String,
     pub keys: Vec<SessionKeyInput>,
@@ -396,7 +396,7 @@ pub struct SessionPadInput {
     pub backend: Backend,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct SessionReleaseSummary {
     pub session_id: String,
     pub released_keys: u32,
@@ -438,18 +438,6 @@ struct OwnedPadInput {
     controller: GamepadController,
     backend: Backend,
     owners: BTreeSet<String>,
-}
-
-impl Default for SessionReleaseSummary {
-    fn default() -> Self {
-        Self {
-            session_id: String::new(),
-            released_keys: 0,
-            released_buttons: 0,
-            neutralized_pads: 0,
-            retained_shared_inputs: 0,
-        }
-    }
 }
 
 impl SessionInputOwnership {

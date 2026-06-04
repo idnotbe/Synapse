@@ -369,7 +369,7 @@ impl PathFollowController {
         self.scheduled.len().saturating_sub(self.cursor)
     }
 
-    fn completed_output(&self, records: Vec<PathFollowDispatchRecord>) -> PathFollowOutput {
+    const fn completed_output(&self, records: Vec<PathFollowDispatchRecord>) -> PathFollowOutput {
         PathFollowOutput::Completed {
             scheduled_actions: self.scheduled.len(),
             dispatched_actions: self.cursor,
@@ -551,7 +551,7 @@ fn action_summary(action: &Action) -> Value {
     }
 }
 
-fn control_point_count(path: &PathSpec) -> usize {
+const fn control_point_count(path: &PathSpec) -> usize {
     match path {
         PathSpec::Line { .. } => 2,
         PathSpec::Arc { .. } | PathSpec::Circle { .. } => 1,
@@ -561,7 +561,7 @@ fn control_point_count(path: &PathSpec) -> usize {
     }
 }
 
-fn path_kind(path: &PathSpec) -> &'static str {
+const fn path_kind(path: &PathSpec) -> &'static str {
     match path {
         PathSpec::Line { .. } => "line",
         PathSpec::Arc { .. } => "arc",

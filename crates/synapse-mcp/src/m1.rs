@@ -891,11 +891,11 @@ pub fn apply_profile_runtime_config_in_state(
         state.capture_generation,
         format!("profile:{}", profile.id),
     );
-    if !capture_config_without_generation_eq(&state.active_capture_config, &active_capture) {
+    if capture_config_without_generation_eq(&state.active_capture_config, &active_capture) {
+        active_capture.generation = state.active_capture_config.generation;
+    } else {
         state.capture_generation = state.capture_generation.saturating_add(1);
         active_capture.generation = state.capture_generation;
-    } else {
-        active_capture.generation = state.active_capture_config.generation;
     }
     state.active_capture_config = active_capture.clone();
     Ok(active_capture)

@@ -6,6 +6,10 @@ use synapse_test_utils::stdio_mcp_client::StdioMcpClient;
 use tempfile::TempDir;
 
 #[tokio::test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "integration test keeps profile list/activate/report assertions in one flow"
+)]
 async fn profile_tools_list_activate_and_report_health() -> anyhow::Result<()> {
     let profiles = TempDir::new()?;
     let logs = TempDir::new()?;

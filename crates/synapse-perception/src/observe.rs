@@ -339,7 +339,7 @@ fn filter_elements(
     let original_total = elements.len();
     if !include.elements {
         let truncated = !elements.is_empty();
-        let page = truncated.then(|| ObservationElementsPage {
+        let page = truncated.then_some(ObservationElementsPage {
             total: original_total,
             offset: 0,
             limit: 0,

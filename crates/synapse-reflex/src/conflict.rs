@@ -20,7 +20,7 @@ pub(crate) enum ConflictResource {
 }
 
 impl ConflictResource {
-    fn device_class(&self) -> ConflictDeviceClass {
+    const fn device_class(&self) -> ConflictDeviceClass {
         match self {
             Self::KeyboardText | Self::Key(_) => ConflictDeviceClass::Keyboard,
             Self::MouseCursor | Self::MouseButton(_) => ConflictDeviceClass::Mouse,

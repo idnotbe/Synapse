@@ -153,15 +153,12 @@ pub(super) fn mouse_stroke(
         .map_err(|error| stroke_error(&error))?;
     let context =
         StrokeEmitLogContext::new(path, button, profile, timing, motion_model, humanize, &plan);
-    let first = match plan.samples.first() {
-        Some(first) => first,
-        None => {
-            let error = ActionError::TargetInvalid {
-                detail: "mouse_stroke planner returned an empty point stream".to_owned(),
-            };
-            log_stroke_emit_error(&context, None, None, "plan_empty", &error);
-            return Err(error);
-        }
+    let Some(first) = plan.samples.first() else {
+        let error = ActionError::TargetInvalid {
+            detail: "mouse_stroke planner returned an empty point stream".to_owned(),
+        };
+        log_stroke_emit_error(&context, None, None, "plan_empty", &error);
+        return Err(error);
     };
     let first_point = match screen_point_from_path_point(first.point, 0) {
         Ok(point) => point,
@@ -179,12 +176,12 @@ pub(super) fn mouse_stroke(
         return Err(error);
     }
 
-    if let Some(button) = button {
-        if let Err(error) = mouse_button(button, ButtonAction::Down, 0, state) {
-            let error = annotate_stroke_emit_error(error, "button_down", Some(0));
-            log_stroke_emit_error(&context, Some(0), Some(first.point), "button_down", &error);
-            return Err(error);
-        }
+    if let Some(button) = button
+        && let Err(error) = mouse_button(button, ButtonAction::Down, 0, state)
+    {
+        let error = annotate_stroke_emit_error(error, "button_down", Some(0));
+        log_stroke_emit_error(&context, Some(0), Some(first.point), "button_down", &error);
+        return Err(error);
     }
 
     let stream_result = emit_stroke_stream(&plan.samples, &context);
@@ -295,6 +292,10 @@ fn mouse_move_curve(
     send_input_batch(&inputs, "drag curve absolute mouse move")
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "stroke emission keeps ordered failure stages in one function so sample-index logging cannot drift"
+)]
 fn emit_stroke_stream(
     samples: &[TimedPathPoint],
     context: &StrokeEmitLogContext,
@@ -452,6 +453,10 @@ fn stroke_delay_ms(
     Ok(delay.round() as u32)
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "cursor readback and DPI compensation are intentionally kept together to preserve fallback ordering"
+)]
 fn send_absolute_mouse_move(point: Point, detail: &'static str) -> Result<(), ActionError> {
     activate_thread_dpi_awareness();
     // Physical cursor APIs avoid DPI virtualization drift between the MCP
@@ -645,7 +650,7 @@ fn sha256_hex(payload: Vec<u8>) -> String {
     encoded
 }
 
-fn path_kind(path: &PathSpec) -> &'static str {
+const fn path_kind(path: &PathSpec) -> &'static str {
     match path {
         PathSpec::Line { .. } => "line",
         PathSpec::Arc { .. } => "arc",

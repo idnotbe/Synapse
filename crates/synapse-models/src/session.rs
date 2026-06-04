@@ -52,7 +52,9 @@ impl LoadedModel {
 }
 
 impl Detector for LoadedModel {
-    fn infer(&self, frame: DetectionFrame, _opts: DetectOpts) -> ModelResult<DetectionBatch> {
+    fn infer(&self, frame: DetectionFrame, opts: DetectOpts) -> ModelResult<DetectionBatch> {
+        #[cfg(not(feature = "ort"))]
+        let _ = &opts;
         let frame = frame.validate()?;
         match &self.session {
             SessionHandle::Placeholder => {
@@ -61,34 +63,43 @@ impl Detector for LoadedModel {
             #[cfg(feature = "ort")]
             SessionHandle::Ort(session) => {
                 let input = preprocess_rgb_frame(&frame, &self.descriptor)?;
-                let mut session = session.lock().map_err(|_err| {
-                    detection_infer_failed("ORT detection session lock was poisoned")
-                })?;
-                let outputs = session
-                    .run(ort::inputs! {
-                        "pixel_values" => input,
-                    })
-                    .map_err(|err| {
-                        detection_infer_failed(format!("ORT inference failed: {err}"))
+                let (logits, pred_boxes) = {
+                    let mut session_guard = session.lock().map_err(|_err| {
+                        detection_infer_failed("ORT detection session lock was poisoned")
                     })?;
-                let logits = outputs
-                    .get("logits")
-                    .ok_or_else(|| detection_infer_failed("ORT output `logits` was missing"))?
-                    .try_extract_tensor::<f32>()
-                    .map_err(|err| {
-                        detection_infer_failed(format!("failed to extract `logits`: {err}"))
-                    })?
-                    .1;
-                let pred_boxes = outputs
-                    .get("pred_boxes")
-                    .ok_or_else(|| detection_infer_failed("ORT output `pred_boxes` was missing"))?
-                    .try_extract_tensor::<f32>()
-                    .map_err(|err| {
-                        detection_infer_failed(format!("failed to extract `pred_boxes`: {err}"))
-                    })?
-                    .1;
+                    let outputs = session_guard
+                        .run(ort::inputs! {
+                            "pixel_values" => input,
+                        })
+                        .map_err(|err| {
+                            detection_infer_failed(format!("ORT inference failed: {err}"))
+                        })?;
+                    let logits = outputs
+                        .get("logits")
+                        .ok_or_else(|| detection_infer_failed("ORT output `logits` was missing"))?
+                        .try_extract_tensor::<f32>()
+                        .map_err(|err| {
+                            detection_infer_failed(format!("failed to extract `logits`: {err}"))
+                        })?
+                        .1
+                        .to_vec();
+                    let pred_boxes = outputs
+                        .get("pred_boxes")
+                        .ok_or_else(|| {
+                            detection_infer_failed("ORT output `pred_boxes` was missing")
+                        })?
+                        .try_extract_tensor::<f32>()
+                        .map_err(|err| {
+                            detection_infer_failed(format!("failed to extract `pred_boxes`: {err}"))
+                        })?
+                        .1
+                        .to_vec();
+                    drop(outputs);
+                    drop(session_guard);
+                    (logits, pred_boxes)
+                };
                 let items =
-                    decode_rtdetr_outputs(&frame, &self.descriptor, logits, pred_boxes, _opts)?;
+                    decode_rtdetr_outputs(&frame, &self.descriptor, &logits, &pred_boxes, &opts)?;
                 Ok(DetectionBatch {
                     model_id: self.descriptor.id.clone(),
                     frame_seq: frame.frame_seq,
@@ -121,10 +132,10 @@ fn preprocess_rgb_frame(
             descriptor.input_shape
         )));
     }
-    let input_w_u32 = u32::try_from(input_w).map_err(|_err| {
+    let resize_width = u32::try_from(input_w).map_err(|_err| {
         detection_infer_failed(format!("input width {input_w} does not fit u32"))
     })?;
-    let input_h_u32 = u32::try_from(input_h).map_err(|_err| {
+    let resize_height = u32::try_from(input_h).map_err(|_err| {
         detection_infer_failed(format!("input height {input_h} does not fit u32"))
     })?;
     let source =
@@ -135,7 +146,8 @@ fn preprocess_rgb_frame(
                 frame.rgb.len()
             ))
         })?;
-    let resized = image::imageops::resize(&source, input_w_u32, input_h_u32, FilterType::Triangle);
+    let resized =
+        image::imageops::resize(&source, resize_width, resize_height, FilterType::Triangle);
     let pixels = input_w.checked_mul(input_h).ok_or_else(|| {
         detection_infer_failed(format!("input shape {input_w}x{input_h} overflows"))
     })?;
@@ -176,7 +188,7 @@ fn decode_rtdetr_outputs(
     descriptor: &ModelDescriptor,
     logits: &[f32],
     pred_boxes: &[f32],
-    opts: DetectOpts,
+    opts: &DetectOpts,
 ) -> ModelResult<Vec<Detection>> {
     let classes = descriptor.class_map.len();
     if classes == 0 {

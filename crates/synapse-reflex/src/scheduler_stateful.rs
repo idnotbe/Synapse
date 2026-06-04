@@ -84,7 +84,7 @@ pub(super) fn step_stateful_controllers(
                     lost_for,
                     target_context,
                 } => {
-                    super::mark_reflex_track_lost(runtime, index, lost_for, target_context);
+                    super::mark_reflex_track_lost(runtime, index, lost_for, &target_context);
                 }
                 StatefulOutcome::Idle => {}
                 StatefulOutcome::Blocked { error } => {
@@ -290,7 +290,7 @@ fn path_follow_conflict_actions(runtime: &RuntimeState, index: usize) -> Vec<Act
     }]
 }
 
-fn hold_button_action(button: &ReflexButtonTarget, backend: synapse_core::Backend) -> Action {
+const fn hold_button_action(button: &ReflexButtonTarget, backend: synapse_core::Backend) -> Action {
     match button {
         ReflexButtonTarget::Mouse { button } => Action::MouseButton {
             button: *button,
@@ -482,7 +482,7 @@ fn step_aim_track(
                 runtime,
                 &reflex_id,
                 &params,
-                action,
+                *action,
                 cursor,
                 target,
                 raw_delta,
@@ -838,7 +838,7 @@ fn delta_value(delta: (f64, f64)) -> Value {
     })
 }
 
-fn aim_axis_value(axis: ReflexAimAxis) -> &'static str {
+const fn aim_axis_value(axis: ReflexAimAxis) -> &'static str {
     match axis {
         ReflexAimAxis::Xy => "xy",
         ReflexAimAxis::XOnly => "x_only",

@@ -1,3 +1,11 @@
+#![allow(
+    clippy::cast_precision_loss,
+    clippy::float_cmp,
+    clippy::missing_errors_doc,
+    clippy::suboptimal_flops,
+    reason = "velocity profiles intentionally map exact normalized endpoints and bounded sample indices into f64 timing positions"
+)]
+
 use synapse_core::{PathPoint, PathSpec, VelocityProfile};
 
 use crate::{ArcLengthPath, PathError};

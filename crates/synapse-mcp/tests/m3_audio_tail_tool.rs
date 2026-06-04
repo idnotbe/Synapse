@@ -83,6 +83,12 @@ fn structured(response: &Value) -> anyhow::Result<Value> {
     serde_json::from_str(text).context("parse text content")
 }
 
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss,
+    reason = "test helper converts bounded synthetic seconds and sample rates into PCM frame counts"
+)]
 fn assert_pcm_len(payload: &Value, seconds: f64) -> anyhow::Result<()> {
     let sample_rate = usize::try_from(
         payload["sample_rate"]

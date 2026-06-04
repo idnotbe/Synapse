@@ -275,7 +275,7 @@ fn publish_debounce_suppression(
     );
 }
 
-fn expire_action_until_event_lifetimes(runtime: &mut RuntimeState, events: &[Event]) {
+fn expire_action_until_event_lifetimes(runtime: &RuntimeState, events: &[Event]) {
     if events.is_empty() {
         return;
     }

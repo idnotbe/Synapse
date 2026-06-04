@@ -228,6 +228,10 @@ impl RecordingState {
         self.mouse_button_up(button, state);
     }
 
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "recording stroke mirrors the Action::MouseStroke payload plus mutable emit state"
+    )]
     fn mouse_stroke(
         &mut self,
         path: &PathSpec,

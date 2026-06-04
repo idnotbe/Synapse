@@ -121,18 +121,15 @@ impl ReflexRuntime {
     /// persisted.
     #[tracing::instrument(skip_all, fields(component = "reflex_runtime", reflex_id = %reflex_id))]
     pub fn cancel(&mut self, reflex_id: &str) -> ReflexResult<ReflexCancelOutcome> {
-        let status = match self
+        let Some(status) = self
             .statuses()
             .into_iter()
             .find(|status| status.id == reflex_id)
-        {
-            Some(status) => status,
-            None => {
-                let Some(status) = self.terminal_status_from_audit(reflex_id)? else {
-                    return Ok(ReflexCancelOutcome::NotFound);
-                };
-                return Ok(cancel_outcome_for_terminal_status(status));
-            }
+        else {
+            let Some(status) = self.terminal_status_from_audit(reflex_id)? else {
+                return Ok(ReflexCancelOutcome::NotFound);
+            };
+            return Ok(cancel_outcome_for_terminal_status(status));
         };
 
         match status.state {

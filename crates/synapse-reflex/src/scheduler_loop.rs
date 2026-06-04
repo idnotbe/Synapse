@@ -425,7 +425,7 @@ pub(super) fn mark_reflex_track_lost(
     runtime: &RuntimeState,
     index: usize,
     lost_for: Duration,
-    target_context: serde_json::Value,
+    target_context: &serde_json::Value,
 ) {
     if let Some(control) = lock_controls(&runtime.controls).get_mut(index) {
         control.active = false;
@@ -533,7 +533,7 @@ fn write_track_lost_audit(
     runtime: &RuntimeState,
     status: &ReflexStatus,
     lost_for: Duration,
-    target_context: serde_json::Value,
+    target_context: &serde_json::Value,
 ) {
     let Some(db) = runtime.audit_db.as_deref() else {
         return;
@@ -576,7 +576,7 @@ fn now_ts_ns() -> u64 {
         .unwrap_or_default()
 }
 
-fn path_kind(path: &synapse_core::PathSpec) -> &'static str {
+const fn path_kind(path: &synapse_core::PathSpec) -> &'static str {
     match path {
         synapse_core::PathSpec::Line { .. } => "line",
         synapse_core::PathSpec::Arc { .. } => "arc",

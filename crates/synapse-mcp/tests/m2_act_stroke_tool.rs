@@ -8,6 +8,11 @@ use synapse_test_utils::stdio_mcp_client::StdioMcpClient;
 use tempfile::TempDir;
 
 #[tokio::test]
+#[allow(
+    clippy::float_cmp,
+    clippy::too_many_lines,
+    reason = "integration test asserts exact synthetic stroke values across one MCP flow"
+)]
 async fn act_stroke_tools_call_recording_backend_and_path_edges() -> anyhow::Result<()> {
     let log_dir = TempDir::new()?;
     let db_dir = TempDir::new()?;

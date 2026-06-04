@@ -301,20 +301,14 @@ impl ActionEmitter {
 
     fn reject_pending_normal_actions_after_release_all(&mut self) {
         let mut rejected = 0_u32;
-        loop {
-            match self.rx.try_recv() {
-                Ok((action, ack)) => {
-                    rejected = rejected.saturating_add(1);
-                    let kind = super::routing::action_kind(&action);
-                    let _send_result = ack.send(Err(ActionError::SafetyReleaseAllFired {
-                        detail: format!(
-                            "pending {kind} action discarded because release_all preempted the action queue"
-                        ),
-                    }));
-                }
-                Err(mpsc::error::TryRecvError::Empty) => break,
-                Err(mpsc::error::TryRecvError::Disconnected) => break,
-            }
+        while let Ok((action, ack)) = self.rx.try_recv() {
+            rejected = rejected.saturating_add(1);
+            let kind = super::routing::action_kind(&action);
+            let _send_result = ack.send(Err(ActionError::SafetyReleaseAllFired {
+                detail: format!(
+                    "pending {kind} action discarded because release_all preempted the action queue"
+                ),
+            }));
         }
         if rejected > 0 {
             tracing::warn!(

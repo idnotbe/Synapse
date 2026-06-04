@@ -17,7 +17,7 @@ use std::{
 use anyhow::{Context, bail};
 use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
 
-fn bin() -> &'static str {
+const fn bin() -> &'static str {
     env!("CARGO_BIN_EXE_synapse-mcp")
 }
 

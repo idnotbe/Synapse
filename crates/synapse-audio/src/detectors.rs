@@ -36,6 +36,10 @@ pub struct SharedDetectorState {
 }
 
 #[derive(Debug)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "audio detectors track independent recent/active latches rather than one exclusive state"
+)]
 struct DetectorState {
     rms_db: f32,
     moving_rms: f32,

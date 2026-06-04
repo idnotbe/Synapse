@@ -108,7 +108,7 @@ pub struct AimTrackContext<'a> {
 #[derive(Clone, Debug, PartialEq)]
 pub enum AimTrackOutput {
     Dispatched {
-        action: Action,
+        action: Box<Action>,
         target: Point,
         raw_delta: (f64, f64),
         smoothed_delta: (f64, f64),
@@ -211,7 +211,7 @@ impl AimTrackController {
                 reflex_id: self.reflex_id.clone(),
             })?;
         Ok(AimTrackOutput::Dispatched {
-            action,
+            action: Box::new(action),
             target,
             raw_delta: raw_delta(context.cursor, target, self.params.axis),
             smoothed_delta: (f64::from(dx), f64::from(dy)),

@@ -63,6 +63,10 @@ async fn storage_tools_are_default_granted_and_persist_probe_rows() -> anyhow::R
 }
 
 #[tokio::test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "integration test keeps storage pressure and column-family assertions in one flow"
+)]
 async fn storage_probe_rows_cover_pressure_gated_column_families() -> anyhow::Result<()> {
     let logs = TempDir::new()?;
     let db = TempDir::new()?;

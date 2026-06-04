@@ -1,3 +1,15 @@
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss,
+    clippy::missing_const_for_fn,
+    clippy::missing_errors_doc,
+    clippy::suboptimal_flops,
+    clippy::unnecessary_wraps,
+    reason = "path geometry intentionally converts between bounded sample indices and f64 path parameters; public Result helpers preserve a uniform path API"
+)]
+
 use synapse_core::{PathPoint, PathSpec};
 
 const EPSILON: f64 = 1.0e-9;

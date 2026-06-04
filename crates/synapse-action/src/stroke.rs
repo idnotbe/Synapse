@@ -1,3 +1,10 @@
+#![allow(
+    clippy::cast_precision_loss,
+    clippy::missing_const_for_fn,
+    clippy::suboptimal_flops,
+    reason = "stroke planning converts bounded sample indices and deterministic RNG bits into f64 timing/geometry values"
+)]
+
 use synapse_core::{
     HumanizeParams, PathPoint, PathSpec, Point, StrokeMotionModel, StrokeTiming, VelocityProfile,
 };

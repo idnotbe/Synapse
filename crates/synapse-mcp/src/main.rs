@@ -1,3 +1,32 @@
+#![allow(
+    clippy::borrow_as_ptr,
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss,
+    clippy::doc_markdown,
+    clippy::ignored_unit_patterns,
+    clippy::implicit_clone,
+    clippy::items_after_statements,
+    clippy::manual_clamp,
+    clippy::map_unwrap_or,
+    clippy::match_same_arms,
+    clippy::missing_const_for_fn,
+    clippy::needless_pass_by_value,
+    clippy::needless_return,
+    clippy::nonminimal_bool,
+    clippy::option_if_let_else,
+    clippy::question_mark,
+    clippy::redundant_closure_for_method_calls,
+    clippy::redundant_pub_crate,
+    clippy::ref_option,
+    clippy::significant_drop_tightening,
+    clippy::similar_names,
+    clippy::single_match_else,
+    clippy::too_many_lines,
+    clippy::unnecessary_wraps,
+    clippy::unused_async,
+    reason = "synapse-mcp keeps pedantic/nursery style lint debt explicit while using clippy -D warnings for behavior-level regressions"
+)]
 #![cfg_attr(
     test,
     allow(
@@ -6,11 +35,8 @@
         clippy::float_cmp,
         clippy::items_after_test_module,
         clippy::manual_let_else,
-        clippy::needless_pass_by_value,
         clippy::needless_raw_string_hashes,
         clippy::redundant_clone,
-        clippy::significant_drop_tightening,
-        clippy::too_many_lines,
         clippy::unreadable_literal,
         clippy::unwrap_used
     )
