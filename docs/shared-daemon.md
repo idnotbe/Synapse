@@ -71,13 +71,16 @@ both exit **4** instead of failing later inside a tool call.
   processes are temporary. Close them after the check and reread the
   process/socket table so only the intended daemon and requested user-facing
   apps remain.
-- The Windows auto-start daemon task must not schedule `cmd.exe` directly.
-  `scripts/synapse-setup.ps1` writes `synapse-daemon-launch-hidden.vbs` and
-  registers `wscript.exe //B //Nologo` so the long-running daemon can stay
-  attached to the task without flashing a blank console window in the
-  operator's desktop session. If a visible `C:\Windows\System32\cmd.exe`
-  window appears during setup, re-run setup and read back the task action plus
-  visible-window list.
+- The Windows auto-start daemon task must not launch through `cmd.exe` at any
+  point. `scripts/synapse-setup.ps1` writes
+  `synapse-daemon-launch-hidden.vbs` and registers
+  `wscript.exe //B //Nologo`; the VBS reads `%APPDATA%\synapse\token.txt`,
+  sets process-local auth/log environment, and starts `synapse-mcp.exe`
+  directly with hidden window style. The legacy
+  `synapse-daemon-launch.cmd` file is deleted so no raw bearer token is
+  embedded in a command file. Setup fails with
+  `SYNAPSE_DAEMON_CMD_ANCESTOR_FORBIDDEN` if the healthy daemon's process
+  lineage still contains `cmd.exe`.
 
 ## Health
 
@@ -119,5 +122,7 @@ clients are connected.
   RocksDB lock for that `--db`. `doctor` will name the holder PID; stop it or
   point the daemon at a different `--db`.
 - **Bridge exits immediately / `MCP_DAEMON_SPAWN_FAILED`** — the daemon did not
-  become healthy within the spawn timeout. Check the daemon log under
-  `%LOCALAPPDATA%\synapse\logs` for `STORAGE_*` errors.
+  become healthy within the spawn timeout. Check
+  `%LOCALAPPDATA%\synapse\logs\daemon-launcher.log` and the rotated
+  `%LOCALAPPDATA%\synapse\logs\synapse.log.*` telemetry files for launch,
+  `STORAGE_*`, or bind errors.

@@ -112,6 +112,101 @@ function Quote-VbsString {
     return '"' + ($Value -replace '"', '""') + '"'
 }
 
+function Vbs-Literal {
+    param([Parameter(Mandatory=$true)][string]$Value)
+    return '"' + ($Value -replace '"', '""') + '"'
+}
+
+function New-HiddenDaemonLauncher {
+    param(
+        [Parameter(Mandatory=$true)][string]$OutputPath,
+        [Parameter(Mandatory=$true)][string]$ExePath,
+        [Parameter(Mandatory=$true)][string]$Bind,
+        [Parameter(Mandatory=$true)][string]$DbPath,
+        [Parameter(Mandatory=$true)][string]$ProfilesDir,
+        [Parameter(Mandatory=$true)][string]$LogDir,
+        [Parameter(Mandatory=$true)][string]$TokenPath
+    )
+
+    $daemonLogDir = $LogDir
+    $launcherLog = Join-Path $LogDir 'daemon-launcher.log'
+    $daemonCommand = @(
+        (Quote-WindowsCommandArgument $ExePath),
+        '--mode', 'http',
+        '--bind', (Quote-WindowsCommandArgument $Bind),
+        '--db', (Quote-WindowsCommandArgument $DbPath),
+        '--profile-dir', (Quote-WindowsCommandArgument $ProfilesDir),
+        '--log-level', 'info'
+    ) -join ' '
+
+    @"
+Option Explicit
+Dim shell, fso, env, tokenPath, launcherLog, daemonLogDir, daemonCommand
+Dim tokenFile, token, exitCode
+
+Set shell = CreateObject("WScript.Shell")
+Set fso = CreateObject("Scripting.FileSystemObject")
+tokenPath = $(Vbs-Literal $TokenPath)
+launcherLog = $(Vbs-Literal $launcherLog)
+daemonLogDir = $(Vbs-Literal $daemonLogDir)
+daemonCommand = $(Vbs-Literal $daemonCommand)
+
+Sub LogLine(message)
+  Dim logFile
+  Set logFile = fso.OpenTextFile(launcherLog, 8, True)
+  logFile.WriteLine Now & " " & message
+  logFile.Close
+End Sub
+
+On Error Resume Next
+If Not fso.FolderExists(daemonLogDir) Then
+  fso.CreateFolder daemonLogDir
+End If
+If Err.Number <> 0 Then
+  WScript.Quit 1
+End If
+On Error GoTo 0
+
+If Not fso.FileExists(tokenPath) Then
+  LogLine "SYNAPSE_DAEMON_TOKEN_MISSING path=" & tokenPath
+  WScript.Quit 1
+End If
+
+On Error Resume Next
+Set tokenFile = fso.OpenTextFile(tokenPath, 1, False)
+If Err.Number <> 0 Then
+  LogLine "SYNAPSE_DAEMON_TOKEN_READ_FAILED path=" & tokenPath & " err_number=" & Err.Number & " err_description=" & Err.Description
+  WScript.Quit 1
+End If
+If tokenFile.AtEndOfStream Then
+  token = ""
+Else
+  token = Trim(tokenFile.ReadAll)
+End If
+If Err.Number <> 0 Then
+  LogLine "SYNAPSE_DAEMON_TOKEN_READ_FAILED path=" & tokenPath & " err_number=" & Err.Number & " err_description=" & Err.Description
+  tokenFile.Close
+  WScript.Quit 1
+End If
+tokenFile.Close
+On Error GoTo 0
+
+If Len(token) < 16 Then
+  LogLine "SYNAPSE_DAEMON_TOKEN_INVALID path=" & tokenPath & " length=" & Len(token)
+  WScript.Quit 1
+End If
+
+Set env = shell.Environment("PROCESS")
+env("SYNAPSE_BEARER_TOKEN") = token
+env("SYNAPSE_LOG_DIR") = daemonLogDir
+
+LogLine "SYNAPSE_DAEMON_LAUNCH_START command=" & daemonCommand
+exitCode = shell.Run(daemonCommand, 0, True)
+LogLine "SYNAPSE_DAEMON_EXIT exit_code=" & exitCode
+WScript.Quit exitCode
+"@ | Set-Content -Path $OutputPath -Encoding ascii
+}
+
 function Ensure-SynapseSetupProcessJobType {
     if ('SynapseSetup.ProcessJob' -as [type]) { return }
 
@@ -808,27 +903,17 @@ try {
 # 6. Register + start the auto-start HTTP daemon (interactive desktop session)
 # ---------------------------------------------------------------------------
 Step "Registering auto-start daemon task '$TaskName'"
-$launcher = Join-Path $LogDir 'synapse-daemon-launch.cmd'
+$legacyLauncher = Join-Path $LogDir 'synapse-daemon-launch.cmd'
 $hiddenLauncher = Join-Path $LogDir 'synapse-daemon-launch-hidden.vbs'
-$daemonLog = Join-Path $LogDir 'daemon.log'
-@"
-@echo off
-set SYNAPSE_BEARER_TOKEN=$token
-"$ExePath" --mode http --bind $Bind --db "$DbPath" --profile-dir "$ProfilesDir" --log-level info >> "$daemonLog" 2>&1
-"@ | Set-Content -Path $launcher -Encoding ascii
-$cmdExe = Join-Path $env:SystemRoot 'System32\cmd.exe'
+$launcherLog = Join-Path $LogDir 'daemon-launcher.log'
+if (Test-Path $legacyLauncher) {
+    Remove-Item -LiteralPath $legacyLauncher -Force
+}
 $wscriptExe = Join-Path $env:SystemRoot 'System32\wscript.exe'
 if (-not (Test-Path $wscriptExe)) {
     Die "SYNAPSE_HIDDEN_LAUNCHER_MISSING path=$wscriptExe remediation=repair Windows Script Host or run the daemon manually with a hidden process supervisor"
 }
-$hiddenCommand = "$(Quote-WindowsCommandArgument $cmdExe) /d /s /c $(Quote-WindowsCommandArgument $launcher)"
-@"
-Option Explicit
-Dim shell, exitCode
-Set shell = CreateObject("WScript.Shell")
-exitCode = shell.Run($(Quote-VbsString $hiddenCommand), 0, True)
-WScript.Quit exitCode
-"@ | Set-Content -Path $hiddenLauncher -Encoding ascii
+New-HiddenDaemonLauncher -OutputPath $hiddenLauncher -ExePath $ExePath -Bind $Bind -DbPath $DbPath -ProfilesDir $ProfilesDir -LogDir $LogDir -TokenPath $TokenPath
 
 $action  = New-ScheduledTaskAction -Execute $wscriptExe -Argument "//B //Nologo `"$hiddenLauncher`"" -WorkingDirectory $LogDir
 $trigger = New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\$env:USERNAME"
@@ -850,17 +935,25 @@ Info "Task registered and started."
 # ---------------------------------------------------------------------------
 Step "Verifying daemon health (http://$Bind/health)"
 $ok = $false
+$healthPid = $null
 for ($i=0; $i -lt 15; $i++) {
     Start-Sleep -Seconds 2
     try {
         $h = Invoke-RestMethod -Uri "http://$Bind/health" -Headers @{ Authorization = "Bearer $token" } -TimeoutSec 4
         if ($h.ok) {
             Info ("Daemon OK: pid={0} version={1} db={2}" -f $h.pid, $h.version, $h.subsystems.storage.db_path)
+            $healthPid = [int]$h.pid
             $ok = $true; break
         }
     } catch { }
 }
-if (-not $ok) { Die "Daemon did not become healthy on http://$Bind/health. Check $daemonLog for STORAGE_* / bind errors." }
+if (-not $ok) { Die "Daemon did not become healthy on http://$Bind/health. Check $launcherLog and synapse.log.* under $LogDir for launch / STORAGE_* / bind errors." }
+$daemonLineage = Get-ProcessLineage -StartPid $healthPid
+$cmdAncestor = $daemonLineage | Where-Object { $_.Name -ieq 'cmd.exe' } | Select-Object -First 1
+if ($cmdAncestor) {
+    $lineageText = ($daemonLineage | ForEach-Object { "{0}:{1}" -f $_.ProcessId, $_.Name }) -join ' <- '
+    Die "SYNAPSE_DAEMON_CMD_ANCESTOR_FORBIDDEN pid=$healthPid cmd_pid=$($cmdAncestor.ProcessId) lineage=$lineageText remediation=rerun setup after removing legacy daemon launchers; daemon must not be launched through cmd.exe."
+}
 
 # ---------------------------------------------------------------------------
 # 8. Wire the Windows-side MCP clients
