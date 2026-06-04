@@ -2907,199 +2907,6 @@ expression: profile_tool_shapes
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
       "properties": {
-        "installed_profile_id": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "package_id": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "package_version": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "profile_id": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "profile_version": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "row_key": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "source_id": {
-          "type": [
-            "string",
-            "null"
-          ]
-        }
-      },
-      "title": "ProfileRegistryInspectParams",
-      "type": "object"
-    },
-    "name": "profile_registry_inspect",
-    "outputSchema": {
-      "$defs": {
-        "ProfileRegistryRowSummary": {
-          "additionalProperties": false,
-          "properties": {
-            "cf_name": {
-              "type": "string"
-            },
-            "key": {
-              "type": "string"
-            },
-            "key_hex": {
-              "type": "string"
-            },
-            "package_id": {
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "package_version": {
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "profile_id": {
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "profile_version": {
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "row_id": {
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "row_kind": {
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "source_id": {
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "state": {
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "updated_at": {
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "value_len_bytes": {
-              "minimum": 0,
-              "type": "integer"
-            },
-            "value_utf8_prefix": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "cf_name",
-            "key",
-            "key_hex",
-            "value_len_bytes",
-            "value_utf8_prefix"
-          ],
-          "type": "object"
-        },
-        "ProfileRegistryStoredRow": {
-          "additionalProperties": false,
-          "properties": {
-            "summary": {
-              "$ref": "#/$defs/ProfileRegistryRowSummary"
-            },
-            "value": {
-              "type": [
-                "object",
-                "array",
-                "string",
-                "number",
-                "boolean",
-                "null"
-              ]
-            }
-          },
-          "required": [
-            "summary",
-            "value"
-          ],
-          "type": "object"
-        }
-      },
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "additionalProperties": false,
-      "properties": {
-        "cf_name": {
-          "type": "string"
-        },
-        "found": {
-          "type": "boolean"
-        },
-        "row": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/ProfileRegistryStoredRow"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "row_key": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "cf_name",
-        "row_key",
-        "found"
-      ],
-      "title": "ProfileRegistryInspectResponse",
-      "type": "object"
-    }
-  },
-  {
-    "inputSchema": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "additionalProperties": false,
-      "properties": {
         "expected_manifest_digest": {
           "type": [
             "string",
@@ -3314,9 +3121,29 @@ expression: profile_tool_shapes
   },
   {
     "inputSchema": {
+      "$defs": {
+        "ProfileRegistryQueryView": {
+          "enum": [
+            "search",
+            "inspect",
+            "report"
+          ],
+          "type": "string"
+        }
+      },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
       "properties": {
+        "include_disabled": {
+          "default": false,
+          "type": "boolean"
+        },
+        "installed_profile_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "limit": {
           "default": 100,
           "maximum": 1000,
@@ -3329,19 +3156,105 @@ expression: profile_tool_shapes
           "minimum": 1,
           "type": "integer"
         },
+        "package_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "package_version": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "profile_id": {
           "type": [
             "string",
             "null"
           ]
+        },
+        "profile_version": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "query": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "row_key": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "row_kind": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "view": {
+          "$ref": "#/$defs/ProfileRegistryQueryView"
         }
       },
-      "title": "ProfileRegistryReportParams",
+      "required": [
+        "view"
+      ],
+      "title": "ProfileRegistryQueryParams",
       "type": "object"
     },
-    "name": "profile_registry_report",
+    "name": "profile_registry_query",
     "outputSchema": {
       "$defs": {
+        "ProfileRegistryInspectResponse": {
+          "additionalProperties": false,
+          "properties": {
+            "cf_name": {
+              "type": "string"
+            },
+            "found": {
+              "type": "boolean"
+            },
+            "row": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ProfileRegistryStoredRow"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "row_key": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "cf_name",
+            "row_key",
+            "found"
+          ],
+          "type": "object"
+        },
+        "ProfileRegistryQueryView": {
+          "enum": [
+            "search",
+            "inspect",
+            "report"
+          ],
+          "type": "string"
+        },
         "ProfileRegistryReportAudit": {
           "additionalProperties": false,
           "properties": {
@@ -4031,6 +3944,130 @@ expression: profile_tool_shapes
           ],
           "type": "object"
         },
+        "ProfileRegistryReportResponse": {
+          "additionalProperties": false,
+          "properties": {
+            "consent": {
+              "items": {
+                "$ref": "#/$defs/ProfileRegistryReportConsent"
+              },
+              "type": "array"
+            },
+            "curated_targets": {
+              "items": {
+                "$ref": "#/$defs/ProfileRegistryReportCuratedTarget"
+              },
+              "type": "array"
+            },
+            "explicit_controls": {
+              "items": {
+                "$ref": "#/$defs/ProfileRegistryReportControl"
+              },
+              "type": "array"
+            },
+            "generated_at": {
+              "type": "string"
+            },
+            "installed_profiles": {
+              "items": {
+                "$ref": "#/$defs/ProfileRegistryReportInstalledProfile"
+              },
+              "type": "array"
+            },
+            "limit": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "max_audit_rows": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "packages": {
+              "items": {
+                "$ref": "#/$defs/ProfileRegistryReportPackage"
+              },
+              "type": "array"
+            },
+            "profile_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "quality_snapshots": {
+              "items": {
+                "$ref": "#/$defs/ProfileRegistryReportQualitySnapshot"
+              },
+              "type": "array"
+            },
+            "quarantined_packages": {
+              "items": {
+                "$ref": "#/$defs/ProfileRegistryReportQuarantine"
+              },
+              "type": "array"
+            },
+            "recent_audit": {
+              "$ref": "#/$defs/ProfileRegistryReportAudit"
+            },
+            "registry_heads": {
+              "items": {
+                "$ref": "#/$defs/ProfileRegistryRowSummary"
+              },
+              "type": "array"
+            },
+            "registry_rows_scanned": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "rollback_rows": {
+              "items": {
+                "$ref": "#/$defs/ProfileRegistryReportRollback"
+              },
+              "type": "array"
+            },
+            "row_counts": {
+              "additionalProperties": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "type": "object"
+            },
+            "schema_version": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "source_of_truth": {
+              "items": {
+                "$ref": "#/$defs/ProfileRegistryReportPointer"
+              },
+              "type": "array"
+            },
+            "storage_path": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "schema_version",
+            "generated_at",
+            "storage_path",
+            "limit",
+            "max_audit_rows",
+            "row_counts",
+            "source_of_truth",
+            "registry_rows_scanned",
+            "registry_heads",
+            "installed_profiles",
+            "packages",
+            "curated_targets",
+            "quarantined_packages",
+            "rollback_rows",
+            "quality_snapshots",
+            "consent",
+            "recent_audit",
+            "explicit_controls"
+          ],
+          "type": "object"
+        },
         "ProfileRegistryReportRollback": {
           "additionalProperties": false,
           "properties": {
@@ -4179,131 +4216,121 @@ expression: profile_tool_shapes
             "value_utf8_prefix"
           ],
           "type": "object"
+        },
+        "ProfileRegistrySearchResponse": {
+          "additionalProperties": false,
+          "properties": {
+            "cf_name": {
+              "type": "string"
+            },
+            "include_disabled": {
+              "type": "boolean"
+            },
+            "limit": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "prefix": {
+              "type": "string"
+            },
+            "query": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "row_kind": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "rows": {
+              "items": {
+                "$ref": "#/$defs/ProfileRegistryRowSummary"
+              },
+              "type": "array"
+            },
+            "total_matched": {
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "cf_name",
+            "prefix",
+            "include_disabled",
+            "limit",
+            "total_matched",
+            "rows"
+          ],
+          "type": "object"
+        },
+        "ProfileRegistryStoredRow": {
+          "additionalProperties": false,
+          "properties": {
+            "summary": {
+              "$ref": "#/$defs/ProfileRegistryRowSummary"
+            },
+            "value": {
+              "type": [
+                "object",
+                "array",
+                "string",
+                "number",
+                "boolean",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "summary",
+            "value"
+          ],
+          "type": "object"
         }
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
       "properties": {
-        "consent": {
-          "items": {
-            "$ref": "#/$defs/ProfileRegistryReportConsent"
-          },
-          "type": "array"
-        },
-        "curated_targets": {
-          "items": {
-            "$ref": "#/$defs/ProfileRegistryReportCuratedTarget"
-          },
-          "type": "array"
-        },
-        "explicit_controls": {
-          "items": {
-            "$ref": "#/$defs/ProfileRegistryReportControl"
-          },
-          "type": "array"
-        },
-        "generated_at": {
-          "type": "string"
-        },
-        "installed_profiles": {
-          "items": {
-            "$ref": "#/$defs/ProfileRegistryReportInstalledProfile"
-          },
-          "type": "array"
-        },
-        "limit": {
-          "minimum": 0,
-          "type": "integer"
-        },
-        "max_audit_rows": {
-          "minimum": 0,
-          "type": "integer"
-        },
-        "packages": {
-          "items": {
-            "$ref": "#/$defs/ProfileRegistryReportPackage"
-          },
-          "type": "array"
-        },
-        "profile_id": {
-          "type": [
-            "string",
-            "null"
+        "inspect": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProfileRegistryInspectResponse"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
-        "quality_snapshots": {
-          "items": {
-            "$ref": "#/$defs/ProfileRegistryReportQualitySnapshot"
-          },
-          "type": "array"
+        "report": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProfileRegistryReportResponse"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
-        "quarantined_packages": {
-          "items": {
-            "$ref": "#/$defs/ProfileRegistryReportQuarantine"
-          },
-          "type": "array"
+        "search": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProfileRegistrySearchResponse"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
-        "recent_audit": {
-          "$ref": "#/$defs/ProfileRegistryReportAudit"
-        },
-        "registry_heads": {
-          "items": {
-            "$ref": "#/$defs/ProfileRegistryRowSummary"
-          },
-          "type": "array"
-        },
-        "registry_rows_scanned": {
-          "minimum": 0,
-          "type": "integer"
-        },
-        "rollback_rows": {
-          "items": {
-            "$ref": "#/$defs/ProfileRegistryReportRollback"
-          },
-          "type": "array"
-        },
-        "row_counts": {
-          "additionalProperties": {
-            "minimum": 0,
-            "type": "integer"
-          },
-          "type": "object"
-        },
-        "schema_version": {
-          "minimum": 0,
-          "type": "integer"
-        },
-        "source_of_truth": {
-          "items": {
-            "$ref": "#/$defs/ProfileRegistryReportPointer"
-          },
-          "type": "array"
-        },
-        "storage_path": {
-          "type": "string"
+        "view": {
+          "$ref": "#/$defs/ProfileRegistryQueryView"
         }
       },
       "required": [
-        "schema_version",
-        "generated_at",
-        "storage_path",
-        "limit",
-        "max_audit_rows",
-        "row_counts",
-        "source_of_truth",
-        "registry_rows_scanned",
-        "registry_heads",
-        "installed_profiles",
-        "packages",
-        "curated_targets",
-        "quarantined_packages",
-        "rollback_rows",
-        "quality_snapshots",
-        "consent",
-        "recent_audit",
-        "explicit_controls"
+        "view"
       ],
-      "title": "ProfileRegistryReportResponse",
+      "title": "ProfileRegistryQueryResponse",
       "type": "object"
     }
   },
@@ -4497,175 +4524,6 @@ expression: profile_tool_shapes
         "rollback_row"
       ],
       "title": "ProfileRegistryRollbackResponse",
-      "type": "object"
-    }
-  },
-  {
-    "inputSchema": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "additionalProperties": false,
-      "properties": {
-        "include_disabled": {
-          "default": false,
-          "type": "boolean"
-        },
-        "limit": {
-          "default": 100,
-          "maximum": 1000,
-          "minimum": 1,
-          "type": "integer"
-        },
-        "query": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "row_kind": {
-          "type": [
-            "string",
-            "null"
-          ]
-        }
-      },
-      "title": "ProfileRegistrySearchParams",
-      "type": "object"
-    },
-    "name": "profile_registry_search",
-    "outputSchema": {
-      "$defs": {
-        "ProfileRegistryRowSummary": {
-          "additionalProperties": false,
-          "properties": {
-            "cf_name": {
-              "type": "string"
-            },
-            "key": {
-              "type": "string"
-            },
-            "key_hex": {
-              "type": "string"
-            },
-            "package_id": {
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "package_version": {
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "profile_id": {
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "profile_version": {
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "row_id": {
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "row_kind": {
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "source_id": {
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "state": {
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "updated_at": {
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "value_len_bytes": {
-              "minimum": 0,
-              "type": "integer"
-            },
-            "value_utf8_prefix": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "cf_name",
-            "key",
-            "key_hex",
-            "value_len_bytes",
-            "value_utf8_prefix"
-          ],
-          "type": "object"
-        }
-      },
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "additionalProperties": false,
-      "properties": {
-        "cf_name": {
-          "type": "string"
-        },
-        "include_disabled": {
-          "type": "boolean"
-        },
-        "limit": {
-          "minimum": 0,
-          "type": "integer"
-        },
-        "prefix": {
-          "type": "string"
-        },
-        "query": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "row_kind": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "rows": {
-          "items": {
-            "$ref": "#/$defs/ProfileRegistryRowSummary"
-          },
-          "type": "array"
-        },
-        "total_matched": {
-          "minimum": 0,
-          "type": "integer"
-        }
-      },
-      "required": [
-        "cf_name",
-        "prefix",
-        "include_disabled",
-        "limit",
-        "total_matched",
-        "rows"
-      ],
-      "title": "ProfileRegistrySearchResponse",
       "type": "object"
     }
   }

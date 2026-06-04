@@ -89,9 +89,18 @@ struct RegistryExportInputs {
     quality_row: Option<EncodedRow>,
 }
 
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ProfileRegistryQueryView {
+    Search,
+    Inspect,
+    Report,
+}
+
 #[derive(Clone, Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct ProfileRegistrySearchParams {
+pub struct ProfileRegistryQueryParams {
+    pub view: ProfileRegistryQueryView,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub query: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -101,11 +110,6 @@ pub struct ProfileRegistrySearchParams {
     #[serde(default = "default_search_limit")]
     #[schemars(default = "default_search_limit", range(min = 1, max = 1000))]
     pub limit: u32,
-}
-
-#[derive(Clone, Debug, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct ProfileRegistryInspectParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub row_key: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -120,16 +124,6 @@ pub struct ProfileRegistryInspectParams {
     pub profile_version: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub installed_profile_id: Option<ProfileId>,
-}
-
-#[derive(Clone, Debug, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct ProfileRegistryReportParams {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub profile_id: Option<ProfileId>,
-    #[serde(default = "default_search_limit")]
-    #[schemars(default = "default_search_limit", range(min = 1, max = 1000))]
-    pub limit: u32,
     #[serde(default = "default_report_audit_rows")]
     #[schemars(default = "default_report_audit_rows", range(min = 1, max = 1000))]
     pub max_audit_rows: u32,
@@ -289,6 +283,15 @@ pub struct ProfileRegistryReportResponse {
     pub consent: Vec<ProfileRegistryReportConsent>,
     pub recent_audit: ProfileRegistryReportAudit,
     pub explicit_controls: Vec<ProfileRegistryReportControl>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ProfileRegistryQueryResponse {
+    pub view: ProfileRegistryQueryView,
+    pub search: Option<ProfileRegistrySearchResponse>,
+    pub inspect: Option<ProfileRegistryInspectResponse>,
+    pub report: Option<ProfileRegistryReportResponse>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, JsonSchema)]
@@ -748,18 +751,8 @@ const BUILTIN_TRUST_ROOTS: &[TrustRoot] = &[TrustRoot {
 }];
 
 #[must_use]
-pub const fn profile_registry_search() -> M3ToolStub {
-    M3ToolStub::new("profile_registry_search")
-}
-
-#[must_use]
-pub const fn profile_registry_inspect() -> M3ToolStub {
-    M3ToolStub::new("profile_registry_inspect")
-}
-
-#[must_use]
-pub const fn profile_registry_report() -> M3ToolStub {
-    M3ToolStub::new("profile_registry_report")
+pub const fn profile_registry_query() -> M3ToolStub {
+    M3ToolStub::new("profile_registry_query")
 }
 
 #[must_use]
@@ -793,17 +786,7 @@ pub const fn audit_intelligence_query() -> M3ToolStub {
 }
 
 #[must_use]
-pub fn required_permissions_search(_params: &ProfileRegistrySearchParams) -> RequiredPermissions {
-    required([Permission::ReadProfile, Permission::ReadStorage])
-}
-
-#[must_use]
-pub fn required_permissions_inspect(_params: &ProfileRegistryInspectParams) -> RequiredPermissions {
-    required([Permission::ReadProfile, Permission::ReadStorage])
-}
-
-#[must_use]
-pub fn required_permissions_report(_params: &ProfileRegistryReportParams) -> RequiredPermissions {
+pub fn required_permissions_query(_params: &ProfileRegistryQueryParams) -> RequiredPermissions {
     required([Permission::ReadProfile, Permission::ReadStorage])
 }
 
@@ -855,9 +838,44 @@ pub fn required_permissions_audit(_params: &AuditIntelligenceQueryParams) -> Req
     required([Permission::ReadProfile, Permission::ReadStorage])
 }
 
-pub fn search_registry(
+pub fn query_registry(
     reflex_runtime: &Arc<Mutex<ReflexRuntime>>,
-    params: &ProfileRegistrySearchParams,
+    params: &ProfileRegistryQueryParams,
+) -> Result<ProfileRegistryQueryResponse, ErrorData> {
+    match params.view {
+        ProfileRegistryQueryView::Search => {
+            let search = search_registry(reflex_runtime, params)?;
+            Ok(ProfileRegistryQueryResponse {
+                view: ProfileRegistryQueryView::Search,
+                search: Some(search),
+                inspect: None,
+                report: None,
+            })
+        }
+        ProfileRegistryQueryView::Inspect => {
+            let inspect = inspect_registry(reflex_runtime, params)?;
+            Ok(ProfileRegistryQueryResponse {
+                view: ProfileRegistryQueryView::Inspect,
+                search: None,
+                inspect: Some(inspect),
+                report: None,
+            })
+        }
+        ProfileRegistryQueryView::Report => {
+            let report = report_profile_registry(reflex_runtime, params)?;
+            Ok(ProfileRegistryQueryResponse {
+                view: ProfileRegistryQueryView::Report,
+                search: None,
+                inspect: None,
+                report: Some(report),
+            })
+        }
+    }
+}
+
+fn search_registry(
+    reflex_runtime: &Arc<Mutex<ReflexRuntime>>,
+    params: &ProfileRegistryQueryParams,
 ) -> Result<ProfileRegistrySearchResponse, ErrorData> {
     validate_limit(params.limit)?;
     if let Some(kind) = &params.row_kind {
@@ -873,7 +891,13 @@ pub fn search_registry(
     let mut total_matched = 0_u64;
     for (key, value) in rows {
         let summary = row_summary(cf::CF_PROFILES, &key, &value);
-        if !row_filter_matches(&summary, &value, query.as_deref(), params) {
+        if !row_filter_matches(
+            &summary,
+            &value,
+            query.as_deref(),
+            params.row_kind.as_deref(),
+            params.include_disabled,
+        ) {
             continue;
         }
         total_matched += 1;
@@ -893,9 +917,9 @@ pub fn search_registry(
     })
 }
 
-pub fn inspect_registry(
+fn inspect_registry(
     reflex_runtime: &Arc<Mutex<ReflexRuntime>>,
-    params: &ProfileRegistryInspectParams,
+    params: &ProfileRegistryQueryParams,
 ) -> Result<ProfileRegistryInspectResponse, ErrorData> {
     let (cf_name, key) = inspect_key(params)?;
     let runtime = lock_runtime(reflex_runtime, "inspecting profile registry")?;
@@ -922,9 +946,9 @@ pub fn inspect_registry(
     clippy::too_many_lines,
     reason = "operator report intentionally assembles all registry, audit, quality, and consent surfaces in one read-only MCP operation"
 )]
-pub fn report_profile_registry(
+fn report_profile_registry(
     reflex_runtime: &Arc<Mutex<ReflexRuntime>>,
-    params: &ProfileRegistryReportParams,
+    params: &ProfileRegistryQueryParams,
 ) -> Result<ProfileRegistryReportResponse, ErrorData> {
     validate_report_params(params)?;
     let runtime = lock_runtime(reflex_runtime, "reporting profile registry state")?;
@@ -1639,19 +1663,19 @@ fn collect_export_bundle_rows(
     ),
     ErrorData,
 > {
-    let search_params = ProfileRegistrySearchParams {
-        query: params.query.clone(),
-        row_kind: params.row_kind.clone(),
-        include_disabled: params.include_disabled,
-        limit: params.limit,
-    };
     let query = normalized_query(params.query.as_deref());
     let mut bundle_rows = Vec::new();
     let mut summaries = Vec::new();
     'rows: for (cf_name, rows) in [(cf::CF_PROFILES, profile_rows), (cf::CF_KV, kv_rows)] {
         for (key, value) in rows {
             let summary = row_summary(cf_name, &key, &value);
-            if !row_filter_matches(&summary, &value, query.as_deref(), &search_params) {
+            if !row_filter_matches(
+                &summary,
+                &value,
+                query.as_deref(),
+                params.row_kind.as_deref(),
+                params.include_disabled,
+            ) {
                 continue;
             }
             if bundle_kind == CONTRIBUTION_BUNDLE_KIND
@@ -2923,13 +2947,13 @@ fn value_mentions_profile(value: &Value, profile_id: &str) -> bool {
             })
 }
 
-fn validate_report_params(params: &ProfileRegistryReportParams) -> Result<(), ErrorData> {
+fn validate_report_params(params: &ProfileRegistryQueryParams) -> Result<(), ErrorData> {
     validate_limit(params.limit)?;
     if params.max_audit_rows == 0 || params.max_audit_rows > MAX_REPORT_AUDIT_ROWS {
         return Err(mcp_error(
             error_codes::TOOL_PARAMS_INVALID,
             format!(
-                "profile_registry_report max_audit_rows must be 1..={MAX_REPORT_AUDIT_ROWS}; got {}",
+                "profile_registry_query max_audit_rows must be 1..={MAX_REPORT_AUDIT_ROWS}; got {}",
                 params.max_audit_rows
             ),
         ));
@@ -3485,7 +3509,7 @@ fn required_string_from_value(
         })
 }
 
-fn inspect_key(params: &ProfileRegistryInspectParams) -> Result<(&'static str, String), ErrorData> {
+fn inspect_key(params: &ProfileRegistryQueryParams) -> Result<(&'static str, String), ErrorData> {
     if let Some(row_key) = params
         .row_key
         .as_ref()
@@ -3527,9 +3551,10 @@ fn row_filter_matches(
     summary: &ProfileRegistryRowSummary,
     value: &[u8],
     query: Option<&str>,
-    params: &ProfileRegistrySearchParams,
+    row_kind: Option<&str>,
+    include_disabled: bool,
 ) -> bool {
-    if !params.include_disabled
+    if !include_disabled
         && matches!(
             summary.state.as_deref(),
             Some("disabled" | "removed" | "staged" | "quarantined" | "rejected")
@@ -3537,8 +3562,8 @@ fn row_filter_matches(
     {
         return false;
     }
-    if let Some(row_kind) = &params.row_kind
-        && summary.row_kind.as_deref() != Some(row_kind.as_str())
+    if let Some(row_kind) = row_kind
+        && summary.row_kind.as_deref() != Some(row_kind)
     {
         return false;
     }

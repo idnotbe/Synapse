@@ -83,12 +83,12 @@ async fn curated_productivity_package_accepts_single_token_profile_id() -> anyho
     let inspect = structured(
         &client
             .tools_call(
-                "profile_registry_inspect",
-                json!({"row_key": "profile_registry/v1/curated_target/starter.v1/notepad.windows"}),
+                "profile_registry_query",
+                json!({"view": "inspect", "row_key": "profile_registry/v1/curated_target/starter.v1/notepad.windows"}),
             )
             .await?,
     )?;
-    let value = &inspect["row"]["value"];
+    let value = &inspect["inspect"]["row"]["value"];
     assert_eq!(value["row_kind"], "curated_profile_target");
     assert_eq!(value["target_id"], "notepad.windows");
     assert_eq!(value["profile_id"], "notepad");
@@ -286,25 +286,25 @@ async fn assert_curated_search_and_inspect(client: &mut StdioMcpClient) -> anyho
     let search = structured(
         &client
             .tools_call(
-                "profile_registry_search",
-                json!({"row_kind": "curated_profile_target"}),
+                "profile_registry_query",
+                json!({"view": "search", "row_kind": "curated_profile_target"}),
             )
             .await?,
     )?;
-    assert_eq!(search["total_matched"], 1);
+    assert_eq!(search["search"]["total_matched"], 1);
     assert_eq!(
-        search["rows"][0]["key"],
+        search["search"]["rows"][0]["key"],
         "profile_registry/v1/curated_target/starter.v1/luanti.minetest"
     );
     let inspect = structured(
         &client
             .tools_call(
-                "profile_registry_inspect",
-                json!({"row_key": "profile_registry/v1/curated_target/starter.v1/luanti.minetest"}),
+                "profile_registry_query",
+                json!({"view": "inspect", "row_key": "profile_registry/v1/curated_target/starter.v1/luanti.minetest"}),
             )
             .await?,
     )?;
-    let value = &inspect["row"]["value"];
+    let value = &inspect["inspect"]["row"]["value"];
     assert_eq!(value["row_kind"], "curated_profile_target");
     assert_eq!(value["seed_set_id"], "starter.v1");
     assert_eq!(value["target_id"], "luanti.minetest");
@@ -357,25 +357,25 @@ async fn assert_vscode_curated_search_and_inspect(
     let search = structured(
         &client
             .tools_call(
-                "profile_registry_search",
-                json!({"row_kind": "curated_profile_target"}),
+                "profile_registry_query",
+                json!({"view": "search", "row_kind": "curated_profile_target"}),
             )
             .await?,
     )?;
-    assert_eq!(search["total_matched"], 1);
+    assert_eq!(search["search"]["total_matched"], 1);
     assert_eq!(
-        search["rows"][0]["key"],
+        search["search"]["rows"][0]["key"],
         "profile_registry/v1/curated_target/starter.v1/vscode.windows"
     );
     let inspect = structured(
         &client
             .tools_call(
-                "profile_registry_inspect",
-                json!({"row_key": "profile_registry/v1/curated_target/starter.v1/vscode.windows"}),
+                "profile_registry_query",
+                json!({"view": "inspect", "row_key": "profile_registry/v1/curated_target/starter.v1/vscode.windows"}),
             )
             .await?,
     )?;
-    let value = &inspect["row"]["value"];
+    let value = &inspect["inspect"]["row"]["value"];
     assert_eq!(value["row_kind"], "curated_profile_target");
     assert_eq!(value["target_id"], "vscode.windows");
     assert_eq!(value["profile_id"], "vscode");
@@ -426,25 +426,25 @@ async fn assert_terminal_curated_search_and_inspect(
     let search = structured(
         &client
             .tools_call(
-                "profile_registry_search",
-                json!({"row_kind": "curated_profile_target"}),
+                "profile_registry_query",
+                json!({"view": "search", "row_kind": "curated_profile_target"}),
             )
             .await?,
     )?;
-    assert_eq!(search["total_matched"], 1);
+    assert_eq!(search["search"]["total_matched"], 1);
     assert_eq!(
-        search["rows"][0]["key"],
+        search["search"]["rows"][0]["key"],
         "profile_registry/v1/curated_target/starter.v1/terminal.windows"
     );
     let inspect = structured(
         &client
             .tools_call(
-                "profile_registry_inspect",
-                json!({"row_key": "profile_registry/v1/curated_target/starter.v1/terminal.windows"}),
+                "profile_registry_query",
+                json!({"view": "inspect", "row_key": "profile_registry/v1/curated_target/starter.v1/terminal.windows"}),
             )
             .await?,
     )?;
-    let value = &inspect["row"]["value"];
+    let value = &inspect["inspect"]["row"]["value"];
     assert_eq!(value["row_kind"], "curated_profile_target");
     assert_eq!(value["target_id"], "terminal.windows");
     assert_eq!(value["profile_id"], "terminal");
@@ -506,25 +506,25 @@ async fn assert_chrome_curated_search_and_inspect(
     let search = structured(
         &client
             .tools_call(
-                "profile_registry_search",
-                json!({"row_kind": "curated_profile_target"}),
+                "profile_registry_query",
+                json!({"view": "search", "row_kind": "curated_profile_target"}),
             )
             .await?,
     )?;
-    assert_eq!(search["total_matched"], 1);
+    assert_eq!(search["search"]["total_matched"], 1);
     assert_eq!(
-        search["rows"][0]["key"],
+        search["search"]["rows"][0]["key"],
         "profile_registry/v1/curated_target/starter.v1/chrome.windows"
     );
     let inspect = structured(
         &client
             .tools_call(
-                "profile_registry_inspect",
-                json!({"row_key": "profile_registry/v1/curated_target/starter.v1/chrome.windows"}),
+                "profile_registry_query",
+                json!({"view": "inspect", "row_key": "profile_registry/v1/curated_target/starter.v1/chrome.windows"}),
             )
             .await?,
     )?;
-    let value = &inspect["row"]["value"];
+    let value = &inspect["inspect"]["row"]["value"];
     assert_eq!(value["row_kind"], "curated_profile_target");
     assert_eq!(value["target_id"], "chrome.windows");
     assert_eq!(value["profile_id"], "chrome");
@@ -577,25 +577,25 @@ async fn assert_minecraft_curated_search_and_inspect(
     let search = structured(
         &client
             .tools_call(
-                "profile_registry_search",
-                json!({"row_kind": "curated_profile_target"}),
+                "profile_registry_query",
+                json!({"view": "search", "row_kind": "curated_profile_target"}),
             )
             .await?,
     )?;
-    assert_eq!(search["total_matched"], 1);
+    assert_eq!(search["search"]["total_matched"], 1);
     assert_eq!(
-        search["rows"][0]["key"],
+        search["search"]["rows"][0]["key"],
         "profile_registry/v1/curated_target/starter.v1/minecraft.java"
     );
     let inspect = structured(
         &client
             .tools_call(
-                "profile_registry_inspect",
-                json!({"row_key": "profile_registry/v1/curated_target/starter.v1/minecraft.java"}),
+                "profile_registry_query",
+                json!({"view": "inspect", "row_key": "profile_registry/v1/curated_target/starter.v1/minecraft.java"}),
             )
             .await?,
     )?;
-    let value = &inspect["row"]["value"];
+    let value = &inspect["inspect"]["row"]["value"];
     assert_eq!(value["row_kind"], "curated_profile_target");
     assert_eq!(value["target_id"], "minecraft.java");
     assert_eq!(value["profile_id"], "minecraft.java");

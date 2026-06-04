@@ -4,7 +4,7 @@ use anyhow::{Context, ensure};
 use serde_json::{Value, json};
 use synapse_test_utils::stdio_mcp_client::StdioMcpClient;
 
-const EXPECTED_TOOLS: [&str; 48] = [
+const EXPECTED_TOOLS: [&str; 46] = [
     "act_aim",
     "act_click",
     "act_clipboard",
@@ -33,11 +33,9 @@ const EXPECTED_TOOLS: [&str; 48] = [
     "profile_registry_disable",
     "profile_registry_export",
     "profile_registry_import",
-    "profile_registry_inspect",
     "profile_registry_install",
-    "profile_registry_report",
+    "profile_registry_query",
     "profile_registry_rollback",
-    "profile_registry_search",
     "read_text",
     "reflex_cancel",
     "reflex_history",
@@ -297,14 +295,14 @@ fn read_schema_defaults(readbacks: &mut Vec<Value>, tools: &[Value]) -> anyhow::
     read_default(
         readbacks,
         tools,
-        "profile_registry_search",
+        "profile_registry_query",
         "inputSchema.properties.include_disabled.default",
         &json!(false),
     )?;
     read_default(
         readbacks,
         tools,
-        "profile_registry_search",
+        "profile_registry_query",
         "inputSchema.properties.limit.default",
         &json!(100),
     )?;
@@ -325,14 +323,14 @@ fn read_schema_defaults(readbacks: &mut Vec<Value>, tools: &[Value]) -> anyhow::
     read_default(
         readbacks,
         tools,
-        "profile_registry_report",
+        "profile_registry_query",
         "inputSchema.properties.limit.default",
         &json!(100),
     )?;
     read_default(
         readbacks,
         tools,
-        "profile_registry_report",
+        "profile_registry_query",
         "inputSchema.properties.max_audit_rows.default",
         &json!(100),
     )?;
@@ -448,6 +446,7 @@ fn read_required_fields(readbacks: &mut Vec<Value>, tools: &[Value]) -> anyhow::
         "profile_registry_install",
         "manifest_path",
     )?;
+    read_required(readbacks, tools, "profile_registry_query", "view")?;
     read_required(readbacks, tools, "profile_registry_disable", "profile_id")?;
     read_required(readbacks, tools, "profile_registry_export", "output_path")?;
     read_required(readbacks, tools, "profile_registry_import", "bundle_path")?;

@@ -10,7 +10,7 @@ use synapse_test_utils::stdio_mcp_client::StdioMcpClient;
 use tempfile::TempDir;
 
 #[tokio::test]
-async fn profile_registry_report_summarizes_registry_quality_consent_and_quarantine()
+async fn profile_registry_query_report_summarizes_registry_quality_consent_and_quarantine()
 -> anyhow::Result<()> {
     let logs = TempDir::new()?;
     let db = TempDir::new()?;
@@ -39,9 +39,10 @@ async fn profile_registry_report_summarizes_registry_quality_consent_and_quarant
 async fn assert_empty_report(client: &mut StdioMcpClient) -> anyhow::Result<()> {
     let empty = structured(
         &client
-            .tools_call("profile_registry_report", json!({}))
+            .tools_call("profile_registry_query", json!({"view": "report"}))
             .await?,
     )?;
+    let empty = empty["report"].clone();
     assert_eq!(empty["row_counts"][cf::CF_PROFILES], 0);
     assert_eq!(array_len(&empty, "installed_profiles")?, 0);
     assert!(has_sot_surface(&empty, "registry_rows_prefix"));
@@ -161,11 +162,12 @@ async fn assert_populated_report(client: &mut StdioMcpClient) -> anyhow::Result<
     let report = structured(
         &client
             .tools_call(
-                "profile_registry_report",
-                json!({"profile_id": "luanti.minetest", "max_audit_rows": 10}),
+                "profile_registry_query",
+                json!({"view": "report", "profile_id": "luanti.minetest", "max_audit_rows": 10}),
             )
             .await?,
     )?;
+    let report = report["report"].clone();
     assert_eq!(
         report["installed_profiles"][0]["profile_id"],
         "luanti.minetest"

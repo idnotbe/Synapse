@@ -3,7 +3,7 @@ source: crates/synapse-mcp/tests/m3_tools_list.rs
 expression: snapshot
 ---
 {
-  "count": 48,
+  "count": 46,
   "m3_defaults": [
     {
       "actual": 33,
@@ -105,12 +105,12 @@ expression: snapshot
     {
       "actual": false,
       "path": "inputSchema.properties.include_disabled.default",
-      "tool": "profile_registry_search"
+      "tool": "profile_registry_query"
     },
     {
       "actual": 100,
       "path": "inputSchema.properties.limit.default",
-      "tool": "profile_registry_search"
+      "tool": "profile_registry_query"
     },
     {
       "actual": "registry.local",
@@ -125,12 +125,12 @@ expression: snapshot
     {
       "actual": 100,
       "path": "inputSchema.properties.limit.default",
-      "tool": "profile_registry_report"
+      "tool": "profile_registry_query"
     },
     {
       "actual": 100,
       "path": "inputSchema.properties.max_audit_rows.default",
-      "tool": "profile_registry_report"
+      "tool": "profile_registry_query"
     },
     {
       "actual": "disabled",
@@ -263,6 +263,11 @@ expression: snapshot
       "tool": "profile_registry_install"
     },
     {
+      "actual_contains": "view",
+      "path": "inputSchema.required",
+      "tool": "profile_registry_query"
+    },
+    {
       "actual_contains": "profile_id",
       "path": "inputSchema.required",
       "tool": "profile_registry_disable"
@@ -367,11 +372,9 @@ expression: snapshot
     "profile_registry_disable",
     "profile_registry_export",
     "profile_registry_import",
-    "profile_registry_inspect",
     "profile_registry_install",
-    "profile_registry_report",
+    "profile_registry_query",
     "profile_registry_rollback",
-    "profile_registry_search",
     "read_text",
     "reflex_cancel",
     "reflex_history",
