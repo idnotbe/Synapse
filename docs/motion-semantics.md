@@ -18,7 +18,7 @@ shape, or use `target`/`to` with an optional `from` for point-to-point motion.
 Leave `button` unset to move/aim; set `button` to drag along the resolved line or
 path.
 
-`act_click.velocity_profile` only controls timing for coordinate fallback moves
+`act_click.velocity_profile` only controls timing for coordinate target moves
 before the click. It does not define a spatial path; use `act_stroke.path` when
 shape matters.
 

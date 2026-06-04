@@ -228,14 +228,14 @@ Install Synapse for me and wire it into my AI tools.
    (%USERPROFILE%\.cargo\bin\synapse-mcp.exe). Find the absolute path to that
    binary and use it verbatim in every config below.
 3. Connect it to Claude Code (user scope):
-     claude mcp add --scope user synapse -- "<absolute path>\synapse-mcp.exe" --mode stdio
+     claude mcp add --scope user synapse -- "<absolute path>\synapse-mcp.exe" --mode connect --bind 127.0.0.1:7700
 4. Connect it to Codex by adding this to ~/.codex/config.toml:
      [mcp_servers.synapse]
      command = "<absolute path>\\synapse-mcp.exe"
-     args = ["--mode", "stdio"]
+     args = ["--mode", "connect", "--bind", "127.0.0.1:7700"]
 5. Connect it to the Claude Desktop app by adding a "synapse" server to
    %APPDATA%\Claude\claude_desktop_config.json under "mcpServers" with the same
-   command and ["--mode","stdio"] args. Preserve any existing servers in that file.
+   command and ["--mode","connect","--bind","127.0.0.1:7700"] args. Preserve any existing servers in that file.
 6. Verify: restart each client, then call the Synapse `health` tool and confirm
    it returns { "ok": true, ... }.
 
@@ -295,7 +295,7 @@ cargo install --path crates/synapse-mcp --force   # -> %USERPROFILE%\.cargo\bin\
 Claude Code (user scope):
 
 ```bash
-claude mcp add --scope user synapse -- <cargo-bin>\synapse-mcp.exe --mode stdio
+claude mcp add --scope user synapse -- <cargo-bin>\synapse-mcp.exe --mode connect --bind 127.0.0.1:7700
 ```
 
 Codex (`~/.codex/config.toml`):
@@ -303,7 +303,7 @@ Codex (`~/.codex/config.toml`):
 ```toml
 [mcp_servers.synapse]
 command = "C:\\Users\\you\\.cargo\\bin\\synapse-mcp.exe"
-args = ["--mode", "stdio"]
+args = ["--mode", "connect", "--bind", "127.0.0.1:7700"]
 ```
 
 Claude Desktop (`%APPDATA%\Claude\claude_desktop_config.json`):
@@ -313,7 +313,7 @@ Claude Desktop (`%APPDATA%\Claude\claude_desktop_config.json`):
   "mcpServers": {
     "synapse": {
       "command": "C:\\Users\\you\\.cargo\\bin\\synapse-mcp.exe",
-      "args": ["--mode", "stdio"]
+      "args": ["--mode", "connect", "--bind", "127.0.0.1:7700"]
     }
   }
 }
