@@ -103,7 +103,7 @@ benchmark_player = "synapsebench"
 "capability.observe.hud" = "luanti.crosshair_contrast,luanti.hotbar_contrast"
 "capability.observe.entities" = "luanti_crosshair_region,luanti_hotbar_region"
 "capability.action.keyboard.software" = "act_press supported"
-"capability.action.mouse.software" = "act_click,act_aim,act_drag,act_scroll supported"
+"capability.action.mouse.software" = "act_click,act_stroke,act_scroll supported"
 "capability.action.pad.vigem" = "available when ViGEm backend is configured"
 "capability.audit.action_log" = "CF_ACTION_LOG via storage_inspect samples"
 "capability.edge.hud_hidden" = "F1"
@@ -152,7 +152,7 @@ name = "luanti_dug_or_placed"
 from_filter = { op = "and", args = [
     { op = "source", source = "action_emitter" },
     { op = "kind", kind = "action.dispatched" },
-    { op = "data", path = "/tool", predicate = { op = "in_set", values = ["act_click", "act_drag"] } },
+    { op = "data", path = "/tool", predicate = { op = "in_set", values = ["act_click", "act_stroke"] } },
     { op = "data", path = "/keymap_action", predicate = { op = "in_set", values = ["dig", "punch", "place", "use"] } }
 ] }
 emits_kind = "benchmark.luanti.dug_or_placed"

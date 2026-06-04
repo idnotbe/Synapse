@@ -152,8 +152,8 @@ pub async fn cdp_type_node(
     .map(|_point| ())
 }
 
-/// Resolves the viewport-CSS centre of a web node (for `act_aim`), scrolling it
-/// into view first.
+/// Resolves the viewport-CSS centre of a web node (for `act_stroke` target
+/// aiming), scrolling it into view first.
 ///
 /// # Errors
 ///
