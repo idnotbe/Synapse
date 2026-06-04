@@ -120,6 +120,9 @@ assumptions against physical reality:
 - **`reality_audit`** — re-reads the real machine and reports drift, forcing a
   rebase when the agent's mental model has gone stale.
 
+Design note: the delta-first reality tools intentionally stay separate from
+plain `observe`; see [Delta-First Reality Tool Boundary](docs/delta-reality.md).
+
 <br clear="all">
 
 ### 🧠 It learns — the profile + audit flywheel
