@@ -3,21 +3,42 @@ use std::time::Duration;
 use anyhow::{Context, bail};
 use axum::{
     body::{Body, to_bytes},
+    extract::State,
     http::{Method, Request, StatusCode, header},
     middleware::Next,
     response::{IntoResponse, Response},
 };
 use rmcp::transport::streamable_http_server::session::local::SessionConfig;
+use synapse_action::ActionHandle;
 
 const SESSION_IDLE_TIMEOUT_ENV: &str = "SYNAPSE_HTTP_SESSION_IDLE_TIMEOUT_SECS";
 const DEFAULT_SESSION_IDLE_TIMEOUT_SECS: u64 = 30 * 60;
 const MAX_MCP_REQUEST_BYTES: usize = 1024 * 1024;
 const SESSION_ID_HEADER: &str = "Mcp-Session-Id";
 
+tokio::task_local! {
+    static CURRENT_MCP_SESSION_ID: Option<String>;
+}
+
+#[derive(Clone)]
+pub(super) struct SessionCleanupState {
+    action_handle: ActionHandle,
+}
+
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 enum SessionFailure {
     Missing,
     UnknownOrExpired,
+}
+
+impl SessionCleanupState {
+    pub(super) fn new(action_handle: ActionHandle) -> Self {
+        Self { action_handle }
+    }
+}
+
+pub(crate) fn current_mcp_session_id() -> Option<String> {
+    CURRENT_MCP_SESSION_ID.try_with(Clone::clone).ok().flatten()
 }
 
 pub(super) fn load_session_config() -> anyhow::Result<SessionConfig> {
@@ -36,15 +57,83 @@ pub(super) async fn require_mcp_session(request: Request<Body>, next: Next) -> R
     if !is_mcp_endpoint(request.uri().path()) {
         return next.run(request).await;
     }
+    let session_id = session_id_from_header(&request);
     let request = match enforce_session_header(request).await {
         Ok(request) => request,
         Err(response) => return response,
     };
+    CURRENT_MCP_SESSION_ID
+        .scope(session_id, async move {
+            let response = next.run(request).await;
+            if response.status() == StatusCode::NOT_FOUND {
+                return session_invalid(SessionFailure::UnknownOrExpired);
+            }
+            response
+        })
+        .await
+}
+
+pub(super) async fn release_held_inputs_on_delete(
+    State(state): State<SessionCleanupState>,
+    request: Request<Body>,
+    next: Next,
+) -> Response {
+    let cleanup_session_id = (request.method() == Method::DELETE
+        && is_mcp_endpoint(request.uri().path()))
+    .then(|| session_id_from_header(&request))
+    .flatten();
     let response = next.run(request).await;
-    if response.status() == StatusCode::NOT_FOUND {
-        return session_invalid(SessionFailure::UnknownOrExpired);
+    let Some(session_id) = cleanup_session_id else {
+        return response;
+    };
+    if !response.status().is_success() {
+        return response;
     }
-    response
+
+    let before = match state.action_handle.session_inputs_snapshot() {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            tracing::error!(
+                code = error.code(),
+                session_id,
+                detail = %error.detail(),
+                "HTTP MCP session cleanup could not read held-input ownership before release"
+            );
+            return cleanup_failed(error);
+        }
+    };
+    let result = state
+        .action_handle
+        .release_session_inputs(&session_id)
+        .await;
+    let after = state.action_handle.session_inputs_snapshot();
+    match result {
+        Ok(summary) => {
+            tracing::info!(
+                code = "MCP_HTTP_SESSION_INPUT_CLEANUP",
+                session_id,
+                released_keys = summary.released_keys,
+                released_buttons = summary.released_buttons,
+                neutralized_pads = summary.neutralized_pads,
+                retained_shared_inputs = summary.retained_shared_inputs,
+                before = ?before,
+                after = ?after,
+                "readback=session_input_ownership edge=http_delete after_cleanup"
+            );
+            response
+        }
+        Err(error) => {
+            tracing::error!(
+                code = error.code(),
+                session_id,
+                detail = %error.detail(),
+                before = ?before,
+                after = ?after,
+                "HTTP MCP session cleanup failed while releasing owned inputs"
+            );
+            cleanup_failed(error)
+        }
+    }
 }
 
 fn session_idle_timeout_secs() -> anyhow::Result<u64> {
@@ -81,10 +170,17 @@ async fn enforce_session_header(request: Request<Body>) -> Result<Request<Body>,
 }
 
 fn has_session_header(request: &Request<Body>) -> bool {
+    session_id_from_header(request).is_some()
+}
+
+fn session_id_from_header(request: &Request<Body>) -> Option<String> {
     request
         .headers()
         .get(SESSION_ID_HEADER)
-        .is_some_and(|value| value.to_str().is_ok_and(|text| !text.trim().is_empty()))
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
 }
 
 async fn allow_initialize_without_session(
@@ -133,9 +229,21 @@ fn payload_too_large() -> Response {
     (StatusCode::PAYLOAD_TOO_LARGE, "request body too large").into_response()
 }
 
+fn cleanup_failed(error: synapse_action::ActionError) -> Response {
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+        format!("{}: {}", error.code(), error.detail()),
+    )
+        .into_response()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{jsonrpc_method_is_initialize, parse_idle_timeout};
+    use super::{
+        CURRENT_MCP_SESSION_ID, current_mcp_session_id, jsonrpc_method_is_initialize,
+        parse_idle_timeout,
+    };
 
     #[test]
     fn initialize_detection_accepts_initialize_request_only() {
@@ -159,5 +267,17 @@ mod tests {
         assert_eq!(parse_idle_timeout("1").unwrap_or_default(), 1);
         assert!(parse_idle_timeout("0").is_err());
         assert!(parse_idle_timeout("abc").is_err());
+    }
+
+    #[tokio::test]
+    async fn current_session_id_survives_async_request_scope() {
+        assert_eq!(current_mcp_session_id(), None);
+        CURRENT_MCP_SESSION_ID
+            .scope(Some("session-test".to_owned()), async {
+                tokio::task::yield_now().await;
+                assert_eq!(current_mcp_session_id().as_deref(), Some("session-test"));
+            })
+            .await;
+        assert_eq!(current_mcp_session_id(), None);
     }
 }

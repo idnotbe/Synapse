@@ -134,11 +134,26 @@ impl SynapseService {
             .lock()
             .map(|state| {
                 (
-                    state.emitter_handle.clone(),
+                    state
+                        .emitter_handle
+                        .clone()
+                        .with_session_id(crate::http::current_mcp_session_id()),
                     state.recording.clone(),
                     state.connection_closed_cancel.clone(),
                 )
             })
+            .map_err(|_err| {
+                mcp_error(
+                    synapse_core::error_codes::OBSERVE_INTERNAL,
+                    "M2 service state lock poisoned",
+                )
+            })
+    }
+
+    fn m2_unscoped_action_handle(&self) -> Result<synapse_action::ActionHandle, ErrorData> {
+        self.m2_state
+            .lock()
+            .map(|state| state.emitter_handle.clone().with_session_id(None))
             .map_err(|_err| {
                 mcp_error(
                     synapse_core::error_codes::OBSERVE_INTERNAL,
@@ -233,7 +248,7 @@ impl SynapseService {
         &self,
     ) -> Result<Arc<Mutex<synapse_reflex::ReflexRuntime>>, ErrorData> {
         let event_bus = self.sse_state()?.event_bus();
-        let (action_handle, _recording, _connection_closed_cancel) = self.m2_action_context()?;
+        let action_handle = self.m2_unscoped_action_handle()?;
         let mut state = self.m3_state.lock().map_err(|_err| {
             mcp_error(
                 synapse_core::error_codes::TOOL_INTERNAL_ERROR,

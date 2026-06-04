@@ -43,6 +43,8 @@ pub use emitter::{
 pub use error::{ActionError, ActionResult};
 pub use handle::{
     ACTION_QUEUE_CAPACITY, ActionComboScheduler, ActionHandle, ActionMessage, RELEASE_ALL_HANDLE,
+    SessionInputSessionSnapshot, SessionInputSnapshot, SessionKeyInput, SessionMouseButtonInput,
+    SessionPadInput, SessionReleaseSummary,
 };
 pub use hotkey::{
     OperatorHotkeyGuard, OperatorHotkeyStatus, install_operator_hotkey, operator_hotkey_status,

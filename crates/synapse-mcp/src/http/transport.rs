@@ -206,6 +206,11 @@ fn router(
         "HTTP bearer token configured"
     );
     let health_service = Arc::new(service.clone());
+    let session_cleanup = session::SessionCleanupState::new(
+        service
+            .unscoped_action_handle()
+            .context("read action handle for HTTP session cleanup")?,
+    );
     let (mcp_service, session_manager) = streamable_service(shutdown_cancel, service)
         .context("initialize HTTP MCP session state")?;
     let state = HttpState {
@@ -219,6 +224,10 @@ fn router(
         .route("/events/stats", get(event_stats))
         .nest_service("/mcp", mcp_service)
         .layer(middleware::from_fn(session::require_mcp_session))
+        .layer(middleware::from_fn_with_state(
+            session_cleanup,
+            session::release_held_inputs_on_delete,
+        ))
         .layer(middleware::from_fn_with_state(
             auth,
             auth::require_http_security,

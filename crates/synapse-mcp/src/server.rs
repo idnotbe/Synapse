@@ -13,7 +13,7 @@ use rmcp::{
     model::{Implementation, ServerCapabilities, ServerInfo},
     tool, tool_handler, tool_router,
 };
-use synapse_action::{ActionStateSnapshot, RecordingBackend};
+use synapse_action::{ActionHandle, ActionStateSnapshot, RecordingBackend};
 use synapse_core::{Health, SubsystemHealth, error_codes};
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
@@ -248,6 +248,13 @@ impl SynapseService {
 
     pub(crate) fn m3_state_handle(&self) -> SharedM3State {
         Arc::clone(&self.m3_state)
+    }
+
+    pub(crate) fn unscoped_action_handle(&self) -> anyhow::Result<ActionHandle> {
+        self.m2_state
+            .lock()
+            .map(|state| state.emitter_handle.clone().with_session_id(None))
+            .map_err(|_err| anyhow::anyhow!("M2 service state lock poisoned"))
     }
 
     fn tool_router() -> ToolRouter<Self> {
