@@ -1,10 +1,6 @@
-#[allow(dead_code)]
-mod aim;
 mod click;
 mod clipboard;
 mod config;
-#[allow(dead_code)]
-mod drag;
 mod pad;
 mod press;
 mod release_all;
