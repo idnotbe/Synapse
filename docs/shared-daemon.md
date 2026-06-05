@@ -68,9 +68,13 @@ both exit **4** instead of failing later inside a tool call.
 - The daemon stays resident across individual client disconnects and does **not**
   `release_all` global input when one client leaves (only on full daemon shutdown).
 - Diagnostic bridge, Codex app-server, browser, Cargo/rustc, and test helper
-  processes are temporary. Close them after the check and reread the
-  process/socket table so only the intended daemon and requested user-facing
-  apps remain.
+  processes are temporary only when the current operation spawned and recorded
+  their exact PIDs. Close only those owner-known PIDs after the check, then
+  reread the process/socket table so only the intended daemon and requested
+  user-facing apps remain. Never close terminal/IDE/WSL host processes
+  globally (`cmd.exe`, `powershell.exe`, `pwsh.exe`, `WindowsTerminal.exe`,
+  `OpenConsole.exe`, `conhost.exe`, `wsl.exe`, `wslhost.exe`, `Code.exe`):
+  they are operator and agent workspaces.
 - `scripts/synapse-setup.ps1` refuses to stop/restart the shared daemon while
   bridge/stdio children or live peer-owned TCP client connections are present.
   Raw HTTP session-manager entries are logged as `idle_session_map_entries`,
@@ -82,6 +86,14 @@ both exit **4** instead of failing later inside a tool call.
   are printed as `stale_tcp_connections`. Use `-ForceRestart` only after a
   deliberate maintenance decision; setup must not silently interrupt another
   agent.
+- `scripts/synapse-setup.ps1` also takes an exclusive
+  `%LOCALAPPDATA%\synapse\setup-maintenance.lock.json` file handle before
+  setup/remove. This serializes multi-agent install/restart work. The lock file
+  records the owning PID, command line, lineage, reason, and cleanup policy for
+  physical readback; the OS releases the lock when the setup process exits.
+  If another setup owns the lock, the script fails closed with
+  `SYNAPSE_SETUP_MAINTENANCE_LOCK_HELD` and explicitly forbids clearing it by
+  closing terminal windows.
 - The daemon's default Streamable HTTP session idle timeout is 5 minutes
   (`SYNAPSE_HTTP_SESSION_IDLE_TIMEOUT_SECS` overrides it). This bounds zombie
   session memory and stale client accounting when a client disappears without
@@ -149,9 +161,14 @@ not accepted as live session proof.
   `STORAGE_*`, or bind errors.
 - **Setup/update says `SYNAPSE_ACTIVE_CLIENTS_PRESENT`** — setup saw a live
   daemon with bridge/stdio children or a peer-owned loopback client socket.
-  Close the client/helper that owns the peer process, rerun setup, and read the
-  process/socket SoT again. `idle_session_map_entries` without live TCP peers
-  means stale or idle HTTP session state is present but did not prove an
-  attached client. If a restart is truly required while clients are attached,
-  rerun with `-ForceRestart` only after coordinating a maintenance window; this
-  flag exists to make interruption explicit.
+  Close only the exact owner-known helper PID named in the process/socket SoT,
+  rerun setup, and read the process/socket SoT again. Do not close terminal
+  windows or broad shell process groups. `idle_session_map_entries` without
+  live TCP peers means stale or idle HTTP session state is present but did not
+  prove an attached client. If a restart is truly required while clients are
+  attached, rerun with `-ForceRestart` only after coordinating a maintenance
+  window; this flag exists to make interruption explicit.
+- **Setup/update says `SYNAPSE_SETUP_MAINTENANCE_LOCK_HELD`** — another setup
+  or remove operation is already running. Read the lock file owner fields, wait
+  for that process to exit, or inspect that exact PID. Do not close terminal
+  windows to clear this condition.

@@ -53,6 +53,11 @@
 .PARAMETER Bind
   Loopback address the daemon binds. Default 127.0.0.1:7700.
 
+.PARAMETER MaintenanceLockPath
+  File-lock Source of Truth that serializes setup/remove across multiple
+  agents. The file contents name the owning PID and cleanup policy; the held
+  FileStream is the actual lock and is released by Windows when setup exits.
+
 .PARAMETER WireClients
   Wire the Windows-side MCP clients (Claude Code and Codex via HTTP, Claude
   Desktop via the connect bridge). Default $true.
@@ -76,6 +81,7 @@ param(
     [string]$LogDir      = "$env:LOCALAPPDATA\synapse\logs",
     [string]$TokenPath   = "$env:APPDATA\synapse\token.txt",
     [string]$TaskName    = 'SynapseMcpDaemon',
+    [string]$MaintenanceLockPath = "$env:LOCALAPPDATA\synapse\setup-maintenance.lock.json",
     [ValidateRange(1, 1440)][int]$BuildTimeoutMinutes = 90,
     [switch]$ForceRestart,
     [switch]$SkipClientWiring,
@@ -89,6 +95,7 @@ function Step($m)  { Write-Host "`n=== $m ===" -ForegroundColor Cyan }
 function Die($m)   { throw "[synapse-setup] FATAL: $m" }
 
 $processTokenAtStart = $env:SYNAPSE_BEARER_TOKEN
+$script:SynapseSetupMaintenanceLockStream = $null
 
 function Get-ProcessLineage {
     param([int]$StartPid = $PID)
@@ -103,6 +110,71 @@ function Get-ProcessLineage {
         $current = [int]$p.ParentProcessId
     }
     return $lineage
+}
+
+function Read-SynapseSetupMaintenanceLockOwner {
+    param([Parameter(Mandatory=$true)][string]$Path)
+    if (-not (Test-Path -LiteralPath $Path)) {
+        return '<missing>'
+    }
+    try {
+        $stream = [System.IO.File]::Open($Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+        try {
+            $reader = New-Object System.IO.StreamReader($stream, [System.Text.Encoding]::UTF8, $true, 4096, $true)
+            try {
+                $text = $reader.ReadToEnd().Trim()
+                if ([string]::IsNullOrWhiteSpace($text)) { return '<empty>' }
+                return ($text -replace '\s+', ' ')
+            } finally {
+                $reader.Dispose()
+            }
+        } finally {
+            $stream.Dispose()
+        }
+    } catch {
+        return "<unreadable error=$($_.Exception.Message)>"
+    }
+}
+
+function Acquire-SynapseSetupMaintenanceLock {
+    param(
+        [Parameter(Mandatory=$true)][string]$Path,
+        [Parameter(Mandatory=$true)][string]$Reason
+    )
+
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $Path) | Out-Null
+    try {
+        $stream = [System.IO.File]::Open($Path, [System.IO.FileMode]::OpenOrCreate, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::Read)
+    } catch [System.IO.IOException] {
+        $owner = Read-SynapseSetupMaintenanceLockOwner -Path $Path
+        Die "SYNAPSE_SETUP_MAINTENANCE_LOCK_HELD reason=$Reason path=$Path owner=$owner remediation=another setup/remove process owns the maintenance lock; wait for that setup process to exit or inspect the named PID. Do not close terminal windows or broad shell processes to clear this condition."
+    } catch {
+        Die "SYNAPSE_SETUP_MAINTENANCE_LOCK_OPEN_FAILED reason=$Reason path=$Path error=$($_.Exception.Message) remediation=repair permissions on the synapse local appdata directory"
+    }
+
+    $script:SynapseSetupMaintenanceLockStream = $stream
+    $self = Get-CimInstance Win32_Process -Filter "ProcessId=$PID" -ErrorAction SilentlyContinue
+    $lineageText = (Get-ProcessLineage | ForEach-Object { "{0}:{1}" -f $_.ProcessId, $_.Name }) -join ' <- '
+    $owner = [ordered]@{
+        schema = 'synapse_setup_maintenance_lock/v1'
+        state = 'held'
+        reason = $Reason
+        pid = $PID
+        parent_pid = $self.ParentProcessId
+        process_name = $self.Name
+        command_line = $self.CommandLine
+        source_dir = $SourceDir
+        bind = $Bind
+        started_at_utc = (Get-Date).ToUniversalTime().ToString('o')
+        lineage = $lineageText
+        cleanup_policy = 'never close terminal windows globally; only exact process IDs spawned by this setup operation or verified synapse-mcp targets may be stopped'
+    }
+    $json = $owner | ConvertTo-Json -Depth 6
+    $bytes = [System.Text.Encoding]::UTF8.GetBytes($json + "`n")
+    $stream.SetLength(0)
+    $stream.Write($bytes, 0, $bytes.Length)
+    $stream.Flush($true)
+    Info "Maintenance lock acquired reason=$Reason path=$Path pid=$PID"
 }
 
 function Quote-WindowsCommandArgument {
@@ -930,7 +1002,7 @@ function Assert-SynapseRestartAllowed {
     }
 
     if ($blockers.Count -gt 0) {
-        $message = ("SYNAPSE_ACTIVE_CLIENTS_PRESENT reason={0} blockers={1} process_count={2} active_sessions={3} live_tcp_clients={4} idle_session_map_entries={5} stale_tcp_connections={6}`nprocesses:`n{7}`ntcp_clients:`n{8}`nstale_tcp:`n{9}`nremediation=wait for MCP clients to disconnect, close stale helpers first, or rerun with -ForceRestart only after coordinating a maintenance window" -f `
+        $message = ("SYNAPSE_ACTIVE_CLIENTS_PRESENT reason={0} blockers={1} process_count={2} active_sessions={3} live_tcp_clients={4} idle_session_map_entries={5} stale_tcp_connections={6}`nprocesses:`n{7}`ntcp_clients:`n{8}`nstale_tcp:`n{9}`nremediation=wait for MCP clients to disconnect, close only the exact owner-known helper process listed here, or rerun with -ForceRestart only after coordinating a maintenance window. Do not close terminal windows or broad shell processes." -f `
             $Reason,
             ($blockers -join ','),
             $processes.Count,
@@ -949,6 +1021,52 @@ function Assert-SynapseRestartAllowed {
     } else {
         Info "Synapse restart guard reason=$Reason verdict=clear active_sessions=$activeSessions live_tcp_clients=0 stale_tcp_connections=$($staleTcpConnections.Count) process_count=$($processes.Count)"
     }
+}
+
+function Assert-SynapseProcessStopTarget {
+    param([Parameter(Mandatory=$true)]$SnapshotProcess)
+
+    $pidValue = [int]$SnapshotProcess.ProcessId
+    $current = Get-CimInstance Win32_Process -Filter "ProcessId=$pidValue" -ErrorAction SilentlyContinue
+    if (-not $current) {
+        Info "Synapse process stop target already exited pid=$pidValue"
+        return $null
+    }
+
+    $protectedNames = @(
+        'cmd.exe',
+        'powershell.exe',
+        'pwsh.exe',
+        'WindowsTerminal.exe',
+        'OpenConsole.exe',
+        'conhost.exe',
+        'wsl.exe',
+        'wslhost.exe',
+        'Code.exe'
+    )
+    if ($protectedNames -contains $current.Name) {
+        Die ("SYNAPSE_PROTECTED_PROCESS_STOP_REFUSED pid={0} name={1} command_line={2} remediation=terminal/IDE/WSL host processes are operator and agent workspaces; never close them from setup, tests, or FSV. Stop only exact owner-known helper PIDs." -f `
+            $pidValue,
+            $current.Name,
+            $current.CommandLine)
+    }
+
+    $exeLeaf = if ($current.ExecutablePath) { Split-Path -Leaf $current.ExecutablePath } else { '' }
+    if ($current.Name -ine 'synapse-mcp.exe' -and $exeLeaf -ine 'synapse-mcp.exe') {
+        Die ("SYNAPSE_PROCESS_STOP_TARGET_MISMATCH pid={0} expected=synapse-mcp.exe actual_name={1} actual_path={2} command_line={3} remediation=PID was reused or snapshot was not a Synapse process; refusing taskkill /T" -f `
+            $pidValue,
+            $current.Name,
+            $current.ExecutablePath,
+            $current.CommandLine)
+    }
+    if ($current.CommandLine -notmatch '(?i)synapse-mcp(\.exe)?') {
+        Die ("SYNAPSE_PROCESS_STOP_TARGET_UNVERIFIED pid={0} name={1} command_line={2} remediation=command line does not prove a Synapse MCP target; refusing taskkill /T" -f `
+            $pidValue,
+            $current.Name,
+            $current.CommandLine)
+    }
+
+    return $current
 }
 
 function Stop-SynapseMcpProcesses {
@@ -970,7 +1088,9 @@ function Stop-SynapseMcpProcesses {
     }
 
     foreach ($proc in $before) {
-        $pidValue = [int]$proc.ProcessId
+        $verified = Assert-SynapseProcessStopTarget -SnapshotProcess $proc
+        if (-not $verified) { continue }
+        $pidValue = [int]$verified.ProcessId
         $taskkillOutput = & $taskkillPath /pid $pidValue /t /f 2>&1
         $taskkillExit = $LASTEXITCODE
         if ($taskkillOutput) {
@@ -998,6 +1118,9 @@ function Stop-SynapseMcpProcesses {
 # ---------------------------------------------------------------------------
 # Uninstall path
 # ---------------------------------------------------------------------------
+$maintenanceReason = if ($Remove) { 'remove' } else { 'setup' }
+Acquire-SynapseSetupMaintenanceLock -Path $MaintenanceLockPath -Reason $maintenanceReason
+
 if ($Remove) {
     Step "Removing scheduled task '$TaskName'"
     Assert-SynapseRestartAllowed -Reason 'remove' -Bind $Bind -TokenPath $TokenPath -ForceRestart:$ForceRestart
