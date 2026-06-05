@@ -48,7 +48,9 @@
   Permit setup/remove to stop the shared daemon even when active HTTP MCP
   sessions, live client TCP connections, or bridge children are present. Without
   this explicit maintenance flag, setup fails closed instead of interrupting
-  another agent.
+  another agent. The normal stop path is authenticated graceful shutdown; this
+  flag also permits an exact-PID forced stop only after the graceful path fails
+  for a verified legacy or unresponsive synapse-mcp.exe process.
 
 .PARAMETER Bind
   Loopback address the daemon binds. Default 127.0.0.1:7700.
@@ -915,6 +917,53 @@ function Read-SynapseHealthForRestartGuard {
     }
 }
 
+function Request-SynapseGracefulShutdown {
+    param(
+        [Parameter(Mandatory=$true)][string]$Bind,
+        [Parameter(Mandatory=$true)][string]$Token,
+        [Parameter(Mandatory=$true)][int[]]$ExpectedPids,
+        [Parameter(Mandatory=$true)][string]$Reason
+    )
+
+    try {
+        $response = Invoke-RestMethod `
+            -Method Post `
+            -Uri "http://$Bind/shutdown" `
+            -Headers @{ Authorization = "Bearer $Token" } `
+            -UserAgent "synapse-setup/$Reason" `
+            -TimeoutSec 4
+    } catch {
+        return [pscustomobject]@{ Ok = $false; Code = 'SYNAPSE_GRACEFUL_SHUTDOWN_REQUEST_FAILED'; Response = $null; Error = $_.Exception.Message }
+    }
+
+    $responsePid = 0
+    try {
+        $responsePid = [int]$response.pid
+    } catch {
+        return [pscustomobject]@{ Ok = $false; Code = 'SYNAPSE_GRACEFUL_SHUTDOWN_PID_UNREADABLE'; Response = $response; Error = $_.Exception.Message }
+    }
+
+    if ($ExpectedPids -notcontains $responsePid) {
+        return [pscustomobject]@{
+            Ok = $false
+            Code = 'SYNAPSE_GRACEFUL_SHUTDOWN_PID_MISMATCH'
+            Response = $response
+            Error = "response_pid=$responsePid expected_pids=$($ExpectedPids -join ',')"
+        }
+    }
+
+    if ($response.ok -ne $true -or "$($response.shutdown)" -ne 'requested') {
+        return [pscustomobject]@{
+            Ok = $false
+            Code = 'SYNAPSE_GRACEFUL_SHUTDOWN_RESPONSE_INVALID'
+            Response = $response
+            Error = "response=$($response | ConvertTo-Json -Compress -Depth 6)"
+        }
+    }
+
+    [pscustomobject]@{ Ok = $true; Code = 'OK'; Response = $response; Error = $null }
+}
+
 function Get-SynapseActiveSessionCount {
     param([Parameter(Mandatory=$true)]$Health)
 
@@ -938,7 +987,7 @@ function Assert-SynapseRestartAllowed {
         [switch]$ForceRestart
     )
 
-    $processes = Get-SynapseMcpProcessSnapshot
+    $processes = @(Get-SynapseMcpProcessSnapshot)
     if ($processes.Count -eq 0) {
         Info "Synapse restart guard reason=$Reason existing_process_count=0 verdict=clear"
         return
@@ -983,7 +1032,13 @@ function Assert-SynapseRestartAllowed {
     }
 
     $tcpConnections = @(Get-SynapseTcpClientSnapshot -Bind $Bind)
-    $tcpClients = @($tcpConnections | Where-Object { $_.HasLivePeer })
+    $setupLineagePids = @((Get-ProcessLineage -StartPid $PID) | ForEach-Object { [int]$_.ProcessId })
+    $selfProbeTcpClients = @($tcpConnections | Where-Object {
+        $_.HasLivePeer -and $setupLineagePids -contains [int]$_.PeerOwningProcess
+    })
+    $tcpClients = @($tcpConnections | Where-Object {
+        $_.HasLivePeer -and $setupLineagePids -notcontains [int]$_.PeerOwningProcess
+    })
     $staleTcpConnections = @($tcpConnections | Where-Object { -not $_.HasLivePeer })
     $blockers = @()
     if ($nonHttpProcesses.Count -gt 0) { $blockers += "non_http_synapse_processes=$($nonHttpProcesses.Count)" }
@@ -999,6 +1054,12 @@ function Assert-SynapseRestartAllowed {
             $Reason,
             $staleTcpConnections.Count,
             (Format-SynapseTcpClientSnapshot -Snapshot $staleTcpConnections))
+    }
+    if ($selfProbeTcpClients.Count -gt 0) {
+        Info ("Synapse restart guard reason={0} self_probe_tcp_connections={1}`nself_probe_tcp:`n{2}" -f `
+            $Reason,
+            $selfProbeTcpClients.Count,
+            (Format-SynapseTcpClientSnapshot -Snapshot $selfProbeTcpClients))
     }
 
     if ($blockers.Count -gt 0) {
@@ -1072,10 +1133,13 @@ function Assert-SynapseProcessStopTarget {
 function Stop-SynapseMcpProcesses {
     param(
         [Parameter(Mandatory=$true)][string]$Reason,
+        [Parameter(Mandatory=$true)][string]$Bind,
+        [Parameter(Mandatory=$true)][string]$TokenPath,
+        [switch]$ForceRestart,
         [int]$TimeoutSeconds = 15
     )
 
-    $before = Get-SynapseMcpProcessSnapshot
+    $before = @(Get-SynapseMcpProcessSnapshot)
     Info "Synapse process stop requested reason=$Reason before_count=$($before.Count)"
     Info ("Synapse process stop before:`n{0}" -f (Format-SynapseMcpProcessSnapshot -Snapshot $before))
     if ($before.Count -eq 0) {
@@ -1083,12 +1147,113 @@ function Stop-SynapseMcpProcesses {
     }
 
     foreach ($proc in $before) {
+        $null = Assert-SynapseProcessStopTarget -SnapshotProcess $proc
+    }
+
+    $httpProcesses = @($before | Where-Object { $_.CommandLine -match '(?i)--mode\s+http' })
+    $nonHttpProcesses = @($before | Where-Object { $_.CommandLine -notmatch '(?i)--mode\s+http' })
+    if ($nonHttpProcesses.Count -gt 0 -and -not $ForceRestart) {
+        Die ("SYNAPSE_GRACEFUL_SHUTDOWN_NON_HTTP_PROCESS reason={0} count={1}`nprocesses:`n{2}`nremediation=setup will not force-stop stdio/bridge/non-http Synapse processes without -ForceRestart; run synapse-mcp --mode doctor to inspect ownership, or coordinate a maintenance window before forcing exact verified PIDs. Do not close terminal windows." -f `
+            $Reason,
+            $nonHttpProcesses.Count,
+            (Format-SynapseMcpProcessSnapshot -Snapshot $nonHttpProcesses))
+    }
+
+    if ($httpProcesses.Count -gt 0) {
+        $tokenRead = Read-SynapseSetupTokenForRestartGuard -TokenPath $TokenPath
+        if (-not $tokenRead.Ok) {
+            $message = ("{0} reason={1} process_count={2} {3} remediation=graceful shutdown requires the daemon bearer token; repair token state before setup, or use -ForceRestart only after manually verifying no held inputs and no live clients." -f `
+                $tokenRead.Code,
+                $Reason,
+                $httpProcesses.Count,
+                $tokenRead.Detail)
+            if ($ForceRestart) {
+                Info "FORCE_RESTART: $message"
+            } else {
+                Die $message
+            }
+        } else {
+            $expectedPids = @($httpProcesses | ForEach-Object { [int]$_.ProcessId })
+            $shutdown = Request-SynapseGracefulShutdown -Bind $Bind -Token $tokenRead.Token -ExpectedPids $expectedPids -Reason $Reason
+            if (-not $shutdown.Ok) {
+                $message = ("{0} reason={1} bind={2} error={3} response={4} remediation=the running daemon did not accept authenticated graceful shutdown; inspect daemon logs and token/bind state. Use -ForceRestart only for a coordinated legacy-runtime transition after manual input-state readback." -f `
+                    $shutdown.Code,
+                    $Reason,
+                    $Bind,
+                    $shutdown.Error,
+                    ($(if ($null -eq $shutdown.Response) { '<none>' } else { $shutdown.Response | ConvertTo-Json -Compress -Depth 6 })))
+                if ($ForceRestart) {
+                    Info "FORCE_RESTART: $message"
+                } else {
+                    Die $message
+                }
+            } else {
+                Info ("Synapse graceful shutdown requested reason={0} pid={1} active_sessions_before_shutdown={2}" -f `
+                    $Reason,
+                    $shutdown.Response.pid,
+                    $shutdown.Response.active_sessions_before_shutdown)
+            }
+        }
+
+        $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+        do {
+            Start-Sleep -Milliseconds 250
+            $remainingHttpPids = @($httpProcesses | Where-Object {
+                $pidValue = [int]$_.ProcessId
+                $current = Get-CimInstance Win32_Process -Filter "ProcessId=$pidValue" -ErrorAction SilentlyContinue
+                $exeLeaf = if ($current -and $current.ExecutablePath) { Split-Path -Leaf $current.ExecutablePath } else { '' }
+                $null -ne $current -and ($current.Name -ieq 'synapse-mcp.exe' -or $exeLeaf -ieq 'synapse-mcp.exe')
+            })
+            if ($remainingHttpPids.Count -eq 0) {
+                Info "Synapse graceful shutdown verified reason=$Reason http_process_count=0"
+                break
+            }
+        } while ((Get-Date) -lt $deadline)
+
+        $remainingHttpPids = @($httpProcesses | Where-Object {
+            $pidValue = [int]$_.ProcessId
+            $current = Get-CimInstance Win32_Process -Filter "ProcessId=$pidValue" -ErrorAction SilentlyContinue
+            $exeLeaf = if ($current -and $current.ExecutablePath) { Split-Path -Leaf $current.ExecutablePath } else { '' }
+            $null -ne $current -and ($current.Name -ieq 'synapse-mcp.exe' -or $exeLeaf -ieq 'synapse-mcp.exe')
+        })
+        if ($remainingHttpPids.Count -gt 0) {
+            $message = ("SYNAPSE_GRACEFUL_SHUTDOWN_TIMEOUT reason={0} timeout_s={1} remaining_count={2}`nremaining:`n{3}" -f `
+                $Reason,
+                $TimeoutSeconds,
+                $remainingHttpPids.Count,
+                (Format-SynapseMcpProcessSnapshot -Snapshot $remainingHttpPids))
+            if ($ForceRestart) {
+                Info "FORCE_RESTART: $message"
+            } else {
+                Die $message
+            }
+        }
+    }
+
+    $remaining = @(Get-SynapseMcpProcessSnapshot)
+    if ($remaining.Count -eq 0) {
+        Info "Synapse process stop verified reason=$Reason after_count=0"
+        return
+    }
+
+    if (-not $ForceRestart) {
+        Die ("SYNAPSE_PROCESS_STOP_INCOMPLETE reason={0} remaining_count={1} remaining=`n{2}" -f `
+            $Reason,
+            $remaining.Count,
+            (Format-SynapseMcpProcessSnapshot -Snapshot $remaining))
+    }
+
+    Info ("FORCE_RESTART: exact-PID stop for remaining verified Synapse processes reason={0} remaining_count={1}`nremaining:`n{2}" -f `
+        $Reason,
+        $remaining.Count,
+        (Format-SynapseMcpProcessSnapshot -Snapshot $remaining))
+    foreach ($proc in $remaining) {
         $verified = Assert-SynapseProcessStopTarget -SnapshotProcess $proc
         if (-not $verified) { continue }
         $pidValue = [int]$verified.ProcessId
         try {
             Stop-Process -Id $pidValue -Force -ErrorAction Stop
-            Info "Synapse process exact-PID stop issued pid=$pidValue reason=$Reason"
+            Info "Synapse process exact-PID force stop issued pid=$pidValue reason=$Reason"
         } catch {
             Die ("SYNAPSE_PROCESS_STOP_FAILED pid={0} reason={1} error={2} remediation=setup only stops verified synapse-mcp.exe PIDs; inspect process ownership and retry after the daemon exits" -f `
                 $pidValue,
@@ -1100,14 +1265,14 @@ function Stop-SynapseMcpProcesses {
     $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
     do {
         Start-Sleep -Milliseconds 250
-        $after = Get-SynapseMcpProcessSnapshot
+        $after = @(Get-SynapseMcpProcessSnapshot)
         if ($after.Count -eq 0) {
             Info "Synapse process stop verified reason=$Reason after_count=0"
             return
         }
     } while ((Get-Date) -lt $deadline)
 
-    $remaining = Get-SynapseMcpProcessSnapshot
+    $remaining = @(Get-SynapseMcpProcessSnapshot)
     Die ("SYNAPSE_PROCESS_STOP_FAILED reason={0} timeout_s={1} remaining_count={2} remaining=`n{3}" -f `
         $Reason, $TimeoutSeconds, $remaining.Count, (Format-SynapseMcpProcessSnapshot -Snapshot $remaining))
 }
@@ -1126,7 +1291,7 @@ if ($Remove) {
         Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
         Info "Unregistered '$TaskName'."
     } else { Info "Task '$TaskName' not present." }
-    Stop-SynapseMcpProcesses -Reason 'remove'
+    Stop-SynapseMcpProcesses -Reason 'remove' -Bind $Bind -TokenPath $TokenPath -ForceRestart:$ForceRestart
     if ($Purge) {
         foreach ($p in @($DbPath, $ProfilesDir, (Split-Path -Parent $TokenPath))) {
             if (Test-Path $p) { Remove-Item -Recurse -Force $p; Info "Deleted $p" }
@@ -1187,7 +1352,7 @@ Assert-SynapseRestartAllowed -Reason 'install_binary' -Bind $Bind -TokenPath $To
 if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) {
     Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
 }
-Stop-SynapseMcpProcesses -Reason 'install_binary'
+Stop-SynapseMcpProcesses -Reason 'install_binary' -Bind $Bind -TokenPath $TokenPath -ForceRestart:$ForceRestart
 New-Item -ItemType Directory -Force -Path (Split-Path -Parent $ExePath) | Out-Null
 if (-not $SkipBuild) {
     if (Test-Path $ExePath) { Copy-Item $ExePath "$ExePath.bak" -Force; Info "Backed up old binary -> $ExePath.bak" }

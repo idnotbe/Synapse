@@ -11,19 +11,19 @@ use anyhow::Context;
 use axum::{
     Json, Router,
     extract::{Query, State},
-    http::HeaderMap,
+    http::{HeaderMap, StatusCode},
     middleware,
-    response::Response,
-    routing::get,
+    response::{IntoResponse, Response},
+    routing::{get, post},
 };
 use rmcp::transport::streamable_http_server::{
     StreamableHttpServerConfig, StreamableHttpService,
     session::{SessionState, SessionStore, SessionStoreError, local::LocalSessionManager},
 };
-use synapse_action::ActionHandle;
+use synapse_action::{ActionHandle, ActionStateSnapshot};
 use synapse_core::Health;
 use synapse_storage::{Db, cf};
-use tokio::{net::TcpListener, task::JoinHandle, time};
+use tokio::{net::TcpListener, sync::watch, task::JoinHandle, time};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
@@ -39,11 +39,13 @@ use crate::{
 type McpHttpService = StreamableHttpService<SynapseService, LocalSessionManager>;
 const MCP_SESSION_STORE_PREFIX: &str = "mcp/session/v1/";
 const STALE_SESSION_INPUT_CLEANUP_INTERVAL: Duration = Duration::from_secs(5);
+const M2_EMITTER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Clone)]
 struct HttpState {
     health_service: Arc<SynapseService>,
     session_manager: Arc<LocalSessionManager>,
+    shutdown_cancel: CancellationToken,
     sse_state: SseState,
 }
 
@@ -177,6 +179,7 @@ pub(super) async fn serve(
 
     let _operator_hotkey_guard = crate::safety::install_operator_hotkey(service.m3_state_handle())
         .context("install operator panic hotkey")?;
+    let m2_emitter_done = service.m2_emitter_done_receiver();
     let app = router(&shutdown_cancel, local_addr, sse_state, service)
         .context("build HTTP MCP router")?;
 
@@ -187,10 +190,16 @@ pub(super) async fn serve(
     );
 
     let mut server_task = spawn_server(listener, app, shutdown_cancel.clone());
+    let m2_done_after_server_stop = m2_emitter_done.clone();
+    let m2_done_after_signal = m2_emitter_done;
     let code = tokio::select! {
         result = &mut server_task => {
             result.context("join HTTP MCP transport")?
                 .context("serve HTTP MCP transport")?;
+            if shutdown_cancel.is_cancelled() {
+                connection_closed_cancel.cancel();
+                wait_for_m2_emitter_done(m2_done_after_server_stop, "http_endpoint").await;
+            }
             ExitCode::SUCCESS
         }
         signal = wait_for_shutdown_signal("http") => {
@@ -199,6 +208,7 @@ pub(super) async fn serve(
             shutdown_cancel.cancel();
             connection_closed_cancel.cancel();
             wait_for_server_stop(&mut server_task).await?;
+            wait_for_m2_emitter_done(m2_done_after_signal, "signal").await;
             ExitCode::SUCCESS
         }
     };
@@ -235,10 +245,12 @@ fn router(
     let state = HttpState {
         health_service,
         session_manager,
+        shutdown_cancel: shutdown_cancel.clone(),
         sse_state,
     };
     Ok(Router::new()
         .route("/health", get(health))
+        .route("/shutdown", post(shutdown))
         .route("/events", get(events).post(publish_event))
         .route("/events/stats", get(event_stats))
         .nest_service("/mcp", mcp_service)
@@ -552,6 +564,38 @@ async fn health(State(state): State<HttpState>) -> Json<Health> {
     )
 }
 
+async fn shutdown(State(state): State<HttpState>, headers: HeaderMap) -> Response {
+    let active_sessions = state.session_manager.sessions.read().await.len();
+    let user_agent = headers
+        .get(axum::http::header::USER_AGENT)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("<missing>");
+    tracing::warn!(
+        code = "MCP_HTTP_SHUTDOWN_REQUESTED",
+        pid = std::process::id(),
+        active_sessions,
+        user_agent,
+        "authenticated HTTP daemon shutdown requested"
+    );
+    tracing::info!(
+        code = "MCP_SHUTDOWN_GRACEFUL",
+        source = "http_shutdown",
+        pid = std::process::id(),
+        "HTTP shutdown endpoint cancelling daemon shutdown token"
+    );
+    state.shutdown_cancel.cancel();
+    (
+        StatusCode::ACCEPTED,
+        Json(serde_json::json!({
+            "ok": true,
+            "pid": std::process::id(),
+            "shutdown": "requested",
+            "active_sessions_before_shutdown": active_sessions,
+        })),
+    )
+        .into_response()
+}
+
 async fn events(
     State(state): State<HttpState>,
     headers: HeaderMap,
@@ -602,6 +646,61 @@ async fn wait_for_server_stop(server_task: &mut JoinHandle<io::Result<()>>) -> a
         }
     }
     Ok(())
+}
+
+async fn wait_for_m2_emitter_done(
+    done: Option<watch::Receiver<Option<ActionStateSnapshot>>>,
+    source: &'static str,
+) {
+    let Some(mut done) = done else {
+        tracing::warn!(
+            code = "MCP_M2_EMITTER_SHUTDOWN_UNOBSERVED",
+            source,
+            "M2 emitter final snapshot receiver was unavailable during HTTP shutdown"
+        );
+        return;
+    };
+
+    let result = time::timeout(M2_EMITTER_SHUTDOWN_TIMEOUT, async {
+        loop {
+            if done.borrow().is_some() {
+                break;
+            }
+            if done.changed().await.is_err() {
+                break;
+            }
+        }
+    })
+    .await;
+
+    match (result, done.borrow().as_ref()) {
+        (Ok(()), Some(snapshot)) => {
+            tracing::info!(
+                code = "MCP_M2_EMITTER_SHUTDOWN_DONE",
+                source,
+                held_keys = snapshot.held_keys.len(),
+                held_buttons = snapshot.held_buttons.len(),
+                held_pads = snapshot.pad_state.len(),
+                held_key_timer_count = snapshot.held_key_timer_count,
+                "readback=action_emitter_state edge=http_shutdown after_emitter_done"
+            );
+        }
+        (Ok(()), None) => {
+            tracing::warn!(
+                code = "MCP_M2_EMITTER_SHUTDOWN_UNOBSERVED",
+                source,
+                "M2 emitter ended without publishing a final snapshot during HTTP shutdown"
+            );
+        }
+        (Err(_elapsed), _) => {
+            tracing::error!(
+                code = "MCP_M2_EMITTER_SHUTDOWN_TIMEOUT",
+                source,
+                timeout_ms = M2_EMITTER_SHUTDOWN_TIMEOUT.as_millis(),
+                "M2 emitter did not publish final shutdown snapshot before HTTP daemon exit"
+            );
+        }
+    }
 }
 
 #[cfg(windows)]

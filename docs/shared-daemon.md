@@ -87,11 +87,15 @@ both exit **4** instead of failing later inside a tool call.
   deliberate maintenance decision; setup must not silently interrupt another
   agent.
 - When setup does restart the daemon, it stops only the verified
-  `synapse-mcp.exe` daemon PID. It must not use process-tree termination such
-  as `taskkill /T`, because apps launched through `act_launch` can be daemon
-  children and may contain user state. Child app cleanup is separate
-  owner-known work: close only exact PIDs that the current verification spawned
-  and recorded, and leave uncertain user-facing windows running.
+  `synapse-mcp.exe` daemon PID. The normal stop path sends an authenticated
+  `POST /shutdown` request to the loopback daemon, verifies the responding PID
+  is one of the verified Synapse PIDs, then waits for that PID to exit through
+  the daemon's graceful cancellation path. It must not use process-tree
+  termination such as `taskkill /T`, because apps launched through
+  `act_launch` can be daemon children and may contain user state. Child app
+  cleanup is separate owner-known work: close only exact PIDs that the current
+  verification spawned and recorded, and leave uncertain user-facing windows
+  running.
 - `scripts/synapse-setup.ps1` also takes an exclusive
   `%LOCALAPPDATA%\synapse\setup-maintenance.lock.json` file handle before
   setup/remove. This serializes multi-agent install/restart work. The lock file

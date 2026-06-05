@@ -27,11 +27,18 @@ async fn http_mode_serves_health_until_shutdown() -> anyhow::Result<()> {
     let response = wait_for_health(&bind, Some(token)).await;
     let missing = read_health_once(&bind, None).await;
     let wrong = read_health_once(&bind, Some("wrong-token")).await;
-    stop_child(&mut child).await?;
+    let shutdown_missing = read_shutdown_once(&bind, None).await;
+    let shutdown_wrong = read_shutdown_once(&bind, Some("wrong-token")).await;
+    let shutdown = read_shutdown_once(&bind, Some(token)).await;
+    wait_child_exit(&mut child).await?;
 
     let response = response?;
     let missing = missing?;
     let wrong = wrong?;
+    let shutdown_missing = shutdown_missing?;
+    let shutdown_wrong = shutdown_wrong?;
+    let shutdown = shutdown?;
+    let logs = read_logs(dir.path())?;
     assert!(response.starts_with("HTTP/1.1 200 OK"), "{response}");
     assert!(response.contains(r#""ok":true"#), "{response}");
     assert!(
@@ -39,6 +46,20 @@ async fn http_mode_serves_health_until_shutdown() -> anyhow::Result<()> {
         "{missing}"
     );
     assert!(wrong.starts_with("HTTP/1.1 401 Unauthorized"), "{wrong}");
+    assert!(
+        shutdown_missing.starts_with("HTTP/1.1 401 Unauthorized"),
+        "{shutdown_missing}"
+    );
+    assert!(
+        shutdown_wrong.starts_with("HTTP/1.1 401 Unauthorized"),
+        "{shutdown_wrong}"
+    );
+    assert!(shutdown.starts_with("HTTP/1.1 202 Accepted"), "{shutdown}");
+    assert!(shutdown.contains(r#""shutdown":"requested""#), "{shutdown}");
+    assert!(logs.contains("MCP_HTTP_SHUTDOWN_REQUESTED"), "{logs}");
+    assert!(logs.contains("MCP_SHUTDOWN_GRACEFUL"), "{logs}");
+    assert!(logs.contains("SAFETY_RELEASE_ALL_FIRED"), "{logs}");
+    assert!(logs.contains("MCP_M2_EMITTER_SHUTDOWN_DONE"), "{logs}");
     Ok(())
 }
 
@@ -327,6 +348,28 @@ async fn read_health_once_inner(
     let mut response = Vec::new();
     stream.read_to_end(&mut response).await?;
     String::from_utf8(response).context("decode HTTP health response")
+}
+
+async fn read_shutdown_once(bind: &str, token: Option<&str>) -> anyhow::Result<String> {
+    let mut stream = TcpStream::connect(bind).await?;
+    let auth = token.map_or(String::new(), |token| {
+        format!("Authorization: Bearer {token}\r\n")
+    });
+    let request = format!(
+        "POST /shutdown HTTP/1.1\r\nHost: {bind}\r\n{auth}User-Agent: synapse-cli-mode-test\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+    );
+    stream.write_all(request.as_bytes()).await?;
+    let mut response = Vec::new();
+    stream.read_to_end(&mut response).await?;
+    String::from_utf8(response).context("decode HTTP shutdown response")
+}
+
+async fn wait_child_exit(child: &mut Child) -> anyhow::Result<()> {
+    let status = tokio::time::timeout(Duration::from_secs(5), child.wait())
+        .await
+        .context("timed out waiting for http-mode child graceful shutdown")??;
+    assert!(status.success(), "http-mode child exit status: {status}");
+    Ok(())
 }
 
 async fn stop_child(child: &mut Child) -> anyhow::Result<()> {
