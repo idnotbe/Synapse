@@ -1,5 +1,10 @@
 use std::{
-    collections::BTreeSet, io, net::SocketAddr, process::ExitCode, sync::Arc, time::Duration,
+    collections::BTreeSet,
+    io,
+    net::SocketAddr,
+    process::ExitCode,
+    sync::Arc,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::Context;
@@ -250,13 +255,16 @@ fn streamable_service(
     shutdown_cancel: &CancellationToken,
     service: SynapseService,
 ) -> anyhow::Result<(McpHttpService, Arc<LocalSessionManager>)> {
-    let session_store = Arc::new(SynapseMcpSessionStore::new(session_store_db(&service)?));
+    let session_config = session::load_session_config().context("load HTTP session config")?;
+    let session_store = Arc::new(SynapseMcpSessionStore::new(
+        session_store_db(&service)?,
+        session_config.keep_alive,
+    ));
     let mut config = StreamableHttpServerConfig::default()
         .with_cancellation_token(shutdown_cancel.child_token());
     config.session_store = Some(session_store);
     let mut session_manager = LocalSessionManager::default();
-    session_manager.session_config =
-        session::load_session_config().context("load HTTP session config")?;
+    session_manager.session_config = session_config;
     let session_manager = Arc::new(session_manager);
     let service = StreamableHttpService::new(
         move || Ok(service.clone()),
@@ -373,12 +381,19 @@ fn session_store_db(service: &SynapseService) -> anyhow::Result<Arc<Db>> {
 #[derive(Clone)]
 struct SynapseMcpSessionStore {
     db: Arc<Db>,
+    ttl: Option<Duration>,
 }
 
 impl SynapseMcpSessionStore {
-    fn new(db: Arc<Db>) -> Self {
-        Self { db }
+    fn new(db: Arc<Db>, ttl: Option<Duration>) -> Self {
+        Self { db, ttl }
     }
+}
+
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
+struct PersistedMcpSessionState {
+    stored_at_unix_ms: u64,
+    state: SessionState,
 }
 
 #[async_trait::async_trait]
@@ -392,25 +407,70 @@ impl SessionStore for SynapseMcpSessionStore {
         let Some((_key, value)) = rows.into_iter().find(|(row_key, _value)| row_key == &key) else {
             return Ok(None);
         };
-        let state =
-            synapse_storage::decode_json::<SessionState>(&value).map_err(session_store_error)?;
+        let now_ms = unix_time_ms()?;
+        let persisted = match synapse_storage::decode_json::<PersistedMcpSessionState>(&value) {
+            Ok(persisted) => persisted,
+            Err(wrapper_error) => {
+                if synapse_storage::decode_json::<SessionState>(&value).is_ok() {
+                    self.db
+                        .delete_batch(cf::CF_KV, [key])
+                        .map_err(session_store_error)?;
+                    tracing::warn!(
+                        code = "MCP_HTTP_SESSION_STORE_LEGACY_STALE_DELETE",
+                        session_id,
+                        detail = %wrapper_error,
+                        "deleted legacy MCP HTTP session state without persistent TTL metadata"
+                    );
+                    return Ok(None);
+                }
+                tracing::error!(
+                    code = "MCP_HTTP_SESSION_STORE_DECODE_FAILED",
+                    session_id,
+                    detail = %wrapper_error,
+                    "failed to decode persisted MCP HTTP session state"
+                );
+                return Err(session_store_error(wrapper_error));
+            }
+        };
+        if session_store_expired(persisted.stored_at_unix_ms, now_ms, self.ttl) {
+            self.db
+                .delete_batch(cf::CF_KV, [key])
+                .map_err(session_store_error)?;
+            tracing::warn!(
+                code = "MCP_HTTP_SESSION_STORE_EXPIRED",
+                session_id,
+                stored_at_unix_ms = persisted.stored_at_unix_ms,
+                now_unix_ms = now_ms,
+                ttl_ms = self.ttl.map(duration_millis_u64),
+                "deleted expired MCP HTTP session state from CF_KV"
+            );
+            return Ok(None);
+        }
         tracing::info!(
             code = "MCP_HTTP_SESSION_STORE_LOAD",
             session_id,
+            stored_at_unix_ms = persisted.stored_at_unix_ms,
             "loaded MCP HTTP session state from CF_KV"
         );
-        Ok(Some(state))
+        Ok(Some(persisted.state))
     }
 
     async fn store(&self, session_id: &str, state: &SessionState) -> Result<(), SessionStoreError> {
         let key = mcp_session_store_key(session_id);
-        let encoded = synapse_storage::encode_json(state).map_err(session_store_error)?;
+        let stored_at_unix_ms = unix_time_ms()?;
+        let persisted = PersistedMcpSessionState {
+            stored_at_unix_ms,
+            state: state.clone(),
+        };
+        let encoded = synapse_storage::encode_json(&persisted).map_err(session_store_error)?;
         self.db
             .put_batch_pressure_bypass(cf::CF_KV, [(key, encoded)])
             .map_err(session_store_error)?;
         tracing::info!(
             code = "MCP_HTTP_SESSION_STORE_WRITE",
             session_id,
+            stored_at_unix_ms,
+            ttl_ms = self.ttl.map(duration_millis_u64),
             "persisted MCP HTTP session state to CF_KV"
         );
         Ok(())
@@ -436,6 +496,24 @@ fn mcp_session_store_key(session_id: &str) -> Vec<u8> {
 
 fn session_store_error(error: synapse_storage::StorageError) -> SessionStoreError {
     Box::new(error)
+}
+
+fn unix_time_ms() -> Result<u64, SessionStoreError> {
+    let elapsed = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| -> SessionStoreError { Box::new(error) })?;
+    Ok(duration_millis_u64(elapsed))
+}
+
+fn duration_millis_u64(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
+
+fn session_store_expired(stored_at_unix_ms: u64, now_unix_ms: u64, ttl: Option<Duration>) -> bool {
+    let Some(ttl) = ttl else {
+        return false;
+    };
+    now_unix_ms.saturating_sub(stored_at_unix_ms) > duration_millis_u64(ttl)
 }
 
 fn http_service(
@@ -549,7 +627,7 @@ async fn wait_for_shutdown_signal(phase: &'static str) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::{sync::Arc, time::Duration};
 
     use anyhow::Context as _;
     use rmcp::model::{ClientCapabilities, Implementation, InitializeRequestParams};
@@ -574,7 +652,7 @@ mod tests {
     async fn synapse_mcp_session_store_round_trips_exact_keys_and_deletes() -> anyhow::Result<()> {
         let temp = tempfile::tempdir()?;
         let db = Arc::new(Db::open(&temp.path().join("db"), SCHEMA_VERSION)?);
-        let store = SynapseMcpSessionStore::new(db);
+        let store = SynapseMcpSessionStore::new(Arc::clone(&db), Some(Duration::from_secs(300)));
 
         assert!(
             store
@@ -591,6 +669,14 @@ mod tests {
             .store("codex-session", &state)
             .await
             .map_err(test_store_error)?;
+        let stored_rows = db.scan_cf_prefix(cf::CF_KV, &mcp_session_store_key("codex-session"))?;
+        let stored_row = stored_rows
+            .iter()
+            .find(|(key, _value)| key == &mcp_session_store_key("codex-session"))
+            .context("stored row should exist in CF_KV")?;
+        let persisted = synapse_storage::decode_json::<PersistedMcpSessionState>(&stored_row.1)?;
+        assert_eq!(persisted.state.initialize_params, state.initialize_params);
+
         store
             .store("codex-session-extra", &neighboring_state)
             .await
@@ -622,6 +708,79 @@ mod tests {
                 .map_err(test_store_error)?
                 .is_some(),
             "deleting one session should not delete a prefix-sharing neighbor"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn synapse_mcp_session_store_deletes_expired_rows() -> anyhow::Result<()> {
+        let temp = tempfile::tempdir()?;
+        let db = Arc::new(Db::open(&temp.path().join("db"), SCHEMA_VERSION)?);
+        let store = SynapseMcpSessionStore::new(Arc::clone(&db), Some(Duration::from_millis(1)));
+        let key = mcp_session_store_key("expired-session");
+
+        store
+            .store("expired-session", &test_session_state("expired-test"))
+            .await
+            .map_err(test_store_error)?;
+        assert!(
+            db.scan_cf_prefix(cf::CF_KV, &key)?
+                .into_iter()
+                .any(|(row_key, _value)| row_key == key),
+            "stored row should physically exist before expiry"
+        );
+
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        assert!(
+            store
+                .load("expired-session")
+                .await
+                .map_err(test_store_error)?
+                .is_none(),
+            "expired session should not load"
+        );
+        assert!(
+            !db.scan_cf_prefix(cf::CF_KV, &key)?
+                .into_iter()
+                .any(|(row_key, _value)| row_key == key),
+            "expired session row should be deleted from CF_KV"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn synapse_mcp_session_store_deletes_legacy_rows_without_ttl() -> anyhow::Result<()> {
+        let temp = tempfile::tempdir()?;
+        let db = Arc::new(Db::open(&temp.path().join("db"), SCHEMA_VERSION)?);
+        let store = SynapseMcpSessionStore::new(Arc::clone(&db), Some(Duration::from_secs(300)));
+        let key = mcp_session_store_key("legacy-session");
+        let legacy_state = test_session_state("legacy-test");
+        let legacy_encoded = synapse_storage::encode_json(&legacy_state)?;
+        db.put_batch_pressure_bypass(cf::CF_KV, [(key.clone(), legacy_encoded)])?;
+
+        assert!(
+            db.scan_cf_prefix(cf::CF_KV, &key)?
+                .into_iter()
+                .any(|(row_key, _value)| row_key == key),
+            "legacy row should physically exist before load"
+        );
+
+        assert!(
+            store
+                .load("legacy-session")
+                .await
+                .map_err(test_store_error)?
+                .is_none(),
+            "legacy row without persistent TTL metadata should not load"
+        );
+        assert!(
+            !db.scan_cf_prefix(cf::CF_KV, &key)?
+                .into_iter()
+                .any(|(row_key, _value)| row_key == key),
+            "legacy session row should be deleted from CF_KV"
         );
 
         Ok(())

@@ -12,7 +12,7 @@ use rmcp::transport::streamable_http_server::session::local::SessionConfig;
 use synapse_action::ActionHandle;
 
 const SESSION_IDLE_TIMEOUT_ENV: &str = "SYNAPSE_HTTP_SESSION_IDLE_TIMEOUT_SECS";
-const DEFAULT_SESSION_IDLE_TIMEOUT_SECS: u64 = 30 * 60;
+const DEFAULT_SESSION_IDLE_TIMEOUT_SECS: u64 = 5 * 60;
 const MAX_MCP_REQUEST_BYTES: usize = 1024 * 1024;
 const SESSION_ID_HEADER: &str = "Mcp-Session-Id";
 

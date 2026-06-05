@@ -72,11 +72,20 @@ both exit **4** instead of failing later inside a tool call.
   process/socket table so only the intended daemon and requested user-facing
   apps remain.
 - `scripts/synapse-setup.ps1` refuses to stop/restart the shared daemon while
-  active HTTP MCP sessions, live client TCP connections, or bridge/stdio
-  children are present. This fails closed with `SYNAPSE_ACTIVE_CLIENTS_PRESENT`
-  and prints the process/socket readback. Use `-ForceRestart` only after a
+  bridge/stdio children or live peer-owned TCP client connections are present.
+  Raw HTTP session-manager entries are logged as `idle_session_map_entries`,
+  but they are not physical proof of a live client by themselves because
+  Streamable HTTP clients that crash or exit without `DELETE` can leave idle
+  session state until the daemon timeout reaps it. Setup fails closed with
+  `SYNAPSE_ACTIVE_CLIENTS_PRESENT` only when the process/socket Source of Truth
+  proves an attached client; stale server-side sockets without a peer process
+  are printed as `stale_tcp_connections`. Use `-ForceRestart` only after a
   deliberate maintenance decision; setup must not silently interrupt another
   agent.
+- The daemon's default Streamable HTTP session idle timeout is 5 minutes
+  (`SYNAPSE_HTTP_SESSION_IDLE_TIMEOUT_SECS` overrides it). This bounds zombie
+  session memory and stale client accounting when a client disappears without
+  sending MCP `DELETE`.
 - The Windows auto-start daemon task must not launch through `cmd.exe` at any
   point. `scripts/synapse-setup.ps1` writes
   `synapse-daemon-launch-hidden.vbs` and registers
@@ -91,9 +100,15 @@ both exit **4** instead of failing later inside a tool call.
 ## Health
 
 `GET http://127.0.0.1:7700/health` (with `Authorization: Bearer <token>`) returns
-`{ ok, version, pid, uptime_s, subsystems }`. `subsystems.storage.db_path` and
-`subsystems.http.active_sessions` confirm which DB the daemon owns and how many
-clients are connected.
+`{ ok, version, pid, uptime_s, subsystems }`. `subsystems.storage.db_path`
+confirms which DB the daemon owns. `subsystems.http.active_sessions` is the raw
+Streamable HTTP session-manager count, not by itself proof of a currently
+attached process; pair it with process/socket readback for restart decisions.
+HTTP MCP session state is persisted in `CF_KV` under `mcp/session/v1/<session>`.
+Rows include `stored_at_unix_ms` and expire on the same idle timeout as the
+in-memory session manager (`SYNAPSE_HTTP_SESSION_IDLE_TIMEOUT_SECS`, default
+300 seconds). Legacy rows without this TTL metadata are deleted on load and are
+not accepted as live session proof.
 
 ## Troubleshooting
 
@@ -133,8 +148,10 @@ clients are connected.
   `%LOCALAPPDATA%\synapse\logs\synapse.log.*` telemetry files for launch,
   `STORAGE_*`, or bind errors.
 - **Setup/update says `SYNAPSE_ACTIVE_CLIENTS_PRESENT`** — setup saw a live
-  daemon with active MCP sessions, established loopback client sockets, or
-  bridge/stdio children. Close the client/helper that owns the session, rerun
-  setup, and read the process/socket SoT again. If a restart is truly required
-  while clients are attached, rerun with `-ForceRestart` only after coordinating
-  a maintenance window; this flag exists to make interruption explicit.
+  daemon with bridge/stdio children or a peer-owned loopback client socket.
+  Close the client/helper that owns the peer process, rerun setup, and read the
+  process/socket SoT again. `idle_session_map_entries` without live TCP peers
+  means stale or idle HTTP session state is present but did not prove an
+  attached client. If a restart is truly required while clients are attached,
+  rerun with `-ForceRestart` only after coordinating a maintenance window; this
+  flag exists to make interruption explicit.

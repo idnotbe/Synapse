@@ -758,12 +758,44 @@ function Get-SynapseTcpClientSnapshot {
     param([Parameter(Mandatory=$true)][string]$Bind)
 
     $endpoint = Get-SynapseBindEndpoint -Bind $Bind
-    @(Get-NetTCPConnection -LocalAddress $endpoint.Address -LocalPort $endpoint.Port -ErrorAction SilentlyContinue |
-        Where-Object { "$($_.State)" -ne 'Listen' } |
-        Sort-Object LocalPort, RemotePort, OwningProcess |
-        Select-Object State, LocalAddress, LocalPort, RemoteAddress, RemotePort, OwningProcess,
-            @{Name='OwnerName';Expression={(Get-Process -Id $_.OwningProcess -ErrorAction SilentlyContinue).ProcessName}},
-            @{Name='OwnerCommandLine';Expression={(Get-CimInstance Win32_Process -Filter "ProcessId=$($_.OwningProcess)" -ErrorAction SilentlyContinue).CommandLine}})
+    $allTcp = @(Get-NetTCPConnection -ErrorAction SilentlyContinue)
+    $serverConnections = @($allTcp |
+        Where-Object {
+            $_.LocalAddress -eq $endpoint.Address -and
+            $_.LocalPort -eq $endpoint.Port -and
+            "$($_.State)" -ne 'Listen'
+        } |
+        Sort-Object LocalPort, RemotePort, OwningProcess)
+
+    foreach ($connection in $serverConnections) {
+        $peer = @($allTcp | Where-Object {
+            $_.LocalAddress -eq $connection.RemoteAddress -and
+            $_.LocalPort -eq $connection.RemotePort -and
+            $_.RemoteAddress -eq $connection.LocalAddress -and
+            $_.RemotePort -eq $connection.LocalPort
+        } | Select-Object -First 1)
+        $peerOwnerPid = if ($peer.Count -gt 0) { [int]$peer[0].OwningProcess } else { 0 }
+        $peerOwner = if ($peerOwnerPid -gt 0) { Get-Process -Id $peerOwnerPid -ErrorAction SilentlyContinue } else { $null }
+        $peerOwnerLine = if ($peerOwnerPid -gt 0) {
+            (Get-CimInstance Win32_Process -Filter "ProcessId=$peerOwnerPid" -ErrorAction SilentlyContinue).CommandLine
+        } else {
+            $null
+        }
+        [pscustomobject]@{
+            State = $connection.State
+            LocalAddress = $connection.LocalAddress
+            LocalPort = $connection.LocalPort
+            RemoteAddress = $connection.RemoteAddress
+            RemotePort = $connection.RemotePort
+            OwningProcess = $connection.OwningProcess
+            OwnerName = (Get-Process -Id $connection.OwningProcess -ErrorAction SilentlyContinue).ProcessName
+            OwnerCommandLine = (Get-CimInstance Win32_Process -Filter "ProcessId=$($connection.OwningProcess)" -ErrorAction SilentlyContinue).CommandLine
+            PeerOwningProcess = $peerOwnerPid
+            PeerOwnerName = $peerOwner.ProcessName
+            PeerOwnerCommandLine = $peerOwnerLine
+            HasLivePeer = ($peerOwnerPid -gt 0)
+        }
+    }
 }
 
 function Format-SynapseTcpClientSnapshot {
@@ -772,7 +804,7 @@ function Format-SynapseTcpClientSnapshot {
         return '<none>'
     }
     return (($Snapshot | ForEach-Object {
-        "state=$($_.State) local=$($_.LocalAddress):$($_.LocalPort) remote=$($_.RemoteAddress):$($_.RemotePort) owner_pid=$($_.OwningProcess) owner=$($_.OwnerName) owner_cmd=$($_.OwnerCommandLine)"
+        "state=$($_.State) local=$($_.LocalAddress):$($_.LocalPort) remote=$($_.RemoteAddress):$($_.RemotePort) owner_pid=$($_.OwningProcess) owner=$($_.OwnerName) peer_pid=$($_.PeerOwningProcess) peer=$($_.PeerOwnerName) has_live_peer=$($_.HasLivePeer) peer_cmd=$($_.PeerOwnerCommandLine)"
     }) -join "`n")
 }
 
@@ -878,28 +910,44 @@ function Assert-SynapseRestartAllowed {
         }
     }
 
-    $tcpClients = Get-SynapseTcpClientSnapshot -Bind $Bind
+    $tcpConnections = @(Get-SynapseTcpClientSnapshot -Bind $Bind)
+    $tcpClients = @($tcpConnections | Where-Object { $_.HasLivePeer })
+    $staleTcpConnections = @($tcpConnections | Where-Object { -not $_.HasLivePeer })
     $blockers = @()
     if ($nonHttpProcesses.Count -gt 0) { $blockers += "non_http_synapse_processes=$($nonHttpProcesses.Count)" }
-    if ($null -ne $activeSessions -and $activeSessions -gt 0) { $blockers += "active_sessions=$activeSessions" }
     if ($tcpClients.Count -gt 0) { $blockers += "live_tcp_clients=$($tcpClients.Count)" }
+    if ($null -ne $activeSessions -and $activeSessions -gt 0 -and $tcpClients.Count -gt 0) {
+        $blockers += "active_sessions=$activeSessions"
+    }
+    if ($null -ne $activeSessions -and $activeSessions -gt 0 -and $tcpClients.Count -eq 0) {
+        Info "Synapse restart guard reason=$Reason idle_session_map_entries=$activeSessions live_tcp_clients=0 verdict=not_blocking_idle_sessions"
+    }
+    if ($staleTcpConnections.Count -gt 0) {
+        Info ("Synapse restart guard reason={0} stale_tcp_connections={1}`nstale_tcp:`n{2}" -f `
+            $Reason,
+            $staleTcpConnections.Count,
+            (Format-SynapseTcpClientSnapshot -Snapshot $staleTcpConnections))
+    }
 
     if ($blockers.Count -gt 0) {
-        $message = ("SYNAPSE_ACTIVE_CLIENTS_PRESENT reason={0} blockers={1} process_count={2} active_sessions={3} live_tcp_clients={4}`nprocesses:`n{5}`ntcp_clients:`n{6}`nremediation=wait for MCP clients to disconnect, close stale helpers first, or rerun with -ForceRestart only after coordinating a maintenance window" -f `
+        $message = ("SYNAPSE_ACTIVE_CLIENTS_PRESENT reason={0} blockers={1} process_count={2} active_sessions={3} live_tcp_clients={4} idle_session_map_entries={5} stale_tcp_connections={6}`nprocesses:`n{7}`ntcp_clients:`n{8}`nstale_tcp:`n{9}`nremediation=wait for MCP clients to disconnect, close stale helpers first, or rerun with -ForceRestart only after coordinating a maintenance window" -f `
             $Reason,
             ($blockers -join ','),
             $processes.Count,
             ($(if ($null -eq $activeSessions) { 'unknown' } else { $activeSessions })),
             $tcpClients.Count,
+            ($(if ($null -eq $activeSessions) { 'unknown' } else { $activeSessions })),
+            $staleTcpConnections.Count,
             (Format-SynapseMcpProcessSnapshot -Snapshot $processes),
-            (Format-SynapseTcpClientSnapshot -Snapshot $tcpClients))
+            (Format-SynapseTcpClientSnapshot -Snapshot $tcpClients),
+            (Format-SynapseTcpClientSnapshot -Snapshot $staleTcpConnections))
         if ($ForceRestart) {
             Info "FORCE_RESTART: $message"
         } else {
             Die $message
         }
     } else {
-        Info "Synapse restart guard reason=$Reason verdict=clear active_sessions=0 live_tcp_clients=0 process_count=$($processes.Count)"
+        Info "Synapse restart guard reason=$Reason verdict=clear active_sessions=$activeSessions live_tcp_clients=0 stale_tcp_connections=$($staleTcpConnections.Count) process_count=$($processes.Count)"
     }
 }
 
@@ -1062,7 +1110,7 @@ $token = if ($null -eq $tokenRaw) { '' } else { $tokenRaw.Trim() }
 if ($token.Length -lt 16) { Die "Token at $TokenPath is too short ($($token.Length) chars); delete it and re-run to regenerate." }
 [Environment]::SetEnvironmentVariable('SYNAPSE_BEARER_TOKEN', $token, 'User')
 $env:SYNAPSE_BEARER_TOKEN = $token
-Info "Set Windows User SYNAPSE_BEARER_TOKEN from $TokenPath for future Codex HTTP MCP processes."
+Info "Set Windows User SYNAPSE_BEARER_TOKEN from $TokenPath for native HTTP MCP clients that require env-based bearer auth."
 try {
     $signature = '[DllImport("user32.dll", SetLastError=true, CharSet=CharSet.Auto)] public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint Msg, UIntPtr wParam, string lParam, uint fuFlags, uint uTimeout, out UIntPtr lpdwResult);'
     $type = Add-Type -MemberDefinition $signature -Name Win32SendMessageTimeout -Namespace SynapseEnv -PassThru -ErrorAction Stop
