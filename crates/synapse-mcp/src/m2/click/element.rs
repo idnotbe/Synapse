@@ -223,11 +223,8 @@ fn element_center(element_id: &synapse_core::ElementId) -> Result<Point, ErrorDa
     let rect = if let Some(rect) = browser_ocr_rect_or_error(element_id)? {
         rect
     } else {
-        synapse_a11y::element_bounding_rect(element_id).map_err(|err| {
-            action_error_to_mcp(&ActionError::ElementNotResolved {
-                detail: format!("act_click element {element_id} could not be resolved: {err}"),
-            })
-        })?
+        synapse_a11y::element_bounding_rect(element_id)
+            .map_err(|err| action_error_to_mcp(&element_resolution_error(element_id, err)))?
     };
 
     if rect.w <= 0 || rect.h <= 0 {
@@ -250,6 +247,23 @@ fn element_center(element_id: &synapse_core::ElementId) -> Result<Point, ErrorDa
             })
         })?,
     })
+}
+
+#[cfg(windows)]
+fn element_resolution_error(
+    element_id: &synapse_core::ElementId,
+    error: synapse_a11y::A11yError,
+) -> ActionError {
+    let detail = error.to_string();
+    match error {
+        synapse_a11y::A11yError::ElementStale { .. } => ActionError::TransientElementExpired {
+            element_id: element_id.clone(),
+            detail,
+        },
+        _ => ActionError::ElementNotResolved {
+            detail: format!("act_click element {element_id} could not be resolved: {detail}"),
+        },
+    }
 }
 
 #[cfg(windows)]
@@ -596,5 +610,28 @@ mod tests {
             ));
         }
         println!("readback=act_click_element_coordinate_direct before={before} after={after:?}");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn stale_bbox_resolution_maps_to_transient_expired() {
+        let element_id = synapse_core::ElementId::parse("0x1000:0000002a00000001")
+            .expect("synthetic element id must be valid");
+        let before = synapse_a11y::A11yError::ElementStale {
+            detail: format!("element id {element_id} was not found under hwnd 0x1000"),
+        };
+
+        let after = element_resolution_error(&element_id, before);
+
+        assert_eq!(
+            after.code(),
+            synapse_core::error_codes::TRANSIENT_ELEMENT_EXPIRED
+        );
+        assert!(after.detail().contains(element_id.as_str()));
+        println!(
+            "readback=act_click_element_bbox edge=stale_resolution before=ElementStale after_code={} after_detail={:?}",
+            after.code(),
+            after.detail()
+        );
     }
 }

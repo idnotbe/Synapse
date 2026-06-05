@@ -36,7 +36,9 @@ pub struct CoordinateFallbackPlan {
 /// coordinate click handling.
 #[cfg(windows)]
 pub fn invoke_element(element_id: &ElementId) -> ActionResult<()> {
-    match synapse_a11y::click_element_action(element_id).map_err(a11y_error_to_action)? {
+    match synapse_a11y::click_element_action(element_id)
+        .map_err(|error| a11y_error_to_action(element_id, error))?
+    {
         synapse_a11y::ElementClickAction::Invoked | synapse_a11y::ElementClickAction::Toggled => {
             Ok(())
         }
@@ -80,7 +82,9 @@ pub fn click_element_or_fallback<B>(
 where
     B: ActionBackend,
 {
-    match synapse_a11y::click_element_action(element_id).map_err(a11y_error_to_action)? {
+    match synapse_a11y::click_element_action(element_id)
+        .map_err(|error| a11y_error_to_action(element_id, error))?
+    {
         synapse_a11y::ElementClickAction::Invoked => Ok(ElementClickOutcome::Invoked),
         synapse_a11y::ElementClickAction::Toggled => Ok(ElementClickOutcome::Toggled),
         synapse_a11y::ElementClickAction::CoordinateFallback { bbox } => {
@@ -119,7 +123,8 @@ where
     reason = "reserved for element-target action paths that need screen-point readback"
 )]
 pub(crate) fn element_screen_point(element_id: &ElementId) -> ActionResult<Point> {
-    let rect = synapse_a11y::element_bounding_rect(element_id).map_err(a11y_error_to_action)?;
+    let rect = synapse_a11y::element_bounding_rect(element_id)
+        .map_err(|error| a11y_error_to_action(element_id, error))?;
     resolver::coordinate_fallback_plan(element_id, rect).map(|plan| plan.screen_point)
 }
 
@@ -135,17 +140,23 @@ pub(crate) fn element_screen_point(element_id: &ElementId) -> ActionResult<Point
 }
 
 #[cfg(windows)]
-fn a11y_error_to_action(error: synapse_a11y::A11yError) -> crate::ActionError {
+fn a11y_error_to_action(
+    element_id: &ElementId,
+    error: synapse_a11y::A11yError,
+) -> crate::ActionError {
+    let detail = error.to_string();
     match error {
-        synapse_a11y::A11yError::ElementStale { .. }
-        | synapse_a11y::A11yError::InvalidElementId { .. }
-        | synapse_a11y::A11yError::NoForeground { .. } => resolver::element_not_resolved(error),
+        synapse_a11y::A11yError::ElementStale { .. } => {
+            resolver::transient_element_expired(element_id, detail)
+        }
+        synapse_a11y::A11yError::InvalidElementId { .. }
+        | synapse_a11y::A11yError::NoForeground { .. } => resolver::element_not_resolved(detail),
         synapse_a11y::A11yError::NotAvailable { detail } => {
             crate::ActionError::BackendUnavailable { detail }
         }
         synapse_a11y::A11yError::CdpUnreachable { .. }
         | synapse_a11y::A11yError::CdpAttachFailed { .. }
         | synapse_a11y::A11yError::CdpAxtreeFailed { .. }
-        | synapse_a11y::A11yError::Internal { .. } => resolver::target_invalid(error),
+        | synapse_a11y::A11yError::Internal { .. } => resolver::target_invalid(detail),
     }
 }

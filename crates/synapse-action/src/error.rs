@@ -1,4 +1,4 @@
-use synapse_core::error_codes;
+use synapse_core::{ElementId, error_codes};
 
 pub type ActionResult<T> = Result<T, ActionError>;
 
@@ -20,6 +20,11 @@ pub enum ActionError {
     VigemPluginFailed { detail: String },
     #[error("action element not resolved: {detail}")]
     ElementNotResolved { detail: String },
+    #[error("transient element expired: {detail}")]
+    TransientElementExpired {
+        element_id: ElementId,
+        detail: String,
+    },
     #[error("action foreground lost: {detail}")]
     ForegroundLost { detail: String },
     #[error("action unsupported key: {detail}")]
@@ -46,6 +51,7 @@ impl ActionError {
             Self::VigemNotInstalled { .. } => error_codes::ACTION_VIGEM_NOT_INSTALLED,
             Self::VigemPluginFailed { .. } => error_codes::ACTION_VIGEM_PLUGIN_FAILED,
             Self::ElementNotResolved { .. } => error_codes::ACTION_ELEMENT_NOT_RESOLVED,
+            Self::TransientElementExpired { .. } => error_codes::TRANSIENT_ELEMENT_EXPIRED,
             Self::ForegroundLost { .. } => error_codes::ACTION_FOREGROUND_LOST,
             Self::UnsupportedKey { .. } => error_codes::ACTION_UNSUPPORTED_KEY,
             Self::DragDistanceExceedsLimit { .. } => {
@@ -68,6 +74,7 @@ impl ActionError {
             | Self::VigemNotInstalled { detail }
             | Self::VigemPluginFailed { detail }
             | Self::ElementNotResolved { detail }
+            | Self::TransientElementExpired { detail, .. }
             | Self::ForegroundLost { detail }
             | Self::UnsupportedKey { detail }
             | Self::DragDistanceExceedsLimit { detail }
@@ -92,6 +99,9 @@ impl ActionError {
             Self::VigemNotInstalled { .. } => Self::VigemNotInstalled { detail },
             Self::VigemPluginFailed { .. } => Self::VigemPluginFailed { detail },
             Self::ElementNotResolved { .. } => Self::ElementNotResolved { detail },
+            Self::TransientElementExpired { element_id, .. } => {
+                Self::TransientElementExpired { element_id, detail }
+            }
             Self::ForegroundLost { .. } => Self::ForegroundLost { detail },
             Self::UnsupportedKey { .. } => Self::UnsupportedKey { detail },
             Self::DragDistanceExceedsLimit { .. } => Self::DragDistanceExceedsLimit { detail },
@@ -112,6 +122,7 @@ impl ActionError {
             | Self::VigemNotInstalled { .. }
             | Self::VigemPluginFailed { .. }
             | Self::ElementNotResolved { .. }
+            | Self::TransientElementExpired { .. }
             | Self::ForegroundLost { .. }
             | Self::UnsupportedKey { .. }
             | Self::DragDistanceExceedsLimit { .. }

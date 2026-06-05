@@ -1,8 +1,9 @@
 use std::{sync::Arc, time::Instant};
 
-use rmcp::ErrorData;
+use rmcp::{ErrorData, model::ErrorCode};
+use serde_json::json;
 use synapse_action::{ActionError, ActionHandle, RecordingBackend, cached_double_click_timing};
-use synapse_core::{Action, Backend, ButtonAction, MouseTarget, Point, error_codes};
+use synapse_core::{Action, Backend, ButtonAction, ElementId, MouseTarget, Point, error_codes};
 
 use crate::m1::mcp_error;
 
@@ -240,7 +241,41 @@ fn point_mouse_target(target: &ActClickTarget) -> Result<MouseTarget, ErrorData>
 }
 
 fn action_error_to_mcp(error: &ActionError) -> ErrorData {
-    mcp_error(error.code(), error.to_string())
+    match error {
+        ActionError::TransientElementExpired { element_id, detail } => {
+            transient_element_expired_error(element_id, detail)
+        }
+        _ => mcp_error(error.code(), error.to_string()),
+    }
+}
+
+fn transient_element_expired_error(element_id: &ElementId, detail: &str) -> ErrorData {
+    let root_hwnd = element_id.parts().ok().map(|parts| parts.hwnd);
+    let recommended_pattern = "Call observe or find again immediately before acting on the transient UI, then pass the fresh element_id to act_click; do not reuse element_ids from expired toast/snackbar observations.";
+    tracing::warn!(
+        code = error_codes::TRANSIENT_ELEMENT_EXPIRED,
+        element_id = %element_id,
+        root_hwnd,
+        detail,
+        recommended_pattern,
+        "act_click transient UI element expired before dispatch; no fallback click attempted"
+    );
+    ErrorData::new(
+        ErrorCode(-32099),
+        format!("transient UI element expired before act_click dispatch: {detail}"),
+        Some(json!({
+            "code": error_codes::TRANSIENT_ELEMENT_EXPIRED,
+            "detail_code": "UIA_ELEMENT_STALE_AFTER_OBSERVE",
+            "transient": true,
+            "fallback_attempted": false,
+            "element_id": element_id.to_string(),
+            "root_hwnd": root_hwnd,
+            "source_of_truth": "live UI Automation re-resolution under the element_id root HWND",
+            "recommended_next_tools": ["observe", "find", "act_click"],
+            "recommended_pattern": recommended_pattern,
+            "detail": detail,
+        })),
+    )
 }
 
 const fn backend_used_name(backend: Backend) -> &'static str {

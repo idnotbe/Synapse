@@ -10,7 +10,7 @@ use super::{
     },
     resolver::{
         RectEdges, center_from_rect_edges, element_not_resolved, invoke_pattern_failed,
-        invoke_pattern_unavailable,
+        invoke_pattern_unavailable, transient_element_expired,
     },
 };
 #[cfg(not(windows))]
@@ -28,6 +28,29 @@ fn re_resolve_failures_map_to_element_not_resolved() {
         "readback=invoke_error_mapping edge=re_resolve_failure before={before:?} after_code={} after_detail={:?}",
         after.code(),
         after.detail()
+    );
+}
+
+#[test]
+fn stale_uia_elements_map_to_transient_expired() {
+    let element_id = synthetic_element_id();
+    let before = format!("UI Automation element is stale: element id {element_id} disappeared");
+    let after = transient_element_expired(&element_id, &before);
+    assert_eq!(after.code(), error_codes::TRANSIENT_ELEMENT_EXPIRED);
+    assert_eq!(after.detail(), before);
+    match after {
+        ActionError::TransientElementExpired {
+            element_id: actual,
+            detail,
+        } => {
+            assert_eq!(actual, element_id);
+            assert!(detail.contains("stale"));
+        }
+        other => panic!("expected transient expired error, got {other:?}"),
+    }
+    println!(
+        "readback=invoke_error_mapping edge=stale_transient before={before:?} after_code={} after_element_id={element_id}",
+        error_codes::TRANSIENT_ELEMENT_EXPIRED
     );
 }
 

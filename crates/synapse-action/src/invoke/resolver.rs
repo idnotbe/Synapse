@@ -39,6 +39,18 @@ pub(super) fn element_not_resolved(error: impl Display) -> ActionError {
 
 #[must_use]
 #[cfg(any(test, windows))]
+pub(super) fn transient_element_expired(
+    element_id: &ElementId,
+    error: impl Display,
+) -> ActionError {
+    ActionError::TransientElementExpired {
+        element_id: element_id.clone(),
+        detail: error.to_string(),
+    }
+}
+
+#[must_use]
+#[cfg(any(test, windows))]
 pub(super) fn invoke_pattern_unavailable(
     element_id: &ElementId,
     error: impl Display,

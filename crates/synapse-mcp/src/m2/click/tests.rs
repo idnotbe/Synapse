@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use serde_json::json;
-use synapse_action::{ActionBackend, ActionEmitter, RecordedInput, RecordingBackend};
-use synapse_core::{Backend, MouseTarget, Point, error_codes};
+use synapse_action::{ActionBackend, ActionEmitter, ActionError, RecordedInput, RecordingBackend};
+use synapse_core::{Backend, ElementId, MouseTarget, Point, error_codes};
 use tokio_util::sync::CancellationToken;
 
 use super::{
@@ -118,6 +118,56 @@ async fn element_click_rejects_non_mouse_element_transports_before_delivery() {
         cancel.cancel();
         let _ = join.await;
     }
+}
+
+#[test]
+fn transient_element_expired_error_carries_reobserve_guidance() {
+    let element_id =
+        ElementId::parse("0x1000:0000002a00000001").expect("synthetic element id must be valid");
+    let detail = format!(
+        "UI Automation element is stale: element id {element_id} was not found under hwnd 0x1000"
+    );
+    let before = ActionError::TransientElementExpired {
+        element_id: element_id.clone(),
+        detail,
+    };
+
+    let after = super::action_error_to_mcp(&before);
+    let data = after
+        .data
+        .as_ref()
+        .expect("transient element error should carry structured data");
+    println!(
+        "readback=act_click_transient_expired edge=stale_toast before_code={} after_data={data}",
+        before.code()
+    );
+
+    assert_eq!(
+        data.get("code").and_then(serde_json::Value::as_str),
+        Some(error_codes::TRANSIENT_ELEMENT_EXPIRED)
+    );
+    assert_eq!(
+        data.get("detail_code").and_then(serde_json::Value::as_str),
+        Some("UIA_ELEMENT_STALE_AFTER_OBSERVE")
+    );
+    assert_eq!(
+        data.get("fallback_attempted")
+            .and_then(serde_json::Value::as_bool),
+        Some(false)
+    );
+    assert_eq!(
+        data.get("element_id").and_then(serde_json::Value::as_str),
+        Some(element_id.as_str())
+    );
+    assert_eq!(
+        data.get("root_hwnd").and_then(serde_json::Value::as_i64),
+        Some(0x1000)
+    );
+    assert!(
+        data.get("recommended_pattern")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|value| value.contains("observe") && value.contains("fresh element_id"))
+    );
 }
 
 #[tokio::test]
