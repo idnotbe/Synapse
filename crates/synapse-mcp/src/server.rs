@@ -37,9 +37,9 @@ use crate::{
         ActStrokeResponse, ActTypeParams, ActTypeResponse, M2ServiceConfig, ReleaseAllParams,
         ReleaseAllResponse, SharedM2State, act_click_with_handle, act_clipboard,
         act_keymap_with_handle, act_pad_with_handle, act_press_with_handle, act_scroll_with_handle,
-        act_stroke_with_handle, act_type_with_handle, release_all_with_handles,
-        shared_m2_state_from_config_with_shutdown_reason, shared_m2_state_from_env,
-        validate_act_stroke_params,
+        act_stroke_validation_failure_details, act_stroke_with_handle, act_type_with_handle,
+        release_all_with_handles, shared_m2_state_from_config_with_shutdown_reason,
+        shared_m2_state_from_env, validate_act_stroke_params,
     },
     m3::{
         M3ServiceConfig, SharedM3State,

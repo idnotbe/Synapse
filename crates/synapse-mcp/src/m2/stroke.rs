@@ -237,6 +237,32 @@ pub fn act_stroke_request_details(params: &ActStrokeParams, plan: &ActStrokePlan
     })
 }
 
+pub fn act_stroke_validation_failure_details(params: &ActStrokeParams, error: &ErrorData) -> Value {
+    json!({
+        "stroke": {
+            "validation_stage": "params",
+            "validated": false,
+            "input_kind": act_stroke_input_summary(params),
+            "path_kind": params.path.as_ref().map(path_kind),
+            "control_point_count": params.path.as_ref().map(control_point_count),
+            "target_present": params.target.is_some(),
+            "from_present": params.from.is_some(),
+            "to_present": params.to.is_some(),
+            "button": params.button,
+            "velocity_profile": params.velocity_profile,
+            "duration_or_speed": &params.duration_or_speed,
+            "motion_model": params.motion_model,
+            "humanized": params.humanize.is_some(),
+            "backend_requested": params.backend,
+            "backend_resolved": backend_used_name(params.backend.to_backend()),
+            "modifiers": &params.modifiers,
+            "fallback_path_executed": false,
+        },
+        "preflight": Value::Null,
+        "failure": act_stroke_error_details(error),
+    })
+}
+
 pub fn act_stroke_error_details(error: &ErrorData) -> Value {
     let data = error.data.as_ref();
     json!({
@@ -255,6 +281,16 @@ pub fn act_stroke_error_details(error: &ErrorData) -> Value {
             .unwrap_or_else(|| json!({ "kind": "not_rate_or_queue" })),
         "fallback_path_executed": false,
     })
+}
+
+fn act_stroke_input_summary(params: &ActStrokeParams) -> &'static str {
+    if params.path.is_some() {
+        "path"
+    } else if params.target.is_some() || params.to.is_some() {
+        "target_line"
+    } else {
+        "missing"
+    }
 }
 
 impl StrokeBackend {

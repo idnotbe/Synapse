@@ -3,7 +3,8 @@ use std::path::Path;
 use anyhow::Context;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
-use synapse_core::error_codes;
+use synapse_core::{SCHEMA_VERSION, error_codes};
+use synapse_storage::{Db, cf, decode_json};
 use synapse_test_utils::stdio_mcp_client::StdioMcpClient;
 use tempfile::TempDir;
 
@@ -223,6 +224,104 @@ async fn act_stroke_tools_call_recording_backend_and_path_edges() -> anyhow::Res
     Ok(())
 }
 
+#[tokio::test]
+async fn act_stroke_validation_errors_are_durably_audited() -> anyhow::Result<()> {
+    let log_dir = TempDir::new()?;
+    let db_dir = TempDir::new()?;
+    let db_path = db_dir.path().join("db");
+    let db_path_string = db_path.to_string_lossy().into_owned();
+    let mut client = StdioMcpClient::launch_and_init_with_env(
+        Some(log_dir.path()),
+        &[
+            ("SYNAPSE_DB", db_path_string.as_str()),
+            ("SYNAPSE_MCP_SYNTHETIC_FIXTURE", "notepad"),
+            ("SYNAPSE_MCP_RECORDING_BACKEND", "1"),
+        ],
+    )
+    .await?;
+    activate_notepad_profile(&mut client).await?;
+
+    let before: Value = structured(&client.tools_call("storage_inspect", json!({})).await?)?;
+    let before_action_rows = before["cf_row_counts"][cf::CF_ACTION_LOG]
+        .as_u64()
+        .context("before CF_ACTION_LOG count missing")?;
+    println!(
+        "readback=act_stroke_validation_audit edge=before before_action_rows={before_action_rows}"
+    );
+
+    let missing_target = client
+        .tools_call_error(
+            "act_stroke",
+            json!({
+                "duration_or_speed": {"kind": "duration_ms", "duration_ms": 100},
+                "velocity_profile": "linear",
+                "motion_model": {"kind": "path"},
+                "backend": "software"
+            }),
+        )
+        .await?;
+    println!(
+        "readback=act_stroke_validation_audit edge=missing_target after_error={missing_target}"
+    );
+    assert_eq!(
+        error_code(&missing_target),
+        Some(error_codes::TOOL_PARAMS_INVALID)
+    );
+
+    let after: Value = structured(&client.tools_call("storage_inspect", json!({})).await?)?;
+    let after_action_rows = after["cf_row_counts"][cf::CF_ACTION_LOG]
+        .as_u64()
+        .context("after CF_ACTION_LOG count missing")?;
+    println!(
+        "readback=act_stroke_validation_audit edge=after_mcp before_action_rows={before_action_rows} after_action_rows={after_action_rows}"
+    );
+    assert_eq!(after_action_rows, before_action_rows + 1);
+
+    assert!(client.shutdown().await?.success());
+
+    let row = latest_action_log_row(&db_path)?;
+    println!(
+        "readback=act_stroke_validation_audit edge=after_shutdown_source_of_truth tool={} status={} error_code={:?} detail_code={:?} validated={:?} fallback={:?}",
+        row["tool"].as_str().unwrap_or("<missing>"),
+        row["status"].as_str().unwrap_or("<missing>"),
+        row["error_code"].as_str(),
+        row.pointer("/details/request/failure/data/detail_code")
+            .and_then(Value::as_str),
+        row.pointer("/details/request/stroke/validated"),
+        row.pointer("/details/request/stroke/fallback_path_executed")
+    );
+    assert_eq!(row["tool"], "act_stroke");
+    assert_eq!(row["status"], "error");
+    assert_eq!(row["error_code"], error_codes::TOOL_PARAMS_INVALID);
+    assert_eq!(
+        row.pointer("/details/request/failure/data/detail_code")
+            .and_then(Value::as_str),
+        Some("STROKE_TARGET_MISSING")
+    );
+    assert_eq!(
+        row.pointer("/details/request/stroke/validation_stage")
+            .and_then(Value::as_str),
+        Some("params")
+    );
+    assert_eq!(
+        row.pointer("/details/request/stroke/validated")
+            .and_then(Value::as_bool),
+        Some(false)
+    );
+    assert_eq!(
+        row.pointer("/details/request/stroke/input_kind")
+            .and_then(Value::as_str),
+        Some("missing")
+    );
+    assert_eq!(
+        row.pointer("/details/request/stroke/fallback_path_executed")
+            .and_then(Value::as_bool),
+        Some(false)
+    );
+
+    Ok(())
+}
+
 async fn activate_notepad_profile(client: &mut StdioMcpClient) -> anyhow::Result<()> {
     client
         .tools_call("profile_activate", json!({"profile_id": "notepad"}))
@@ -250,6 +349,14 @@ fn read_logs(path: &Path) -> anyhow::Result<String> {
         }
     }
     Ok(logs)
+}
+
+fn latest_action_log_row(db_path: &Path) -> anyhow::Result<Value> {
+    let db = Db::open(db_path, SCHEMA_VERSION)?;
+    let mut rows = db.scan_cf(cf::CF_ACTION_LOG)?;
+    rows.sort_by(|left, right| left.0.cmp(&right.0));
+    let (_key, value) = rows.pop().context("CF_ACTION_LOG row missing")?;
+    decode_json::<Value>(&value).map_err(Into::into)
 }
 
 #[derive(serde::Deserialize)]

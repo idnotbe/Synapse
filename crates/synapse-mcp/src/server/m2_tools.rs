@@ -5,7 +5,7 @@ use super::{
     ActTypeParams, ActTypeResponse, ErrorData, Json, Parameters, ReleaseAllParams,
     ReleaseAllResponse, SynapseService, act_click_with_handle, act_clipboard,
     act_keymap_with_handle, act_pad_with_handle, act_press_with_handle, act_scroll_with_handle,
-    act_stroke_with_handle, act_type_with_handle,
+    act_stroke_validation_failure_details, act_stroke_with_handle, act_type_with_handle,
     action_preflight::{ActionPreflightReadback, ForegroundProof},
     release_all_with_handles, tool, tool_router, validate_act_stroke_params,
 };
@@ -276,7 +276,15 @@ impl SynapseService {
             kind = "act_stroke",
             "tool.invocation kind=act_stroke"
         );
-        let plan = validate_act_stroke_params(&params)?;
+        let plan = match validate_act_stroke_params(&params) {
+            Ok(plan) => plan,
+            Err(error) => {
+                let failure_details = act_stroke_validation_failure_details(&params, &error);
+                log_act_stroke_failure(&failure_details, &error);
+                self.audit_action_error_with_details("act_stroke", &error, &failure_details)?;
+                return Err(error);
+            }
+        };
         let stroke_details = act_stroke_request_details(&params, &plan);
         let preflight = match self.ensure_supported_use_allows_action("act_stroke") {
             Ok(preflight) => preflight,

@@ -872,6 +872,32 @@ function Get-SynapseTcpClientSnapshot {
     }
 }
 
+function Get-SynapseTcpBindListenerSnapshot {
+    param([Parameter(Mandatory=$true)][string]$Bind)
+
+    $endpoint = Get-SynapseBindEndpoint -Bind $Bind
+    $listeners = @(Get-NetTCPConnection -LocalAddress $endpoint.Address -LocalPort $endpoint.Port -State Listen -ErrorAction SilentlyContinue |
+        Sort-Object LocalAddress, LocalPort, OwningProcess)
+
+    foreach ($listener in $listeners) {
+        $owner = if ($listener.OwningProcess -gt 0) {
+            Get-CimInstance Win32_Process -Filter "ProcessId=$($listener.OwningProcess)" -ErrorAction SilentlyContinue
+        } else {
+            $null
+        }
+        [pscustomobject]@{
+            LocalAddress = $listener.LocalAddress
+            LocalPort = $listener.LocalPort
+            State = $listener.State
+            OwningProcess = $listener.OwningProcess
+            CreationTime = $listener.CreationTime
+            OwnerExists = ($null -ne $owner)
+            OwnerName = $owner.Name
+            OwnerCommandLine = $owner.CommandLine
+        }
+    }
+}
+
 function Format-SynapseTcpClientSnapshot {
     param([object[]]$Snapshot)
     if (-not $Snapshot -or $Snapshot.Count -eq 0) {
@@ -880,6 +906,47 @@ function Format-SynapseTcpClientSnapshot {
     return (($Snapshot | ForEach-Object {
         "state=$($_.State) local=$($_.LocalAddress):$($_.LocalPort) remote=$($_.RemoteAddress):$($_.RemotePort) owner_pid=$($_.OwningProcess) owner=$($_.OwnerName) peer_pid=$($_.PeerOwningProcess) peer=$($_.PeerOwnerName) has_live_peer=$($_.HasLivePeer) peer_cmd=$($_.PeerOwnerCommandLine)"
     }) -join "`n")
+}
+
+function Format-SynapseTcpBindListenerSnapshot {
+    param([object[]]$Snapshot)
+    if (-not $Snapshot -or $Snapshot.Count -eq 0) {
+        return '<none>'
+    }
+    return (($Snapshot | ForEach-Object {
+        "state=$($_.State) local=$($_.LocalAddress):$($_.LocalPort) owner_pid=$($_.OwningProcess) owner_exists=$($_.OwnerExists) owner=$($_.OwnerName) created=$($_.CreationTime) owner_cmd=$($_.OwnerCommandLine)"
+    }) -join "`n")
+}
+
+function Wait-SynapseBindReleased {
+    param(
+        [Parameter(Mandatory=$true)][string]$Reason,
+        [Parameter(Mandatory=$true)][string]$Bind,
+        [int]$TimeoutSeconds = 15
+    )
+
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    do {
+        $listeners = @(Get-SynapseTcpBindListenerSnapshot -Bind $Bind)
+        if ($listeners.Count -eq 0) {
+            Info "Synapse bind release verified reason=$Reason bind=$Bind listener_count=0"
+            return
+        }
+        Start-Sleep -Milliseconds 250
+    } while ((Get-Date) -lt $deadline)
+
+    $listeners = @(Get-SynapseTcpBindListenerSnapshot -Bind $Bind)
+    $tcpClients = @(Get-SynapseTcpClientSnapshot -Bind $Bind)
+    $processes = @(Get-SynapseMcpProcessSnapshot)
+    Die ("SYNAPSE_BIND_STILL_LISTENING reason={0} bind={1} timeout_s={2} listener_count={3} process_count={4}`nlisteners:`n{5}`ntcp_clients:`n{6}`nprocesses:`n{7}`nremediation=the configured HTTP bind is still occupied after daemon shutdown. Do not start another daemon or switch ports. Close/restart the exact live MCP client peer listed here if it owns the remaining connection, or restart the current Codex process when it is the peer; never close terminal/IDE/WSL processes globally." -f `
+        $Reason,
+        $Bind,
+        $TimeoutSeconds,
+        $listeners.Count,
+        $processes.Count,
+        (Format-SynapseTcpBindListenerSnapshot -Snapshot $listeners),
+        (Format-SynapseTcpClientSnapshot -Snapshot $tcpClients),
+        (Format-SynapseMcpProcessSnapshot -Snapshot $processes))
 }
 
 function Read-SynapseSetupTokenForRestartGuard {
@@ -1143,6 +1210,7 @@ function Stop-SynapseMcpProcesses {
     Info "Synapse process stop requested reason=$Reason before_count=$($before.Count)"
     Info ("Synapse process stop before:`n{0}" -f (Format-SynapseMcpProcessSnapshot -Snapshot $before))
     if ($before.Count -eq 0) {
+        Wait-SynapseBindReleased -Reason $Reason -Bind $Bind -TimeoutSeconds $TimeoutSeconds
         return
     }
 
@@ -1206,6 +1274,7 @@ function Stop-SynapseMcpProcesses {
             })
             if ($remainingHttpPids.Count -eq 0) {
                 Info "Synapse graceful shutdown verified reason=$Reason http_process_count=0"
+                Wait-SynapseBindReleased -Reason $Reason -Bind $Bind -TimeoutSeconds $TimeoutSeconds
                 break
             }
         } while ((Get-Date) -lt $deadline)
@@ -1232,6 +1301,7 @@ function Stop-SynapseMcpProcesses {
 
     $remaining = @(Get-SynapseMcpProcessSnapshot)
     if ($remaining.Count -eq 0) {
+        Wait-SynapseBindReleased -Reason $Reason -Bind $Bind -TimeoutSeconds $TimeoutSeconds
         Info "Synapse process stop verified reason=$Reason after_count=0"
         return
     }
@@ -1267,6 +1337,7 @@ function Stop-SynapseMcpProcesses {
         Start-Sleep -Milliseconds 250
         $after = @(Get-SynapseMcpProcessSnapshot)
         if ($after.Count -eq 0) {
+            Wait-SynapseBindReleased -Reason $Reason -Bind $Bind -TimeoutSeconds $TimeoutSeconds
             Info "Synapse process stop verified reason=$Reason after_count=0"
             return
         }
@@ -1412,6 +1483,7 @@ try {
 # 6. Register + start the auto-start HTTP daemon (interactive desktop session)
 # ---------------------------------------------------------------------------
 Step "Registering auto-start daemon task '$TaskName'"
+Wait-SynapseBindReleased -Reason 'pre_start' -Bind $Bind -TimeoutSeconds 1
 $legacyLauncher = Join-Path $LogDir 'synapse-daemon-launch.cmd'
 $hiddenLauncher = Join-Path $LogDir 'synapse-daemon-launch-hidden.vbs'
 $launcherLog = Join-Path $LogDir 'daemon-launcher.log'
