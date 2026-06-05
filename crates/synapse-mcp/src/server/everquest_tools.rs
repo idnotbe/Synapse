@@ -7,7 +7,9 @@ use std::{
 };
 
 use chrono::{DateTime, Utc};
-use rmcp::{ErrorData, model::ErrorCode, schemars::JsonSchema};
+use rmcp::{
+    ErrorData, RoleServer, model::ErrorCode, schemars::JsonSchema, service::RequestContext,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -331,6 +333,7 @@ impl SynapseService {
     pub async fn everquest_loc_probe(
         &self,
         _params: Parameters<EverQuestLocProbeParams>,
+        request_context: RequestContext<RoleServer>,
     ) -> Result<Json<EverQuestLocProbeResponse>, ErrorData> {
         tracing::info!(
             code = "MCP_TOOL_INVOCATION",
@@ -389,9 +392,12 @@ impl SynapseService {
             }),
         )?;
 
+        let action_session_id =
+            super::context::mcp_session_id_from_request_context(&request_context)?;
         let started = Instant::now();
         let result = async {
-            self.execute_literal_command(LOC_COMMAND).await?;
+            self.execute_literal_command(LOC_COMMAND, action_session_id.clone())
+                .await?;
             self.read_loc_probe_result(
                 &active.log.path,
                 start_offset,
@@ -412,6 +418,7 @@ impl SynapseService {
     pub async fn everquest_safe_command(
         &self,
         params: Parameters<EverQuestSafeCommandParams>,
+        request_context: RequestContext<RoleServer>,
     ) -> Result<Json<EverQuestSafeCommandResponse>, ErrorData> {
         tracing::info!(
             code = "MCP_TOOL_INVOCATION",
@@ -475,9 +482,12 @@ impl SynapseService {
             }),
         )?;
 
+        let action_session_id =
+            super::context::mcp_session_id_from_request_context(&request_context)?;
         let started = Instant::now();
         let result = async {
-            self.execute_literal_command(command).await?;
+            self.execute_literal_command(command, action_session_id.clone())
+                .await?;
             sleep(SAFE_COMMAND_LOG_DELAY).await;
             Self::read_safe_command_result(
                 command_kind,
@@ -727,8 +737,13 @@ impl SynapseService {
         Ok(chat_input_state)
     }
 
-    async fn execute_literal_command(&self, command: &str) -> Result<(), ErrorData> {
-        let (handle, recording, _connection_closed_cancel) = self.m2_action_context()?;
+    async fn execute_literal_command(
+        &self,
+        command: &str,
+        action_session_id: Option<String>,
+    ) -> Result<(), ErrorData> {
+        let (handle, recording, _connection_closed_cancel) =
+            self.m2_action_context_for_session_id(action_session_id)?;
         let actions = literal_command_actions(command);
         if let Some(recording) = recording {
             let mut emit_state = EmitState::new();

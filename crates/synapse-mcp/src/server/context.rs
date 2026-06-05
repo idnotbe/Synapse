@@ -9,7 +9,7 @@ use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use chrono::Utc;
-use rmcp::model::ErrorCode;
+use rmcp::{RoleServer, model::ErrorCode, service::RequestContext};
 use serde_json::json;
 use synapse_core::{
     AccessibleNode, Action, ElementId, Event, EventSource, FocusedElement, ForegroundContext,
@@ -34,6 +34,7 @@ type M2ReleaseAllContext = (
 
 const PROFILE_CHANGED_KIND: &str = "profile-changed";
 const SCOPE_TRANSITIONED_KIND: &str = "scope-transitioned";
+const MCP_SESSION_ID_HEADER: &str = "Mcp-Session-Id";
 // Match observe's default shallow tree so targets selected from an observation
 // can be resolved on scheduler ticks without requiring a deep UIA walk.
 const AIM_TRACK_TARGET_SOURCE_DEPTH: u32 = 2;
@@ -129,15 +130,22 @@ impl SynapseService {
             })
     }
 
-    pub(super) fn m2_action_context(&self) -> Result<M2ActionContext, ErrorData> {
+    pub(super) fn m2_action_context_for_request(
+        &self,
+        request_context: &RequestContext<RoleServer>,
+    ) -> Result<M2ActionContext, ErrorData> {
+        self.m2_action_context_for_session_id(mcp_session_id_from_request_context(request_context)?)
+    }
+
+    pub(super) fn m2_action_context_for_session_id(
+        &self,
+        session_id: Option<String>,
+    ) -> Result<M2ActionContext, ErrorData> {
         self.m2_state
             .lock()
             .map(|state| {
                 (
-                    state
-                        .emitter_handle
-                        .clone()
-                        .with_session_id(crate::http::current_mcp_session_id()),
+                    state.emitter_handle.clone().with_session_id(session_id),
                     state.recording.clone(),
                     state.connection_closed_cancel.clone(),
                 )
@@ -844,6 +852,67 @@ fn reflex_denial_from_error(error: &ErrorData) -> ReflexActionPermissionDenied {
     }
 }
 
+pub(super) fn mcp_session_id_from_request_context(
+    request_context: &RequestContext<RoleServer>,
+) -> Result<Option<String>, ErrorData> {
+    mcp_session_id_from_extensions(&request_context.extensions)
+}
+
+fn mcp_session_id_from_extensions(
+    extensions: &rmcp::model::Extensions,
+) -> Result<Option<String>, ErrorData> {
+    let Some(parts) = extensions.get::<axum::http::request::Parts>() else {
+        return Ok(crate::http::current_mcp_session_id());
+    };
+    let session_id = mcp_session_id_from_headers(&parts.headers)?;
+    if session_id.is_some() {
+        return Ok(session_id);
+    }
+    tracing::error!(
+        code = synapse_core::error_codes::HTTP_SESSION_INVALID,
+        method = %parts.method,
+        uri = %parts.uri,
+        "HTTP MCP action request reached tool dispatch without Mcp-Session-Id"
+    );
+    Err(mcp_error(
+        synapse_core::error_codes::HTTP_SESSION_INVALID,
+        "HTTP MCP action request reached tool dispatch without Mcp-Session-Id",
+    ))
+}
+
+fn mcp_session_id_from_headers(
+    headers: &axum::http::HeaderMap,
+) -> Result<Option<String>, ErrorData> {
+    let Some(value) = headers.get(MCP_SESSION_ID_HEADER) else {
+        return Ok(None);
+    };
+    let value = value.to_str().map_err(|_err| {
+        tracing::error!(
+            code = synapse_core::error_codes::HTTP_SESSION_INVALID,
+            "HTTP MCP action request carried a non-ASCII Mcp-Session-Id header"
+        );
+        mcp_error(
+            synapse_core::error_codes::HTTP_SESSION_INVALID,
+            "Mcp-Session-Id header is not valid visible ASCII",
+        )
+    })?;
+    let value = value.trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    if !value.bytes().all(|byte| (0x21..=0x7e).contains(&byte)) {
+        tracing::error!(
+            code = synapse_core::error_codes::HTTP_SESSION_INVALID,
+            "HTTP MCP action request carried an invalid Mcp-Session-Id header value"
+        );
+        return Err(mcp_error(
+            synapse_core::error_codes::HTTP_SESSION_INVALID,
+            "Mcp-Session-Id header contains characters outside visible ASCII",
+        ));
+    }
+    Ok(Some(value.to_owned()))
+}
+
 const fn profile_use_scope_label(scope: ProfileUseScope) -> &'static str {
     match scope {
         ProfileUseScope::Productivity => "productivity",
@@ -878,7 +947,7 @@ pub(super) fn maybe_force_panic_during_act(_tool: &'static str) {}
 mod scope_gate_tests {
     use std::{fs, num::NonZeroUsize, path::Path, time::Duration};
 
-    use rmcp::handler::server::wrapper::Parameters;
+    use rmcp::{handler::server::wrapper::Parameters, model::Extensions};
     use serde_json::{Value, json};
     use synapse_core::{
         AccessibleNode, Action, EventFilter, FocusedElement, ForegroundContext, Rect, SensorStatus,
@@ -911,6 +980,49 @@ mod scope_gate_tests {
         "act_launch",
         "reflex_register",
     ];
+
+    #[test]
+    fn request_context_session_id_reads_http_parts_header() -> anyhow::Result<()> {
+        let extensions = extensions_with_http_parts(Some("session-677"))?;
+
+        assert_eq!(
+            mcp_session_id_from_extensions(&extensions)?.as_deref(),
+            Some("session-677")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn request_context_session_id_rejects_http_parts_without_header() -> anyhow::Result<()> {
+        let extensions = extensions_with_http_parts(None)?;
+
+        let error = match mcp_session_id_from_extensions(&extensions) {
+            Ok(value) => anyhow::bail!("missing HTTP session header returned {value:?}"),
+            Err(error) => error,
+        };
+
+        assert_eq!(
+            error.data.as_ref().and_then(|data| data.get("code")),
+            Some(&json!(error_codes::HTTP_SESSION_INVALID))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn request_context_session_id_rejects_invalid_http_header_value() -> anyhow::Result<()> {
+        let extensions = extensions_with_http_parts(Some("session 677"))?;
+
+        let error = match mcp_session_id_from_extensions(&extensions) {
+            Ok(value) => anyhow::bail!("invalid HTTP session header returned {value:?}"),
+            Err(error) => error,
+        };
+
+        assert_eq!(
+            error.data.as_ref().and_then(|data| data.get("code")),
+            Some(&json!(error_codes::HTTP_SESSION_INVALID))
+        );
+        Ok(())
+    }
 
     #[test]
     fn instructions_advertise_m3_when_current_m3_tools_are_registered() -> anyhow::Result<()> {
@@ -1425,6 +1537,18 @@ mod scope_gate_tests {
 
     fn cf_count(counts: &std::collections::BTreeMap<String, u64>, cf_name: &str) -> u64 {
         counts.get(cf_name).copied().unwrap_or(0)
+    }
+
+    fn extensions_with_http_parts(session_id: Option<&str>) -> anyhow::Result<Extensions> {
+        let mut builder = axum::http::Request::builder().method("POST").uri("/mcp");
+        if let Some(session_id) = session_id {
+            builder = builder.header(MCP_SESSION_ID_HEADER, session_id);
+        }
+        let request = builder.body(())?;
+        let (parts, _body) = request.into_parts();
+        let mut extensions = Extensions::new();
+        extensions.insert(parts);
+        Ok(extensions)
     }
 
     fn write_profile(path: &Path, id: &str, use_scope: &str) -> anyhow::Result<()> {

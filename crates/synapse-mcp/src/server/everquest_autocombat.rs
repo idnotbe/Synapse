@@ -18,7 +18,7 @@
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
-use rmcp::{ErrorData, schemars::JsonSchema};
+use rmcp::{ErrorData, RoleServer, schemars::JsonSchema, service::RequestContext};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use synapse_core::{Profile, error_codes};
@@ -296,6 +296,7 @@ impl SynapseService {
     pub async fn everquest_autocombat(
         &self,
         params: Parameters<ActAutocombatParams>,
+        request_context: RequestContext<RoleServer>,
     ) -> Result<Json<ActAutocombatResponse>, ErrorData> {
         tracing::info!(
             code = "MCP_TOOL_INVOCATION",
@@ -312,7 +313,11 @@ impl SynapseService {
             }
         };
         self.audit_action_started_with_details(TOOL, &request_details)?;
-        let result = self.run_autocombat_loop(&policy, &profile).await;
+        let action_session_id =
+            super::context::mcp_session_id_from_request_context(&request_context)?;
+        let result = self
+            .run_autocombat_loop(&policy, &profile, action_session_id.as_deref())
+            .await;
         if let Ok(response) = &result {
             let _ = self.persist_autocombat_run(&policy, response);
         }
@@ -344,6 +349,7 @@ impl SynapseService {
         &self,
         policy: &Policy,
         profile: &Profile,
+        action_session_id: Option<&str>,
     ) -> Result<ActAutocombatResponse, ErrorData> {
         let started = Instant::now();
         let panic_epoch = synapse_action::operator_release_epoch();
@@ -353,23 +359,32 @@ impl SynapseService {
         for index in 0..policy.max_iterations {
             if let Some(reason) = self.evaluate_stop(policy, panic_epoch, started) {
                 stop = reason;
-                self.handle_stop_recovery(reason, profile).await;
+                self.handle_stop_recovery(reason, profile, action_session_id)
+                    .await;
                 break;
             }
             let iteration = self
-                .run_engagement(index, policy, profile, panic_epoch, started, &mut state)
+                .run_engagement(
+                    index,
+                    policy,
+                    profile,
+                    panic_epoch,
+                    started,
+                    &mut state,
+                    action_session_id,
+                )
                 .await?;
             let outcome = iteration.outcome.clone();
             state.iterations.push(iteration);
             if outcome == EngagementOutcome::OperatorPanic.as_str() {
                 stop = StopReason::OperatorPanic;
-                self.handle_stop_recovery(StopReason::OperatorPanic, profile)
+                self.handle_stop_recovery(StopReason::OperatorPanic, profile, action_session_id)
                     .await;
                 break;
             }
             if outcome == EngagementOutcome::HpFloor.as_str() {
                 stop = StopReason::HpFloor;
-                self.handle_stop_recovery(StopReason::HpFloor, profile)
+                self.handle_stop_recovery(StopReason::HpFloor, profile, action_session_id)
                     .await;
                 break;
             }
@@ -418,7 +433,12 @@ impl SynapseService {
         None
     }
 
-    async fn handle_stop_recovery(&self, reason: StopReason, profile: &Profile) {
+    async fn handle_stop_recovery(
+        &self,
+        reason: StopReason,
+        profile: &Profile,
+        action_session_id: Option<&str>,
+    ) {
         match reason {
             StopReason::OperatorPanic => {
                 let _ = self.release_all_best_effort().await;
@@ -426,7 +446,9 @@ impl SynapseService {
             // HP-floor flee: stop auto-attack (toggle off) then sit is unsafe while
             // being hit, so only drop melee and let the operator take over.
             StopReason::HpFloor => {
-                let _ = self.press_alias("auto_attack", profile).await;
+                let _ = self
+                    .press_alias("auto_attack", profile, action_session_id)
+                    .await;
             }
             _ => {}
         }
@@ -442,6 +464,7 @@ impl SynapseService {
         panic_epoch: u64,
         run_started: Instant,
         state: &mut LoopState,
+        action_session_id: Option<&str>,
     ) -> Result<ActAutocombatIteration, ErrorData> {
         let log_path = self.autocombat_log_path()?;
 
@@ -454,10 +477,11 @@ impl SynapseService {
         let (consider, decision, target_level) = if recent_combat {
             (None, ConDecision::Safe, None)
         } else {
-            self.press_alias("target_nearest_npc", profile).await?;
+            self.press_alias("target_nearest_npc", profile, action_session_id)
+                .await?;
             sleep(INTER_KEY_DELAY).await;
             let con_offset = file_len(&log_path);
-            self.press_alias("con", profile).await?;
+            self.press_alias("con", profile, action_session_id).await?;
             let summary = self.poll_consider(&log_path, con_offset).await;
             let decision = classify_con(summary.as_deref(), policy.target_level_max);
             let level = parse_target_level(summary.as_deref());
@@ -482,14 +506,16 @@ impl SynapseService {
         if decision != ConDecision::Safe {
             state.consecutive_no_target += 1;
             // No live mob, safe to sit and recover toward mana floor for the next pull.
-            self.recover_mana(policy, profile, panic_epoch).await;
+            self.recover_mana(policy, profile, panic_epoch, action_session_id)
+                .await;
             return Ok(iteration);
         }
         state.consecutive_no_target = 0;
 
         // Engage: assert melee auto-attack ONCE for this fight (it is a toggle in
         // EQ and drops when the target dies). We track it on per-engagement.
-        self.press_alias("auto_attack", profile).await?;
+        self.press_alias("auto_attack", profile, action_session_id)
+            .await?;
         iteration.melee_started = true;
 
         let ctx = FightContext {
@@ -499,7 +525,7 @@ impl SynapseService {
             run_started,
         };
         let (outcome, tally) = self
-            .fight_target(&ctx, policy, profile, &mut iteration)
+            .fight_target(&ctx, policy, profile, &mut iteration, action_session_id)
             .await?;
         outcome.as_str().clone_into(&mut iteration.outcome);
         state.resisted += tally.resisted;
@@ -509,12 +535,16 @@ impl SynapseService {
             EngagementOutcome::Slain => {
                 state.kills += 1;
                 // Auto-attack drops on death (no target); recover mana before next pull.
-                self.recover_mana(policy, profile, panic_epoch).await;
+                self.recover_mana(policy, profile, panic_epoch, action_session_id)
+                    .await;
             }
             EngagementOutcome::Fled | EngagementOutcome::NoTarget | EngagementOutcome::Timeout => {
                 // Drop melee toggle so we don't carry it into the next pull, then recover.
-                let _ = self.press_alias("auto_attack", profile).await;
-                self.recover_mana(policy, profile, panic_epoch).await;
+                let _ = self
+                    .press_alias("auto_attack", profile, action_session_id)
+                    .await;
+                self.recover_mana(policy, profile, panic_epoch, action_session_id)
+                    .await;
             }
             EngagementOutcome::HpFloor | EngagementOutcome::OperatorPanic => {}
         }
@@ -529,6 +559,7 @@ impl SynapseService {
         policy: &Policy,
         profile: &Profile,
         iteration: &mut ActAutocombatIteration,
+        action_session_id: Option<&str>,
     ) -> Result<(EngagementOutcome, CastTally), ErrorData> {
         let FightContext {
             log_path,
@@ -568,7 +599,8 @@ impl SynapseService {
 
             // Nuke when mana% is at/above the cast-cost threshold; otherwise melee.
             if should_cast_nuke(mana, policy.cast_mana_cost) {
-                self.press_alias(&policy.hotbar_alias, profile).await?;
+                self.press_alias(&policy.hotbar_alias, profile, action_session_id)
+                    .await?;
                 iteration.casts += 1;
                 iteration.cast = true;
             }
@@ -622,7 +654,13 @@ impl SynapseService {
 
     /// Sit to recover mana to the floor, bounded by `RECOVER_TIMEOUT`, then stand.
     /// Only call this when NOT in active combat (sitting breaks under damage).
-    async fn recover_mana(&self, policy: &Policy, profile: &Profile, panic_epoch: u64) {
+    async fn recover_mana(
+        &self,
+        policy: &Policy,
+        profile: &Profile,
+        panic_epoch: u64,
+        action_session_id: Option<&str>,
+    ) {
         // Do not sit if a mob is currently meleeing us — that is unsafe and the
         // sit is interrupted anyway.
         if let Ok(log_path) = self.autocombat_log_path()
@@ -630,7 +668,11 @@ impl SynapseService {
         {
             return;
         }
-        if self.press_alias("sit", profile).await.is_err() {
+        if self
+            .press_alias("sit", profile, action_session_id)
+            .await
+            .is_err()
+        {
             return;
         }
         let started = Instant::now();
@@ -649,7 +691,7 @@ impl SynapseService {
             sleep(POLL_INTERVAL).await;
         }
         // Stand before the next pull.
-        let _ = self.press_alias("sit", profile).await;
+        let _ = self.press_alias("sit", profile, action_session_id).await;
     }
 
     async fn poll_consider(&self, log_path: &std::path::Path, offset: u64) -> Option<String> {
@@ -665,8 +707,14 @@ impl SynapseService {
         None
     }
 
-    async fn press_alias(&self, alias: &str, profile: &Profile) -> Result<(), ErrorData> {
-        let (handle, recording, cancel) = self.m2_action_context()?;
+    async fn press_alias(
+        &self,
+        alias: &str,
+        profile: &Profile,
+        action_session_id: Option<&str>,
+    ) -> Result<(), ErrorData> {
+        let (handle, recording, cancel) =
+            self.m2_action_context_for_session_id(action_session_id.map(ToOwned::to_owned))?;
         let params = ActKeymapParams {
             alias: alias.to_owned(),
             hold_ms: KEY_HOLD_MS,

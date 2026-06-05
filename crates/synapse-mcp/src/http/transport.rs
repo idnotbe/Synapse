@@ -221,9 +221,12 @@ fn router(
     let action_cleanup_handle = service
         .unscoped_action_handle()
         .context("read action handle for HTTP session cleanup")?;
-    let session_cleanup = session::SessionCleanupState::new(action_cleanup_handle.clone());
     let (mcp_service, session_manager) = streamable_service(shutdown_cancel, service)
         .context("initialize HTTP MCP session state")?;
+    let session_cleanup = session::SessionCleanupState::new(
+        action_cleanup_handle.clone(),
+        Arc::clone(&session_manager),
+    );
     let _stale_cleanup_task = spawn_stale_session_input_cleanup(
         action_cleanup_handle,
         Arc::clone(&session_manager),

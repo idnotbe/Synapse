@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use anyhow::{Context, bail};
 use axum::{
@@ -8,7 +8,7 @@ use axum::{
     middleware::Next,
     response::{IntoResponse, Response},
 };
-use rmcp::transport::streamable_http_server::session::local::SessionConfig;
+use rmcp::transport::streamable_http_server::session::local::{LocalSessionManager, SessionConfig};
 use synapse_action::ActionHandle;
 
 const SESSION_IDLE_TIMEOUT_ENV: &str = "SYNAPSE_HTTP_SESSION_IDLE_TIMEOUT_SECS";
@@ -23,6 +23,7 @@ tokio::task_local! {
 #[derive(Clone)]
 pub(super) struct SessionCleanupState {
     action_handle: ActionHandle,
+    session_manager: Arc<LocalSessionManager>,
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -32,8 +33,14 @@ enum SessionFailure {
 }
 
 impl SessionCleanupState {
-    pub(super) fn new(action_handle: ActionHandle) -> Self {
-        Self { action_handle }
+    pub(super) fn new(
+        action_handle: ActionHandle,
+        session_manager: Arc<LocalSessionManager>,
+    ) -> Self {
+        Self {
+            action_handle,
+            session_manager,
+        }
     }
 }
 
@@ -82,6 +89,17 @@ pub(super) async fn release_held_inputs_on_delete(
         && is_mcp_endpoint(request.uri().path()))
     .then(|| session_id_from_header(&request))
     .flatten();
+    if let Some(session_id) = cleanup_session_id.as_deref()
+        && !session_is_active(&state.session_manager, session_id).await
+    {
+        tracing::warn!(
+            code = synapse_core::error_codes::HTTP_SESSION_INVALID,
+            session_id,
+            reason = ?SessionFailure::UnknownOrExpired,
+            "HTTP MCP session delete rejected before held-input cleanup"
+        );
+        return session_invalid(SessionFailure::UnknownOrExpired);
+    }
     let response = next.run(request).await;
     let Some(session_id) = cleanup_session_id else {
         return response;
@@ -134,6 +152,14 @@ pub(super) async fn release_held_inputs_on_delete(
             cleanup_failed(error)
         }
     }
+}
+
+async fn session_is_active(session_manager: &LocalSessionManager, session_id: &str) -> bool {
+    session_manager
+        .sessions
+        .read()
+        .await
+        .contains_key(session_id)
 }
 
 fn session_idle_timeout_secs() -> anyhow::Result<u64> {

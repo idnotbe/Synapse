@@ -11,7 +11,7 @@ use super::{
 };
 use crate::m1::mcp_error;
 use crate::m2::{act_stroke_error_details, act_stroke_request_details};
-use rmcp::model::ErrorCode;
+use rmcp::{RoleServer, model::ErrorCode, service::RequestContext};
 use serde_json::{Value, json};
 use synapse_core::{Backend, ForegroundContext, error_codes};
 use tokio_util::sync::CancellationToken;
@@ -26,6 +26,7 @@ impl SynapseService {
     pub async fn act_click(
         &self,
         params: Parameters<ActClickParams>,
+        request_context: RequestContext<RoleServer>,
     ) -> Result<Json<ActClickResponse>, ErrorData> {
         let params = params.0;
         tracing::info!(
@@ -46,7 +47,8 @@ impl SynapseService {
             self.audit_action_result("act_click", &result)?;
             return result.map(Json);
         }
-        let (handle, recording, _connection_closed_cancel) = self.m2_action_context()?;
+        let (handle, recording, _connection_closed_cancel) =
+            self.m2_action_context_for_request(&request_context)?;
         let result = act_click_with_handle(handle, recording, params).await;
         self.audit_action_result("act_click", &result)?;
         result.map(Json)
@@ -56,6 +58,7 @@ impl SynapseService {
     pub async fn act_type(
         &self,
         params: Parameters<ActTypeParams>,
+        request_context: RequestContext<RoleServer>,
     ) -> Result<Json<ActTypeResponse>, ErrorData> {
         let params = params.0;
         tracing::info!(
@@ -71,7 +74,8 @@ impl SynapseService {
             }
         };
         self.audit_action_started_with_details("act_type", &action_preflight_details(&preflight))?;
-        let (handle, recording, _connection_closed_cancel) = self.m2_action_context()?;
+        let (handle, recording, _connection_closed_cancel) =
+            self.m2_action_context_for_request(&request_context)?;
         if params.into_element.is_none()
             && let Err(error) = self.ensure_act_type_foreground(recording.as_ref())
         {
@@ -88,6 +92,7 @@ impl SynapseService {
     pub async fn act_press(
         &self,
         params: Parameters<ActPressParams>,
+        request_context: RequestContext<RoleServer>,
     ) -> Result<Json<ActPressResponse>, ErrorData> {
         tracing::info!(
             code = "MCP_TOOL_INVOCATION",
@@ -103,7 +108,8 @@ impl SynapseService {
             }
         };
         self.audit_action_started_with_details("act_press", &action_preflight_details(&preflight))?;
-        let (handle, recording, connection_closed_cancel) = self.m2_action_context()?;
+        let (handle, recording, connection_closed_cancel) =
+            self.m2_action_context_for_request(&request_context)?;
         let result =
             act_press_with_handle(handle, recording, connection_closed_cancel, params.0).await;
         self.audit_action_result("act_press", &result)?;
@@ -114,6 +120,7 @@ impl SynapseService {
     pub async fn act_keymap(
         &self,
         params: Parameters<ActKeymapParams>,
+        request_context: RequestContext<RoleServer>,
     ) -> Result<Json<ActKeymapResponse>, ErrorData> {
         let params = params.0;
         tracing::info!(
@@ -162,7 +169,8 @@ impl SynapseService {
                     )
                 })?
         };
-        let (handle, recording, connection_closed_cancel) = self.m2_action_context()?;
+        let (handle, recording, connection_closed_cancel) =
+            self.m2_action_context_for_request(&request_context)?;
         let result = act_keymap_with_handle(
             handle,
             recording,
@@ -181,6 +189,7 @@ impl SynapseService {
     pub async fn act_stroke(
         &self,
         params: Parameters<ActStrokeParams>,
+        request_context: RequestContext<RoleServer>,
     ) -> Result<Json<ActStrokeResponse>, ErrorData> {
         let params = params.0;
         tracing::info!(
@@ -208,7 +217,8 @@ impl SynapseService {
             "act_stroke",
             &act_stroke_audit_details(&stroke_details, &preflight),
         )?;
-        let (handle, recording, _connection_closed_cancel) = self.m2_action_context()?;
+        let (handle, recording, _connection_closed_cancel) =
+            self.m2_action_context_for_request(&request_context)?;
         let foreground_monitor = recording
             .is_none()
             .then(|| self.start_act_stroke_foreground_monitor(&preflight));
@@ -245,6 +255,7 @@ impl SynapseService {
     pub async fn act_scroll(
         &self,
         params: Parameters<ActScrollParams>,
+        request_context: RequestContext<RoleServer>,
     ) -> Result<Json<ActScrollResponse>, ErrorData> {
         tracing::info!(
             code = "MCP_TOOL_INVOCATION",
@@ -262,7 +273,8 @@ impl SynapseService {
             "act_scroll",
             &action_preflight_details(&preflight),
         )?;
-        let (handle, recording, _connection_closed_cancel) = self.m2_action_context()?;
+        let (handle, recording, _connection_closed_cancel) =
+            self.m2_action_context_for_request(&request_context)?;
         let result = act_scroll_with_handle(handle, recording, params.0).await;
         self.audit_action_result("act_scroll", &result)?;
         result.map(Json)
@@ -272,6 +284,7 @@ impl SynapseService {
     pub async fn act_pad(
         &self,
         params: Parameters<ActPadParams>,
+        request_context: RequestContext<RoleServer>,
     ) -> Result<Json<ActPadResponse>, ErrorData> {
         tracing::info!(
             code = "MCP_TOOL_INVOCATION",
@@ -286,7 +299,8 @@ impl SynapseService {
             }
         };
         self.audit_action_started_with_details("act_pad", &action_preflight_details(&preflight))?;
-        let (handle, recording, _connection_closed_cancel) = self.m2_action_context()?;
+        let (handle, recording, _connection_closed_cancel) =
+            self.m2_action_context_for_request(&request_context)?;
         let result = act_pad_with_handle(handle, recording, params.0).await;
         self.audit_action_result("act_pad", &result)?;
         result.map(Json)
