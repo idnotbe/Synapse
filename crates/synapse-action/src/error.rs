@@ -8,6 +8,13 @@ pub enum ActionError {
     QueueFull { detail: String },
     #[error("action rate limited: {detail}")]
     RateLimited { detail: String, retry_after_ms: u64 },
+    #[error("foreground input lease busy: {detail}")]
+    ForegroundLeaseBusy {
+        detail: String,
+        holder_session_id: Option<String>,
+        requesting_session_id: String,
+        retry_after_ms: u64,
+    },
     #[error("action backend unavailable: {detail}")]
     BackendUnavailable { detail: String },
     #[error("action target invalid: {detail}")]
@@ -50,6 +57,7 @@ impl ActionError {
         match self {
             Self::QueueFull { .. } => error_codes::ACTION_QUEUE_FULL,
             Self::RateLimited { .. } => error_codes::ACTION_RATE_LIMITED,
+            Self::ForegroundLeaseBusy { .. } => error_codes::ACTION_FOREGROUND_LEASE_BUSY,
             Self::BackendUnavailable { .. } => error_codes::ACTION_BACKEND_UNAVAILABLE,
             Self::TargetInvalid { .. } => error_codes::ACTION_TARGET_INVALID,
             Self::HoldExceededMax { .. } => error_codes::ACTION_HOLD_EXCEEDED_MAX,
@@ -76,6 +84,7 @@ impl ActionError {
         match self {
             Self::QueueFull { detail }
             | Self::RateLimited { detail, .. }
+            | Self::ForegroundLeaseBusy { detail, .. }
             | Self::BackendUnavailable { detail }
             | Self::TargetInvalid { detail }
             | Self::HoldExceededMax { detail }
@@ -102,6 +111,17 @@ impl ActionError {
                 detail,
                 retry_after_ms,
             },
+            Self::ForegroundLeaseBusy {
+                holder_session_id,
+                requesting_session_id,
+                retry_after_ms,
+                ..
+            } => Self::ForegroundLeaseBusy {
+                detail,
+                holder_session_id,
+                requesting_session_id,
+                retry_after_ms,
+            },
             Self::BackendUnavailable { .. } => Self::BackendUnavailable { detail },
             Self::TargetInvalid { .. } => Self::TargetInvalid { detail },
             Self::HoldExceededMax { .. } => Self::HoldExceededMax { detail },
@@ -126,7 +146,8 @@ impl ActionError {
     #[must_use]
     pub const fn retry_after_ms(&self) -> Option<u64> {
         match self {
-            Self::RateLimited { retry_after_ms, .. } => Some(*retry_after_ms),
+            Self::RateLimited { retry_after_ms, .. }
+            | Self::ForegroundLeaseBusy { retry_after_ms, .. } => Some(*retry_after_ms),
             Self::QueueFull { .. }
             | Self::BackendUnavailable { .. }
             | Self::TargetInvalid { .. }

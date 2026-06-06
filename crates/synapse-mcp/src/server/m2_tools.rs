@@ -4,7 +4,7 @@ use super::{
     ActPadResponse, ActPressParams, ActPressResponse, ActScrollParams, ActScrollResponse,
     ActSetValueParams, ActSetValueResponse, ActStrokeParams, ActStrokeResponse, ActTypeParams,
     ActTypeResponse, ErrorData, Json, Parameters, ReleaseAllParams, ReleaseAllResponse,
-    SynapseService, act_click_with_handle, act_clipboard, act_focus_window,
+    SynapseService, act_click_with_handle_and_lease, act_clipboard, act_focus_window,
     act_focus_window_request_details, act_keymap_with_handle, act_pad_with_handle,
     act_press_with_handle, act_scroll_with_handle, act_set_value, act_set_value_request_details,
     act_stroke_validation_failure_details, act_stroke_with_handle, act_type_with_handle,
@@ -155,6 +155,7 @@ impl SynapseService {
             None
         };
         let verify_timeout_ms = params.verify_timeout_ms;
+        let foreground_lease_session_id = foreground_lease_session_id(&request_context)?;
         let (handle, recording, _connection_closed_cancel) =
             self.m2_action_context_for_request(&request_context)?;
         let result = if let Some(before) = before_delta_signature {
@@ -164,10 +165,17 @@ impl SynapseService {
                 params,
                 before,
                 verify_timeout_ms,
+                foreground_lease_session_id,
             )
             .await
         } else {
-            act_click_with_handle(handle, recording, params).await
+            act_click_with_handle_and_lease(
+                handle,
+                recording,
+                params,
+                foreground_lease_session_id.as_deref(),
+            )
+            .await
         };
         self.audit_action_result("act_click", &result)?;
         result.map(Json)
@@ -202,6 +210,18 @@ impl SynapseService {
             self.audit_action_result("act_type", &result)?;
             return result.map(Json);
         }
+        let _lease_guard = if params.into_element.is_none() {
+            match acquire_tool_foreground_input_lease("act_type", &request_context) {
+                Ok(guard) => Some(guard),
+                Err(error) => {
+                    let result: Result<ActTypeResponse, ErrorData> = Err(error);
+                    self.audit_action_result("act_type", &result)?;
+                    return result.map(Json);
+                }
+            }
+        } else {
+            None
+        };
         let verify_timeout_ms = params.verify_timeout_ms;
         let emitted = emitted_text(&params);
         let before_text_signature = if params.into_element.is_none() {
@@ -267,6 +287,7 @@ impl SynapseService {
     pub async fn act_focus_window(
         &self,
         params: Parameters<ActFocusWindowParams>,
+        request_context: RequestContext<RoleServer>,
     ) -> Result<Json<ActFocusWindowResponse>, ErrorData> {
         let params = params.0;
         tracing::info!(
@@ -289,6 +310,18 @@ impl SynapseService {
                 "preflight": preflight,
             }),
         )?;
+        let _lease_guard =
+            match acquire_tool_foreground_input_lease("act_focus_window", &request_context) {
+                Ok(guard) => guard,
+                Err(error) => {
+                    self.audit_action_error_with_details(
+                        "act_focus_window",
+                        &error,
+                        &request_details,
+                    )?;
+                    return Err(error);
+                }
+            };
         let result = act_focus_window(params).await;
         self.audit_action_result("act_focus_window", &result)?;
         result.map(Json)
@@ -330,6 +363,15 @@ impl SynapseService {
         let verify_timeout_ms = params.verify_timeout_ms;
         let (handle, recording, connection_closed_cancel) =
             self.m2_action_context_for_request(&request_context)?;
+        let _lease_guard = match acquire_tool_foreground_input_lease("act_press", &request_context)
+        {
+            Ok(guard) => guard,
+            Err(error) => {
+                let result: Result<ActPressResponse, ErrorData> = Err(error);
+                self.audit_action_result("act_press", &result)?;
+                return result.map(Json);
+            }
+        };
         let result =
             act_press_with_handle(handle, recording, connection_closed_cancel, params).await;
         let result = match (result, before_delta_signature) {
@@ -398,6 +440,14 @@ impl SynapseService {
         };
         let (handle, recording, connection_closed_cancel) =
             self.m2_action_context_for_request(&request_context)?;
+        let _lease_guard = match acquire_tool_foreground_input_lease("act_keymap", &request_context)
+        {
+            Ok(guard) => guard,
+            Err(error) => {
+                self.audit_action_error_with_details("act_keymap", &error, &request_details)?;
+                return Err(error);
+            }
+        };
         let result = act_keymap_with_handle(
             handle,
             recording,
@@ -470,6 +520,20 @@ impl SynapseService {
         let verify_timeout_ms = params.verify_timeout_ms;
         let (handle, recording, _connection_closed_cancel) =
             self.m2_action_context_for_request(&request_context)?;
+        let _lease_guard = if plan.requires_input_lease() {
+            match acquire_tool_foreground_input_lease("act_stroke", &request_context) {
+                Ok(guard) => Some(guard),
+                Err(error) => {
+                    let failure_details =
+                        act_stroke_failure_audit_details(&stroke_details, &preflight, &error);
+                    log_act_stroke_failure(&failure_details, &error);
+                    self.audit_action_error_with_details("act_stroke", &error, &failure_details)?;
+                    return Err(error);
+                }
+            }
+        } else {
+            None
+        };
         let foreground_monitor = recording
             .is_none()
             .then(|| self.start_act_stroke_foreground_monitor(&preflight));
@@ -551,6 +615,18 @@ impl SynapseService {
         let verify_timeout_ms = params.verify_timeout_ms;
         let (handle, recording, _connection_closed_cancel) =
             self.m2_action_context_for_request(&request_context)?;
+        let _lease_guard = if params.requires_input_lease() {
+            match acquire_tool_foreground_input_lease("act_scroll", &request_context) {
+                Ok(guard) => Some(guard),
+                Err(error) => {
+                    let result: Result<ActScrollResponse, ErrorData> = Err(error);
+                    self.audit_action_result("act_scroll", &result)?;
+                    return result.map(Json);
+                }
+            }
+        } else {
+            None
+        };
         let result = act_scroll_with_handle(handle, recording, params).await;
         let result = match (result, before_delta_signature) {
             (Ok(response), Some(before)) => {
@@ -641,6 +717,27 @@ impl SynapseService {
             return Err(error);
         }
         self.audit_action_started_with_details("act_clipboard", &request_details)?;
+        let _lease_guard = if matches!(
+            params.verb,
+            ActClipboardVerb::Write | ActClipboardVerb::Clear
+        ) {
+            match crate::m2::acquire_foreground_input_lease(
+                "act_clipboard",
+                crate::http::current_mcp_session_id().as_deref(),
+            ) {
+                Ok(guard) => Some(guard),
+                Err(error) => {
+                    self.audit_action_error_with_details(
+                        "act_clipboard",
+                        &error,
+                        &request_details,
+                    )?;
+                    return Err(error);
+                }
+            }
+        } else {
+            None
+        };
         let result = act_clipboard(params).await;
         match &result {
             Ok(response) => {
@@ -836,6 +933,20 @@ impl SynapseService {
     }
 }
 
+fn foreground_lease_session_id(
+    request_context: &RequestContext<RoleServer>,
+) -> Result<Option<String>, ErrorData> {
+    super::context::mcp_session_id_from_request_context(request_context)
+}
+
+fn acquire_tool_foreground_input_lease(
+    tool: &'static str,
+    request_context: &RequestContext<RoleServer>,
+) -> Result<crate::m2::ForegroundInputLeaseGuard, ErrorData> {
+    let session_id = foreground_lease_session_id(request_context)?;
+    crate::m2::acquire_foreground_input_lease(tool, session_id.as_deref())
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 struct ClickDeltaSignature {
@@ -923,8 +1034,16 @@ impl SynapseService {
         params: ActClickParams,
         before: ClickDeltaSignature,
         verify_timeout_ms: u32,
+        foreground_lease_session_id: Option<String>,
     ) -> Result<ActClickResponse, ErrorData> {
-        match act_click_with_handle(handle.clone(), recording.clone(), params.clone()).await {
+        match act_click_with_handle_and_lease(
+            handle.clone(),
+            recording.clone(),
+            params.clone(),
+            foreground_lease_session_id.as_deref(),
+        )
+        .await
+        {
             Ok(response) => {
                 match self
                     .verify_click_response(response, before.clone(), verify_timeout_ms)
@@ -945,6 +1064,7 @@ impl SynapseService {
                             before,
                             verify_timeout_ms,
                             tier_attempts,
+                            foreground_lease_session_id,
                         )
                         .await
                     }
@@ -963,6 +1083,7 @@ impl SynapseService {
                     before,
                     verify_timeout_ms,
                     tier_attempts,
+                    foreground_lease_session_id,
                 )
                 .await
             }
@@ -978,6 +1099,7 @@ impl SynapseService {
         before: ClickDeltaSignature,
         verify_timeout_ms: u32,
         tier_attempts: Vec<ActClickTierAttempt>,
+        foreground_lease_session_id: Option<String>,
     ) -> Result<ActClickResponse, ErrorData> {
         match act_click_postmessage_with_params(&params, tier_attempts).await {
             Ok(response) => {
@@ -995,6 +1117,7 @@ impl SynapseService {
                             before,
                             verify_timeout_ms,
                             tier_attempts,
+                            foreground_lease_session_id,
                         )
                         .await
                     }
@@ -1010,6 +1133,7 @@ impl SynapseService {
                     before,
                     verify_timeout_ms,
                     tier_attempts,
+                    foreground_lease_session_id,
                 )
                 .await
             }
@@ -1025,9 +1149,17 @@ impl SynapseService {
         before: ClickDeltaSignature,
         verify_timeout_ms: u32,
         prior_attempts: Vec<ActClickTierAttempt>,
+        foreground_lease_session_id: Option<String>,
     ) -> Result<ActClickResponse, ErrorData> {
         params.use_invoke_pattern = false;
-        match act_click_with_handle(handle, recording, params).await {
+        match act_click_with_handle_and_lease(
+            handle,
+            recording,
+            params,
+            foreground_lease_session_id.as_deref(),
+        )
+        .await
+        {
             Ok(mut response) => {
                 let current_attempts = std::mem::take(&mut response.tier_attempts);
                 response.tier_attempts =

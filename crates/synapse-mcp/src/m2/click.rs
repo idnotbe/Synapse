@@ -37,10 +37,20 @@ pub(crate) const CLICK_REASON_NO_OBSERVED_DELTA: &str = "no_observed_delta";
 pub(crate) const CLICK_REASON_SELECTION_ONLY: &str = "selection_only";
 pub(crate) const CLICK_REASON_ERROR: &str = "error";
 
+#[allow(dead_code)]
 pub async fn act_click_with_handle(
     handle: ActionHandle,
     recording: Option<Arc<RecordingBackend>>,
     params: ActClickParams,
+) -> Result<ActClickResponse, ErrorData> {
+    act_click_with_handle_and_lease(handle, recording, params, None).await
+}
+
+pub(crate) async fn act_click_with_handle_and_lease(
+    handle: ActionHandle,
+    recording: Option<Arc<RecordingBackend>>,
+    params: ActClickParams,
+    foreground_lease_session_id: Option<&str>,
 ) -> Result<ActClickResponse, ErrorData> {
     validate_click_params(&params)?;
     if params.deprecated_curve_alias_used {
@@ -70,6 +80,7 @@ pub async fn act_click_with_handle(
             recording.as_deref(),
             double_click_timing,
             started,
+            foreground_lease_session_id,
         )
         .await;
     }
@@ -116,12 +127,18 @@ pub async fn act_click_with_handle(
             "screen-coordinate click recorded through the foreground input tier",
         )]
     } else {
+        let mut tier_attempts = Vec::new();
+        let _lease_guard =
+            acquire_click_foreground_lease(foreground_lease_session_id, &mut tier_attempts)?;
         match record::execute_actor_actions(handle, actions, double_click_timing).await {
-            Ok(()) => vec![click_tier_delivered(
-                CLICK_TIER_FOREGROUND,
-                true,
-                "screen-coordinate click delivered through the foreground input tier",
-            )],
+            Ok(()) => {
+                tier_attempts.push(click_tier_delivered(
+                    CLICK_TIER_FOREGROUND,
+                    true,
+                    "screen-coordinate click delivered through the foreground input tier",
+                ));
+                tier_attempts
+            }
             Err(error) => {
                 let error_code = click_error_code(&error);
                 let reason_code = click_reason_for_error_code(&error_code);
@@ -438,6 +455,7 @@ pub(crate) fn error_has_click_tier_attempts(error: &ErrorData) -> bool {
 
 pub(crate) fn click_reason_for_error_code(error_code: &str) -> &'static str {
     match error_code {
+        error_codes::ACTION_FOREGROUND_LEASE_BUSY => "foreground_lease_busy",
         error_codes::ACTION_ELEMENT_PATTERN_UNSUPPORTED => CLICK_REASON_PATTERN_UNSUPPORTED,
         error_codes::TRANSIENT_ELEMENT_EXPIRED | error_codes::A11Y_ELEMENT_STALE => {
             CLICK_REASON_ELEMENT_STALE
@@ -455,6 +473,36 @@ pub(crate) fn click_reason_for_error_code(error_code: &str) -> &'static str {
         error_codes::ACTION_NO_OBSERVED_DELTA => CLICK_REASON_NO_OBSERVED_DELTA,
         _ => CLICK_REASON_ERROR,
     }
+}
+
+pub(super) fn acquire_click_foreground_lease(
+    foreground_lease_session_id: Option<&str>,
+    tier_attempts: &mut Vec<ActClickTierAttempt>,
+) -> Result<crate::m2::ForegroundInputLeaseGuard, ErrorData> {
+    match crate::m2::acquire_foreground_input_lease("act_click", foreground_lease_session_id) {
+        Ok(guard) => Ok(guard),
+        Err(error) => {
+            let error_code = click_error_data_code(&error)
+                .unwrap_or(error_codes::ACTION_FOREGROUND_LEASE_BUSY)
+                .to_owned();
+            tier_attempts.push(click_tier_failed(
+                CLICK_TIER_FOREGROUND,
+                click_reason_for_error_code(&error_code),
+                error_code,
+                true,
+                error.message.to_string(),
+            ));
+            Err(attach_click_tier_attempts(error, tier_attempts.clone()))
+        }
+    }
+}
+
+fn click_error_data_code(error: &ErrorData) -> Option<&str> {
+    error
+        .data
+        .as_ref()
+        .and_then(|data| data.get("code"))
+        .and_then(Value::as_str)
 }
 
 fn log_click_tier_attempt(attempt: &ActClickTierAttempt) {
@@ -600,7 +648,7 @@ fn action_error_to_mcp(error: &ActionError) -> ErrorData {
         ActionError::ElementPatternUnsupported { element_id, detail } => {
             element_pattern_unsupported_error(element_id, detail)
         }
-        _ => mcp_error(error.code(), error.to_string()),
+        _ => crate::m2::action_error_to_mcp(error),
     }
 }
 

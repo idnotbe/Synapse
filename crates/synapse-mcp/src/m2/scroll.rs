@@ -148,6 +148,10 @@ pub async fn act_scroll_with_handle(
 }
 
 impl ActScrollParams {
+    pub(crate) const fn requires_input_lease(&self) -> bool {
+        self.target.is_none() && self.at.is_none() && (self.dy != 0 || self.dx != 0)
+    }
+
     pub(crate) fn verify_delta_point_region(&self) -> Option<Point> {
         if self.target.is_some() {
             None
@@ -649,7 +653,7 @@ fn at_label(at: Option<Point>) -> String {
 }
 
 fn action_error_to_mcp(error: &ActionError) -> ErrorData {
-    mcp_error(error.code(), error.to_string())
+    crate::m2::action_error_to_mcp(error)
 }
 
 #[cfg(windows)]

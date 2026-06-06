@@ -172,7 +172,7 @@ fn press_action(keys: Vec<synapse_core::Key>, hold_ms: u32, backend: Backend) ->
 }
 
 fn action_error_to_mcp(error: &ActionError) -> ErrorData {
-    mcp_error(error.code(), error.to_string())
+    crate::m2::action_error_to_mcp(error)
 }
 
 const fn backend_used_name(backend: Backend) -> &'static str {

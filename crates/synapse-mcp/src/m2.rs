@@ -16,18 +16,23 @@ use std::{
     sync::{Arc, Mutex, RwLock},
 };
 
+use rmcp::{ErrorData, model::ErrorCode};
+use serde_json::json;
 use synapse_action::{
-    ActionBackend, ActionEmitter, ActionEmitterSnapshotHandle, ActionHandle, ActionStateSnapshot,
-    BackendRateLimitControl, BackendResolutionPolicy, RELEASE_ALL_HANDLE, RecordingBackend,
-    initialize_double_click_timing_cache,
+    ActionBackend, ActionEmitter, ActionEmitterSnapshotHandle, ActionError, ActionHandle,
+    ActionStateSnapshot, BackendRateLimitControl, BackendResolutionPolicy, LeaseOutcome,
+    RELEASE_ALL_HANDLE, RecordingBackend, initialize_double_click_timing_cache, lease,
 };
+use synapse_core::error_codes;
 use tokio::{sync::watch, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
 
+#[allow(unused_imports)]
 pub use click::{ActClickParams, ActClickPostcondition, ActClickResponse, act_click_with_handle};
 pub(crate) use click::{
     ActClickTierAttempt, CLICK_REASON_NO_OBSERVED_DELTA, act_click_postmessage_with_params,
-    attach_click_tier_attempts, click_params_can_route_background_first, click_tier_failed,
+    act_click_with_handle_and_lease, attach_click_tier_attempts,
+    click_params_can_route_background_first, click_tier_failed,
 };
 #[cfg(test)]
 pub use clipboard::ActClipboardFormat;
@@ -60,6 +65,149 @@ pub use type_text::{ActTypeParams, ActTypeResponse, act_type_with_handle};
 use config::RECORDING_BACKEND_ENV;
 
 pub type SharedM2State = Arc<Mutex<M2State>>;
+
+#[derive(Debug)]
+pub(crate) struct ForegroundInputLeaseGuard {
+    tool: &'static str,
+    session_id: String,
+    release_on_drop: bool,
+}
+
+impl ForegroundInputLeaseGuard {
+    fn renewed(tool: &'static str, session_id: String) -> Self {
+        Self {
+            tool,
+            session_id,
+            release_on_drop: false,
+        }
+    }
+
+    fn auto_acquired(tool: &'static str, session_id: String) -> Self {
+        Self {
+            tool,
+            session_id,
+            release_on_drop: true,
+        }
+    }
+}
+
+impl Drop for ForegroundInputLeaseGuard {
+    fn drop(&mut self) {
+        if !self.release_on_drop {
+            return;
+        }
+        match lease::release(&self.session_id) {
+            Ok(status) => {
+                tracing::info!(
+                    code = "INPUT_LEASE_AUTO_RELEASED",
+                    tool = self.tool,
+                    session_id = %self.session_id,
+                    held = status.held,
+                    "readback=input_lease outcome=auto_released"
+                );
+            }
+            Err(error) => {
+                tracing::warn!(
+                    code = error.code(),
+                    tool = self.tool,
+                    session_id = %self.session_id,
+                    detail = %error,
+                    "foreground input lease auto-release failed"
+                );
+            }
+        }
+    }
+}
+
+pub(crate) fn acquire_foreground_input_lease(
+    tool: &'static str,
+    session_id: Option<&str>,
+) -> Result<ForegroundInputLeaseGuard, ErrorData> {
+    let session_id = session_id.ok_or_else(|| {
+        crate::m1::mcp_error(
+            error_codes::TOOL_PARAMS_INVALID,
+            format!("{tool} requires an MCP session id before using the foreground input tier"),
+        )
+    })?;
+    match lease::try_acquire(
+        session_id,
+        lease::ttl_from_ms(synapse_action::DEFAULT_LEASE_TTL_MS),
+    ) {
+        LeaseOutcome::Acquired(status) => {
+            tracing::info!(
+                code = "INPUT_LEASE_ACTION_ACQUIRED",
+                tool,
+                session_id,
+                ttl_ms = status.ttl_ms,
+                expires_in_ms = status.expires_in_ms,
+                "readback=input_lease outcome=action_acquired"
+            );
+            Ok(ForegroundInputLeaseGuard::auto_acquired(
+                tool,
+                session_id.to_owned(),
+            ))
+        }
+        LeaseOutcome::Renewed(status) => {
+            tracing::info!(
+                code = "INPUT_LEASE_ACTION_RENEWED",
+                tool,
+                session_id,
+                ttl_ms = status.ttl_ms,
+                expires_in_ms = status.expires_in_ms,
+                "readback=input_lease outcome=action_renewed"
+            );
+            Ok(ForegroundInputLeaseGuard::renewed(
+                tool,
+                session_id.to_owned(),
+            ))
+        }
+        LeaseOutcome::Busy {
+            holder,
+            retry_after_ms,
+        } => {
+            let detail = format!(
+                "{tool} requires the foreground input lease, but it is held by session {:?}; retry_after_ms={retry_after_ms}",
+                holder.owner_session_id
+            );
+            tracing::warn!(
+                code = error_codes::ACTION_FOREGROUND_LEASE_BUSY,
+                tool,
+                requesting_session_id = session_id,
+                holder_session_id = ?holder.owner_session_id,
+                retry_after_ms,
+                "readback=input_lease outcome=action_busy"
+            );
+            Err(action_error_to_mcp(&ActionError::ForegroundLeaseBusy {
+                detail,
+                holder_session_id: holder.owner_session_id,
+                requesting_session_id: session_id.to_owned(),
+                retry_after_ms,
+            }))
+        }
+    }
+}
+
+pub(crate) fn action_error_to_mcp(error: &ActionError) -> ErrorData {
+    match error {
+        ActionError::ForegroundLeaseBusy {
+            detail,
+            holder_session_id,
+            requesting_session_id,
+            retry_after_ms,
+        } => ErrorData::new(
+            ErrorCode(-32099),
+            error.to_string(),
+            Some(json!({
+                "code": error.code(),
+                "detail": detail,
+                "holder_session_id": holder_session_id,
+                "requesting_session_id": requesting_session_id,
+                "retry_after_ms": retry_after_ms,
+            })),
+        ),
+        _ => crate::m1::mcp_error(error.code(), error.to_string()),
+    }
+}
 
 pub struct M2State {
     pub emitter_handle: ActionHandle,

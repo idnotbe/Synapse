@@ -152,6 +152,12 @@ pub struct ActStrokePlan {
     cdp_aim: Option<CdpAimTarget>,
 }
 
+impl ActStrokePlan {
+    pub(crate) const fn requires_input_lease(&self) -> bool {
+        !matches!(self.input_kind, ActStrokeInputKind::CdpElementAim)
+    }
+}
+
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 enum ActStrokeInputKind {
     Path,
@@ -1105,17 +1111,25 @@ fn stroke_error_to_mcp(error: &StrokeError) -> ErrorData {
 }
 
 fn action_error_to_mcp(error: &ActionError) -> ErrorData {
-    ErrorData::new(
-        ErrorCode(-32099),
-        error.to_string(),
-        Some(json!({
-            "code": error.code(),
-            "detail": error.detail(),
-            "retry_after_ms": error.retry_after_ms(),
-            "point_index": extract_sample_index(error.detail()),
-            "queue_rate_state": queue_rate_state(error),
-        })),
-    )
+    let mut data = json!({
+        "code": error.code(),
+        "detail": error.detail(),
+        "retry_after_ms": error.retry_after_ms(),
+        "point_index": extract_sample_index(error.detail()),
+        "queue_rate_state": queue_rate_state(error),
+    });
+    if let ActionError::ForegroundLeaseBusy {
+        holder_session_id,
+        requesting_session_id,
+        retry_after_ms,
+        ..
+    } = error
+    {
+        data["holder_session_id"] = json!(holder_session_id);
+        data["requesting_session_id"] = json!(requesting_session_id);
+        data["retry_after_ms"] = json!(retry_after_ms);
+    }
+    ErrorData::new(ErrorCode(-32099), error.to_string(), Some(data))
 }
 
 fn path_error_to_mcp(error: &PathError) -> ErrorData {
@@ -1237,6 +1251,18 @@ fn queue_rate_state(error: &ActionError) -> Value {
         }),
         ActionError::QueueFull { detail } => json!({
             "kind": "queue_full",
+            "detail": detail,
+        }),
+        ActionError::ForegroundLeaseBusy {
+            holder_session_id,
+            requesting_session_id,
+            retry_after_ms,
+            detail,
+        } => json!({
+            "kind": "foreground_lease_busy",
+            "holder_session_id": holder_session_id,
+            "requesting_session_id": requesting_session_id,
+            "retry_after_ms": retry_after_ms,
             "detail": detail,
         }),
         _ => json!({

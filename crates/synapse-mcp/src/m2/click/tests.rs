@@ -6,7 +6,7 @@ use synapse_core::{Backend, ElementId, MouseTarget, Point, error_codes};
 use tokio_util::sync::CancellationToken;
 
 use super::{
-    act_click_with_handle,
+    act_click_with_handle, act_click_with_handle_and_lease,
     schema::{
         ActClickParams, ActClickPointTarget, ActClickTarget, ClickVelocityProfile,
         default_click_backend, default_click_button, default_click_count,
@@ -29,7 +29,7 @@ async fn coordinate_click_leaves_actor_held_state_empty() {
         "readback=act_click_actor edge=coordinate before=held_buttons:{:?} held_keys:{:?}",
         before.held_buttons, before.held_keys
     );
-    let response = match act_click_with_handle(
+    let response = match act_click_with_handle_and_lease(
         handle,
         None,
         ActClickParams {
@@ -47,6 +47,7 @@ async fn coordinate_click_leaves_actor_held_state_empty() {
             verify_timeout_ms: super::schema::default_verify_timeout_ms(),
             deprecated_curve_alias_used: false,
         },
+        Some("test-click-coordinate-session"),
     )
     .await
     {

@@ -535,7 +535,7 @@ fn recorded_ikis(events: &[RecordedInput]) -> Vec<u32> {
 }
 
 fn action_error_to_mcp(error: &ActionError) -> ErrorData {
-    mcp_error(error.code(), error.to_string())
+    crate::m2::action_error_to_mcp(error)
 }
 
 fn a11y_error_to_mcp(error: synapse_a11y::A11yError) -> ErrorData {
