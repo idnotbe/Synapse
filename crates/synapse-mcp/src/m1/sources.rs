@@ -982,11 +982,10 @@ fn degraded_window_input(
 
 #[cfg(windows)]
 fn mark_sparse_target_a11y(input: &mut ObservationInput) {
-    let has_accessible_content = input.elements.iter().any(|node| node.depth > 0)
-        || input
-            .elements
-            .first()
-            .is_some_and(|node| node.children_count > 0);
+    let has_accessible_content = input
+        .elements
+        .iter()
+        .any(|node| node.depth > 0 && !is_standard_window_chrome_node(node));
     if has_accessible_content {
         return;
     }
@@ -1000,6 +999,23 @@ fn mark_sparse_target_a11y(input: &mut ObservationInput) {
     input.a11y_status = SensorStatus::DegradedSensorFailed {
         reason_code: A11Y_TARGET_WINDOW_NO_UIA_CONTENT.to_owned(),
     };
+}
+
+#[cfg(windows)]
+fn is_standard_window_chrome_node(node: &AccessibleNode) -> bool {
+    match node.role.to_ascii_lowercase().as_str() {
+        "title bar" | "menu bar" => true,
+        "menu item" => node.name.is_empty() || node.name.eq_ignore_ascii_case("System"),
+        "button" => is_standard_window_button(&node.name),
+        _ => false,
+    }
+}
+
+#[cfg(windows)]
+fn is_standard_window_button(name: &str) -> bool {
+    ["Minimize", "Maximize", "Restore", "Close", "Help"]
+        .iter()
+        .any(|standard| name.eq_ignore_ascii_case(standard))
 }
 
 #[cfg(windows)]
