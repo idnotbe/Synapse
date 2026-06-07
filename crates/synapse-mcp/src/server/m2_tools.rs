@@ -181,7 +181,9 @@ impl SynapseService {
         result.map(Json)
     }
 
-    #[tool(description = "Type text through the active keyboard backend")]
+    #[tool(
+        description = "Type text. With into_element, routes through background CDP insertText for web nodes, foreground-safe native HWND text messages for UIA-resolved edit controls, or UIA ValuePattern.SetValue with value readback for native elements without a native edit HWND; into_element routing does not require foreground. Without into_element, types through the leased foreground keyboard backend."
+    )]
     pub async fn act_type(
         &self,
         params: Parameters<ActTypeParams>,

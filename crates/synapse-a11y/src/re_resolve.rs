@@ -47,6 +47,10 @@ pub struct ElementValueSetReadback {
     pub method: String,
     pub before_value: String,
     pub after_value: String,
+    pub expected_after_value: Option<String>,
+    pub is_password: bool,
+    pub before_password_len: Option<usize>,
+    pub after_password_len: Option<usize>,
 }
 
 /// Readback from an element's native text/value pattern without mutating it.
@@ -56,6 +60,8 @@ pub struct ElementValueReadback {
     pub method: String,
     pub value: String,
     pub is_readonly: bool,
+    pub is_password: bool,
+    pub password_len: Option<usize>,
 }
 
 /// Live metadata read from a re-resolved element on the UIA worker.

@@ -71,6 +71,19 @@ async fn health_and_action_tools_appear_in_tools_list_with_schema() -> anyhow::R
             .as_str()
             .is_some_and(|description| description.contains("coordinate_fallback_on_unsupported"))
     );
+
+    let type_tool = tools
+        .iter()
+        .find(|tool| tool.get("name") == Some(&Value::String("act_type".to_owned())))
+        .context("act_type tool missing")?;
+    let type_description = type_tool["description"]
+        .as_str()
+        .context("act_type description missing")?;
+    assert!(type_description.contains("foreground-safe native HWND text messages"));
+    assert!(type_description.contains("UIA ValuePattern.SetValue"));
+    assert!(type_description.contains("does not require foreground"));
+    assert!(type_description.contains("leased foreground keyboard backend"));
+
     assert!(
         client
             .raw_received()

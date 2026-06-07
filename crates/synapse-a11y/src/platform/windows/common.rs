@@ -207,6 +207,7 @@ pub(super) fn create_cache_request(
         UIProperty::ClassName,
         UIProperty::IsControlElement,
         UIProperty::IsContentElement,
+        UIProperty::IsPassword,
         UIProperty::NativeWindowHandle,
         UIProperty::IsInvokePatternAvailable,
         UIProperty::IsTogglePatternAvailable,

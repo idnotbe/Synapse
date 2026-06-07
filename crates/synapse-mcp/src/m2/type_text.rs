@@ -18,10 +18,22 @@ use crate::m2::postcondition::{
 };
 
 const MIN_SAFE_LINEAR_MS_PER_CHAR: u32 = 20;
+const TYPE_TIER_CDP: &str = "cdp";
+const TYPE_TIER_UIA: &str = "uia";
+const TYPE_TIER_WIN32_MESSAGE: &str = "win32_message";
+const TYPE_TIER_FOREGROUND: &str = "foreground";
 const TEXT_INTEGRITY_DISPATCH_ONLY: &str = "dispatch_only_requires_target_readback";
 const TEXT_INTEGRITY_UIA_VALUE_PATTERN: &str = "uia_value_pattern_readback";
+const TEXT_INTEGRITY_UIA_PASSWORD_LENGTH: &str = "uia_value_pattern_password_length_readback";
+const TEXT_INTEGRITY_NATIVE_TEXT_MESSAGE: &str = "win32_text_message_readback";
+const TEXT_INTEGRITY_NATIVE_PASSWORD_LENGTH: &str = "win32_text_message_password_length_readback";
 const TEXT_INTEGRITY_UIA_VALUE_PATTERN_DISPATCH_ONLY: &str =
     "uia_value_pattern_dispatch_only_requires_target_readback";
+const SOURCE_UIA_VALUE: &str = "uia_value_pattern.value";
+const SOURCE_UIA_PASSWORD_LENGTH: &str = "uia_value_pattern.password_length";
+const SOURCE_NATIVE_TEXT: &str = "win32_window_text";
+const SOURCE_NATIVE_PASSWORD_LENGTH: &str = "win32_window_text.password_length";
+const METHOD_NATIVE_TEXT_MESSAGE: &str = "uia_native_window_text_message";
 /// Text was inserted into a web input via CDP `Input.insertText` after focusing
 /// the DOM node. Verify via `observe`/`find` (the node's `value`) — this path
 /// dispatches into the renderer, so a follow-up readback is required (#686).
@@ -80,6 +92,8 @@ pub struct ActTypeResponse {
     pub ok: bool,
     pub chars_typed: u32,
     pub elapsed_ms: u32,
+    pub backend_tier_used: String,
+    pub required_foreground: bool,
     pub target_text_integrity: String,
     pub target_readback_required: bool,
     pub minimum_linear_ms_per_char: u32,
@@ -172,6 +186,8 @@ async fn cdp_type_into_element(
         ok: true,
         chars_typed,
         elapsed_ms: u32::try_from(started.elapsed().as_millis()).unwrap_or(u32::MAX),
+        backend_tier_used: TYPE_TIER_CDP.to_owned(),
+        required_foreground: false,
         target_text_integrity: TEXT_INTEGRITY_CDP_INSERT_TEXT.to_owned(),
         target_readback_required: !verify_delta,
         minimum_linear_ms_per_char: MIN_SAFE_LINEAR_MS_PER_CHAR,
@@ -209,15 +225,16 @@ pub async fn act_type_with_handle(
         } else {
             synapse_a11y::set_element_value(element_id, &emitted).map_err(a11y_error_to_mcp)?
         };
-        let readback_matches = readback.after_value == emitted;
+        let readback_matches = uia_readback_matches_emitted(&readback, &emitted);
         if !readback_matches {
             tracing::warn!(
                 code = "M2_ACT_TYPE_ELEMENT_VALUE_PATTERN_READBACK_MISMATCH",
                 element_id = %element_id,
                 method = %readback.method,
-                before_len = readback.before_value.chars().count(),
-                after_len = readback.after_value.chars().count(),
-                expected_len = emitted.chars().count(),
+                is_password = readback.is_password,
+                before_len = value_set_before_len(&readback),
+                after_len = value_set_after_len(&readback),
+                expected_len = expected_set_value(&readback, &emitted).chars().count(),
                 chars_typed,
                 "act_type into_element ValuePattern SetValue returned success but immediate UIA value readback did not match; target SoT readback is required"
             );
@@ -226,21 +243,25 @@ pub async fn act_type_with_handle(
             code = "M2_ACT_TYPE_ELEMENT_VALUE_PATTERN_READBACK",
             element_id = %element_id,
             method = %readback.method,
-            before_len = readback.before_value.chars().count(),
-            after_len = readback.after_value.chars().count(),
+            is_password = readback.is_password,
+            before_len = value_set_before_len(&readback),
+            after_len = value_set_after_len(&readback),
             chars_typed,
-            "readback=act_type_into_element before_len={} after_len={} chars_typed={} method={}",
-            readback.before_value.chars().count(),
-            readback.after_value.chars().count(),
+            "readback=act_type_into_element before_len={} after_len={} chars_typed={} method={} is_password={}",
+            value_set_before_len(&readback),
+            value_set_after_len(&readback),
             chars_typed,
-            readback.method
+            readback.method,
+            readback.is_password
         );
         return Ok(ActTypeResponse {
             ok: true,
             chars_typed,
             elapsed_ms: u32::try_from(started.elapsed().as_millis()).unwrap_or(u32::MAX),
+            backend_tier_used: set_backend_tier(&readback).to_owned(),
+            required_foreground: false,
             target_text_integrity: if readback_matches {
-                TEXT_INTEGRITY_UIA_VALUE_PATTERN
+                set_text_integrity(&readback)
             } else {
                 TEXT_INTEGRITY_UIA_VALUE_PATTERN_DISPATCH_ONLY
             }
@@ -250,7 +271,7 @@ pub async fn act_type_with_handle(
             postcondition: if params.verify_delta {
                 verify_uia_type_delta(params.verify_timeout_ms, &emitted, &readback)?
             } else {
-                postcondition_not_requested("act_type", "uia_value_pattern.value")
+                postcondition_not_requested("act_type", set_source_of_truth(&readback))
             },
         });
     }
@@ -270,6 +291,8 @@ pub async fn act_type_with_handle(
         ok: true,
         chars_typed,
         elapsed_ms: u32::try_from(started.elapsed().as_millis()).unwrap_or(u32::MAX),
+        backend_tier_used: TYPE_TIER_FOREGROUND.to_owned(),
+        required_foreground: true,
         target_text_integrity: TEXT_INTEGRITY_DISPATCH_ONLY.to_owned(),
         target_readback_required: true,
         minimum_linear_ms_per_char: MIN_SAFE_LINEAR_MS_PER_CHAR,
@@ -309,36 +332,48 @@ async fn verified_set_element_value(
             )))
             .await;
             let after = synapse_a11y::element_value(element_id).map_err(a11y_error_to_mcp)?;
-            let before_signature = text_signature(&before.value);
-            let after_signature = text_signature(&after.value);
-            if before.value == after.value {
+            let before_is_password = before.is_password;
+            let after_is_password = after.is_password;
+            let source_of_truth =
+                value_readback_source_of_truth(before_is_password || after_is_password);
+            let before_signature = value_readback_signature(&before);
+            let after_signature = value_readback_signature(&after);
+            if uia_readbacks_equivalent(&before, &after) {
                 return Err(no_observed_delta_error(
                     "act_type",
-                    "uia_value_pattern.value",
+                    source_of_truth,
                     verify_timeout_ms,
                     before_signature,
                     after_signature,
                     json!({
                         "element_id": element_id.to_string(),
-                        "before_len": before.value.chars().count(),
-                        "after_len": after.value.chars().count(),
+                        "before_len": value_readback_len(&before),
+                        "after_len": value_readback_len(&after),
                         "before_readonly": before.is_readonly,
                         "after_readonly": after.is_readonly,
+                        "before_is_password": before_is_password,
+                        "after_is_password": after_is_password,
+                        "before_password_len": before.password_len,
+                        "after_password_len": after.password_len,
                         "set_error": error.to_string(),
                     }),
                 ));
             }
             Err(postcondition_failed_error(
                 "act_type",
-                "uia_value_pattern.value",
+                source_of_truth,
                 format!("ValuePattern SetValue failed but value changed: {error}"),
                 before_signature,
                 after_signature,
                 json!({
                     "element_id": element_id.to_string(),
-                    "expected_len": emitted.chars().count(),
-                    "before_len": before.value.chars().count(),
-                    "after_len": after.value.chars().count(),
+                    "expected_len": expected_value_len(emitted, before_is_password || after_is_password),
+                    "before_len": value_readback_len(&before),
+                    "after_len": value_readback_len(&after),
+                    "before_is_password": before_is_password,
+                    "after_is_password": after_is_password,
+                    "before_password_len": before.password_len,
+                    "after_password_len": after.password_len,
                     "set_error": error.to_string(),
                 }),
             ))
@@ -351,12 +386,22 @@ fn verify_uia_type_delta(
     emitted: &str,
     readback: &synapse_a11y::ElementValueSetReadback,
 ) -> Result<ActPostcondition, ErrorData> {
-    let before_signature = text_signature(&readback.before_value);
-    let after_signature = text_signature(&readback.after_value);
+    let before_signature = value_set_before_signature(readback);
+    let after_signature = value_set_after_signature(readback);
+    if readback.is_password {
+        return verify_uia_password_length_delta(
+            verify_timeout_ms,
+            emitted,
+            readback,
+            before_signature,
+            after_signature,
+        );
+    }
     if readback.before_value == readback.after_value {
+        let expected_value = expected_set_value(readback, emitted);
         return Err(no_observed_delta_error(
             "act_type",
-            "uia_value_pattern.value",
+            set_source_of_truth(readback),
             verify_timeout_ms,
             before_signature,
             after_signature,
@@ -364,31 +409,110 @@ fn verify_uia_type_delta(
                 "method": readback.method,
                 "before_len": readback.before_value.chars().count(),
                 "after_len": readback.after_value.chars().count(),
-                "expected_len": emitted.chars().count(),
+                "requested_len": emitted.chars().count(),
+                "expected_len": expected_value.chars().count(),
+                "normalized": expected_value != emitted,
             }),
         ));
     }
-    if readback.after_value != emitted {
+    let expected_value = expected_set_value(readback, emitted);
+    if readback.after_value != expected_value {
         return Err(postcondition_failed_error(
             "act_type",
-            "uia_value_pattern.value",
-            "UIA ValuePattern value changed but does not equal requested text",
+            set_source_of_truth(readback),
+            "UIA ValuePattern value changed but does not equal expected text",
             before_signature,
             after_signature,
             json!({
                 "method": readback.method,
                 "before_len": readback.before_value.chars().count(),
                 "after_len": readback.after_value.chars().count(),
-                "expected_len": emitted.chars().count(),
+                "requested_len": emitted.chars().count(),
+                "expected_len": expected_value.chars().count(),
+                "normalized": expected_value != emitted,
             }),
         ));
     }
     Ok(postcondition_observed_delta(
         "act_type",
-        "uia_value_pattern.value",
+        set_source_of_truth(readback),
         before_signature,
         after_signature,
         "observed target value equal requested text",
+    ))
+}
+
+fn verify_uia_password_length_delta(
+    verify_timeout_ms: u32,
+    emitted: &str,
+    readback: &synapse_a11y::ElementValueSetReadback,
+    before_signature: String,
+    after_signature: String,
+) -> Result<ActPostcondition, ErrorData> {
+    let Some(before_len) = readback.before_password_len else {
+        return Err(postcondition_failed_error(
+            "act_type",
+            set_source_of_truth(readback),
+            "UIA password ValuePattern readback did not include a before length Source of Truth",
+            before_signature,
+            after_signature,
+            json!({
+                "method": readback.method,
+                "expected_len": expected_value_len(emitted, true),
+                "is_password": true,
+            }),
+        ));
+    };
+    let Some(after_len) = readback.after_password_len else {
+        return Err(postcondition_failed_error(
+            "act_type",
+            set_source_of_truth(readback),
+            "UIA password ValuePattern readback did not include an after length Source of Truth",
+            before_signature,
+            after_signature,
+            json!({
+                "method": readback.method,
+                "before_len": before_len,
+                "expected_len": expected_value_len(emitted, true),
+                "is_password": true,
+            }),
+        ));
+    };
+    let expected_len = expected_value_len(emitted, true);
+    if after_len != expected_len {
+        return Err(postcondition_failed_error(
+            "act_type",
+            set_source_of_truth(readback),
+            "UIA password ValuePattern length changed but does not equal requested text length",
+            before_signature,
+            after_signature,
+            json!({
+                "method": readback.method,
+                "before_len": before_len,
+                "after_len": after_len,
+                "expected_len": expected_len,
+                "is_password": true,
+            }),
+        ));
+    }
+    if before_len == after_len {
+        return Ok(ActPostcondition {
+            status: "verified_state".to_owned(),
+            observed_delta: Some(false),
+            source_of_truth: Some(set_source_of_truth(readback).to_owned()),
+            before_signature: Some(before_signature),
+            after_signature: Some(after_signature),
+            detail: Some(format!(
+                "act_type verify_delta verified password target length equals requested length after delivery; value content intentionally not read or compared; timeout_ms={verify_timeout_ms}"
+            )),
+        });
+    }
+    Ok(postcondition_observed_delta(
+        "act_type",
+        set_source_of_truth(readback),
+        before_signature,
+        after_signature,
+        "observed password target length equal requested text length; value content intentionally not read or compared",
     ))
 }
 
@@ -435,6 +559,142 @@ fn verify_cdp_type_delta(
         after_signature,
         "observed target value containing requested inserted text",
     ))
+}
+
+fn uia_readback_matches_emitted(
+    readback: &synapse_a11y::ElementValueSetReadback,
+    emitted: &str,
+) -> bool {
+    if readback.is_password {
+        return readback.after_password_len == Some(expected_value_len(emitted, true));
+    }
+    readback.after_value == expected_set_value(readback, emitted)
+}
+
+fn expected_set_value<'a>(
+    readback: &'a synapse_a11y::ElementValueSetReadback,
+    emitted: &'a str,
+) -> &'a str {
+    readback.expected_after_value.as_deref().unwrap_or(emitted)
+}
+
+fn uia_readbacks_equivalent(
+    before: &synapse_a11y::ElementValueReadback,
+    after: &synapse_a11y::ElementValueReadback,
+) -> bool {
+    if before.is_password || after.is_password {
+        return before.password_len == after.password_len;
+    }
+    before.value == after.value
+}
+
+fn value_set_before_len(readback: &synapse_a11y::ElementValueSetReadback) -> usize {
+    value_set_len(
+        readback.before_value.as_str(),
+        readback.before_password_len,
+        readback.is_password,
+    )
+}
+
+fn value_set_after_len(readback: &synapse_a11y::ElementValueSetReadback) -> usize {
+    value_set_len(
+        readback.after_value.as_str(),
+        readback.after_password_len,
+        readback.is_password,
+    )
+}
+
+fn value_set_len(value: &str, password_len: Option<usize>, is_password: bool) -> usize {
+    if is_password {
+        password_len.unwrap_or(0)
+    } else {
+        value.chars().count()
+    }
+}
+
+fn value_readback_len(readback: &synapse_a11y::ElementValueReadback) -> usize {
+    if readback.is_password {
+        readback.password_len.unwrap_or(0)
+    } else {
+        readback.value.chars().count()
+    }
+}
+
+fn value_set_before_signature(readback: &synapse_a11y::ElementValueSetReadback) -> String {
+    value_set_signature(
+        readback.before_value.as_str(),
+        readback.before_password_len,
+        readback.is_password,
+    )
+}
+
+fn value_set_after_signature(readback: &synapse_a11y::ElementValueSetReadback) -> String {
+    value_set_signature(
+        readback.after_value.as_str(),
+        readback.after_password_len,
+        readback.is_password,
+    )
+}
+
+fn value_set_signature(value: &str, password_len: Option<usize>, is_password: bool) -> String {
+    if is_password {
+        return password_len
+            .map(|len| format!("password_len:{len}"))
+            .unwrap_or_else(|| "password_len:<missing>".to_owned());
+    }
+    text_signature(value)
+}
+
+fn value_readback_signature(readback: &synapse_a11y::ElementValueReadback) -> String {
+    if readback.is_password {
+        return readback
+            .password_len
+            .map(|len| format!("password_len:{len}"))
+            .unwrap_or_else(|| "password_len:<missing>".to_owned());
+    }
+    text_signature(&readback.value)
+}
+
+fn expected_value_len(value: &str, is_password: bool) -> usize {
+    if is_password {
+        value.encode_utf16().count()
+    } else {
+        value.chars().count()
+    }
+}
+
+fn set_backend_tier(readback: &synapse_a11y::ElementValueSetReadback) -> &'static str {
+    if readback.method == METHOD_NATIVE_TEXT_MESSAGE {
+        TYPE_TIER_WIN32_MESSAGE
+    } else {
+        TYPE_TIER_UIA
+    }
+}
+
+fn set_text_integrity(readback: &synapse_a11y::ElementValueSetReadback) -> &'static str {
+    match (readback.method.as_str(), readback.is_password) {
+        (METHOD_NATIVE_TEXT_MESSAGE, true) => TEXT_INTEGRITY_NATIVE_PASSWORD_LENGTH,
+        (METHOD_NATIVE_TEXT_MESSAGE, false) => TEXT_INTEGRITY_NATIVE_TEXT_MESSAGE,
+        (_, true) => TEXT_INTEGRITY_UIA_PASSWORD_LENGTH,
+        (_, false) => TEXT_INTEGRITY_UIA_VALUE_PATTERN,
+    }
+}
+
+fn set_source_of_truth(readback: &synapse_a11y::ElementValueSetReadback) -> &'static str {
+    match (readback.method.as_str(), readback.is_password) {
+        (METHOD_NATIVE_TEXT_MESSAGE, true) => SOURCE_NATIVE_PASSWORD_LENGTH,
+        (METHOD_NATIVE_TEXT_MESSAGE, false) => SOURCE_NATIVE_TEXT,
+        (_, true) => SOURCE_UIA_PASSWORD_LENGTH,
+        (_, false) => SOURCE_UIA_VALUE,
+    }
+}
+
+const fn value_readback_source_of_truth(is_password: bool) -> &'static str {
+    if is_password {
+        SOURCE_UIA_PASSWORD_LENGTH
+    } else {
+        SOURCE_UIA_VALUE
+    }
 }
 
 impl TypeDynamics {
@@ -553,6 +813,8 @@ fn type_params_error(requested_linear_ms_per_char: u32, message: impl Into<Strin
             "minimum_linear_ms_per_char": MIN_SAFE_LINEAR_MS_PER_CHAR,
             "target_text_integrity": TEXT_INTEGRITY_DISPATCH_ONLY,
             "target_readback_required": true,
+            "backend_tier_used": TYPE_TIER_FOREGROUND,
+            "required_foreground": true,
         })),
     )
 }
@@ -589,10 +851,15 @@ mod tests {
     use synapse_core::{ElementId, KeystrokeNaturalParams};
 
     use super::{
-        ActTypeParams, MIN_SAFE_LINEAR_MS_PER_CHAR, TEXT_INTEGRITY_DISPATCH_ONLY, TypeBackend,
-        TypeDynamics, act_type_with_handle, action_from_type_params, default_linear_ms_per_char,
-        default_press_enter_after, default_type_backend, default_type_dynamics,
-        default_use_scancodes, default_verify_delta, default_verify_timeout_ms, recorded_ikis,
+        ActTypeParams, METHOD_NATIVE_TEXT_MESSAGE, MIN_SAFE_LINEAR_MS_PER_CHAR,
+        SOURCE_NATIVE_PASSWORD_LENGTH, SOURCE_NATIVE_TEXT, SOURCE_UIA_PASSWORD_LENGTH,
+        TEXT_INTEGRITY_DISPATCH_ONLY, TEXT_INTEGRITY_NATIVE_PASSWORD_LENGTH,
+        TEXT_INTEGRITY_NATIVE_TEXT_MESSAGE, TYPE_TIER_FOREGROUND, TYPE_TIER_WIN32_MESSAGE,
+        TypeBackend, TypeDynamics, act_type_with_handle, action_from_type_params,
+        default_linear_ms_per_char, default_press_enter_after, default_type_backend,
+        default_type_dynamics, default_use_scancodes, default_verify_delta,
+        default_verify_timeout_ms, recorded_ikis, set_backend_tier, set_source_of_truth,
+        set_text_integrity, uia_readback_matches_emitted, verify_uia_type_delta,
     };
 
     #[tokio::test]
@@ -634,6 +901,8 @@ mod tests {
 
         assert!(response.ok);
         assert_eq!(response.chars_typed, 12);
+        assert_eq!(response.backend_tier_used, TYPE_TIER_FOREGROUND);
+        assert!(response.required_foreground);
         assert_eq!(response.target_text_integrity, TEXT_INTEGRITY_DISPATCH_ONLY);
         assert!(response.target_readback_required);
         assert_eq!(
@@ -764,6 +1033,214 @@ mod tests {
             error
                 .message
                 .contains("requires live UIA ValuePattern dispatch")
+        );
+    }
+
+    #[test]
+    fn password_value_pattern_uses_length_source_of_truth() {
+        let readback = synapse_a11y::ElementValueSetReadback {
+            method: "uia_value_pattern".to_owned(),
+            before_value: String::new(),
+            after_value: String::new(),
+            expected_after_value: None,
+            is_password: true,
+            before_password_len: Some(0),
+            after_password_len: Some(7),
+        };
+
+        assert!(uia_readback_matches_emitted(&readback, "p@ss727"));
+        let postcondition =
+            verify_uia_type_delta(default_verify_timeout_ms(), "p@ss727", &readback)
+                .expect("password length readback should verify");
+
+        assert_eq!(postcondition.status, "observed_delta");
+        assert_eq!(postcondition.observed_delta, Some(true));
+        assert_eq!(
+            postcondition.source_of_truth.as_deref(),
+            Some(SOURCE_UIA_PASSWORD_LENGTH)
+        );
+        assert_eq!(
+            postcondition.before_signature.as_deref(),
+            Some("password_len:0")
+        );
+        assert_eq!(
+            postcondition.after_signature.as_deref(),
+            Some("password_len:7")
+        );
+    }
+
+    #[test]
+    fn password_value_pattern_same_length_verifies_state() {
+        let readback = synapse_a11y::ElementValueSetReadback {
+            method: "uia_value_pattern".to_owned(),
+            before_value: String::new(),
+            after_value: String::new(),
+            expected_after_value: None,
+            is_password: true,
+            before_password_len: Some(7),
+            after_password_len: Some(7),
+        };
+
+        let postcondition =
+            verify_uia_type_delta(default_verify_timeout_ms(), "p@ss727", &readback)
+                .expect("password same-length state should verify");
+
+        assert_eq!(postcondition.status, "verified_state");
+        assert_eq!(postcondition.observed_delta, Some(false));
+        assert_eq!(
+            postcondition.source_of_truth.as_deref(),
+            Some(SOURCE_UIA_PASSWORD_LENGTH)
+        );
+    }
+
+    #[test]
+    fn password_value_pattern_length_mismatch_fails_closed() {
+        let readback = synapse_a11y::ElementValueSetReadback {
+            method: "uia_value_pattern".to_owned(),
+            before_value: String::new(),
+            after_value: String::new(),
+            expected_after_value: None,
+            is_password: true,
+            before_password_len: Some(0),
+            after_password_len: Some(6),
+        };
+
+        let error = match verify_uia_type_delta(default_verify_timeout_ms(), "p@ss727", &readback) {
+            Ok(postcondition) => {
+                panic!("password mismatch verified unexpectedly: {postcondition:?}")
+            }
+            Err(error) => error,
+        };
+
+        assert!(
+            error
+                .message
+                .contains("Source-of-Truth postcondition failed")
+        );
+        let data = error.data.expect("password mismatch should include data");
+        assert_eq!(data["source_of_truth"], SOURCE_UIA_PASSWORD_LENGTH);
+        assert_eq!(data["verify_delta"]["after_signature"], "password_len:6");
+    }
+
+    #[test]
+    fn password_value_pattern_missing_length_fails_closed() {
+        let readback = synapse_a11y::ElementValueSetReadback {
+            method: "uia_value_pattern".to_owned(),
+            before_value: String::new(),
+            after_value: String::new(),
+            expected_after_value: None,
+            is_password: true,
+            before_password_len: None,
+            after_password_len: Some(7),
+        };
+
+        let error = match verify_uia_type_delta(default_verify_timeout_ms(), "p@ss727", &readback) {
+            Ok(postcondition) => {
+                panic!("missing password length verified unexpectedly: {postcondition:?}")
+            }
+            Err(error) => error,
+        };
+
+        assert!(error.message.contains("postcondition failed"));
+        let data = error
+            .data
+            .expect("missing password length should include data");
+        assert_eq!(data["source_of_truth"], SOURCE_UIA_PASSWORD_LENGTH);
+        assert_eq!(data["verify_delta"]["after_signature"], "password_len:7");
+    }
+
+    #[test]
+    fn native_text_message_reports_win32_source_and_tier() {
+        let readback = synapse_a11y::ElementValueSetReadback {
+            method: METHOD_NATIVE_TEXT_MESSAGE.to_owned(),
+            before_value: String::new(),
+            after_value: "WMSETTEXT-BG-727".to_owned(),
+            expected_after_value: None,
+            is_password: false,
+            before_password_len: None,
+            after_password_len: None,
+        };
+
+        assert_eq!(set_backend_tier(&readback), TYPE_TIER_WIN32_MESSAGE);
+        assert_eq!(
+            set_text_integrity(&readback),
+            TEXT_INTEGRITY_NATIVE_TEXT_MESSAGE
+        );
+        assert_eq!(set_source_of_truth(&readback), SOURCE_NATIVE_TEXT);
+
+        let postcondition =
+            verify_uia_type_delta(default_verify_timeout_ms(), "WMSETTEXT-BG-727", &readback)
+                .expect("native text message readback should verify");
+        assert_eq!(postcondition.status, "observed_delta");
+        assert_eq!(
+            postcondition.source_of_truth.as_deref(),
+            Some(SOURCE_NATIVE_TEXT)
+        );
+    }
+
+    #[test]
+    fn native_password_message_reports_length_source() {
+        let readback = synapse_a11y::ElementValueSetReadback {
+            method: METHOD_NATIVE_TEXT_MESSAGE.to_owned(),
+            before_value: String::new(),
+            after_value: String::new(),
+            expected_after_value: None,
+            is_password: true,
+            before_password_len: Some(0),
+            after_password_len: Some(7),
+        };
+
+        assert_eq!(set_backend_tier(&readback), TYPE_TIER_WIN32_MESSAGE);
+        assert_eq!(
+            set_text_integrity(&readback),
+            TEXT_INTEGRITY_NATIVE_PASSWORD_LENGTH
+        );
+        assert_eq!(
+            set_source_of_truth(&readback),
+            SOURCE_NATIVE_PASSWORD_LENGTH
+        );
+
+        let postcondition =
+            verify_uia_type_delta(default_verify_timeout_ms(), "p@ss727", &readback)
+                .expect("native password length readback should verify");
+        assert_eq!(postcondition.status, "observed_delta");
+        assert_eq!(
+            postcondition.source_of_truth.as_deref(),
+            Some(SOURCE_NATIVE_PASSWORD_LENGTH)
+        );
+        assert_eq!(
+            postcondition.after_signature.as_deref(),
+            Some("password_len:7")
+        );
+    }
+
+    #[test]
+    fn native_text_message_can_verify_normalized_multiline_expected_value() {
+        let readback = synapse_a11y::ElementValueSetReadback {
+            method: METHOD_NATIVE_TEXT_MESSAGE.to_owned(),
+            before_value: String::new(),
+            after_value: "LineA-727\r\nLineB-727".to_owned(),
+            expected_after_value: Some("LineA-727\r\nLineB-727".to_owned()),
+            is_password: false,
+            before_password_len: None,
+            after_password_len: None,
+        };
+
+        assert!(uia_readback_matches_emitted(
+            &readback,
+            "LineA-727\nLineB-727"
+        ));
+        let postcondition = verify_uia_type_delta(
+            default_verify_timeout_ms(),
+            "LineA-727\nLineB-727",
+            &readback,
+        )
+        .expect("normalized multiline readback should verify");
+
+        assert_eq!(postcondition.status, "observed_delta");
+        assert_eq!(
+            postcondition.source_of_truth.as_deref(),
+            Some(SOURCE_NATIVE_TEXT)
         );
     }
 }

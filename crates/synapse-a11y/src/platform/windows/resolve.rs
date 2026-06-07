@@ -1,3 +1,5 @@
+use std::ffi::c_void;
+
 use synapse_core::{ElementId, Rect};
 use uiautomation::{
     UIAutomation, UIElement,
@@ -6,6 +8,13 @@ use uiautomation::{
         UISelectionItemPattern, UITogglePattern, UIValuePattern,
     },
     types::{ElementMode, ExpandCollapseState, Handle, Rect as UiaRect, TreeScope, UIProperty},
+};
+use windows::Win32::{
+    Foundation::{HWND, LPARAM, WPARAM},
+    UI::WindowsAndMessaging::{
+        ES_MULTILINE, GWL_STYLE, GetWindowLongW, SMTO_ABORTIFHUNG, SendMessageTimeoutW, WM_GETTEXT,
+        WM_GETTEXTLENGTH,
+    },
 };
 
 use crate::{
@@ -20,6 +29,10 @@ use super::common::{
 };
 
 const RE_RESOLVE_NODE_BUDGET: usize = 20_000;
+const EM_SETSEL: u32 = 0x00B1;
+const EM_REPLACESEL: u32 = 0x00C2;
+const PASSWORD_LENGTH_READ_TIMEOUT_MS: u32 = 500;
+const NATIVE_TEXT_MESSAGE_TIMEOUT_MS: u32 = 500;
 const SUPPORTED_CLICK_PATTERNS: [&str; 5] = [
     "InvokePattern",
     "TogglePattern",
@@ -446,14 +459,85 @@ pub fn set_element_value(id: &ElementId, value: &str) -> A11yResult<ElementValue
                 detail: format!("ValuePattern is read-only for element {id}"),
             });
         }
-        let before_value = pattern.get_value().map_err(map_uia_error)?;
+        let is_password = cached_bool(&element, UIProperty::IsPassword);
+        if native_text_message_supported(&element)
+            && let Some(hwnd) = native_hwnd(&element)?
+        {
+            return set_native_text_value(&id, hwnd, &value, is_password);
+        }
+
+        let before_password_len = if is_password {
+            Some(password_text_len(&id, &element)?)
+        } else {
+            None
+        };
+        let before_value = if is_password {
+            String::new()
+        } else {
+            pattern.get_value().map_err(map_uia_error)?
+        };
         pattern.set_value(&value).map_err(map_uia_error)?;
-        let after_value = pattern.get_value().map_err(map_uia_error)?;
+        let after_password_len = if is_password {
+            Some(password_text_len(&id, &element)?)
+        } else {
+            None
+        };
+        let after_value = if is_password {
+            String::new()
+        } else {
+            pattern.get_value().map_err(map_uia_error)?
+        };
         Ok(ElementValueSetReadback {
             method: "uia_value_pattern".to_owned(),
             before_value,
             after_value,
+            expected_after_value: None,
+            is_password,
+            before_password_len,
+            after_password_len,
         })
+    })
+}
+
+fn set_native_text_value(
+    id: &ElementId,
+    hwnd: HWND,
+    value: &str,
+    is_password: bool,
+) -> A11yResult<ElementValueSetReadback> {
+    let before_password_len = if is_password {
+        Some(native_text_len(id, hwnd)?)
+    } else {
+        None
+    };
+    let before_value = if is_password {
+        String::new()
+    } else {
+        native_text_value(id, hwnd)?
+    };
+    let expected_after_value = native_set_text(id, hwnd, value)?;
+    let after_password_len = if is_password {
+        Some(native_text_len(id, hwnd)?)
+    } else {
+        None
+    };
+    let after_value = if is_password {
+        String::new()
+    } else {
+        native_text_value(id, hwnd)?
+    };
+    Ok(ElementValueSetReadback {
+        method: "uia_native_window_text_message".to_owned(),
+        before_value,
+        after_value,
+        expected_after_value: if is_password {
+            None
+        } else {
+            Some(expected_after_value)
+        },
+        is_password,
+        before_password_len,
+        after_password_len,
     })
 }
 
@@ -468,13 +552,188 @@ pub fn element_value(id: &ElementId) -> A11yResult<ElementValueReadback> {
                     detail: format!("ValuePattern not exposed for element {id}: {err}"),
                 })?;
         let is_readonly = pattern.is_readonly().map_err(map_uia_error)?;
-        let value = pattern.get_value().map_err(map_uia_error)?;
+        let is_password = cached_bool(&element, UIProperty::IsPassword);
+        let password_len = if is_password {
+            Some(password_text_len(&id, &element)?)
+        } else {
+            None
+        };
+        let value = if is_password {
+            String::new()
+        } else {
+            pattern.get_value().map_err(map_uia_error)?
+        };
         Ok(ElementValueReadback {
             method: "uia_value_pattern".to_owned(),
             value,
             is_readonly,
+            is_password,
+            password_len,
         })
     })
+}
+
+fn password_text_len(id: &ElementId, element: &UIElement) -> A11yResult<usize> {
+    let hwnd = native_hwnd(element)?.ok_or_else(|| {
+        A11yError::internal(format!(
+            "password element {id} has NativeWindowHandle=0; cannot verify password length without reading hidden value text"
+        ))
+    })?;
+    native_text_len(id, hwnd)
+}
+
+fn native_text_message_supported(element: &UIElement) -> bool {
+    cached_role(element).to_ascii_lowercase().contains("edit")
+}
+
+fn native_hwnd(element: &UIElement) -> A11yResult<Option<HWND>> {
+    let handle = element.get_native_window_handle().map_err(|err| {
+        A11yError::internal(format!(
+            "NativeWindowHandle read failed for native text element: {err}"
+        ))
+    })?;
+    let raw: isize = handle.into();
+    if raw == 0 {
+        return Ok(None);
+    }
+    Ok(Some(HWND(raw as *mut c_void)))
+}
+
+fn native_text_len(id: &ElementId, hwnd: HWND) -> A11yResult<usize> {
+    let mut result = 0_usize;
+    send_native_text_message(
+        id,
+        hwnd,
+        WM_GETTEXTLENGTH,
+        WPARAM(0),
+        LPARAM(0),
+        PASSWORD_LENGTH_READ_TIMEOUT_MS,
+        "WM_GETTEXTLENGTH",
+        &mut result,
+    )?;
+    Ok(result)
+}
+
+fn native_text_value(id: &ElementId, hwnd: HWND) -> A11yResult<String> {
+    let len = native_text_len(id, hwnd)?;
+    let mut buffer = vec![0_u16; len.saturating_add(1)];
+    let mut copied = 0_usize;
+    send_native_text_message(
+        id,
+        hwnd,
+        WM_GETTEXT,
+        WPARAM(buffer.len()),
+        LPARAM(buffer.as_mut_ptr().cast::<c_void>() as isize),
+        NATIVE_TEXT_MESSAGE_TIMEOUT_MS,
+        "WM_GETTEXT",
+        &mut copied,
+    )?;
+    let copied = copied.min(buffer.len().saturating_sub(1));
+    String::from_utf16(&buffer[..copied]).map_err(|err| {
+        A11yError::internal(format!(
+            "WM_GETTEXT returned invalid UTF-16 for native text element {id}: {err}"
+        ))
+    })
+}
+
+fn native_set_text(id: &ElementId, hwnd: HWND, value: &str) -> A11yResult<String> {
+    let expected_value = if native_is_multiline(hwnd) {
+        normalize_multiline_edit_newlines(value)
+    } else {
+        value.to_owned()
+    };
+    native_select_all(id, hwnd)?;
+    native_replace_selection(id, hwnd, &expected_value)?;
+    Ok(expected_value)
+}
+
+fn native_is_multiline(hwnd: HWND) -> bool {
+    let style = unsafe { GetWindowLongW(hwnd, GWL_STYLE) };
+    style & ES_MULTILINE != 0
+}
+
+fn normalize_multiline_edit_newlines(value: &str) -> String {
+    let mut normalized = String::with_capacity(value.len());
+    let mut chars = value.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\r' => {
+                normalized.push('\r');
+                if chars.peek() == Some(&'\n') {
+                    let _ = chars.next();
+                    normalized.push('\n');
+                } else {
+                    normalized.push('\n');
+                }
+            }
+            '\n' => {
+                normalized.push('\r');
+                normalized.push('\n');
+            }
+            _ => normalized.push(ch),
+        }
+    }
+    normalized
+}
+
+fn native_select_all(id: &ElementId, hwnd: HWND) -> A11yResult<()> {
+    let mut result = 0_usize;
+    send_native_text_message(
+        id,
+        hwnd,
+        EM_SETSEL,
+        WPARAM(0),
+        LPARAM(-1),
+        NATIVE_TEXT_MESSAGE_TIMEOUT_MS,
+        "EM_SETSEL",
+        &mut result,
+    )
+}
+
+fn native_replace_selection(id: &ElementId, hwnd: HWND, value: &str) -> A11yResult<()> {
+    let mut wide: Vec<u16> = value.encode_utf16().collect();
+    wide.push(0);
+    let mut result = 0_usize;
+    send_native_text_message(
+        id,
+        hwnd,
+        EM_REPLACESEL,
+        WPARAM(1),
+        LPARAM(wide.as_ptr().cast::<c_void>() as isize),
+        NATIVE_TEXT_MESSAGE_TIMEOUT_MS,
+        "EM_REPLACESEL",
+        &mut result,
+    )
+}
+
+fn send_native_text_message(
+    id: &ElementId,
+    hwnd: HWND,
+    message: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+    timeout_ms: u32,
+    operation: &'static str,
+    result: &mut usize,
+) -> A11yResult<()> {
+    let send_result = unsafe {
+        SendMessageTimeoutW(
+            hwnd,
+            message,
+            wparam,
+            lparam,
+            SMTO_ABORTIFHUNG,
+            timeout_ms,
+            Some(result as *mut usize),
+        )
+    };
+    if send_result.0 == 0 {
+        return Err(A11yError::internal(format!(
+            "SendMessageTimeoutW({operation}) failed or timed out after {timeout_ms}ms for native text element {id} hwnd=0x{:x}",
+            hwnd.0 as isize
+        )));
+    }
+    Ok(())
 }
 
 pub fn element_metadata(id: &ElementId) -> A11yResult<ElementMetadataReadback> {
