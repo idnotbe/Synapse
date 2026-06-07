@@ -48,6 +48,11 @@ expression: snapshot
       "actual": 10000,
       "path": "inputSchema.properties.timeout_ms.default",
       "tool": "act_launch"
+    },
+    {
+      "actual": null,
+      "path": "inputSchema.properties.windows_console_window_state.default",
+      "tool": "act_launch"
     }
   ],
   "non_schema_defaults": [
@@ -114,6 +119,7 @@ expression: snapshot
     "act_launch.inputSchema.properties.env.default",
     "act_launch.inputSchema.properties.force_renderer_accessibility.default",
     "act_launch.inputSchema.properties.timeout_ms.default",
+    "act_launch.inputSchema.properties.windows_console_window_state.default",
     "act_run_shell.inputSchema.properties.args.default",
     "act_run_shell.inputSchema.properties.env.default",
     "act_run_shell.inputSchema.properties.timeout_ms.default"

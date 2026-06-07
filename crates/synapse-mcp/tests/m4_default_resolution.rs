@@ -78,6 +78,11 @@ fn assert_prd_defaults(tools: &[Value]) -> anyhow::Result<Vec<Value>> {
             "inputSchema.properties.timeout_ms.default",
             json!(10000),
         ),
+        (
+            "act_launch",
+            "inputSchema.properties.windows_console_window_state.default",
+            Value::Null,
+        ),
     ];
 
     let mut observed = Vec::new();
@@ -216,6 +221,7 @@ fn assert_no_unexpected_m4_defaults(tools: &[Value]) -> anyhow::Result<Vec<Strin
         "act_launch.inputSchema.properties.env.default",
         "act_launch.inputSchema.properties.force_renderer_accessibility.default",
         "act_launch.inputSchema.properties.timeout_ms.default",
+        "act_launch.inputSchema.properties.windows_console_window_state.default",
         "act_run_shell.inputSchema.properties.args.default",
         "act_run_shell.inputSchema.properties.env.default",
         "act_run_shell.inputSchema.properties.timeout_ms.default",

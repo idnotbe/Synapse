@@ -31,8 +31,7 @@ use crate::{
 };
 
 const MAX_COMBO_STEPS: usize = 256;
-const DEFAULT_SHELL_TIMEOUT_MS: u32 = 30_000;
-const MAX_SHELL_TIMEOUT_MS: u32 = 600_000;
+const DEFAULT_SHELL_TIMEOUT_MS: u64 = 30_000;
 const DEFAULT_LAUNCH_TIMEOUT_MS: u32 = 10_000;
 const MAX_LAUNCH_TIMEOUT_MS: u32 = 600_000;
 #[cfg(windows)]
@@ -334,8 +333,8 @@ pub struct ActRunShellParams {
     #[schemars(default)]
     pub env: BTreeMap<String, String>,
     #[serde(default = "default_shell_timeout_ms")]
-    #[schemars(default = "default_shell_timeout_ms", range(min = 1, max = 600_000))]
-    pub timeout_ms: u32,
+    #[schemars(default = "default_shell_timeout_ms", range(min = 1))]
+    pub timeout_ms: u64,
     pub idempotency_key: Option<String>,
 }
 
@@ -1679,10 +1678,10 @@ fn validate_run_shell_params(params: &ActRunShellParams) -> Result<(), ErrorData
         ));
     }
     validate_run_shell_command_shape(params, command)?;
-    if params.timeout_ms == 0 || params.timeout_ms > MAX_SHELL_TIMEOUT_MS {
+    if params.timeout_ms == 0 {
         return Err(mcp_error(
             error_codes::TOOL_PARAMS_INVALID,
-            format!("act_run_shell timeout_ms must be 1..={MAX_SHELL_TIMEOUT_MS}"),
+            "act_run_shell timeout_ms must be >= 1",
         ));
     }
     if let Some(key) = &params.idempotency_key {
@@ -2943,10 +2942,9 @@ fn spawn_capped_readers(
 
 async fn wait_shell_child(
     child: &mut tokio::process::Child,
-    timeout_ms: u32,
+    timeout_ms: u64,
 ) -> Result<(Option<i32>, bool), ErrorData> {
-    let wait_result =
-        tokio::time::timeout(Duration::from_millis(u64::from(timeout_ms)), child.wait()).await;
+    let wait_result = tokio::time::timeout(Duration::from_millis(timeout_ms), child.wait()).await;
     let result = match wait_result {
         Ok(Ok(status)) => (status.code(), false),
         Ok(Err(error)) => {
@@ -3206,7 +3204,7 @@ const fn default_backend() -> Backend {
     Backend::Auto
 }
 
-const fn default_shell_timeout_ms() -> u32 {
+const fn default_shell_timeout_ms() -> u64 {
     DEFAULT_SHELL_TIMEOUT_MS
 }
 
@@ -3449,7 +3447,7 @@ mod tests {
         }
     }
 
-    fn shell_params(command: &str, args: Vec<&str>, timeout_ms: u32) -> ActRunShellParams {
+    fn shell_params(command: &str, args: Vec<&str>, timeout_ms: u64) -> ActRunShellParams {
         ActRunShellParams {
             command: command.to_owned(),
             args: args.into_iter().map(str::to_owned).collect(),
@@ -4443,27 +4441,16 @@ mod tests {
     }
 
     #[test]
-    fn shell_rejects_timeout_above_max() {
-        let params = shell_params(
-            "cmd.exe",
-            vec!["/c", "echo too-long"],
-            MAX_SHELL_TIMEOUT_MS + 1,
-        );
+    fn shell_accepts_timeout_above_legacy_cap() {
+        let params = shell_params("cmd.exe", vec!["/c", "echo long-timeout-ok"], 1_200_000);
 
-        let error = match authorize_run_shell(&shell_config_for(&params), &params) {
-            Ok(_authorization) => panic!("timeout above max should reject"),
-            Err(error) => error,
-        };
+        let authorization = authorize_run_shell(&shell_config_for(&params), &params)
+            .unwrap_or_else(|error| panic!("legacy-cap timeout should authorize: {error}"));
 
         assert_eq!(
-            error
-                .data
-                .as_ref()
-                .and_then(|data| data.get("code"))
-                .and_then(|code| code.as_str()),
-            Some(error_codes::TOOL_PARAMS_INVALID)
+            authorization.command_line,
+            "cmd.exe /c \"echo long-timeout-ok\""
         );
-        assert!(error.message.contains("timeout_ms must be"));
     }
 
     #[test]
