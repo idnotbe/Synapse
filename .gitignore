@@ -54,3 +54,10 @@ tracing-*.log
 
 # Scratch / investigation working state — never part of the repo.
 /tmp/
+
+# synapse-update.ps1 keep-current workflow: run it daily (pull -> rebuild ->
+# reconnect). The script writes its build/run logs off-tree
+# (%LOCALAPPDATA%\synapse\logs); ignore any local copies so daily runs never
+# dirty git status. The script itself IS committed; its run products are not.
+/synapse-update-*.log
+/synapse-update.log
