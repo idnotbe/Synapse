@@ -20,8 +20,8 @@ use crate::m2::postcondition::{
 use crate::m2::{
     ActClickPostcondition, ActClickTierAttempt, CLICK_REASON_NO_OBSERVED_DELTA,
     act_click_postmessage_with_params, act_stroke_error_details, act_stroke_request_details,
-    attach_click_tier_attempts, click_params_can_route_background_first, click_tier_failed,
-    emitted_text,
+    attach_click_tier_attempts, click_params_can_route_background_first, click_target_root_hwnd,
+    click_tier_failed, emitted_text,
 };
 use rmcp::{RoleServer, model::ErrorCode, service::RequestContext};
 use schemars::JsonSchema;
@@ -116,7 +116,7 @@ const fn default_queue_blocker_duration_ms() -> u32 {
 #[tool_router(router = m2_tool_router, vis = "pub(super)")]
 impl SynapseService {
     #[tool(
-        description = "Click a screen coordinate or UI Automation element. Default element delivery uses background UIA control patterns (Invoke, Toggle, SelectionItem, ExpandCollapse, LegacyIAccessible.DoDefaultAction). When those patterns are unsupported, coordinate_fallback_on_unsupported=true allows a recorded bbox-center coordinate click only for enabled keyboard-focusable edit/document/text targets or elements exposing Value/Text patterns; set false to fail closed with ACTION_ELEMENT_PATTERN_UNSUPPORTED. velocity_profile controls coordinate-move timing only, while explicit spatial paths belong to act_stroke. If a previously observed transient element expired before dispatch, returns TRANSIENT_ELEMENT_EXPIRED with re-observe/find guidance."
+        description = "Click a screen coordinate or UI Automation element. Default element delivery uses background UIA control patterns (Invoke, Toggle, SelectionItem, ExpandCollapse, LegacyIAccessible.DoDefaultAction). When element coordinate delivery is needed, Synapse tries a background HWND PostMessage click to the resolved child window before escalating to the leased foreground coordinate tier; verify_delta reads the target window SoT for element clicks. coordinate_fallback_on_unsupported=true allows bbox-center coordinate delivery only for enabled keyboard-focusable edit/document/text targets or elements exposing Value/Text patterns; set false to fail closed with ACTION_ELEMENT_PATTERN_UNSUPPORTED. This mouse click tool does not synthesize WM_CHAR/dead-key keyboard text; use act_type/act_set_value for text. velocity_profile controls coordinate-move timing only, while explicit spatial paths belong to act_stroke. If a previously observed transient element expired before dispatch, returns TRANSIENT_ELEMENT_EXPIRED with re-observe/find guidance."
     )]
     pub async fn act_click(
         &self,
@@ -142,8 +142,23 @@ impl SynapseService {
             self.audit_action_result("act_click", &result)?;
             return result.map(Json);
         }
+        let target_window_hwnd = if params.verify_delta {
+            match click_target_root_hwnd(&params) {
+                Ok(hwnd) => hwnd,
+                Err(error) => {
+                    let result: Result<ActClickResponse, ErrorData> = Err(error);
+                    self.audit_action_result("act_click", &result)?;
+                    return result.map(Json);
+                }
+            }
+        } else {
+            None
+        };
         let before_delta_signature = if params.verify_delta {
-            match self.capture_click_delta_signature(160).await {
+            match self
+                .capture_click_delta_signature(160, target_window_hwnd)
+                .await
+            {
                 Ok(signature) => Some(signature),
                 Err(error) => {
                     let result: Result<ActClickResponse, ErrorData> = Err(error);
@@ -165,6 +180,7 @@ impl SynapseService {
                 params,
                 before,
                 verify_timeout_ms,
+                target_window_hwnd,
                 foreground_lease_session_id,
             )
             .await
@@ -360,7 +376,10 @@ impl SynapseService {
             }
         };
         let before_delta_signature = if params.verify_delta {
-            match self.capture_action_delta_signature(160, None, false).await {
+            match self
+                .capture_action_delta_signature(160, None, false, None)
+                .await
+            {
                 Ok(signature) => Some(signature),
                 Err(error) => {
                     let result: Result<ActPressResponse, ErrorData> = Err(error);
@@ -525,7 +544,10 @@ impl SynapseService {
             &act_stroke_audit_details(&stroke_details, &preflight),
         )?;
         let before_delta_signature = if params.verify_delta {
-            match self.capture_action_delta_signature(160, None, true).await {
+            match self
+                .capture_action_delta_signature(160, None, true, None)
+                .await
+            {
                 Ok(signature) => Some(signature),
                 Err(error) => {
                     self.audit_action_error_with_details(
@@ -621,7 +643,7 @@ impl SynapseService {
         let point_region = params.verify_delta_point_region();
         let before_delta_signature = if params.verify_delta && !params.uses_element_target() {
             match self
-                .capture_action_delta_signature(160, point_region, false)
+                .capture_action_delta_signature(160, point_region, false, None)
                 .await
             {
                 Ok(signature) => Some(signature),
@@ -961,6 +983,14 @@ fn foreground_lease_session_id(
     super::context::mcp_session_id_from_request_context(request_context)
 }
 
+const fn click_delta_source_of_truth(target_window_hwnd: Option<i64>) -> &'static str {
+    if target_window_hwnd.is_some() {
+        "target_window_ui_or_pixels"
+    } else {
+        "foreground_focused_ui_or_pixels"
+    }
+}
+
 fn acquire_tool_foreground_input_lease(
     tool: &'static str,
     request_context: &RequestContext<RoleServer>,
@@ -1098,6 +1128,7 @@ impl SynapseService {
         params: ActClickParams,
         before: ClickDeltaSignature,
         verify_timeout_ms: u32,
+        target_window_hwnd: Option<i64>,
         foreground_lease_session_id: Option<String>,
     ) -> Result<ActClickResponse, ErrorData> {
         match act_click_with_handle_and_lease(
@@ -1110,7 +1141,12 @@ impl SynapseService {
         {
             Ok(response) => {
                 match self
-                    .verify_click_response(response, before.clone(), verify_timeout_ms)
+                    .verify_click_response(
+                        response,
+                        before.clone(),
+                        verify_timeout_ms,
+                        target_window_hwnd,
+                    )
                     .await
                 {
                     Ok(response) => Ok(response),
@@ -1127,6 +1163,7 @@ impl SynapseService {
                             params,
                             before,
                             verify_timeout_ms,
+                            target_window_hwnd,
                             tier_attempts,
                             foreground_lease_session_id,
                         )
@@ -1146,6 +1183,7 @@ impl SynapseService {
                     params,
                     before,
                     verify_timeout_ms,
+                    target_window_hwnd,
                     tier_attempts,
                     foreground_lease_session_id,
                 )
@@ -1162,13 +1200,19 @@ impl SynapseService {
         params: ActClickParams,
         before: ClickDeltaSignature,
         verify_timeout_ms: u32,
+        target_window_hwnd: Option<i64>,
         tier_attempts: Vec<ActClickTierAttempt>,
         foreground_lease_session_id: Option<String>,
     ) -> Result<ActClickResponse, ErrorData> {
         match act_click_postmessage_with_params(&params, tier_attempts).await {
             Ok(response) => {
                 match self
-                    .verify_click_response(response, before.clone(), verify_timeout_ms)
+                    .verify_click_response(
+                        response,
+                        before.clone(),
+                        verify_timeout_ms,
+                        target_window_hwnd,
+                    )
                     .await
                 {
                     Ok(response) => Ok(response),
@@ -1180,6 +1224,7 @@ impl SynapseService {
                             params,
                             before,
                             verify_timeout_ms,
+                            target_window_hwnd,
                             tier_attempts,
                             foreground_lease_session_id,
                         )
@@ -1196,6 +1241,7 @@ impl SynapseService {
                     params,
                     before,
                     verify_timeout_ms,
+                    target_window_hwnd,
                     tier_attempts,
                     foreground_lease_session_id,
                 )
@@ -1212,6 +1258,7 @@ impl SynapseService {
         mut params: ActClickParams,
         before: ClickDeltaSignature,
         verify_timeout_ms: u32,
+        target_window_hwnd: Option<i64>,
         prior_attempts: Vec<ActClickTierAttempt>,
         foreground_lease_session_id: Option<String>,
     ) -> Result<ActClickResponse, ErrorData> {
@@ -1228,7 +1275,7 @@ impl SynapseService {
                 let current_attempts = std::mem::take(&mut response.tier_attempts);
                 response.tier_attempts =
                     merge_click_tier_attempts(prior_attempts, current_attempts);
-                self.verify_click_response(response, before, verify_timeout_ms)
+                self.verify_click_response(response, before, verify_timeout_ms, target_window_hwnd)
                     .await
             }
             Err(error) => {
@@ -1244,8 +1291,12 @@ impl SynapseService {
         mut response: ActClickResponse,
         before: ClickDeltaSignature,
         verify_timeout_ms: u32,
+        target_window_hwnd: Option<i64>,
     ) -> Result<ActClickResponse, ErrorData> {
-        match self.verify_click_delta(before, verify_timeout_ms).await {
+        match self
+            .verify_click_delta(before, verify_timeout_ms, target_window_hwnd)
+            .await
+        {
             Ok(postcondition) => {
                 response.postcondition = postcondition;
                 Ok(response)
@@ -1270,8 +1321,9 @@ impl SynapseService {
     async fn capture_click_delta_signature(
         &self,
         max_elements: usize,
+        target_window_hwnd: Option<i64>,
     ) -> Result<ClickDeltaSignature, ErrorData> {
-        self.capture_action_delta_signature(max_elements, None, false)
+        self.capture_action_delta_signature(max_elements, None, false, target_window_hwnd)
             .await
     }
 
@@ -1330,10 +1382,24 @@ impl SynapseService {
         max_elements: usize,
         point_region: Option<Point>,
         include_cursor: bool,
+        target_window_hwnd: Option<i64>,
     ) -> Result<ClickDeltaSignature, ErrorData> {
         let mut input = {
             let state = self.m1_state()?;
-            crate::m1::current_input(&state, 6)?
+            if let Some(hwnd) = target_window_hwnd {
+                crate::m1::observe_input(
+                    &state,
+                    &crate::m1::ObserveParams {
+                        depth: Some(6),
+                        max_elements: Some(max_elements),
+                        window_hwnd: Some(hwnd),
+                        ..crate::m1::ObserveParams::default()
+                    },
+                    None,
+                )?
+            } else {
+                crate::m1::current_input(&state, 6)?
+            }
         };
         crate::m1::enrich_input_with_cdp(&mut input, 6, max_elements).await;
         crate::m1::enrich_input_with_browser_ocr(&mut input, max_elements);
@@ -1375,17 +1441,19 @@ impl SynapseService {
         &self,
         before: ClickDeltaSignature,
         timeout_ms: u32,
+        target_window_hwnd: Option<i64>,
     ) -> Result<ActClickPostcondition, ErrorData> {
         tokio::time::sleep(Duration::from_millis(u64::from(timeout_ms))).await;
         let after = self
-            .capture_action_delta_signature(160, None, false)
+            .capture_action_delta_signature(160, None, false, target_window_hwnd)
             .await?;
+        let source_of_truth = click_delta_source_of_truth(target_window_hwnd);
         let before_hash = signature_hash(&before)?;
         let after_hash = signature_hash(&after)?;
         if foreground_identity_changed(&before, &after) {
             return Err(foreground_lost_delta_error(
                 "act_click",
-                "foreground_focused_ui_or_pixels",
+                source_of_truth,
                 timeout_ms,
                 &before_hash,
                 &after_hash,
@@ -1396,7 +1464,7 @@ impl SynapseService {
         if before == after {
             return Err(source_no_observed_delta_error(
                 "act_click",
-                "foreground_focused_ui_or_pixels",
+                source_of_truth,
                 timeout_ms,
                 before_hash,
                 after_hash,
@@ -1408,7 +1476,7 @@ impl SynapseService {
         }
         Ok(postcondition_observed_delta(
             "act_click",
-            "foreground_focused_ui_or_pixels",
+            source_of_truth,
             before_hash,
             after_hash,
             "observed a changed focused/UI/pixel signature after delivery",
@@ -1563,7 +1631,12 @@ impl SynapseService {
     ) -> Result<ActPostcondition, ErrorData> {
         tokio::time::sleep(Duration::from_millis(u64::from(timeout_ms))).await;
         let after = self
-            .capture_action_delta_signature(160, point_region, source_of_truth.contains("cursor"))
+            .capture_action_delta_signature(
+                160,
+                point_region,
+                source_of_truth.contains("cursor"),
+                None,
+            )
             .await?;
         verify_captured_action_delta(
             tool,

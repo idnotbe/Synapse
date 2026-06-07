@@ -28,11 +28,11 @@ use windows::{
 };
 
 use super::{
-    CLICK_REASON_BACKEND_UNAVAILABLE, CLICK_REASON_SELECTION_ONLY, CLICK_TIER_FOREGROUND,
-    CLICK_TIER_POSTMESSAGE, CLICK_TIER_UIA, acquire_click_foreground_lease, action_error_to_mcp,
-    attach_click_tier_attempts, backend_used_name, click_backend_tier_used, click_error_code,
-    click_reason_for_error_code, click_required_foreground, click_tier_delivered,
-    click_tier_failed, error_has_click_tier_attempts, record,
+    CLICK_REASON_SELECTION_ONLY, CLICK_TIER_FOREGROUND, CLICK_TIER_POSTMESSAGE, CLICK_TIER_UIA,
+    acquire_click_foreground_lease, action_error_to_mcp, attach_click_tier_attempts,
+    backend_used_name, click_backend_tier_used, click_error_code, click_reason_for_error_code,
+    click_required_foreground, click_tier_delivered, click_tier_failed,
+    error_has_click_tier_attempts, record,
     schema::{
         ActClickElementTarget, ActClickParams, ActClickResponse, ActClickTierAttempt,
         postcondition_not_requested,
@@ -443,64 +443,58 @@ async fn execute_coordinate_element_click(
         ));
         backend_used_name(params.backend).to_owned()
     } else {
-        let _lease_guard = acquire_click_foreground_lease(
-            foreground_lease_session_id,
-            params.hold_ms,
-            &mut tier_attempts,
-        )?;
-        match record::execute_actor_actions(handle, actions, timing).await {
-            Ok(()) => {
+        match post_element_window_message_click(params, element, screen_point, timing).await {
+            Ok(backend_used) => {
                 tier_attempts.push(click_tier_delivered(
-                    CLICK_TIER_FOREGROUND,
-                    true,
-                    "coordinate element click delivered through the foreground input tier",
+                    CLICK_TIER_POSTMESSAGE,
+                    false,
+                    "coordinate element click delivered through HWND PostMessage before leased foreground fallback",
                 ));
-                backend_used_name(params.backend).to_owned()
-            }
-            Err(error) if should_try_hwnd_message_fallback(&error) => {
-                let foreground_detail = error.message.to_string();
-                tier_attempts.push(click_tier_failed(
-                    CLICK_TIER_FOREGROUND,
-                    CLICK_REASON_BACKEND_UNAVAILABLE,
-                    error_codes::ACTION_BACKEND_UNAVAILABLE,
-                    true,
-                    foreground_detail,
-                ));
-                match post_element_window_message_click(params, element, screen_point, timing).await
-                {
-                    Ok(backend_used) => {
-                        tier_attempts.push(click_tier_delivered(
-                            CLICK_TIER_POSTMESSAGE,
-                            false,
-                            "coordinate element click delivered through HWND PostMessage",
-                        ));
-                        backend_used
-                    }
-                    Err(error) => {
-                        let error_code = click_error_code(&error);
-                        let reason_code = click_reason_for_error_code(&error_code);
-                        tier_attempts.push(click_tier_failed(
-                            CLICK_TIER_POSTMESSAGE,
-                            reason_code,
-                            error_code,
-                            false,
-                            error.message.to_string(),
-                        ));
-                        return Err(attach_click_tier_attempts(error, tier_attempts));
-                    }
-                }
+                backend_used
             }
             Err(error) => {
                 let error_code = click_error_code(&error);
                 let reason_code = click_reason_for_error_code(&error_code);
                 tier_attempts.push(click_tier_failed(
-                    CLICK_TIER_FOREGROUND,
+                    CLICK_TIER_POSTMESSAGE,
                     reason_code,
                     error_code,
-                    true,
+                    false,
                     error.message.to_string(),
                 ));
-                return Err(attach_click_tier_attempts(error, tier_attempts));
+                tracing::warn!(
+                    code = "M2_ACT_CLICK_POSTMESSAGE_BEFORE_FOREGROUND_FAILED",
+                    kind = "act_click",
+                    element_id = %element.element_id,
+                    "act_click element coordinate route could not use the background HWND message tier; escalating to leased foreground input"
+                );
+                let _lease_guard = acquire_click_foreground_lease(
+                    foreground_lease_session_id,
+                    params.hold_ms,
+                    &mut tier_attempts,
+                )?;
+                match record::execute_actor_actions(handle, actions, timing).await {
+                    Ok(()) => {
+                        tier_attempts.push(click_tier_delivered(
+                            CLICK_TIER_FOREGROUND,
+                            true,
+                            "coordinate element click delivered through the foreground input tier after HWND PostMessage failed",
+                        ));
+                        backend_used_name(params.backend).to_owned()
+                    }
+                    Err(error) => {
+                        let error_code = click_error_code(&error);
+                        let reason_code = click_reason_for_error_code(&error_code);
+                        tier_attempts.push(click_tier_failed(
+                            CLICK_TIER_FOREGROUND,
+                            reason_code,
+                            error_code,
+                            true,
+                            error.message.to_string(),
+                        ));
+                        return Err(attach_click_tier_attempts(error, tier_attempts));
+                    }
+                }
             }
         }
     };
@@ -667,15 +661,6 @@ fn coordinate_click_actions(params: &ActClickParams, screen_point: Point) -> Vec
         });
     }
     actions
-}
-
-fn should_try_hwnd_message_fallback(error: &ErrorData) -> bool {
-    error
-        .data
-        .as_ref()
-        .and_then(|data| data.get("code"))
-        .and_then(serde_json::Value::as_str)
-        == Some(error_codes::ACTION_BACKEND_UNAVAILABLE)
 }
 
 #[cfg(windows)]

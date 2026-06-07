@@ -437,6 +437,28 @@ pub(crate) fn click_params_can_route_background_first(params: &ActClickParams) -
     }
 }
 
+pub(crate) fn click_target_root_hwnd(params: &ActClickParams) -> Result<Option<i64>, ErrorData> {
+    match &params.target {
+        ActClickTarget::Element(element) => {
+            let hwnd = element
+                .element_id
+                .parts()
+                .map_err(|error| {
+                    mcp_error(
+                        error_codes::ACTION_TARGET_INVALID,
+                        format!(
+                            "act_click element id {} could not be parsed for target-window verification: {error}",
+                            element.element_id
+                        ),
+                    )
+                })?
+                .hwnd;
+            Ok(Some(hwnd))
+        }
+        ActClickTarget::Point(_) => Ok(None),
+    }
+}
+
 pub(crate) fn click_error_code(error: &ErrorData) -> String {
     error
         .data
