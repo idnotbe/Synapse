@@ -1,9 +1,10 @@
 ---
 source: crates/synapse-mcp/tests/m4_tools_list.rs
+assertion_line: 142
 expression: snapshot
 ---
 {
-  "count": 91,
+  "count": 94,
   "m4_defaults": [
     {
       "actual": 33,
@@ -56,6 +57,21 @@ expression: snapshot
       "actual": 30000,
       "path": "inputSchema.properties.timeout_ms.default",
       "tool": "act_run_shell"
+    },
+    {
+      "actual": [],
+      "path": "inputSchema.properties.args.default",
+      "tool": "act_run_shell_start"
+    },
+    {
+      "actual": {},
+      "path": "inputSchema.properties.env.default",
+      "tool": "act_run_shell_start"
+    },
+    {
+      "actual": 65536,
+      "path": "inputSchema.properties.tail_bytes.default",
+      "tool": "act_run_shell_status"
     },
     {
       "actual": [],
@@ -113,6 +129,21 @@ expression: snapshot
       "tool": "act_run_shell"
     },
     {
+      "actual_contains": "command",
+      "path": "inputSchema.required",
+      "tool": "act_run_shell_start"
+    },
+    {
+      "actual_contains": "job_id",
+      "path": "inputSchema.required",
+      "tool": "act_run_shell_status"
+    },
+    {
+      "actual_contains": "job_id",
+      "path": "inputSchema.required",
+      "tool": "act_run_shell_cancel"
+    },
+    {
       "actual_contains": "target",
       "path": "inputSchema.required",
       "tool": "act_launch"
@@ -168,6 +199,9 @@ expression: snapshot
     "act_pad",
     "act_press",
     "act_run_shell",
+    "act_run_shell_cancel",
+    "act_run_shell_start",
+    "act_run_shell_status",
     "act_scroll",
     "act_set_value",
     "act_spawn_agent",

@@ -1,13 +1,16 @@
 use super::{
-    ActComboParams, ActComboResponse, ActLaunchParams, ActLaunchResponse, ActRunShellParams,
-    ActRunShellResponse, ActSpawnAgentCli, ActSpawnAgentLogPaths, ActSpawnAgentParams,
+    ActComboParams, ActComboResponse, ActLaunchParams, ActLaunchResponse,
+    ActRunShellCancelResponse, ActRunShellJobIdParams, ActRunShellParams, ActRunShellResponse,
+    ActRunShellStartParams, ActRunShellStartResponse, ActRunShellStatusParams,
+    ActRunShellStatusResponse, ActSpawnAgentCli, ActSpawnAgentLogPaths, ActSpawnAgentParams,
     ActSpawnAgentResponse, ActSpawnAgentTarget, ErrorData, Json, LaunchWindowState, Parameters,
-    RunShellAuthorization, SynapseService, authorize_run_shell, execute_combo, launch,
-    launch_process_history_row, launch_process_history_row_key, launch_request_details, mcp_error,
-    required_combo_permissions, run_authorized_shell, run_shell_idempotency_completed_row,
-    run_shell_idempotency_replay, run_shell_idempotency_reservation_row,
-    run_shell_idempotency_row_key, run_shell_request_details, tool, tool_router,
-    validate_agent_spawn_params,
+    RunShellAuthorization, SynapseService, authorize_run_shell, authorize_run_shell_start,
+    cancel_shell_job, execute_combo, launch, launch_process_history_row,
+    launch_process_history_row_key, launch_request_details, mcp_error, required_combo_permissions,
+    run_authorized_shell, run_shell_idempotency_completed_row, run_shell_idempotency_replay,
+    run_shell_idempotency_reservation_row, run_shell_idempotency_row_key,
+    run_shell_request_details, run_shell_start_request_details, shell_job_status,
+    start_authorized_shell_job, tool, tool_router, validate_agent_spawn_params,
 };
 
 use std::{
@@ -89,6 +92,95 @@ impl SynapseService {
             Err(error) => Err(error),
         };
         self.audit_action_result("act_run_shell", &result)?;
+        result.map(Json)
+    }
+
+    #[tool(
+        description = "Start an allowlisted executable as a durable background shell job. Returns immediately with a job id plus status/stdout/stderr file paths; use act_run_shell_status to poll and act_run_shell_cancel to terminate by job id."
+    )]
+    pub async fn act_run_shell_start(
+        &self,
+        params: Parameters<ActRunShellStartParams>,
+    ) -> Result<Json<ActRunShellStartResponse>, ErrorData> {
+        tracing::info!(
+            code = "MCP_TOOL_INVOCATION",
+            kind = "act_run_shell_start",
+            command = %params.0.command,
+            "tool.invocation kind=act_run_shell_start"
+        );
+        if let Err(error) = self.ensure_supported_use_allows_action("act_run_shell") {
+            self.audit_action_denied("act_run_shell_start", &error);
+            return Err(error);
+        }
+        let params = params.0;
+        self.audit_action_started_with_details(
+            "act_run_shell_start",
+            &run_shell_start_request_details(&params),
+        )?;
+        let result = match authorize_run_shell_start(&self.m4_config, &params) {
+            Ok(authorization) => start_authorized_shell_job(params, &authorization),
+            Err(error) => Err(error),
+        };
+        self.audit_action_result("act_run_shell_start", &result)?;
+        result.map(Json)
+    }
+
+    #[tool(
+        description = "Read durable background shell job status and tails of persisted stdout/stderr logs by job id. This is a separate source-of-truth readback and does not wait for the process to finish."
+    )]
+    pub async fn act_run_shell_status(
+        &self,
+        params: Parameters<ActRunShellStatusParams>,
+    ) -> Result<Json<ActRunShellStatusResponse>, ErrorData> {
+        tracing::info!(
+            code = "MCP_TOOL_INVOCATION",
+            kind = "act_run_shell_status",
+            job_id = %params.0.job_id,
+            "tool.invocation kind=act_run_shell_status"
+        );
+        if let Err(error) = self.ensure_supported_use_allows_action("act_run_shell") {
+            self.audit_action_denied("act_run_shell_status", &error);
+            return Err(error);
+        }
+        let params = params.0;
+        self.audit_action_started_with_details(
+            "act_run_shell_status",
+            &json!({
+                "job_id": &params.job_id,
+                "tail_bytes": params.tail_bytes,
+            }),
+        )?;
+        let result = shell_job_status(&params);
+        self.audit_action_result("act_run_shell_status", &result)?;
+        result.map(Json)
+    }
+
+    #[tool(
+        description = "Cancel a durable background shell job by exact job id, terminating only the recorded job-owned process tree and returning status/log/process readback."
+    )]
+    pub async fn act_run_shell_cancel(
+        &self,
+        params: Parameters<ActRunShellJobIdParams>,
+    ) -> Result<Json<ActRunShellCancelResponse>, ErrorData> {
+        tracing::info!(
+            code = "MCP_TOOL_INVOCATION",
+            kind = "act_run_shell_cancel",
+            job_id = %params.0.job_id,
+            "tool.invocation kind=act_run_shell_cancel"
+        );
+        if let Err(error) = self.ensure_supported_use_allows_action("act_run_shell") {
+            self.audit_action_denied("act_run_shell_cancel", &error);
+            return Err(error);
+        }
+        let params = params.0;
+        self.audit_action_started_with_details(
+            "act_run_shell_cancel",
+            &json!({
+                "job_id": &params.job_id,
+            }),
+        )?;
+        let result = cancel_shell_job(&params);
+        self.audit_action_result("act_run_shell_cancel", &result)?;
         result.map(Json)
     }
 

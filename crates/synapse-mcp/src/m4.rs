@@ -1,8 +1,9 @@
 use std::{
     borrow::Cow,
     collections::{BTreeMap, HashSet},
-    io,
-    path::Path,
+    fs::{self, OpenOptions},
+    io::{self, Read, Seek, SeekFrom},
+    path::{Path, PathBuf},
     process::{Command as StdCommand, Stdio},
     sync::{Arc, Mutex},
     time::{Duration, Instant},
@@ -57,6 +58,9 @@ const ALLOW_LAUNCH_ANY_ENV: &str = "SYNAPSE_ALLOW_LAUNCH_ANY";
 /// command/target without an allowlist entry.
 const ANY_PERMITTED_SENTINEL: &str = "__any_permitted__";
 const SHELL_OUTPUT_CAP_BYTES: usize = 1024 * 1024;
+const SHELL_JOB_TAIL_DEFAULT_BYTES: u64 = 64 * 1024;
+const SHELL_JOB_TAIL_MAX_BYTES: u64 = 1024 * 1024;
+const SHELL_JOB_ID_MAX_BYTES: usize = 128;
 const ALLOW_PATTERN_SIZE_LIMIT_BYTES: usize = 256 * 1024;
 const PROCESS_BASE_ENV_KEYS: [&str; 20] = [
     "PATH",
@@ -348,6 +352,117 @@ pub struct ActRunShellResponse {
     pub timed_out: bool,
     pub stdout_truncated: bool,
     pub stderr_truncated: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ActRunShellStartParams {
+    #[schemars(
+        description = "Executable path or program name only. Do not include arguments, quotes, pipes, redirection, or other shell syntax here; pass arguments in args. For shell syntax, set command to an explicit shell executable such as powershell.exe or cmd.exe and put the shell flags/snippet in args."
+    )]
+    pub command: String,
+    #[serde(default)]
+    #[schemars(
+        default,
+        description = "Arguments passed literally to the executable. These are not parsed by a shell unless command itself is an explicit shell executable."
+    )]
+    pub args: Vec<String>,
+    pub working_dir: Option<String>,
+    #[serde(default)]
+    #[schemars(default)]
+    pub env: BTreeMap<String, String>,
+    #[serde(default)]
+    #[schemars(range(min = 1))]
+    pub timeout_ms: Option<u64>,
+    #[serde(default)]
+    #[schemars(length(max = 128))]
+    pub job_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ActRunShellJobIdParams {
+    #[schemars(length(min = 1, max = 128))]
+    pub job_id: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ActRunShellStatusParams {
+    #[schemars(length(min = 1, max = 128))]
+    pub job_id: String,
+    #[serde(default = "default_shell_job_tail_bytes")]
+    #[schemars(
+        default = "default_shell_job_tail_bytes",
+        range(min = 0, max = 1048576)
+    )]
+    pub tail_bytes: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ActRunShellStartResponse {
+    pub job: ActRunShellJobStatus,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ActRunShellStatusResponse {
+    pub job: ActRunShellJobStatus,
+    pub running: bool,
+    pub stdout_len_bytes: u64,
+    pub stderr_len_bytes: u64,
+    pub stdout_tail: String,
+    pub stderr_tail: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ActRunShellCancelResponse {
+    pub job_id: String,
+    pub before_status: String,
+    pub cancel_requested: bool,
+    pub termination_attempted: bool,
+    pub termination_status: String,
+    pub remaining_process_ids: Vec<u32>,
+    pub status: ActRunShellStatusResponse,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ActRunShellJobStatus {
+    pub schema_version: u32,
+    pub job_id: String,
+    pub status: String,
+    pub pid: Option<u32>,
+    pub command: String,
+    pub args: Vec<String>,
+    pub command_line: String,
+    pub working_dir: Option<String>,
+    pub env_keys: Vec<String>,
+    pub timeout_ms: Option<u64>,
+    pub started_at: String,
+    pub completed_at: Option<String>,
+    pub duration_ms: Option<u64>,
+    pub exit_code: Option<i32>,
+    pub timed_out: bool,
+    pub cancel_requested: bool,
+    pub error_code: Option<String>,
+    pub error_message: Option<String>,
+    pub stdout_path: String,
+    pub stderr_path: String,
+    pub status_path: String,
+    pub request_sha256: String,
+    pub matched_pattern: String,
+}
+
+#[derive(Clone, Debug)]
+struct ShellJobPaths {
+    job_dir: PathBuf,
+    stdout_path: PathBuf,
+    stderr_path: PathBuf,
+    status_path: PathBuf,
+    request_path: PathBuf,
 }
 
 #[derive(Clone, Debug)]
@@ -833,6 +948,231 @@ pub fn run_shell_request_details(params: &ActRunShellParams) -> serde_json::Valu
         "timeout_ms": params.timeout_ms,
         "idempotency_key_present": params.idempotency_key.is_some(),
         "request_sha256": run_shell_request_sha256(params).ok(),
+    })
+}
+
+pub fn authorize_run_shell_start(
+    config: &M4ServiceConfig,
+    params: &ActRunShellStartParams,
+) -> Result<RunShellAuthorization, ErrorData> {
+    validate_run_shell_start_params(params)?;
+    let shell_params = run_shell_params_for_start_validation(params);
+    authorize_run_shell(config, &shell_params)
+}
+
+pub fn run_shell_start_request_details(params: &ActRunShellStartParams) -> serde_json::Value {
+    json!({
+        "command": params.command,
+        "args": params.args,
+        "working_dir": params.working_dir,
+        "env_keys": params.env.keys().cloned().collect::<Vec<_>>(),
+        "timeout_ms": params.timeout_ms,
+        "job_id": params.job_id,
+        "request_sha256": run_shell_start_request_sha256(params).ok(),
+    })
+}
+
+pub fn start_authorized_shell_job(
+    params: ActRunShellStartParams,
+    authorization: &RunShellAuthorization,
+) -> Result<ActRunShellStartResponse, ErrorData> {
+    let started = Instant::now();
+    let started_at = chrono::Utc::now().to_rfc3339();
+    let request_sha256 = run_shell_start_request_sha256(&params)?;
+    let (job_id, paths) = create_shell_job_paths(params.job_id.as_deref())?;
+    write_shell_job_request(&paths, &params, &request_sha256)?;
+
+    let stdout_file = open_shell_job_output(&paths.stdout_path, "stdout", &job_id)?;
+    let stderr_file = open_shell_job_output(&paths.stderr_path, "stderr", &job_id)?;
+    let mut child = match spawn_shell_job_child(&params, stdout_file, stderr_file) {
+        Ok(child) => child,
+        Err(error) => {
+            let mut status = shell_job_status_record(
+                &job_id,
+                "spawn_failed",
+                &params,
+                &paths,
+                &request_sha256,
+                authorization,
+                started_at,
+                None,
+            );
+            status.completed_at = Some(chrono::Utc::now().to_rfc3339());
+            status.duration_ms =
+                Some(u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX));
+            status.error_code = Some(extract_error_code(&error));
+            status.error_message = Some(error.message.to_string());
+            if let Err(write_error) = write_shell_job_status(&paths.status_path, &status) {
+                tracing::error!(
+                    code = "M4_ACT_RUN_SHELL_JOB_STATUS_WRITE_FAILED_AFTER_SPAWN_FAILURE",
+                    job_id = %job_id,
+                    error = ?write_error,
+                    "act_run_shell_start could not persist spawn failure status"
+                );
+            }
+            return Err(error);
+        }
+    };
+
+    let Some(pid) = child.id() else {
+        let _ = child.start_kill();
+        let mut status = shell_job_status_record(
+            &job_id,
+            "pid_unavailable",
+            &params,
+            &paths,
+            &request_sha256,
+            authorization,
+            started_at,
+            None,
+        );
+        status.completed_at = Some(chrono::Utc::now().to_rfc3339());
+        status.duration_ms = Some(u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX));
+        status.error_code = Some(error_codes::TOOL_INTERNAL_ERROR.to_owned());
+        status.error_message = Some("spawned process id was unavailable".to_owned());
+        write_shell_job_status(&paths.status_path, &status)?;
+        return Err(shell_tool_error(
+            error_codes::TOOL_INTERNAL_ERROR,
+            "act_run_shell_start spawned a child process but could not read its pid",
+            json!({
+                "code": error_codes::TOOL_INTERNAL_ERROR,
+                "job_id": job_id,
+                "reason": "pid_unavailable",
+                "status_path": paths.status_path,
+            }),
+        ));
+    };
+
+    let status = shell_job_status_record(
+        &job_id,
+        "running",
+        &params,
+        &paths,
+        &request_sha256,
+        authorization,
+        started_at,
+        Some(pid),
+    );
+    write_shell_job_status(&paths.status_path, &status)?;
+
+    let monitor_paths = paths.clone();
+    let monitor_status = status.clone();
+    tokio::spawn(async move {
+        monitor_shell_job(child, monitor_status, monitor_paths, started).await;
+    });
+
+    tracing::info!(
+        code = "M4_ACT_RUN_SHELL_JOB_STARTED",
+        job_id = %job_id,
+        pid,
+        command_line = %authorization.command_line,
+        matched_pattern = %authorization.matched_pattern,
+        timeout_ms = ?params.timeout_ms,
+        status_path = %paths.status_path.display(),
+        stdout_path = %paths.stdout_path.display(),
+        stderr_path = %paths.stderr_path.display(),
+        "readback=act_run_shell_start after=job_status_persisted"
+    );
+    Ok(ActRunShellStartResponse { job: status })
+}
+
+pub fn shell_job_status(
+    params: &ActRunShellStatusParams,
+) -> Result<ActRunShellStatusResponse, ErrorData> {
+    validate_shell_job_id(&params.job_id)?;
+    if params.tail_bytes > SHELL_JOB_TAIL_MAX_BYTES {
+        return Err(shell_tool_error(
+            error_codes::TOOL_PARAMS_INVALID,
+            format!("act_run_shell_status tail_bytes must be <= {SHELL_JOB_TAIL_MAX_BYTES}"),
+            json!({
+                "code": error_codes::TOOL_PARAMS_INVALID,
+                "job_id": params.job_id,
+                "tail_bytes": params.tail_bytes,
+                "max_tail_bytes": SHELL_JOB_TAIL_MAX_BYTES,
+                "reason": "tail_bytes_too_large",
+            }),
+        ));
+    }
+    let paths = shell_job_paths_for_id(&params.job_id)?;
+    let mut job = read_shell_job_status(&paths.status_path, &params.job_id)?;
+    job = reconcile_shell_job_process_state(job, &paths)?;
+    let tail_bytes =
+        usize::try_from(params.tail_bytes).unwrap_or(SHELL_JOB_TAIL_MAX_BYTES as usize);
+    let stdout_len_bytes = file_len(&paths.stdout_path, &params.job_id, "stdout")?;
+    let stderr_len_bytes = file_len(&paths.stderr_path, &params.job_id, "stderr")?;
+    let stdout_tail = tail_file_lossy(&paths.stdout_path, tail_bytes)?;
+    let stderr_tail = tail_file_lossy(&paths.stderr_path, tail_bytes)?;
+    let running = shell_job_live_status(&job.status)
+        && job
+            .pid
+            .is_some_and(|pid| shell_job_live_process_ids(&[pid]).contains(&pid));
+    tracing::info!(
+        code = "M4_ACT_RUN_SHELL_JOB_STATUS_READ",
+        job_id = %params.job_id,
+        status = %job.status,
+        running,
+        stdout_len_bytes,
+        stderr_len_bytes,
+        "readback=act_run_shell_status after=status_file_and_process_table"
+    );
+    Ok(ActRunShellStatusResponse {
+        job,
+        running,
+        stdout_len_bytes,
+        stderr_len_bytes,
+        stdout_tail,
+        stderr_tail,
+    })
+}
+
+pub fn cancel_shell_job(
+    params: &ActRunShellJobIdParams,
+) -> Result<ActRunShellCancelResponse, ErrorData> {
+    validate_shell_job_id(&params.job_id)?;
+    let paths = shell_job_paths_for_id(&params.job_id)?;
+    let mut job = read_shell_job_status(&paths.status_path, &params.job_id)?;
+    let before_status = job.status.clone();
+    let mut cancel_requested = false;
+    let mut termination_attempted = false;
+    let mut termination_status = "already_terminal".to_owned();
+    let mut remaining_process_ids = Vec::new();
+
+    if shell_job_live_status(&job.status) {
+        cancel_requested = true;
+        job.cancel_requested = true;
+        job.status = "cancel_requested".to_owned();
+        write_shell_job_status(&paths.status_path, &job)?;
+        if let Some(pid) = job.pid {
+            let termination = terminate_shell_job_process_tree(pid);
+            termination_attempted = termination.attempted;
+            termination_status = termination.status;
+            remaining_process_ids = termination.remaining_process_ids;
+        } else {
+            termination_status = "pid_unavailable".to_owned();
+        }
+    }
+
+    let status = shell_job_status(&ActRunShellStatusParams {
+        job_id: params.job_id.clone(),
+        tail_bytes: default_shell_job_tail_bytes(),
+    })?;
+    tracing::info!(
+        code = "M4_ACT_RUN_SHELL_JOB_CANCEL_READBACK",
+        job_id = %params.job_id,
+        before_status = %before_status,
+        after_status = %status.job.status,
+        termination_status = %termination_status,
+        remaining_process_ids = ?remaining_process_ids,
+        "readback=act_run_shell_cancel after=status_file_and_process_table"
+    );
+    Ok(ActRunShellCancelResponse {
+        job_id: params.job_id.clone(),
+        before_status,
+        cancel_requested,
+        termination_attempted,
+        termination_status,
+        remaining_process_ids,
+        status,
     })
 }
 
@@ -2856,6 +3196,863 @@ fn snapshot_visible_window_hwnds() -> HashSet<i64> {
     }
 }
 
+fn validate_run_shell_start_params(params: &ActRunShellStartParams) -> Result<(), ErrorData> {
+    if matches!(params.timeout_ms, Some(0)) {
+        return Err(mcp_error(
+            error_codes::TOOL_PARAMS_INVALID,
+            "act_run_shell_start timeout_ms must be >= 1 when provided",
+        ));
+    }
+    if let Some(job_id) = &params.job_id {
+        validate_shell_job_id(job_id)?;
+    }
+    let shell_params = run_shell_params_for_start_validation(params);
+    validate_run_shell_params(&shell_params)
+}
+
+fn run_shell_params_for_start_validation(params: &ActRunShellStartParams) -> ActRunShellParams {
+    ActRunShellParams {
+        command: params.command.clone(),
+        args: params.args.clone(),
+        working_dir: params.working_dir.clone(),
+        env: params.env.clone(),
+        timeout_ms: params.timeout_ms.unwrap_or(1),
+        idempotency_key: None,
+    }
+}
+
+fn validate_shell_job_id(job_id: &str) -> Result<(), ErrorData> {
+    if job_id.is_empty() {
+        return Err(shell_tool_error(
+            error_codes::TOOL_PARAMS_INVALID,
+            "act_run_shell job_id must not be empty",
+            json!({
+                "code": error_codes::TOOL_PARAMS_INVALID,
+                "reason": "job_id_empty",
+            }),
+        ));
+    }
+    if job_id.len() > SHELL_JOB_ID_MAX_BYTES {
+        return Err(shell_tool_error(
+            error_codes::TOOL_PARAMS_INVALID,
+            format!("act_run_shell job_id must be <= {SHELL_JOB_ID_MAX_BYTES} bytes"),
+            json!({
+                "code": error_codes::TOOL_PARAMS_INVALID,
+                "job_id": job_id,
+                "max_bytes": SHELL_JOB_ID_MAX_BYTES,
+                "reason": "job_id_too_long",
+            }),
+        ));
+    }
+    if !job_id
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        return Err(shell_tool_error(
+            error_codes::TOOL_PARAMS_INVALID,
+            "act_run_shell job_id may contain only ASCII letters, digits, hyphen, and underscore",
+            json!({
+                "code": error_codes::TOOL_PARAMS_INVALID,
+                "job_id": job_id,
+                "reason": "job_id_invalid_characters",
+            }),
+        ));
+    }
+    Ok(())
+}
+
+fn create_shell_job_paths(
+    requested_job_id: Option<&str>,
+) -> Result<(String, ShellJobPaths), ErrorData> {
+    let root = shell_job_root_dir()?;
+    fs::create_dir_all(&root).map_err(|error| {
+        shell_tool_error(
+            error_codes::STORAGE_WRITE_FAILED,
+            format!("act_run_shell_start failed to create shell job root: {error}"),
+            json!({
+                "code": error_codes::STORAGE_WRITE_FAILED,
+                "path": root,
+                "reason": "job_root_create_failed",
+            }),
+        )
+    })?;
+
+    if let Some(job_id) = requested_job_id {
+        validate_shell_job_id(job_id)?;
+        let paths = shell_job_paths_from_root(&root, job_id);
+        match fs::create_dir(&paths.job_dir) {
+            Ok(()) => return Ok((job_id.to_owned(), paths)),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                return Err(shell_tool_error(
+                    error_codes::TOOL_PARAMS_INVALID,
+                    "act_run_shell_start job_id already exists",
+                    json!({
+                        "code": error_codes::TOOL_PARAMS_INVALID,
+                        "job_id": job_id,
+                        "path": paths.job_dir,
+                        "reason": "job_id_already_exists",
+                    }),
+                ));
+            }
+            Err(error) => {
+                return Err(shell_tool_error(
+                    error_codes::STORAGE_WRITE_FAILED,
+                    format!("act_run_shell_start failed to create shell job directory: {error}"),
+                    json!({
+                        "code": error_codes::STORAGE_WRITE_FAILED,
+                        "job_id": job_id,
+                        "path": paths.job_dir,
+                        "reason": "job_dir_create_failed",
+                    }),
+                ));
+            }
+        }
+    }
+
+    for _attempt in 0..8 {
+        let job_id = new_reflex_id();
+        let paths = shell_job_paths_from_root(&root, &job_id);
+        match fs::create_dir(&paths.job_dir) {
+            Ok(()) => return Ok((job_id, paths)),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(shell_tool_error(
+                    error_codes::STORAGE_WRITE_FAILED,
+                    format!(
+                        "act_run_shell_start failed to create generated shell job directory: {error}"
+                    ),
+                    json!({
+                        "code": error_codes::STORAGE_WRITE_FAILED,
+                        "job_id": job_id,
+                        "path": paths.job_dir,
+                        "reason": "job_dir_create_failed",
+                    }),
+                ));
+            }
+        }
+    }
+    Err(shell_tool_error(
+        error_codes::TOOL_INTERNAL_ERROR,
+        "act_run_shell_start could not allocate a unique shell job id",
+        json!({
+            "code": error_codes::TOOL_INTERNAL_ERROR,
+            "root": root,
+            "reason": "job_id_allocation_failed",
+        }),
+    ))
+}
+
+fn shell_job_paths_for_id(job_id: &str) -> Result<ShellJobPaths, ErrorData> {
+    validate_shell_job_id(job_id)?;
+    let root = shell_job_root_dir()?;
+    Ok(shell_job_paths_from_root(&root, job_id))
+}
+
+fn shell_job_paths_from_root(root: &Path, job_id: &str) -> ShellJobPaths {
+    let job_dir = root.join(job_id);
+    ShellJobPaths {
+        stdout_path: job_dir.join("stdout.log"),
+        stderr_path: job_dir.join("stderr.log"),
+        status_path: job_dir.join("status.json"),
+        request_path: job_dir.join("request.json"),
+        job_dir,
+    }
+}
+
+fn shell_job_root_dir() -> Result<PathBuf, ErrorData> {
+    #[cfg(windows)]
+    {
+        let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") else {
+            return Err(shell_tool_error(
+                error_codes::STORAGE_OPEN_FAILED,
+                "act_run_shell_start cannot locate LOCALAPPDATA for durable shell job logs",
+                json!({
+                    "code": error_codes::STORAGE_OPEN_FAILED,
+                    "reason": "localappdata_missing",
+                }),
+            ));
+        };
+        return Ok(PathBuf::from(local_app_data)
+            .join("Synapse")
+            .join("shell-jobs"));
+    }
+
+    #[cfg(not(windows))]
+    {
+        if let Some(state_home) = std::env::var_os("XDG_STATE_HOME") {
+            return Ok(PathBuf::from(state_home).join("synapse").join("shell-jobs"));
+        }
+        let Some(home) = std::env::var_os("HOME") else {
+            return Err(shell_tool_error(
+                error_codes::STORAGE_OPEN_FAILED,
+                "act_run_shell_start cannot locate HOME or XDG_STATE_HOME for durable shell job logs",
+                json!({
+                    "code": error_codes::STORAGE_OPEN_FAILED,
+                    "reason": "state_home_missing",
+                }),
+            ));
+        };
+        Ok(PathBuf::from(home)
+            .join(".local")
+            .join("state")
+            .join("synapse")
+            .join("shell-jobs"))
+    }
+}
+
+fn write_shell_job_request(
+    paths: &ShellJobPaths,
+    params: &ActRunShellStartParams,
+    request_sha256: &str,
+) -> Result<(), ErrorData> {
+    let request = json!({
+        "schema_version": 1,
+        "command": params.command,
+        "args": params.args,
+        "working_dir": params.working_dir,
+        "env_keys": params.env.keys().cloned().collect::<Vec<_>>(),
+        "timeout_ms": params.timeout_ms,
+        "requested_job_id": params.job_id,
+        "request_sha256": request_sha256,
+        "created_at": chrono::Utc::now().to_rfc3339(),
+    });
+    write_pretty_json_file(&paths.request_path, &request, "request")
+}
+
+fn write_pretty_json_file<T: Serialize>(
+    path: &Path,
+    value: &T,
+    role: &'static str,
+) -> Result<(), ErrorData> {
+    let bytes = serde_json::to_vec_pretty(value).map_err(|error| {
+        shell_tool_error(
+            error_codes::TOOL_INTERNAL_ERROR,
+            format!("act_run_shell failed to encode shell job {role}: {error}"),
+            json!({
+                "code": error_codes::TOOL_INTERNAL_ERROR,
+                "path": path,
+                "reason": "job_json_encode_failed",
+                "role": role,
+            }),
+        )
+    })?;
+    fs::write(path, bytes).map_err(|error| {
+        shell_tool_error(
+            error_codes::STORAGE_WRITE_FAILED,
+            format!("act_run_shell failed to write shell job {role}: {error}"),
+            json!({
+                "code": error_codes::STORAGE_WRITE_FAILED,
+                "path": path,
+                "reason": "job_json_write_failed",
+                "role": role,
+            }),
+        )
+    })
+}
+
+fn write_shell_job_status(path: &Path, status: &ActRunShellJobStatus) -> Result<(), ErrorData> {
+    let bytes = serde_json::to_vec_pretty(status).map_err(|error| {
+        shell_tool_error(
+            error_codes::TOOL_INTERNAL_ERROR,
+            format!("act_run_shell failed to encode shell job status: {error}"),
+            json!({
+                "code": error_codes::TOOL_INTERNAL_ERROR,
+                "job_id": status.job_id,
+                "path": path,
+                "reason": "job_status_encode_failed",
+            }),
+        )
+    })?;
+    let tmp_path = path.with_extension("json.tmp");
+    fs::write(&tmp_path, bytes).map_err(|error| {
+        shell_tool_error(
+            error_codes::STORAGE_WRITE_FAILED,
+            format!("act_run_shell failed to write shell job status temp file: {error}"),
+            json!({
+                "code": error_codes::STORAGE_WRITE_FAILED,
+                "job_id": status.job_id,
+                "path": tmp_path,
+                "reason": "job_status_temp_write_failed",
+            }),
+        )
+    })?;
+    if let Err(error) = fs::remove_file(path)
+        && error.kind() != io::ErrorKind::NotFound
+    {
+        return Err(shell_tool_error(
+            error_codes::STORAGE_WRITE_FAILED,
+            format!("act_run_shell failed to replace shell job status file: {error}"),
+            json!({
+                "code": error_codes::STORAGE_WRITE_FAILED,
+                "job_id": status.job_id,
+                "path": path,
+                "reason": "job_status_replace_failed",
+            }),
+        ));
+    }
+    fs::rename(&tmp_path, path).map_err(|error| {
+        shell_tool_error(
+            error_codes::STORAGE_WRITE_FAILED,
+            format!("act_run_shell failed to commit shell job status file: {error}"),
+            json!({
+                "code": error_codes::STORAGE_WRITE_FAILED,
+                "job_id": status.job_id,
+                "path": path,
+                "tmp_path": tmp_path,
+                "reason": "job_status_rename_failed",
+            }),
+        )
+    })
+}
+
+fn read_shell_job_status(path: &Path, job_id: &str) -> Result<ActRunShellJobStatus, ErrorData> {
+    let bytes = fs::read(path).map_err(|error| {
+        let code = if error.kind() == io::ErrorKind::NotFound {
+            error_codes::TOOL_PARAMS_INVALID
+        } else {
+            error_codes::STORAGE_READ_FAILED
+        };
+        let reason = if error.kind() == io::ErrorKind::NotFound {
+            "job_not_found"
+        } else {
+            "job_status_read_failed"
+        };
+        shell_tool_error(
+            code,
+            format!("act_run_shell job status could not be read: {error}"),
+            json!({
+                "code": code,
+                "job_id": job_id,
+                "path": path,
+                "reason": reason,
+            }),
+        )
+    })?;
+    serde_json::from_slice(&bytes).map_err(|error| {
+        shell_tool_error(
+            error_codes::STORAGE_READ_FAILED,
+            format!("act_run_shell job status JSON is invalid: {error}"),
+            json!({
+                "code": error_codes::STORAGE_READ_FAILED,
+                "job_id": job_id,
+                "path": path,
+                "reason": "job_status_decode_failed",
+            }),
+        )
+    })
+}
+
+fn shell_job_status_record(
+    job_id: &str,
+    status: &str,
+    params: &ActRunShellStartParams,
+    paths: &ShellJobPaths,
+    request_sha256: &str,
+    authorization: &RunShellAuthorization,
+    started_at: String,
+    pid: Option<u32>,
+) -> ActRunShellJobStatus {
+    ActRunShellJobStatus {
+        schema_version: 1,
+        job_id: job_id.to_owned(),
+        status: status.to_owned(),
+        pid,
+        command: params.command.clone(),
+        args: params.args.clone(),
+        command_line: authorization.command_line.clone(),
+        working_dir: params.working_dir.clone(),
+        env_keys: params.env.keys().cloned().collect(),
+        timeout_ms: params.timeout_ms,
+        started_at,
+        completed_at: None,
+        duration_ms: None,
+        exit_code: None,
+        timed_out: false,
+        cancel_requested: false,
+        error_code: None,
+        error_message: None,
+        stdout_path: path_string(&paths.stdout_path),
+        stderr_path: path_string(&paths.stderr_path),
+        status_path: path_string(&paths.status_path),
+        request_sha256: request_sha256.to_owned(),
+        matched_pattern: authorization.matched_pattern.clone(),
+    }
+}
+
+fn open_shell_job_output(
+    path: &Path,
+    stream: &'static str,
+    job_id: &str,
+) -> Result<fs::File, ErrorData> {
+    OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(path)
+        .map_err(|error| {
+            shell_tool_error(
+                error_codes::STORAGE_WRITE_FAILED,
+                format!("act_run_shell_start failed to open shell job {stream} log: {error}"),
+                json!({
+                    "code": error_codes::STORAGE_WRITE_FAILED,
+                    "job_id": job_id,
+                    "path": path,
+                    "stream": stream,
+                    "reason": "job_output_open_failed",
+                }),
+            )
+        })
+}
+
+fn spawn_shell_job_child(
+    params: &ActRunShellStartParams,
+    stdout_file: fs::File,
+    stderr_file: fs::File,
+) -> Result<tokio::process::Child, ErrorData> {
+    let mut command = TokioCommand::new(&params.command);
+    command.args(&params.args);
+    if let Some(working_dir) = &params.working_dir {
+        command.current_dir(working_dir);
+    }
+    command.env_clear();
+    let mut env = child_base_environment();
+    ensure_child_temp_environment(&mut env);
+    validate_child_base_environment(&env, "act_run_shell")?;
+    for (_sort_key, (key, value)) in env {
+        command.env(key, value);
+    }
+    command.envs(&params.env);
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(stdout_file))
+        .stderr(Stdio::from(stderr_file))
+        .kill_on_drop(false);
+    apply_no_window_tokio(&mut command);
+
+    command.spawn().map_err(|error| {
+        shell_tool_error(
+            error_codes::ACTION_TARGET_INVALID,
+            format!("act_run_shell_start failed to spawn command: {error}"),
+            json!({
+                "code": error_codes::ACTION_TARGET_INVALID,
+                "command": params.command,
+                "args": params.args,
+                "working_dir": params.working_dir,
+                "reason": "spawn_failed",
+            }),
+        )
+    })
+}
+
+async fn monitor_shell_job(
+    mut child: tokio::process::Child,
+    mut status: ActRunShellJobStatus,
+    paths: ShellJobPaths,
+    started: Instant,
+) {
+    let (exit_code, timed_out, wait_error) =
+        wait_shell_job_child(&mut child, status.timeout_ms).await;
+    if let Ok(latest) = read_shell_job_status(&paths.status_path, &status.job_id) {
+        status.cancel_requested |= latest.cancel_requested;
+        if latest.status == "cancel_requested" {
+            status.status = latest.status;
+        }
+    }
+    status.exit_code = exit_code;
+    status.timed_out = timed_out;
+    status.completed_at = Some(chrono::Utc::now().to_rfc3339());
+    status.duration_ms = Some(u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX));
+    if let Some(error) = wait_error {
+        status.status = "wait_failed".to_owned();
+        status.error_code = Some(error_codes::TOOL_INTERNAL_ERROR.to_owned());
+        status.error_message = Some(error);
+    } else {
+        status.status =
+            terminal_shell_job_status(status.exit_code, status.timed_out, status.cancel_requested)
+                .to_owned();
+    }
+    if let Err(error) = write_shell_job_status(&paths.status_path, &status) {
+        tracing::error!(
+            code = "M4_ACT_RUN_SHELL_JOB_FINAL_STATUS_WRITE_FAILED",
+            job_id = %status.job_id,
+            error = ?error,
+            "act_run_shell_start monitor could not persist final job status"
+        );
+    } else {
+        tracing::info!(
+            code = "M4_ACT_RUN_SHELL_JOB_COMPLETED",
+            job_id = %status.job_id,
+            pid = ?status.pid,
+            status = %status.status,
+            exit_code = ?status.exit_code,
+            timed_out = status.timed_out,
+            cancel_requested = status.cancel_requested,
+            "readback=act_run_shell_start after=process_complete_status_persisted"
+        );
+    }
+}
+
+async fn wait_shell_job_child(
+    child: &mut tokio::process::Child,
+    timeout_ms: Option<u64>,
+) -> (Option<i32>, bool, Option<String>) {
+    match timeout_ms {
+        Some(timeout_ms) => {
+            match tokio::time::timeout(Duration::from_millis(timeout_ms), child.wait()).await {
+                Ok(Ok(status)) => (status.code(), false, None),
+                Ok(Err(error)) => (None, false, Some(format!("wait_failed:{error}"))),
+                Err(_elapsed) => {
+                    if let Err(error) = child.start_kill() {
+                        tracing::warn!(
+                            code = "M4_ACT_RUN_SHELL_JOB_TIMEOUT_KILL_FAILED",
+                            error = %error,
+                            "act_run_shell_start timeout kill request failed"
+                        );
+                    }
+                    match child.wait().await {
+                        Ok(_status) => (None, true, None),
+                        Err(error) => (
+                            None,
+                            true,
+                            Some(format!("wait_after_timeout_failed:{error}")),
+                        ),
+                    }
+                }
+            }
+        }
+        None => match child.wait().await {
+            Ok(status) => (status.code(), false, None),
+            Err(error) => (None, false, Some(format!("wait_failed:{error}"))),
+        },
+    }
+}
+
+fn terminal_shell_job_status(
+    exit_code: Option<i32>,
+    timed_out: bool,
+    cancel_requested: bool,
+) -> &'static str {
+    if timed_out {
+        "timed_out"
+    } else if cancel_requested {
+        "cancelled"
+    } else if exit_code == Some(0) {
+        "ok"
+    } else {
+        "exit_nonzero"
+    }
+}
+
+fn reconcile_shell_job_process_state(
+    mut job: ActRunShellJobStatus,
+    paths: &ShellJobPaths,
+) -> Result<ActRunShellJobStatus, ErrorData> {
+    if !shell_job_live_status(&job.status) {
+        return Ok(job);
+    }
+    let Some(pid) = job.pid else {
+        job.status = "pid_unavailable".to_owned();
+        job.completed_at
+            .get_or_insert_with(|| chrono::Utc::now().to_rfc3339());
+        job.duration_ms
+            .get_or_insert_with(|| elapsed_ms_since_rfc3339(&job.started_at).unwrap_or_default());
+        job.error_code = Some(error_codes::TOOL_INTERNAL_ERROR.to_owned());
+        job.error_message = Some("job status had no pid while marked live".to_owned());
+        write_shell_job_status(&paths.status_path, &job)?;
+        return Ok(job);
+    };
+    if shell_job_live_process_ids(&[pid]).contains(&pid) {
+        return Ok(job);
+    }
+    job.status = if job.cancel_requested {
+        "cancelled".to_owned()
+    } else {
+        job.error_code = Some(error_codes::TOOL_INTERNAL_ERROR.to_owned());
+        job.error_message =
+            Some("job process exited before the monitor persisted final status".to_owned());
+        "exited_unobserved".to_owned()
+    };
+    job.completed_at
+        .get_or_insert_with(|| chrono::Utc::now().to_rfc3339());
+    job.duration_ms
+        .get_or_insert_with(|| elapsed_ms_since_rfc3339(&job.started_at).unwrap_or_default());
+    write_shell_job_status(&paths.status_path, &job)?;
+    Ok(job)
+}
+
+fn shell_job_live_status(status: &str) -> bool {
+    matches!(status, "running" | "cancel_requested")
+}
+
+fn elapsed_ms_since_rfc3339(started_at: &str) -> Option<u64> {
+    let started_at = chrono::DateTime::parse_from_rfc3339(started_at).ok()?;
+    let elapsed = chrono::Utc::now().signed_duration_since(started_at);
+    u64::try_from(elapsed.num_milliseconds().max(0)).ok()
+}
+
+fn file_len(path: &Path, job_id: &str, stream: &'static str) -> Result<u64, ErrorData> {
+    fs::metadata(path)
+        .map(|metadata| metadata.len())
+        .map_err(|error| {
+            shell_tool_error(
+                error_codes::STORAGE_READ_FAILED,
+                format!(
+                    "act_run_shell_status failed to read shell job {stream} log metadata: {error}"
+                ),
+                json!({
+                    "code": error_codes::STORAGE_READ_FAILED,
+                    "job_id": job_id,
+                    "path": path,
+                    "stream": stream,
+                    "reason": "job_output_metadata_read_failed",
+                }),
+            )
+        })
+}
+
+fn tail_file_lossy(path: &Path, limit_bytes: usize) -> Result<String, ErrorData> {
+    let mut file = fs::File::open(path).map_err(|error| {
+        shell_tool_error(
+            error_codes::STORAGE_READ_FAILED,
+            format!("act_run_shell_status failed to open shell job output: {error}"),
+            json!({
+                "code": error_codes::STORAGE_READ_FAILED,
+                "path": path,
+                "reason": "job_output_open_read_failed",
+            }),
+        )
+    })?;
+    let len = file
+        .metadata()
+        .map_err(|error| {
+            shell_tool_error(
+                error_codes::STORAGE_READ_FAILED,
+                format!("act_run_shell_status failed to read shell job output metadata: {error}"),
+                json!({
+                    "code": error_codes::STORAGE_READ_FAILED,
+                    "path": path,
+                    "reason": "job_output_metadata_read_failed",
+                }),
+            )
+        })?
+        .len();
+    let start = len.saturating_sub(u64::try_from(limit_bytes).unwrap_or(u64::MAX));
+    file.seek(SeekFrom::Start(start)).map_err(|error| {
+        shell_tool_error(
+            error_codes::STORAGE_READ_FAILED,
+            format!("act_run_shell_status failed to seek shell job output: {error}"),
+            json!({
+                "code": error_codes::STORAGE_READ_FAILED,
+                "path": path,
+                "reason": "job_output_seek_failed",
+            }),
+        )
+    })?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes).map_err(|error| {
+        shell_tool_error(
+            error_codes::STORAGE_READ_FAILED,
+            format!("act_run_shell_status failed to read shell job output: {error}"),
+            json!({
+                "code": error_codes::STORAGE_READ_FAILED,
+                "path": path,
+                "reason": "job_output_read_failed",
+            }),
+        )
+    })?;
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+fn run_shell_start_request_sha256(params: &ActRunShellStartParams) -> Result<String, ErrorData> {
+    let payload = json!({
+        "command": params.command,
+        "args": params.args,
+        "working_dir": params.working_dir,
+        "env": params.env,
+        "timeout_ms": params.timeout_ms,
+        "job_id": params.job_id,
+    });
+    let bytes = serde_json::to_vec(&payload).map_err(|error| {
+        mcp_error(
+            error_codes::TOOL_INTERNAL_ERROR,
+            format!("act_run_shell_start request fingerprint encode failed: {error}"),
+        )
+    })?;
+    Ok(sha256_hex(&bytes))
+}
+
+fn extract_error_code(error: &ErrorData) -> String {
+    error
+        .data
+        .as_ref()
+        .and_then(|data| data.get("code"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or(error_codes::TOOL_INTERNAL_ERROR)
+        .to_owned()
+}
+
+fn path_string(path: &Path) -> String {
+    path.to_string_lossy().into_owned()
+}
+
+#[cfg(windows)]
+fn apply_no_window_tokio(command: &mut TokioCommand) {
+    command.creation_flags(0x0800_0000);
+}
+
+#[cfg(not(windows))]
+fn apply_no_window_tokio(_command: &mut TokioCommand) {}
+
+#[cfg(windows)]
+fn apply_no_window_std(command: &mut StdCommand) {
+    use std::os::windows::process::CommandExt;
+    command.creation_flags(0x0800_0000);
+}
+
+#[cfg(not(windows))]
+fn apply_no_window_std(_command: &mut StdCommand) {}
+
+struct ShellJobTerminationReadback {
+    attempted: bool,
+    status: String,
+    remaining_process_ids: Vec<u32>,
+}
+
+fn terminate_shell_job_process_tree(pid: u32) -> ShellJobTerminationReadback {
+    let process_ids = shell_job_process_tree_ids(pid);
+    let initial_live_process_ids = shell_job_live_process_ids(&process_ids);
+    if initial_live_process_ids.is_empty() {
+        return ShellJobTerminationReadback {
+            attempted: false,
+            status: "already_exited".to_owned(),
+            remaining_process_ids: Vec::new(),
+        };
+    }
+
+    terminate_shell_job_process_tree_platform(pid, &process_ids)
+}
+
+#[cfg(windows)]
+fn terminate_shell_job_process_tree_platform(
+    pid: u32,
+    process_ids: &[u32],
+) -> ShellJobTerminationReadback {
+    let mut command = StdCommand::new("taskkill.exe");
+    command.args(["/PID", &pid.to_string(), "/T", "/F"]);
+    apply_no_window_std(&mut command);
+    match command.output() {
+        Ok(output) => {
+            let (remaining_process_ids, _waited_ms) =
+                wait_for_shell_job_process_tree_exit(process_ids, Duration::from_secs(5));
+            ShellJobTerminationReadback {
+                attempted: true,
+                status: if output.status.success() && remaining_process_ids.is_empty() {
+                    "terminated".to_owned()
+                } else {
+                    "termination_failed".to_owned()
+                },
+                remaining_process_ids,
+            }
+        }
+        Err(error) => ShellJobTerminationReadback {
+            attempted: true,
+            status: format!("taskkill_spawn_failed:{error}"),
+            remaining_process_ids: shell_job_live_process_ids(process_ids),
+        },
+    }
+}
+
+#[cfg(not(windows))]
+fn terminate_shell_job_process_tree_platform(
+    _pid: u32,
+    process_ids: &[u32],
+) -> ShellJobTerminationReadback {
+    let mut status = "terminated".to_owned();
+    for pid in process_ids.iter().rev() {
+        let output = StdCommand::new("kill")
+            .args(["-TERM", &pid.to_string()])
+            .output();
+        if let Err(error) = output {
+            status = format!("kill_spawn_failed:{error}");
+        }
+    }
+    let (mut remaining_process_ids, _waited_ms) =
+        wait_for_shell_job_process_tree_exit(process_ids, Duration::from_secs(5));
+    if !remaining_process_ids.is_empty() {
+        for pid in &remaining_process_ids {
+            let _ = StdCommand::new("kill")
+                .args(["-KILL", &pid.to_string()])
+                .output();
+        }
+        let (remaining_after_kill, _waited_ms) =
+            wait_for_shell_job_process_tree_exit(process_ids, Duration::from_secs(5));
+        remaining_process_ids = remaining_after_kill;
+        if !remaining_process_ids.is_empty() {
+            status = "termination_failed".to_owned();
+        }
+    }
+    ShellJobTerminationReadback {
+        attempted: true,
+        status,
+        remaining_process_ids,
+    }
+}
+
+fn shell_job_process_tree_ids(root_pid: u32) -> Vec<u32> {
+    use sysinfo::{ProcessesToUpdate, System};
+
+    let mut system = System::new_all();
+    system.refresh_processes(ProcessesToUpdate::All, true);
+    let mut ids = vec![root_pid];
+    ids.extend(shell_job_descendant_process_ids(&system, root_pid));
+    ids.sort_unstable();
+    ids.dedup();
+    ids
+}
+
+fn shell_job_descendant_process_ids(system: &sysinfo::System, root_pid: u32) -> Vec<u32> {
+    let mut descendants = Vec::new();
+    let mut stack = vec![root_pid];
+    while let Some(parent) = stack.pop() {
+        for (pid, process) in system.processes() {
+            if process.parent().map(|value| value.as_u32()) == Some(parent) {
+                let child = pid.as_u32();
+                descendants.push(child);
+                stack.push(child);
+            }
+        }
+    }
+    descendants
+}
+
+fn shell_job_live_process_ids(process_ids: &[u32]) -> Vec<u32> {
+    use sysinfo::{Pid, ProcessesToUpdate, System};
+
+    let pids = process_ids
+        .iter()
+        .copied()
+        .map(Pid::from_u32)
+        .collect::<Vec<_>>();
+    let mut system = System::new();
+    system.refresh_processes(ProcessesToUpdate::Some(&pids), false);
+    process_ids
+        .iter()
+        .copied()
+        .filter(|pid| system.process(Pid::from_u32(*pid)).is_some())
+        .collect()
+}
+
+fn wait_for_shell_job_process_tree_exit(process_ids: &[u32], timeout: Duration) -> (Vec<u32>, u64) {
+    let started = Instant::now();
+    loop {
+        let remaining = shell_job_live_process_ids(process_ids);
+        if remaining.is_empty() || started.elapsed() >= timeout {
+            return (remaining, started.elapsed().as_millis() as u64);
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
 async fn run_allowlisted_shell(
     params: ActRunShellParams,
 ) -> Result<ActRunShellResponse, ErrorData> {
@@ -2894,6 +4091,7 @@ fn spawn_shell_child(params: &ActRunShellParams) -> Result<tokio::process::Child
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    apply_no_window_tokio(&mut command);
 
     command.spawn().map_err(|error| {
         shell_tool_error(
@@ -3206,6 +4404,10 @@ const fn default_backend() -> Backend {
 
 const fn default_shell_timeout_ms() -> u64 {
     DEFAULT_SHELL_TIMEOUT_MS
+}
+
+const fn default_shell_job_tail_bytes() -> u64 {
+    SHELL_JOB_TAIL_DEFAULT_BYTES
 }
 
 const fn default_launch_timeout_ms() -> u32 {

@@ -4,7 +4,7 @@ use anyhow::{Context, ensure};
 use serde_json::{Value, json};
 use synapse_test_utils::stdio_mcp_client::StdioMcpClient;
 
-const EXPECTED_TOOLS: [&str; 91] = [
+const EXPECTED_TOOLS: [&str; 94] = [
     "act_click",
     "act_clipboard",
     "act_combo",
@@ -14,6 +14,9 @@ const EXPECTED_TOOLS: [&str; 91] = [
     "act_pad",
     "act_press",
     "act_run_shell",
+    "act_run_shell_cancel",
+    "act_run_shell_start",
+    "act_run_shell_status",
     "act_scroll",
     "act_set_value",
     "act_spawn_agent",
@@ -123,7 +126,7 @@ async fn m4_tools_list_snapshot_defaults_and_closed_schemas() -> anyhow::Result<
         .map(str::to_owned)
         .collect::<Vec<_>>();
     assert_eq!(names, expected);
-    assert_eq!(names.len(), 91);
+    assert_eq!(names.len(), 94);
     assert_no_duplicate_names(&names)?;
 
     assert_schema_roots_closed(tools)?;
@@ -341,6 +344,27 @@ fn m4_default_readbacks(tools: &[Value]) -> anyhow::Result<Vec<Value>> {
     read_default(
         &mut readbacks,
         tools,
+        "act_run_shell_start",
+        "inputSchema.properties.args.default",
+        &json!([]),
+    )?;
+    read_default(
+        &mut readbacks,
+        tools,
+        "act_run_shell_start",
+        "inputSchema.properties.env.default",
+        &json!({}),
+    )?;
+    read_default(
+        &mut readbacks,
+        tools,
+        "act_run_shell_status",
+        "inputSchema.properties.tail_bytes.default",
+        &json!(65536),
+    )?;
+    read_default(
+        &mut readbacks,
+        tools,
         "act_launch",
         "inputSchema.properties.args.default",
         &json!([]),
@@ -367,6 +391,9 @@ fn m4_default_readbacks(tools: &[Value]) -> anyhow::Result<Vec<Value>> {
     read_property(&mut readbacks, tools, "act_stroke", "to")?;
     read_required(&mut readbacks, tools, "act_stroke", "duration_or_speed")?;
     read_required(&mut readbacks, tools, "act_run_shell", "command")?;
+    read_required(&mut readbacks, tools, "act_run_shell_start", "command")?;
+    read_required(&mut readbacks, tools, "act_run_shell_status", "job_id")?;
+    read_required(&mut readbacks, tools, "act_run_shell_cancel", "job_id")?;
     read_required(&mut readbacks, tools, "act_launch", "target")?;
     read_default(
         &mut readbacks,
