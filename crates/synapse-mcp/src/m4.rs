@@ -52,7 +52,7 @@ const ALLOW_LAUNCH_ANY_ENV: &str = "SYNAPSE_ALLOW_LAUNCH_ANY";
 const ANY_PERMITTED_SENTINEL: &str = "__any_permitted__";
 const SHELL_OUTPUT_CAP_BYTES: usize = 1024 * 1024;
 const ALLOW_PATTERN_SIZE_LIMIT_BYTES: usize = 256 * 1024;
-const PROCESS_BASE_ENV_KEYS: [&str; 14] = [
+const PROCESS_BASE_ENV_KEYS: [&str; 20] = [
     "PATH",
     "PATHEXT",
     "COMSPEC",
@@ -67,7 +67,16 @@ const PROCESS_BASE_ENV_KEYS: [&str; 14] = [
     "APPDATA",
     "LOCALAPPDATA",
     "ProgramData",
+    "ProgramFiles",
+    "ProgramFiles(x86)",
+    "ProgramW6432",
+    "CommonProgramFiles",
+    "CommonProgramFiles(x86)",
+    "CommonProgramW6432",
 ];
+#[cfg(windows)]
+const WINDOWS_DEFAULT_PATHEXT: &str =
+    ".COM;.EXE;.BAT;.CMD;.VBS;.VBE;.JS;.JSE;.WSF;.WSH;.MSC;.PY;.PYW";
 const LAUNCH_WINDOW_POLL_INTERVAL_MS: u64 = 20;
 const LAUNCH_FOREGROUND_STABLE_MS: u64 = 750;
 const LAUNCH_FOREGROUND_POLL_MS: u64 = 75;
@@ -1681,11 +1690,19 @@ fn child_base_environment() -> BTreeMap<String, (String, String)> {
             );
         }
     }
+    add_windows_registry_environment(&mut env);
+    add_windows_standard_environment(&mut env);
     add_windows_profile_environment(&mut env);
     env
 }
 
-fn insert_env_if_absent(env: &mut BTreeMap<String, (String, String)>, key: &str, value: String) {
+fn env_value<'a>(env: &'a BTreeMap<String, (String, String)>, key: &str) -> Option<&'a str> {
+    env.get(&key.to_ascii_uppercase())
+        .map(|(_key, value)| value.as_str())
+        .filter(|value| !value.trim().is_empty())
+}
+
+fn set_env_value(env: &mut BTreeMap<String, (String, String)>, key: &str, value: String) {
     if value.trim().is_empty() || value.contains('\0') {
         tracing::warn!(
             code = "M4_CHILD_ENV_DERIVE_INVALID",
@@ -1694,8 +1711,40 @@ fn insert_env_if_absent(env: &mut BTreeMap<String, (String, String)>, key: &str,
         );
         return;
     }
-    env.entry(key.to_ascii_uppercase())
-        .or_insert_with(|| (key.to_owned(), value));
+    env.insert(key.to_ascii_uppercase(), (key.to_owned(), value));
+}
+
+fn insert_env_if_absent(env: &mut BTreeMap<String, (String, String)>, key: &str, value: String) {
+    if env_value(env, key).is_none() {
+        set_env_value(env, key, value);
+    }
+}
+
+fn merge_semicolon_env_value(
+    env: &mut BTreeMap<String, (String, String)>,
+    key: &str,
+    incoming: &str,
+) {
+    let mut seen = HashSet::new();
+    let mut parts = Vec::new();
+    for raw in env_value(env, key)
+        .into_iter()
+        .chain(std::iter::once(incoming))
+    {
+        for part in raw
+            .split(';')
+            .map(str::trim)
+            .filter(|part| !part.is_empty())
+        {
+            let normalized = part.trim_matches('"').to_ascii_uppercase();
+            if seen.insert(normalized) {
+                parts.push(part.to_owned());
+            }
+        }
+    }
+    if !parts.is_empty() {
+        set_env_value(env, key, parts.join(";"));
+    }
 }
 
 fn ensure_child_temp_environment(env: &mut BTreeMap<String, (String, String)>) {
@@ -1716,37 +1765,347 @@ fn ensure_child_temp_environment(env: &mut BTreeMap<String, (String, String)>) {
 }
 
 #[cfg(windows)]
+fn add_windows_registry_environment(env: &mut BTreeMap<String, (String, String)>) {
+    use windows::Win32::System::Registry::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
+
+    const MACHINE_ENVIRONMENT: &str =
+        r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment";
+    const USER_ENVIRONMENT: &str = "Environment";
+
+    for key in PROCESS_BASE_ENV_KEYS {
+        if let Some(value) =
+            read_windows_registry_environment_value(HKEY_LOCAL_MACHINE, MACHINE_ENVIRONMENT, key)
+        {
+            apply_windows_registry_environment_value(env, key, value, "machine");
+        }
+    }
+    for key in PROCESS_BASE_ENV_KEYS {
+        if let Some(value) =
+            read_windows_registry_environment_value(HKEY_CURRENT_USER, USER_ENVIRONMENT, key)
+        {
+            apply_windows_registry_environment_value(env, key, value, "user");
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn add_windows_registry_environment(_env: &mut BTreeMap<String, (String, String)>) {}
+
+#[cfg(windows)]
+fn read_windows_registry_environment_value(
+    root: windows::Win32::System::Registry::HKEY,
+    subkey: &str,
+    value_name: &str,
+) -> Option<String> {
+    use windows::{
+        Win32::{
+            Foundation::ERROR_SUCCESS,
+            System::Registry::{REG_VALUE_TYPE, RRF_RT_REG_EXPAND_SZ, RRF_RT_REG_SZ, RegGetValueW},
+        },
+        core::PCWSTR,
+    };
+
+    let subkey_wide = wide_null(subkey);
+    let value_wide = wide_null(value_name);
+    let flags = RRF_RT_REG_SZ | RRF_RT_REG_EXPAND_SZ;
+    let mut value_type = REG_VALUE_TYPE::default();
+    let mut byte_len = 0_u32;
+    let status = unsafe {
+        RegGetValueW(
+            root,
+            PCWSTR(subkey_wide.as_ptr()),
+            PCWSTR(value_wide.as_ptr()),
+            flags,
+            Some(&raw mut value_type),
+            None,
+            Some(&raw mut byte_len),
+        )
+    };
+    if status != ERROR_SUCCESS || byte_len == 0 {
+        return None;
+    }
+
+    let mut buffer = vec![0_u16; (byte_len as usize).div_ceil(2)];
+    let status = unsafe {
+        RegGetValueW(
+            root,
+            PCWSTR(subkey_wide.as_ptr()),
+            PCWSTR(value_wide.as_ptr()),
+            flags,
+            Some(&raw mut value_type),
+            Some(buffer.as_mut_ptr().cast()),
+            Some(&raw mut byte_len),
+        )
+    };
+    if status != ERROR_SUCCESS {
+        tracing::warn!(
+            code = "M4_CHILD_ENV_REGISTRY_READ_FAILED",
+            key = value_name,
+            status = status.0,
+            "child process environment registry read failed after size query"
+        );
+        return None;
+    }
+
+    let units = (byte_len as usize).div_ceil(2).min(buffer.len());
+    buffer.truncate(units);
+    let nul = buffer
+        .iter()
+        .position(|unit| *unit == 0)
+        .unwrap_or(buffer.len());
+    let raw = String::from_utf16_lossy(&buffer[..nul]);
+    expand_windows_environment_string(&raw).or(Some(raw))
+}
+
+#[cfg(windows)]
+fn expand_windows_environment_string(raw: &str) -> Option<String> {
+    use windows::{Win32::System::Environment::ExpandEnvironmentStringsW, core::PCWSTR};
+
+    let source = wide_null(raw);
+    let required = unsafe { ExpandEnvironmentStringsW(PCWSTR(source.as_ptr()), None) };
+    if required == 0 {
+        return None;
+    }
+    let mut buffer = vec![0_u16; required as usize];
+    let written = unsafe { ExpandEnvironmentStringsW(PCWSTR(source.as_ptr()), Some(&mut buffer)) };
+    if written == 0 || written as usize > buffer.len() {
+        return None;
+    }
+    let len = buffer
+        .iter()
+        .position(|unit| *unit == 0)
+        .unwrap_or(written as usize);
+    Some(String::from_utf16_lossy(&buffer[..len]))
+}
+
+#[cfg(windows)]
+fn apply_windows_registry_environment_value(
+    env: &mut BTreeMap<String, (String, String)>,
+    key: &str,
+    value: String,
+    source: &'static str,
+) {
+    if key.eq_ignore_ascii_case("PATH") || key.eq_ignore_ascii_case("PATHEXT") {
+        let before = env_value(env, key).map(ToOwned::to_owned);
+        merge_semicolon_env_value(env, key, &value);
+        if before.as_deref() != env_value(env, key) {
+            tracing::info!(
+                code = "M4_CHILD_ENV_REGISTRY_MERGED",
+                key,
+                source,
+                "merged persisted Windows environment value into child process environment"
+            );
+        }
+        return;
+    }
+
+    if env_value(env, key).is_none() {
+        set_env_value(env, key, value);
+    }
+}
+
+#[cfg(windows)]
+fn add_windows_standard_environment(env: &mut BTreeMap<String, (String, String)>) {
+    let system_root = env_value(env, "SystemRoot")
+        .or_else(|| env_value(env, "windir"))
+        .map(ToOwned::to_owned)
+        .or_else(windows_directory)
+        .unwrap_or_else(|| r"C:\Windows".to_owned());
+    let system_drive = env_value(env, "SystemDrive")
+        .map(ToOwned::to_owned)
+        .or_else(|| windows_drive_from_path(&system_root))
+        .unwrap_or_else(|| "C:".to_owned());
+
+    insert_env_if_absent(env, "SystemDrive", system_drive.clone());
+    insert_env_if_absent(env, "SystemRoot", system_root.clone());
+    insert_env_if_absent(env, "windir", system_root.clone());
+    insert_env_if_absent(
+        env,
+        "ComSpec",
+        Path::new(&system_root)
+            .join("System32")
+            .join("cmd.exe")
+            .to_string_lossy()
+            .into_owned(),
+    );
+    insert_env_if_absent(
+        env,
+        "ProgramData",
+        Path::new(&system_drive)
+            .join("ProgramData")
+            .to_string_lossy()
+            .into_owned(),
+    );
+    insert_env_if_absent(
+        env,
+        "ProgramFiles",
+        Path::new(&system_drive)
+            .join("Program Files")
+            .to_string_lossy()
+            .into_owned(),
+    );
+    let program_files_x86 = Path::new(&system_drive).join("Program Files (x86)");
+    if program_files_x86.is_dir() {
+        let value = program_files_x86.to_string_lossy().into_owned();
+        insert_env_if_absent(env, "ProgramFiles(x86)", value.clone());
+        insert_env_if_absent(
+            env,
+            "CommonProgramFiles(x86)",
+            format!("{value}\\Common Files"),
+        );
+    }
+    let program_files = env_value(env, "ProgramFiles").map(ToOwned::to_owned);
+    if let Some(program_files) = program_files {
+        insert_env_if_absent(env, "ProgramW6432", program_files.clone());
+        insert_env_if_absent(
+            env,
+            "CommonProgramFiles",
+            format!("{program_files}\\Common Files"),
+        );
+        insert_env_if_absent(
+            env,
+            "CommonProgramW6432",
+            format!("{program_files}\\Common Files"),
+        );
+    }
+
+    ensure_windows_pathext(env);
+    ensure_windows_path_entries(env, &system_root);
+}
+
+#[cfg(not(windows))]
+fn add_windows_standard_environment(_env: &mut BTreeMap<String, (String, String)>) {}
+
+#[cfg(windows)]
+fn windows_directory() -> Option<String> {
+    use windows::Win32::System::SystemInformation::GetWindowsDirectoryW;
+
+    let mut buffer = vec![0_u16; 260];
+    let written = unsafe { GetWindowsDirectoryW(Some(&mut buffer)) };
+    if written == 0 || written as usize >= buffer.len() {
+        tracing::warn!(
+            code = "M4_CHILD_ENV_WINDOWS_DIR_UNAVAILABLE",
+            written,
+            "GetWindowsDirectoryW did not return a usable Windows directory"
+        );
+        return None;
+    }
+    buffer.truncate(written as usize);
+    Some(String::from_utf16_lossy(&buffer))
+}
+
+#[cfg(windows)]
+fn windows_drive_from_path(path: &str) -> Option<String> {
+    let bytes = path.as_bytes();
+    if bytes.get(1).is_some_and(|value| *value == b':') {
+        return Some(path[..2].to_owned());
+    }
+    None
+}
+
+#[cfg(windows)]
+fn ensure_windows_pathext(env: &mut BTreeMap<String, (String, String)>) {
+    let before = env_value(env, "PATHEXT").map(ToOwned::to_owned);
+    merge_semicolon_env_value(env, "PATHEXT", WINDOWS_DEFAULT_PATHEXT);
+    let after = env_value(env, "PATHEXT").map(ToOwned::to_owned);
+    if before != after {
+        tracing::warn!(
+            code = "M4_CHILD_ENV_PATHEXT_NORMALIZED",
+            before = before.as_deref().unwrap_or("<missing>"),
+            after = after.as_deref().unwrap_or("<missing>"),
+            "normalized child process PATHEXT so Windows executable resolution works"
+        );
+    }
+}
+
+#[cfg(windows)]
+fn ensure_windows_path_entries(env: &mut BTreeMap<String, (String, String)>, system_root: &str) {
+    let candidates = [
+        Path::new(system_root).join("System32"),
+        Path::new(system_root).to_path_buf(),
+        Path::new(system_root).join("System32").join("Wbem"),
+        Path::new(system_root)
+            .join("System32")
+            .join("WindowsPowerShell")
+            .join("v1.0"),
+        Path::new(system_root).join("System32").join("OpenSSH"),
+    ];
+    let required = candidates
+        .into_iter()
+        .filter(|path| path.is_dir())
+        .map(|path| path.to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    if required.is_empty() {
+        return;
+    }
+    let before = env_value(env, "PATH").map(ToOwned::to_owned);
+    merge_semicolon_env_value(env, "PATH", &required.join(";"));
+    if before != env_value(env, "PATH").map(ToOwned::to_owned) {
+        tracing::info!(
+            code = "M4_CHILD_ENV_PATH_NORMALIZED",
+            "merged required Windows system directories into child process PATH"
+        );
+    }
+}
+
+#[cfg(windows)]
 fn validate_child_base_environment(
     env: &BTreeMap<String, (String, String)>,
     surface: &'static str,
 ) -> Result<(), ErrorData> {
-    let required = ["USERPROFILE", "APPDATA", "LOCALAPPDATA", "TEMP", "TMP"];
+    let required = [
+        "PATH",
+        "PATHEXT",
+        "ComSpec",
+        "SystemRoot",
+        "windir",
+        "USERPROFILE",
+        "APPDATA",
+        "LOCALAPPDATA",
+        "TEMP",
+        "TMP",
+        "ProgramData",
+        "ProgramFiles",
+    ];
     let missing: Vec<&str> = required
         .into_iter()
-        .filter(|key| {
-            env.get(*key)
-                .map(|(_name, value)| value.trim().is_empty())
-                .unwrap_or(true)
-        })
+        .filter(|key| env_value(env, key).is_none())
         .collect();
-    if missing.is_empty() {
+    let mut invalid = Vec::new();
+    if let Some(pathext) = env_value(env, "PATHEXT") {
+        let normalized = pathext.to_ascii_uppercase();
+        if !normalized.split(';').any(|part| part.trim() == ".EXE")
+            || !normalized.split(';').any(|part| part.trim() == ".CMD")
+        {
+            invalid.push("PATHEXT_missing_EXE_or_CMD");
+        }
+    }
+    if let Some(comspec) = env_value(env, "ComSpec")
+        && !Path::new(comspec).is_file()
+    {
+        invalid.push("ComSpec_not_a_file");
+    }
+    if missing.is_empty() && invalid.is_empty() {
         return Ok(());
     }
     tracing::error!(
         code = "M4_CHILD_ENV_INCOMPLETE",
         surface,
         missing = ?missing,
-        "child process environment is missing required Windows user-profile variables"
+        invalid = ?invalid,
+        "child process environment is missing required Windows variables"
     );
     let message = format!(
-        "{surface} cannot spawn a reliable Windows child process because Synapse could not construct required user-profile environment variables: {}",
-        missing.join(", ")
+        "{surface} cannot spawn a reliable Windows child process because Synapse could not construct required environment variables: missing=[{}] invalid=[{}]",
+        missing.join(", "),
+        invalid.join(", ")
     );
     let data = json!({
         "code": error_codes::ACTION_TARGET_INVALID,
         "reason": "child_environment_incomplete",
         "surface": surface,
         "missing": missing,
+        "invalid": invalid,
         "required": required,
     });
     if surface == "act_run_shell" {
