@@ -335,6 +335,125 @@ async fn session_release_serializes_new_owner_until_release_action_ack() {
     assert_eq!(session.keys[0].key, key("ctrl"));
 }
 
+#[tokio::test]
+async fn session_input_lease_cleanup_releases_lease_after_ledger_empty() {
+    let cancel = CancellationToken::new();
+    let backend: Arc<dyn ActionBackend> = Arc::new(RecordingBackend::new());
+    let (handle, snapshot_handle, join) =
+        ActionEmitter::spawn_with_backend(cancel.clone(), backend);
+    let session_id = "session-lease-cleanup";
+    let session = handle.with_session_id(Some(session_id.to_owned()));
+    let _prior = synapse_action::lease::force_clear("session_input_lease_cleanup_test_reset");
+    let _held =
+        synapse_action::lease::try_acquire(session_id, synapse_action::lease::ttl_from_ms(30_000));
+
+    session
+        .execute(Action::KeyDown {
+            key: key("ctrl"),
+            backend: Backend::Software,
+        })
+        .await
+        .unwrap_or_else(|error| panic!("session keydown should succeed: {error}"));
+    let before_state = snapshot_handle
+        .snapshot()
+        .await
+        .unwrap_or_else(|error| panic!("snapshot before cleanup should succeed: {error}"));
+    let before_lease = synapse_action::lease::status();
+    println!(
+        "readback=session_input_lease_cleanup edge=happy before_state={before_state:?} before_lease={before_lease:?}"
+    );
+
+    let summary = handle
+        .release_session_inputs_and_lease(session_id)
+        .await
+        .unwrap_or_else(|error| panic!("session input+lease cleanup should succeed: {error}"));
+    let after_state = snapshot_handle
+        .snapshot()
+        .await
+        .unwrap_or_else(|error| panic!("snapshot after cleanup should succeed: {error}"));
+    let after_ownership = handle
+        .session_inputs_snapshot()
+        .unwrap_or_else(|error| panic!("ownership after cleanup should read: {error}"));
+    let after_lease = synapse_action::lease::status();
+    println!(
+        "readback=session_input_lease_cleanup edge=happy after_state={after_state:?} after_ownership={after_ownership:?} after_lease={after_lease:?} summary={summary:?}"
+    );
+    assert_eq!(summary.input_summary.released_keys, 1);
+    assert!(summary.lease_released);
+    assert!(after_state.held_keys.is_empty());
+    assert!(after_ownership.sessions.is_empty());
+    assert!(!after_lease.held);
+
+    cancel.cancel();
+    let final_snapshot = join
+        .await
+        .unwrap_or_else(|error| panic!("emitter task should join: {error}"));
+    assert!(final_snapshot.held_keys.is_empty());
+    let _prior = synapse_action::lease::force_clear("session_input_lease_cleanup_test_reset");
+}
+
+#[tokio::test]
+async fn failed_session_input_cleanup_keeps_lease_for_retry() {
+    let (handle, mut action_rx) = ActionHandle::channel();
+    let session_id = "session-lease-retry";
+    let session = handle.with_session_id(Some(session_id.to_owned()));
+    let _prior = synapse_action::lease::force_clear("session_input_lease_cleanup_test_reset");
+    let _held =
+        synapse_action::lease::try_acquire(session_id, synapse_action::lease::ttl_from_ms(30_000));
+
+    execute_with_ack(
+        session,
+        &mut action_rx,
+        Action::KeyDown {
+            key: key("ctrl"),
+            backend: Backend::Software,
+        },
+    )
+    .await;
+
+    let release_handle = handle.clone();
+    let release_task = tokio::spawn(async move {
+        release_handle
+            .release_session_inputs_and_lease(session_id)
+            .await
+    });
+    ack_next_action(
+        &mut action_rx,
+        Action::KeyUp {
+            key: key("ctrl"),
+            backend: Backend::Software,
+        },
+        Err(ActionError::BackendUnavailable {
+            detail: "forced key-up failure".to_owned(),
+        }),
+    )
+    .await;
+
+    let error = release_task
+        .await
+        .unwrap_or_else(|error| panic!("release task should join: {error}"))
+        .expect_err("forced key-up failure should fail session input+lease cleanup");
+    let after_ownership = handle
+        .session_inputs_snapshot()
+        .unwrap_or_else(|error| panic!("ownership after failed cleanup should read: {error}"));
+    let after_lease = synapse_action::lease::status();
+    println!(
+        "readback=session_input_lease_cleanup edge=failed_release after_ownership={after_ownership:?} after_lease={after_lease:?} error={error:?}"
+    );
+    assert_eq!(
+        error.code(),
+        synapse_core::error_codes::ACTION_BACKEND_UNAVAILABLE
+    );
+    assert!(
+        after_ownership
+            .sessions
+            .iter()
+            .any(|session| session.session_id == session_id)
+    );
+    assert_eq!(after_lease.owner_session_id.as_deref(), Some(session_id));
+    let _prior = synapse_action::lease::force_clear("session_input_lease_cleanup_test_reset");
+}
+
 fn key(value: &str) -> Key {
     Key {
         code: KeyCode::Named {

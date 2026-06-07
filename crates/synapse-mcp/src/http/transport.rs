@@ -38,7 +38,7 @@ use crate::{
 
 type McpHttpService = StreamableHttpService<SynapseService, LocalSessionManager>;
 const MCP_SESSION_STORE_PREFIX: &str = "mcp/session/v1/";
-const STALE_SESSION_INPUT_CLEANUP_INTERVAL: Duration = Duration::from_secs(5);
+const STALE_SESSION_INPUT_CLEANUP_INTERVAL: Duration = Duration::from_millis(250);
 const M2_EMITTER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Clone)]
@@ -321,7 +321,7 @@ async fn cleanup_stale_session_inputs_once(
     session_manager: &LocalSessionManager,
 ) {
     let active_sessions = active_http_session_ids(session_manager).await;
-    cleanup_stale_session_lease_once(&active_sessions);
+    cleanup_expired_lease_inputs_once(action_handle).await;
 
     let snapshot = match action_handle.session_inputs_snapshot() {
         Ok(snapshot) => snapshot,
@@ -334,16 +334,14 @@ async fn cleanup_stale_session_inputs_once(
             return;
         }
     };
-    if snapshot.sessions.is_empty() {
-        return;
-    }
-
     for session in snapshot.sessions {
         if active_sessions.contains(&session.session_id) {
             continue;
         }
-        release_stale_session_inputs(action_handle, &session.session_id).await;
+        release_stale_session_inputs_and_lease(action_handle, &session.session_id).await;
     }
+
+    cleanup_stale_session_lease_once(action_handle, &active_sessions).await;
 }
 
 async fn active_http_session_ids(session_manager: &LocalSessionManager) -> BTreeSet<String> {
@@ -356,7 +354,21 @@ async fn active_http_session_ids(session_manager: &LocalSessionManager) -> BTree
         .collect()
 }
 
-fn cleanup_stale_session_lease_once(active_sessions: &BTreeSet<String>) {
+async fn cleanup_expired_lease_inputs_once(action_handle: &ActionHandle) {
+    let _lease_status_readback = synapse_action::lease::status();
+    let pending = synapse_action::lease::expired_cleanup_snapshot();
+    for expired in pending {
+        let Some(session_id) = expired.owner_session_id.clone() else {
+            continue;
+        };
+        release_expired_session_inputs_and_lease(action_handle, &session_id, &expired).await;
+    }
+}
+
+async fn cleanup_stale_session_lease_once(
+    action_handle: &ActionHandle,
+    active_sessions: &BTreeSet<String>,
+) {
     let status = synapse_action::lease::status();
     let Some(owner_session_id) = status.owner_session_id.clone() else {
         return;
@@ -367,33 +379,66 @@ fn cleanup_stale_session_lease_once(active_sessions: &BTreeSet<String>) {
     if active_sessions.contains(&owner_session_id) {
         return;
     }
-    let released = synapse_action::lease::release_if_owner(&owner_session_id);
-    tracing::info!(
-        code = "MCP_HTTP_SESSION_LEASE_STALE_CLEANUP",
-        session_id = %owner_session_id,
-        released,
-        before = ?status,
-        after = ?synapse_action::lease::status(),
-        active_session_count = active_sessions.len(),
-        "readback=input_lease edge=http_session_gone after_cleanup"
-    );
+    let before_ownership = action_handle.session_inputs_snapshot();
+    let result = action_handle
+        .release_session_inputs_and_lease(&owner_session_id)
+        .await;
+    let after_ownership = action_handle.session_inputs_snapshot();
+    let after_lease = synapse_action::lease::status();
+    match result {
+        Ok(summary) => {
+            tracing::info!(
+                code = "MCP_HTTP_SESSION_LEASE_STALE_CLEANUP",
+                session_id = %owner_session_id,
+                input_lease_released = summary.lease_released,
+                expired_lease_cleanup_completed = summary.expired_lease_cleanup_completed,
+                before_lease = ?status,
+                after_lease = ?after_lease,
+                before_ownership = ?before_ownership,
+                after_ownership = ?after_ownership,
+                active_session_count = active_sessions.len(),
+                "readback=input_lease edge=http_session_gone after_cleanup"
+            );
+        }
+        Err(error) => {
+            tracing::error!(
+                code = error.code(),
+                session_id = %owner_session_id,
+                detail = %error.detail(),
+                before_lease = ?status,
+                after_lease = ?after_lease,
+                before_ownership = ?before_ownership,
+                after_ownership = ?after_ownership,
+                active_session_count = active_sessions.len(),
+                "HTTP MCP stale-session lease cleanup failed"
+            );
+        }
+    }
 }
 
-async fn release_stale_session_inputs(action_handle: &ActionHandle, session_id: &str) {
+async fn release_stale_session_inputs_and_lease(action_handle: &ActionHandle, session_id: &str) {
     let before = action_handle.session_inputs_snapshot();
-    let result = action_handle.release_session_inputs(session_id).await;
+    let before_lease = synapse_action::lease::status();
+    let result = action_handle
+        .release_session_inputs_and_lease(session_id)
+        .await;
     let after = action_handle.session_inputs_snapshot();
+    let after_lease = synapse_action::lease::status();
     match result {
         Ok(summary) => {
             tracing::info!(
                 code = "MCP_HTTP_SESSION_INPUT_STALE_CLEANUP",
                 session_id,
-                released_keys = summary.released_keys,
-                released_buttons = summary.released_buttons,
-                neutralized_pads = summary.neutralized_pads,
-                retained_shared_inputs = summary.retained_shared_inputs,
+                released_keys = summary.input_summary.released_keys,
+                released_buttons = summary.input_summary.released_buttons,
+                neutralized_pads = summary.input_summary.neutralized_pads,
+                retained_shared_inputs = summary.input_summary.retained_shared_inputs,
+                input_lease_released = summary.lease_released,
+                expired_lease_cleanup_completed = summary.expired_lease_cleanup_completed,
                 before = ?before,
                 after = ?after,
+                before_lease = ?before_lease,
+                after_lease = ?after_lease,
                 "readback=session_input_ownership edge=http_session_gone after_cleanup"
             );
         }
@@ -404,7 +449,56 @@ async fn release_stale_session_inputs(action_handle: &ActionHandle, session_id: 
                 detail = %error.detail(),
                 before = ?before,
                 after = ?after,
+                before_lease = ?before_lease,
+                after_lease = ?after_lease,
                 "HTTP MCP stale-session cleanup failed while releasing owned inputs"
+            );
+        }
+    }
+}
+
+async fn release_expired_session_inputs_and_lease(
+    action_handle: &ActionHandle,
+    session_id: &str,
+    expired: &synapse_action::LeaseStatus,
+) {
+    let before = action_handle.session_inputs_snapshot();
+    let before_lease = synapse_action::lease::status();
+    let result = action_handle
+        .release_session_inputs_and_lease(session_id)
+        .await;
+    let after = action_handle.session_inputs_snapshot();
+    let after_lease = synapse_action::lease::status();
+    match result {
+        Ok(summary) => {
+            tracing::warn!(
+                code = "MCP_HTTP_SESSION_LEASE_EXPIRED_INPUT_CLEANUP",
+                session_id,
+                released_keys = summary.input_summary.released_keys,
+                released_buttons = summary.input_summary.released_buttons,
+                neutralized_pads = summary.input_summary.neutralized_pads,
+                retained_shared_inputs = summary.input_summary.retained_shared_inputs,
+                input_lease_released = summary.lease_released,
+                expired_lease_cleanup_completed = summary.expired_lease_cleanup_completed,
+                expired = ?expired,
+                before = ?before,
+                after = ?after,
+                before_lease = ?before_lease,
+                after_lease = ?after_lease,
+                "readback=session_input_ownership edge=input_lease_expired after_cleanup"
+            );
+        }
+        Err(error) => {
+            tracing::error!(
+                code = error.code(),
+                session_id,
+                detail = %error.detail(),
+                expired = ?expired,
+                before = ?before,
+                after = ?after,
+                before_lease = ?before_lease,
+                after_lease = ?after_lease,
+                "HTTP MCP expired-lease cleanup failed while releasing owned inputs"
             );
         }
     }
@@ -756,7 +850,10 @@ async fn wait_for_shutdown_signal(phase: &'static str) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use std::{sync::Arc, time::Duration};
+    use std::{
+        sync::{Arc, Mutex, MutexGuard, PoisonError},
+        time::Duration,
+    };
 
     use anyhow::Context as _;
     use rmcp::model::{ClientCapabilities, Implementation, InitializeRequestParams};
@@ -765,6 +862,14 @@ mod tests {
     use synapse_core::{Action, Backend, Key, KeyCode, SCHEMA_VERSION};
 
     use super::*;
+
+    static LEASE_SERIAL: Mutex<()> = Mutex::new(());
+
+    fn lease_serial() -> MutexGuard<'static, ()> {
+        let guard = LEASE_SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+        let _prior = synapse_action::lease::force_clear("http_transport_lease_test_reset");
+        guard
+    }
 
     fn test_session_state(name: &str) -> SessionState {
         SessionState::new(InitializeRequestParams::new(
@@ -917,6 +1022,7 @@ mod tests {
 
     #[tokio::test]
     async fn stale_session_cleanup_releases_absent_inputs_only() -> anyhow::Result<()> {
+        let _serial = lease_serial();
         let cancel = CancellationToken::new();
         let backend: Arc<dyn ActionBackend> = Arc::new(RecordingBackend::new());
         let (handle, snapshot_handle, join) =
@@ -928,6 +1034,8 @@ mod tests {
             .map_err(|error| anyhow::anyhow!("{error}"))?;
         let active_session_text = active_session_id.as_ref().to_owned();
         let stale_session_id = "stale-session".to_owned();
+        let _prior = synapse_action::lease::force_clear("http_stale_inputs_test_reset");
+        let _held = synapse_action::lease::try_acquire(&stale_session_id, Duration::from_secs(30));
 
         handle
             .with_session_id(Some(stale_session_id.clone()))
@@ -946,19 +1054,26 @@ mod tests {
 
         let before_state = snapshot_handle.snapshot().await?;
         let before_ownership = handle.session_inputs_snapshot()?;
+        let before_lease = synapse_action::lease::status();
         println!(
-            "readback=http_session_cleanup edge=stale_owner before_state={before_state:?} before_ownership={before_ownership:?} active_session_id={active_session_text}"
+            "readback=http_session_cleanup edge=stale_owner before_state={before_state:?} before_ownership={before_ownership:?} before_lease={before_lease:?} active_session_id={active_session_text}"
+        );
+        assert_eq!(
+            before_lease.owner_session_id.as_deref(),
+            Some(stale_session_id.as_str())
         );
 
         cleanup_stale_session_inputs_once(&handle, &session_manager).await;
 
         let after_state = snapshot_handle.snapshot().await?;
         let after_ownership = handle.session_inputs_snapshot()?;
+        let after_lease = synapse_action::lease::status();
         println!(
-            "readback=http_session_cleanup edge=stale_owner after_state={after_state:?} after_ownership={after_ownership:?}"
+            "readback=http_session_cleanup edge=stale_owner after_state={after_state:?} after_ownership={after_ownership:?} after_lease={after_lease:?}"
         );
 
         assert_eq!(after_state.held_keys, vec![test_key("shift")]);
+        assert!(!after_lease.held);
         assert!(
             after_ownership
                 .sessions
@@ -982,12 +1097,14 @@ mod tests {
         cancel.cancel();
         let final_snapshot = join.await?;
         assert!(final_snapshot.held_keys.is_empty());
+        let _prior = synapse_action::lease::force_clear("http_stale_inputs_test_reset");
 
         Ok(())
     }
 
     #[tokio::test]
     async fn stale_session_cleanup_releases_absent_lease_without_inputs() -> anyhow::Result<()> {
+        let _serial = lease_serial();
         let cancel = CancellationToken::new();
         let backend: Arc<dyn ActionBackend> = Arc::new(RecordingBackend::new());
         let (handle, snapshot_handle, join) =
@@ -1017,6 +1134,83 @@ mod tests {
         let final_snapshot = join.await?;
         assert!(final_snapshot.held_keys.is_empty());
         let _prior = synapse_action::lease::force_clear("http_stale_lease_test_reset");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn expired_lease_cleanup_releases_held_input_before_reacquire() -> anyhow::Result<()> {
+        let _serial = lease_serial();
+        let cancel = CancellationToken::new();
+        let backend: Arc<dyn ActionBackend> = Arc::new(RecordingBackend::new());
+        let (handle, snapshot_handle, join) =
+            ActionEmitter::spawn_with_backend(cancel.clone(), backend);
+        let session_manager = LocalSessionManager::default();
+        let expired_session_id = "expired-lease-session";
+        let contender_session_id = "expired-lease-contender";
+        let _prior = synapse_action::lease::force_clear("http_expired_lease_test_reset");
+
+        handle
+            .with_session_id(Some(expired_session_id.to_owned()))
+            .execute(Action::KeyDown {
+                key: test_key("ctrl"),
+                backend: Backend::Software,
+            })
+            .await?;
+        let _held = synapse_action::lease::try_acquire(
+            expired_session_id,
+            Duration::from_millis(synapse_action::MIN_LEASE_TTL_MS),
+        );
+        tokio::time::sleep(Duration::from_millis(synapse_action::MIN_LEASE_TTL_MS + 50)).await;
+
+        let before_state = snapshot_handle.snapshot().await?;
+        let before_ownership = handle.session_inputs_snapshot()?;
+        let before_lease = synapse_action::lease::status();
+        let before_pending = synapse_action::lease::expired_cleanup_snapshot();
+        println!(
+            "readback=http_session_cleanup edge=expired_lease before_state={before_state:?} before_ownership={before_ownership:?} before_lease={before_lease:?} before_pending={before_pending:?}"
+        );
+        assert_eq!(before_state.held_keys, vec![test_key("ctrl")]);
+        assert!(!before_lease.held);
+        assert_eq!(before_pending.len(), 1);
+        match synapse_action::lease::try_acquire(contender_session_id, Duration::from_secs(30)) {
+            synapse_action::LeaseOutcome::CleanupPending { expired, .. } => {
+                assert_eq!(
+                    expired.owner_session_id.as_deref(),
+                    Some(expired_session_id)
+                );
+            }
+            other => anyhow::bail!("contender should be refused pending cleanup, got {other:?}"),
+        }
+
+        cleanup_stale_session_inputs_once(&handle, &session_manager).await;
+
+        let after_state = snapshot_handle.snapshot().await?;
+        let after_ownership = handle.session_inputs_snapshot()?;
+        let after_pending = synapse_action::lease::expired_cleanup_snapshot();
+        let acquire_after_cleanup =
+            synapse_action::lease::try_acquire(contender_session_id, Duration::from_secs(30));
+        let after_lease = synapse_action::lease::status();
+        println!(
+            "readback=http_session_cleanup edge=expired_lease after_state={after_state:?} after_ownership={after_ownership:?} after_pending={after_pending:?} acquire_after_cleanup={acquire_after_cleanup:?} after_lease={after_lease:?}"
+        );
+        assert!(after_state.held_keys.is_empty());
+        assert!(after_ownership.sessions.is_empty());
+        assert!(after_pending.is_empty());
+        assert!(matches!(
+            acquire_after_cleanup,
+            synapse_action::LeaseOutcome::Acquired(_)
+        ));
+        assert_eq!(
+            after_lease.owner_session_id.as_deref(),
+            Some(contender_session_id)
+        );
+
+        let _released = synapse_action::lease::release_if_owner(contender_session_id);
+        cancel.cancel();
+        let final_snapshot = join.await?;
+        assert!(final_snapshot.held_keys.is_empty());
+        let _prior = synapse_action::lease::force_clear("http_expired_lease_test_reset");
 
         Ok(())
     }

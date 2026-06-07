@@ -125,13 +125,9 @@ pub(super) async fn release_held_inputs_on_delete(
     };
     let result = state
         .action_handle
-        .release_session_inputs(&session_id)
+        .release_session_inputs_and_lease(&session_id)
         .await;
     let after = state.action_handle.session_inputs_snapshot();
-    // Release the foreground/cursor input lease in the same cleanup path so a
-    // disconnecting session never leaves the shared real-input resource locked
-    // (epic #719 / issue #735). release_if_owner is a no-op for a non-holder.
-    let lease_released = synapse_action::lease::release_if_owner(&session_id);
     // Drop the session's active perception target so the registry does not leak
     // entries for disconnected agents (epic #720).
     let target_cleared = state
@@ -143,11 +139,12 @@ pub(super) async fn release_held_inputs_on_delete(
             tracing::info!(
                 code = "MCP_HTTP_SESSION_INPUT_CLEANUP",
                 session_id,
-                released_keys = summary.released_keys,
-                released_buttons = summary.released_buttons,
-                neutralized_pads = summary.neutralized_pads,
-                retained_shared_inputs = summary.retained_shared_inputs,
-                input_lease_released = lease_released,
+                released_keys = summary.input_summary.released_keys,
+                released_buttons = summary.input_summary.released_buttons,
+                neutralized_pads = summary.input_summary.neutralized_pads,
+                retained_shared_inputs = summary.input_summary.retained_shared_inputs,
+                input_lease_released = summary.lease_released,
+                expired_lease_cleanup_completed = summary.expired_lease_cleanup_completed,
                 session_target_cleared = target_cleared,
                 before = ?before,
                 after = ?after,

@@ -363,8 +363,11 @@ impl SynapseService {
         let verify_timeout_ms = params.verify_timeout_ms;
         let (handle, recording, connection_closed_cancel) =
             self.m2_action_context_for_request(&request_context)?;
-        let _lease_guard = match acquire_tool_foreground_input_lease("act_press", &request_context)
-        {
+        let _lease_guard = match acquire_tool_foreground_input_lease_with_ttl(
+            "act_press",
+            &request_context,
+            lease_ttl_for_hold_ms(params.hold_ms),
+        ) {
             Ok(guard) => guard,
             Err(error) => {
                 let result: Result<ActPressResponse, ErrorData> = Err(error);
@@ -440,8 +443,11 @@ impl SynapseService {
         };
         let (handle, recording, connection_closed_cancel) =
             self.m2_action_context_for_request(&request_context)?;
-        let _lease_guard = match acquire_tool_foreground_input_lease("act_keymap", &request_context)
-        {
+        let _lease_guard = match acquire_tool_foreground_input_lease_with_ttl(
+            "act_keymap",
+            &request_context,
+            lease_ttl_for_hold_ms(params.hold_ms),
+        ) {
             Ok(guard) => guard,
             Err(error) => {
                 self.audit_action_error_with_details("act_keymap", &error, &request_details)?;
@@ -943,8 +949,26 @@ fn acquire_tool_foreground_input_lease(
     tool: &'static str,
     request_context: &RequestContext<RoleServer>,
 ) -> Result<crate::m2::ForegroundInputLeaseGuard, ErrorData> {
+    acquire_tool_foreground_input_lease_with_ttl(
+        tool,
+        request_context,
+        synapse_action::DEFAULT_LEASE_TTL_MS,
+    )
+}
+
+fn acquire_tool_foreground_input_lease_with_ttl(
+    tool: &'static str,
+    request_context: &RequestContext<RoleServer>,
+    ttl_ms: u64,
+) -> Result<crate::m2::ForegroundInputLeaseGuard, ErrorData> {
     let session_id = foreground_lease_session_id(request_context)?;
-    crate::m2::acquire_foreground_input_lease(tool, session_id.as_deref())
+    crate::m2::acquire_foreground_input_lease_with_ttl(tool, session_id.as_deref(), ttl_ms)
+}
+
+fn lease_ttl_for_hold_ms(hold_ms: u32) -> u64 {
+    synapse_action::DEFAULT_LEASE_TTL_MS
+        .max(u64::from(hold_ms).saturating_add(250))
+        .min(synapse_action::MAX_LEASE_TTL_MS)
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -2346,6 +2370,19 @@ mod tests {
     use synapse_core::Rect;
 
     use super::*;
+
+    #[test]
+    fn key_hold_lease_ttl_matches_bounded_hold_window() {
+        assert_eq!(
+            lease_ttl_for_hold_ms(1),
+            synapse_action::DEFAULT_LEASE_TTL_MS
+        );
+        assert_eq!(lease_ttl_for_hold_ms(6_000), 6_250);
+        assert_eq!(
+            lease_ttl_for_hold_ms(u32::MAX),
+            synapse_action::MAX_LEASE_TTL_MS
+        );
+    }
 
     #[test]
     fn stroke_foreground_lost_error_carries_specific_code_and_readbacks() {

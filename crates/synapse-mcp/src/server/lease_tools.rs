@@ -178,6 +178,23 @@ fn acquire_lease_for_session(
             );
             Err(lease_busy_error(session_id, &holder, retry_after_ms))
         }
+        LeaseOutcome::CleanupPending {
+            expired,
+            retry_after_ms,
+        } => {
+            tracing::warn!(
+                code = error_codes::ACTION_FOREGROUND_LEASE_BUSY,
+                session_id = %session_id,
+                expired_owner = ?expired.owner_session_id,
+                retry_after_ms,
+                "readback=input_lease outcome=cleanup_pending"
+            );
+            Err(lease_cleanup_pending_error(
+                session_id,
+                &expired,
+                retry_after_ms,
+            ))
+        }
     }
 }
 
@@ -230,6 +247,28 @@ fn lease_busy_error(session_id: &str, holder: &LeaseStatus, retry_after_ms: u64)
             "holder_session_id": holder.owner_session_id,
             "retry_after_ms": retry_after_ms,
             "holder": holder,
+        })),
+    )
+}
+
+fn lease_cleanup_pending_error(
+    session_id: &str,
+    expired: &LeaseStatus,
+    retry_after_ms: u64,
+) -> ErrorData {
+    ErrorData::new(
+        ErrorCode(-32099),
+        format!(
+            "input lease expired for session {:?}; held-input cleanup is pending, retry after {retry_after_ms}ms",
+            expired.owner_session_id
+        ),
+        Some(json!({
+            "code": error_codes::ACTION_FOREGROUND_LEASE_BUSY,
+            "requesting_session_id": session_id,
+            "holder_session_id": expired.owner_session_id,
+            "retry_after_ms": retry_after_ms,
+            "expired": expired,
+            "cleanup_pending": true,
         })),
     )
 }

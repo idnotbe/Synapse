@@ -45,8 +45,8 @@ pub use emitter::{
 pub use error::{ActionError, ActionResult};
 pub use handle::{
     ACTION_QUEUE_CAPACITY, ActionComboScheduler, ActionHandle, ActionMessage, RELEASE_ALL_HANDLE,
-    SessionInputSessionSnapshot, SessionInputSnapshot, SessionKeyInput, SessionMouseButtonInput,
-    SessionPadInput, SessionReleaseSummary,
+    SessionInputLeaseReleaseSummary, SessionInputSessionSnapshot, SessionInputSnapshot,
+    SessionKeyInput, SessionMouseButtonInput, SessionPadInput, SessionReleaseSummary,
 };
 pub use hotkey::{
     OperatorHotkeyGuard, OperatorHotkeyStatus, install_operator_hotkey, operator_hotkey_status,
@@ -60,6 +60,8 @@ pub use invoke::{
 pub use lease::{
     DEFAULT_LEASE_TTL_MS, LeaseError, LeaseOutcome, LeaseStatus, MAX_LEASE_TTL_MS,
     MIN_LEASE_TTL_MS, OPERATOR_LEASE_OWNER_SESSION_ID, OPERATOR_PREEMPT_LEASE_TTL_MS,
+    complete_expired_cleanup as complete_expired_input_lease_cleanup,
+    expired_cleanup_snapshot as expired_input_lease_cleanup_snapshot,
     force_clear as force_clear_input_lease, force_preempt as force_preempt_input_lease,
     ttl_from_ms as input_lease_ttl_from_ms,
 };

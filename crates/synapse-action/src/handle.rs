@@ -288,6 +288,44 @@ impl ActionHandle {
         Ok(plan.summary)
     }
 
+    /// Releases a session's targeted held inputs, verifies the ownership ledger
+    /// no longer contains that session, then releases/completes its input lease.
+    ///
+    /// This keeps the critical invariant for multi-agent foreground input:
+    /// there must not be a moment where a session's lease is free while that
+    /// same session still owns held keyboard, mouse, or pad state.
+    ///
+    /// # Errors
+    ///
+    /// Returns an action error if targeted release fails, if the ownership
+    /// ledger cannot be read, or if the session still owns input afterward.
+    pub async fn release_session_inputs_and_lease(
+        &self,
+        session_id: &str,
+    ) -> ActionResult<SessionInputLeaseReleaseSummary> {
+        let input_summary = self.release_session_inputs(session_id).await?;
+        let after = self.session_inputs_snapshot()?;
+        if after
+            .sessions
+            .iter()
+            .any(|session| session.session_id == session_id)
+        {
+            return Err(ActionError::BackendUnavailable {
+                detail: format!(
+                    "session input cleanup for {session_id:?} left ownership in ledger; refusing to release input lease"
+                ),
+            });
+        }
+        let lease_released = crate::lease::release_if_owner(session_id);
+        let expired_lease_cleanup_completed = crate::lease::complete_expired_cleanup(session_id);
+        Ok(SessionInputLeaseReleaseSummary {
+            session_id: session_id.to_owned(),
+            input_summary,
+            lease_released,
+            expired_lease_cleanup_completed,
+        })
+    }
+
     fn combo_scheduler(&self) -> ActionResult<Option<Arc<dyn ActionComboScheduler>>> {
         self.combo_scheduler
             .lock()
@@ -413,6 +451,14 @@ pub struct SessionReleaseSummary {
     pub released_buttons: u32,
     pub neutralized_pads: u32,
     pub retained_shared_inputs: u32,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct SessionInputLeaseReleaseSummary {
+    pub session_id: String,
+    pub input_summary: SessionReleaseSummary,
+    pub lease_released: bool,
+    pub expired_lease_cleanup_completed: bool,
 }
 
 #[derive(Clone, Debug, Default)]

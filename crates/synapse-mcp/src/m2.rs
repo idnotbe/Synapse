@@ -123,16 +123,21 @@ pub(crate) fn acquire_foreground_input_lease(
     tool: &'static str,
     session_id: Option<&str>,
 ) -> Result<ForegroundInputLeaseGuard, ErrorData> {
+    acquire_foreground_input_lease_with_ttl(tool, session_id, synapse_action::DEFAULT_LEASE_TTL_MS)
+}
+
+pub(crate) fn acquire_foreground_input_lease_with_ttl(
+    tool: &'static str,
+    session_id: Option<&str>,
+    ttl_ms: u64,
+) -> Result<ForegroundInputLeaseGuard, ErrorData> {
     let session_id = session_id.ok_or_else(|| {
         crate::m1::mcp_error(
             error_codes::TOOL_PARAMS_INVALID,
             format!("{tool} requires an MCP session id before using the foreground input tier"),
         )
     })?;
-    match lease::try_acquire(
-        session_id,
-        lease::ttl_from_ms(synapse_action::DEFAULT_LEASE_TTL_MS),
-    ) {
+    match lease::try_acquire(session_id, lease::ttl_from_ms(ttl_ms)) {
         LeaseOutcome::Acquired(status) => {
             tracing::info!(
                 code = "INPUT_LEASE_ACTION_ACQUIRED",
@@ -180,6 +185,29 @@ pub(crate) fn acquire_foreground_input_lease(
             Err(action_error_to_mcp(&ActionError::ForegroundLeaseBusy {
                 detail,
                 holder_session_id: holder.owner_session_id,
+                requesting_session_id: session_id.to_owned(),
+                retry_after_ms,
+            }))
+        }
+        LeaseOutcome::CleanupPending {
+            expired,
+            retry_after_ms,
+        } => {
+            let detail = format!(
+                "{tool} requires the foreground input lease, but expired session {:?} still has pending held-input cleanup; retry_after_ms={retry_after_ms}",
+                expired.owner_session_id
+            );
+            tracing::warn!(
+                code = error_codes::ACTION_FOREGROUND_LEASE_BUSY,
+                tool,
+                requesting_session_id = session_id,
+                holder_session_id = ?expired.owner_session_id,
+                retry_after_ms,
+                "readback=input_lease outcome=action_cleanup_pending"
+            );
+            Err(action_error_to_mcp(&ActionError::ForegroundLeaseBusy {
+                detail,
+                holder_session_id: expired.owner_session_id,
                 requesting_session_id: session_id.to_owned(),
                 retry_after_ms,
             }))

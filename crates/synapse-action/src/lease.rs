@@ -10,8 +10,11 @@
 //! Semantics are **refuse, not block**: a contended `try_acquire` returns
 //! [`LeaseOutcome::Busy`] with the current holder and a retry hint rather than
 //! waiting, so an agent never deadlocks on another agent's foreground action.
-//! The lease auto-expires lazily on TTL lapse and is released on session
-//! disconnect, so a crashed agent cannot hold the foreground hostage.
+//! The lease auto-expires lazily on TTL lapse, but a lapsed owner leaves a
+//! pending cleanup record that blocks new acquisition until that session's
+//! held-input ledger is drained. Session disconnect releases inputs and lease
+//! through the same cleanup path, so a crashed agent cannot leave foreground
+//! input stuck behind an unowned lease.
 //!
 //! The lock-free-at-rest static mirrors the [`crate::hotkey`] module's
 //! process-global state pattern. The guard is a plain `std::sync::Mutex` held
@@ -19,6 +22,7 @@
 //! emit — so [`status`] never blocks a health probe.
 
 use std::{
+    collections::BTreeMap,
     sync::{Mutex, MutexGuard, OnceLock, PoisonError},
     time::{Duration, Instant},
 };
@@ -108,6 +112,12 @@ pub enum LeaseOutcome {
         holder: LeaseStatus,
         retry_after_ms: u64,
     },
+    /// A lapsed holder must have its per-session held-input ledger drained
+    /// before any session can acquire the real-input lease.
+    CleanupPending {
+        expired: LeaseStatus,
+        retry_after_ms: u64,
+    },
 }
 
 /// Error returned by [`renew`]/[`release`] when the caller is not the holder.
@@ -135,10 +145,21 @@ fn slot() -> &'static Mutex<Option<InputLease>> {
     LEASE.get_or_init(|| Mutex::new(None))
 }
 
+fn expired_cleanup_slot() -> &'static Mutex<BTreeMap<String, LeaseStatus>> {
+    static EXPIRED_CLEANUP: OnceLock<Mutex<BTreeMap<String, LeaseStatus>>> = OnceLock::new();
+    EXPIRED_CLEANUP.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
 /// Locks the lease slot, recovering from a poisoned mutex rather than panicking:
 /// a foreground lease that panicked mid-action must still be reclaimable.
 fn lock() -> MutexGuard<'static, Option<InputLease>> {
     slot().lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+fn lock_expired_cleanup() -> MutexGuard<'static, BTreeMap<String, LeaseStatus>> {
+    expired_cleanup_slot()
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
 }
 
 fn duration_ms(duration: Duration) -> u64 {
@@ -151,11 +172,58 @@ pub fn ttl_from_ms(ms: u64) -> Duration {
     Duration::from_millis(ms.clamp(MIN_LEASE_TTL_MS, MAX_LEASE_TTL_MS))
 }
 
-/// Drops the stored lease if its TTL has lapsed. Caller holds the lock.
-fn expire_if_lapsed(guard: &mut Option<InputLease>, now: Instant) {
-    if guard.as_ref().is_some_and(|lease| lease.is_expired(now)) {
+/// Drops the stored lease if its TTL has lapsed and records the expired owner
+/// until its held-input ledger has been drained. Caller holds the lease lock.
+fn expire_if_lapsed(guard: &mut Option<InputLease>, now: Instant) -> Option<LeaseStatus> {
+    let expired = guard
+        .as_ref()
+        .filter(|lease| lease.is_expired(now))
+        .map(|lease| lease.status(now));
+    if let Some(status) = expired.clone() {
         *guard = None;
+        remember_expired_cleanup(&status);
     }
+    expired
+}
+
+fn remember_expired_cleanup(status: &LeaseStatus) {
+    let Some(owner_session_id) = status.owner_session_id.clone() else {
+        return;
+    };
+    if owner_session_id == OPERATOR_LEASE_OWNER_SESSION_ID {
+        return;
+    }
+    let mut pending = lock_expired_cleanup();
+    pending
+        .entry(owner_session_id.clone())
+        .or_insert_with(|| status.clone());
+    tracing::warn!(
+        code = error_codes::ACTION_FOREGROUND_LEASE_BUSY,
+        owner_session_id,
+        ttl_ms = status.ttl_ms,
+        acquired_at_ms_ago = status.acquired_at_ms_ago,
+        renewed_at_ms_ago = status.renewed_at_ms_ago,
+        "readback=input_lease edge=expired pending_session_input_cleanup"
+    );
+}
+
+fn first_pending_expired_cleanup() -> Option<LeaseStatus> {
+    lock_expired_cleanup().values().next().cloned()
+}
+
+/// Reads expired lease owners whose held-input ledgers must be drained before
+/// the foreground lease can be granted again.
+#[must_use]
+pub fn expired_cleanup_snapshot() -> Vec<LeaseStatus> {
+    lock_expired_cleanup().values().cloned().collect()
+}
+
+/// Marks a previously expired owner's held-input cleanup as complete.
+///
+/// Returns `true` when a pending expired owner record was removed.
+#[must_use]
+pub fn complete_expired_cleanup(session_id: &str) -> bool {
+    lock_expired_cleanup().remove(session_id).is_some()
 }
 
 /// Attempts to acquire (or renew) the lease for `session_id`.
@@ -166,7 +234,18 @@ fn expire_if_lapsed(guard: &mut Option<InputLease>, now: Instant) {
 pub fn try_acquire(session_id: &str, ttl: Duration) -> LeaseOutcome {
     let now = Instant::now();
     let mut guard = lock();
-    expire_if_lapsed(&mut guard, now);
+    if let Some(expired) = expire_if_lapsed(&mut guard, now) {
+        return LeaseOutcome::CleanupPending {
+            expired,
+            retry_after_ms: 100,
+        };
+    }
+    if let Some(expired) = first_pending_expired_cleanup() {
+        return LeaseOutcome::CleanupPending {
+            expired,
+            retry_after_ms: 100,
+        };
+    }
     let outcome = match guard.as_mut() {
         Some(lease) if lease.owner_session_id == session_id => {
             lease.renewed_at = now;
@@ -206,7 +285,7 @@ pub fn try_acquire(session_id: &str, ttl: Duration) -> LeaseOutcome {
 pub fn renew(session_id: &str, ttl: Option<Duration>) -> Result<LeaseStatus, LeaseError> {
     let now = Instant::now();
     let mut guard = lock();
-    expire_if_lapsed(&mut guard, now);
+    let _expired = expire_if_lapsed(&mut guard, now);
     match guard.as_mut() {
         Some(lease) if lease.owner_session_id == session_id => {
             lease.renewed_at = now;
@@ -230,7 +309,7 @@ pub fn renew(session_id: &str, ttl: Option<Duration>) -> Result<LeaseStatus, Lea
 pub fn release(session_id: &str) -> Result<LeaseStatus, LeaseError> {
     let now = Instant::now();
     let mut guard = lock();
-    expire_if_lapsed(&mut guard, now);
+    let _expired = expire_if_lapsed(&mut guard, now);
     let result = match guard.as_ref() {
         Some(lease) if lease.owner_session_id == session_id => {
             *guard = None;
@@ -303,6 +382,7 @@ pub fn force_clear(reason: &str) -> Option<LeaseStatus> {
         );
     }
     *guard = None;
+    lock_expired_cleanup().clear();
     prior
 }
 
@@ -313,7 +393,7 @@ pub fn force_clear(reason: &str) -> Option<LeaseStatus> {
 pub fn status() -> LeaseStatus {
     let now = Instant::now();
     let mut guard = lock();
-    expire_if_lapsed(&mut guard, now);
+    let _expired = expire_if_lapsed(&mut guard, now);
     guard
         .as_ref()
         .map_or_else(LeaseStatus::unheld, |lease| lease.status(now))
@@ -417,8 +497,19 @@ mod tests {
         let next = "fsv-ttl-next";
         let _held = try_acquire(owner, ttl_from_ms(MIN_LEASE_TTL_MS));
         std::thread::sleep(Duration::from_millis(MIN_LEASE_TTL_MS + 50));
-        // lazy expiry: status sees it lapsed, and the next session can acquire
+        // Lazy expiry clears the holder but refuses a new owner until the
+        // expired session's held-input ledger is drained.
         assert!(!status().held);
+        let pending = expired_cleanup_snapshot();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].owner_session_id.as_deref(), Some(owner));
+        match try_acquire(next, ttl_from_ms(5_000)) {
+            LeaseOutcome::CleanupPending { expired, .. } => {
+                assert_eq!(expired.owner_session_id.as_deref(), Some(owner));
+            }
+            other => panic!("expected cleanup pending, got {other:?}"),
+        }
+        assert!(complete_expired_cleanup(owner));
         assert!(matches!(
             try_acquire(next, ttl_from_ms(5_000)),
             LeaseOutcome::Acquired(_)
