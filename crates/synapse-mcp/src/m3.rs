@@ -16,6 +16,7 @@ mod tests;
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
 use std::{
+    collections::BTreeMap,
     num::NonZeroUsize,
     path::PathBuf,
     sync::{Arc, Mutex},
@@ -175,6 +176,7 @@ pub struct M3State {
     pub a11y_event_bridge: Option<A11yEventBridge>,
     pub audio_runtime: Option<Arc<AudioRuntime>>,
     pub audit_session: Option<AuditSessionState>,
+    pub mcp_audit_sessions: BTreeMap<SessionId, AuditSessionState>,
 }
 
 #[derive(Clone, Debug)]
@@ -295,6 +297,7 @@ impl M3State {
             a11y_event_bridge: None,
             audio_runtime: None,
             audit_session: None,
+            mcp_audit_sessions: BTreeMap::new(),
         })
     }
 

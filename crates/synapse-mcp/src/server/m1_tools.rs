@@ -73,8 +73,10 @@ impl SynapseService {
             "tool.invocation kind=observe"
         );
         let include = observe_include(&params.0);
+        let session_id = super::context::mcp_session_id_from_request_context(&request_context)?;
         let target = self.request_session_target(&request_context)?;
-        self.observe_with_target(params, include, target).await
+        self.observe_with_target(params, include, target, session_id.as_deref())
+            .await
     }
 
     #[cfg(test)]
@@ -83,7 +85,18 @@ impl SynapseService {
         params: Parameters<ObserveParams>,
     ) -> Result<Json<synapse_core::Observation>, ErrorData> {
         let include = observe_include(&params.0);
-        self.observe_with_target(params, include, None).await
+        self.observe_with_target(params, include, None, None).await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn observe_for_mcp_session_id_for_test(
+        &self,
+        params: Parameters<ObserveParams>,
+        mcp_session_id: &str,
+    ) -> Result<Json<synapse_core::Observation>, ErrorData> {
+        let include = observe_include(&params.0);
+        self.observe_with_target(params, include, None, Some(mcp_session_id))
+            .await
     }
 
     async fn observe_with_target(
@@ -91,6 +104,7 @@ impl SynapseService {
         params: Parameters<ObserveParams>,
         include: synapse_perception::ObserveInclude,
         target: Option<SessionTarget>,
+        mcp_session_id: Option<&str>,
     ) -> Result<Json<synapse_core::Observation>, ErrorData> {
         let explicit_hwnd = params.0.window_hwnd;
         let target_hwnd = explicit_hwnd.or_else(|| target_hwnd(&target));
@@ -147,7 +161,7 @@ impl SynapseService {
         let mut state = self.m1_state()?;
         state.last_observed_foreground = Some(observation.foreground.clone());
         drop(state);
-        self.persist_observation(&observation, "observe")?;
+        self.persist_observation_for_mcp_session(&observation, "observe", mcp_session_id)?;
         Ok(Json(observation))
     }
 

@@ -3,7 +3,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use rmcp::ErrorData;
 use serde_json::{Value, json};
 use synapse_core::{
@@ -23,6 +23,13 @@ static OBSERVATION_AUDIT_SEQ: AtomicU32 = AtomicU32::new(0);
 struct ProfileAuditInfo {
     profile: Profile,
     schema_version: u32,
+}
+
+#[derive(Clone, Debug)]
+struct ObservationAuditSessionSnapshot {
+    session_id: SessionId,
+    started_at: DateTime<Utc>,
+    profile_history: Vec<StoredProfileHistoryEntry>,
 }
 
 impl SynapseService {
@@ -150,13 +157,28 @@ impl SynapseService {
         observation: &Observation,
         reason: &'static str,
     ) -> Result<(), ErrorData> {
+        self.persist_observation_for_mcp_session(observation, reason, None)
+    }
+
+    pub(super) fn persist_observation_for_mcp_session(
+        &self,
+        observation: &Observation,
+        reason: &'static str,
+        mcp_session_id: Option<&str>,
+    ) -> Result<(), ErrorData> {
         let (ts_ns, seq) = next_observation_key_parts();
         let observation_id = format!("observe-{ts_ns:020}-{seq:010}");
-        let session_id = self.ensure_audit_session_started()?;
         let profile_info = match observation.foreground.profile_id.as_deref() {
             Some(profile_id) => Some(self.profile_audit_info(profile_id)?),
             None => None,
         };
+        let audit_session = self.observation_audit_session_snapshot(
+            mcp_session_id,
+            profile_info.as_ref(),
+            observation.at,
+            reason,
+        )?;
+        let session_id = audit_session.session_id.clone();
         let audit_context = profile_info.as_ref().map_or_else(
             || StoredAuditContext {
                 session_id: Some(session_id.clone()),
@@ -175,22 +197,17 @@ impl SynapseService {
             },
         );
 
-        let profile_history = self.update_observation_session_history(
-            &session_id,
-            profile_info.as_ref(),
-            observation.at,
-        )?;
         let session = StoredSession {
             schema_version: SCHEMA_VERSION,
             session_id: session_id.clone(),
-            started_at: self.audit_session_started_at()?,
+            started_at: audit_session.started_at,
             ended_at: None,
             transport: "mcp".to_owned(),
             client: Some("synapse-mcp".to_owned()),
             mode: observation.mode,
             active_profile: observation.foreground.profile_id.clone(),
             audit_context: Some(audit_context.clone()),
-            profile_history,
+            profile_history: audit_session.profile_history,
             redacted: false,
             redactions: Vec::new(),
         };
@@ -203,7 +220,7 @@ impl SynapseService {
             observation,
             &observation_id,
             ts_ns,
-            session_id,
+            session_id.clone(),
             audit_context,
             reason,
         );
@@ -213,6 +230,8 @@ impl SynapseService {
             ts_ns,
             seq,
             observation_id,
+            session_id = %session_id,
+            mcp_session_id = mcp_session_id.unwrap_or("<global>"),
             "observation audit row written"
         );
         Ok(())
@@ -294,6 +313,77 @@ impl SynapseService {
             })
     }
 
+    fn observation_audit_session_snapshot(
+        &self,
+        mcp_session_id: Option<&str>,
+        profile_info: Option<&ProfileAuditInfo>,
+        observed_at: DateTime<Utc>,
+        reason: &'static str,
+    ) -> Result<ObservationAuditSessionSnapshot, ErrorData> {
+        let mut state = self.m3_state.lock().map_err(|_err| {
+            mcp_error(
+                error_codes::TOOL_INTERNAL_ERROR,
+                "M3 service state lock poisoned while updating observation audit session",
+            )
+        })?;
+        let audit_session = match mcp_session_id {
+            Some(session_id) => {
+                let session_id = session_id.trim();
+                if session_id.is_empty() {
+                    return Err(mcp_error(
+                        error_codes::HTTP_SESSION_INVALID,
+                        "Mcp-Session-Id for observation audit is empty",
+                    ));
+                }
+                state
+                    .mcp_audit_sessions
+                    .entry(session_id.to_owned())
+                    .or_insert_with(|| AuditSessionState {
+                        session_id: session_id.to_owned(),
+                        started_at: Utc::now(),
+                        profile_history: Vec::new(),
+                    })
+            }
+            None => {
+                if state.audit_session.is_none() {
+                    state.audit_session = Some(AuditSessionState {
+                        session_id: new_session_id(),
+                        started_at: Utc::now(),
+                        profile_history: Vec::new(),
+                    });
+                }
+                state.audit_session.as_mut().ok_or_else(|| {
+                    mcp_error(
+                        error_codes::TOOL_INTERNAL_ERROR,
+                        "audit session did not initialize",
+                    )
+                })?
+            }
+        };
+        if let Some(info) = profile_info {
+            let should_append = audit_session
+                .profile_history
+                .last()
+                .is_none_or(|last| last.profile_id != info.profile.id);
+            if should_append {
+                audit_session
+                    .profile_history
+                    .push(StoredProfileHistoryEntry {
+                        profile_id: info.profile.id.clone(),
+                        profile_version: Some(info.profile.version.clone()),
+                        profile_schema_version: Some(info.schema_version),
+                        activated_at: observed_at,
+                        reason: reason.to_owned(),
+                    });
+            }
+        }
+        Ok(ObservationAuditSessionSnapshot {
+            session_id: audit_session.session_id.clone(),
+            started_at: audit_session.started_at,
+            profile_history: audit_session.profile_history.clone(),
+        })
+    }
+
     fn current_audit_session_id(&self) -> Result<Option<SessionId>, ErrorData> {
         self.m3_state
             .lock()
@@ -370,75 +460,6 @@ impl SynapseService {
             .ok()
             .map(|foreground| app_context_for_foreground(profile, &foreground))
             .or_else(|| profile.map(|profile| app_context_from_metadata(Some(profile))))
-    }
-
-    fn audit_session_started_at(&self) -> Result<chrono::DateTime<Utc>, ErrorData> {
-        self.m3_state
-            .lock()
-            .map_err(|_err| {
-                mcp_error(
-                    error_codes::TOOL_INTERNAL_ERROR,
-                    "M3 service state lock poisoned while reading audit session",
-                )
-            })?
-            .audit_session
-            .as_ref()
-            .map(|session| session.started_at)
-            .ok_or_else(|| {
-                mcp_error(
-                    error_codes::TOOL_INTERNAL_ERROR,
-                    "audit session did not initialize",
-                )
-            })
-    }
-
-    fn update_observation_session_history(
-        &self,
-        session_id: &SessionId,
-        profile_info: Option<&ProfileAuditInfo>,
-        observed_at: chrono::DateTime<Utc>,
-    ) -> Result<Vec<StoredProfileHistoryEntry>, ErrorData> {
-        let profile_history = {
-            let mut state = self.m3_state.lock().map_err(|_err| {
-                mcp_error(
-                    error_codes::TOOL_INTERNAL_ERROR,
-                    "M3 service state lock poisoned while updating observation audit session",
-                )
-            })?;
-            let audit_session = state.audit_session.as_mut().ok_or_else(|| {
-                mcp_error(
-                    error_codes::TOOL_INTERNAL_ERROR,
-                    "audit session disappeared while persisting observation",
-                )
-            })?;
-            if audit_session.session_id != *session_id {
-                return Err(mcp_error(
-                    error_codes::TOOL_INTERNAL_ERROR,
-                    "audit session id changed while persisting observation",
-                ));
-            }
-            if let Some(info) = profile_info {
-                let should_append = audit_session
-                    .profile_history
-                    .last()
-                    .is_none_or(|last| last.profile_id != info.profile.id);
-                if should_append {
-                    audit_session
-                        .profile_history
-                        .push(StoredProfileHistoryEntry {
-                            profile_id: info.profile.id.clone(),
-                            profile_version: Some(info.profile.version.clone()),
-                            profile_schema_version: Some(info.schema_version),
-                            activated_at: observed_at,
-                            reason: "observe".to_owned(),
-                        });
-                }
-            }
-            let profile_history = audit_session.profile_history.clone();
-            drop(state);
-            profile_history
-        };
-        Ok(profile_history)
     }
 
     fn write_session_row(&self, session: &StoredSession) -> Result<(), ErrorData> {

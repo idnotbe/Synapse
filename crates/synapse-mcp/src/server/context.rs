@@ -1363,6 +1363,192 @@ mod scope_gate_tests {
         Ok(())
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_observe_audit_rows_are_partitioned_by_mcp_session_id() -> anyhow::Result<()>
+    {
+        const SESSION_COUNT: usize = 8;
+        const OBSERVES_PER_SESSION: usize = 50;
+
+        let profiles = TempDir::new()?;
+        write_profile(
+            &profiles.path().join("notepad.toml"),
+            "notepad",
+            "productivity",
+        )?;
+        let service = service_with_profiles(profiles.path(), false)?;
+        install_synthetic_notepad_input(&service)?;
+
+        let mut handles = Vec::new();
+        for session_index in 0..SESSION_COUNT {
+            let service = service.clone();
+            handles.push(tokio::spawn(async move {
+                let session_id = format!("issue800-session-{session_index}");
+                for _ in 0..OBSERVES_PER_SESSION {
+                    service
+                        .observe_for_mcp_session_id_for_test(
+                            Parameters(ObserveParams::default()),
+                            &session_id,
+                        )
+                        .await
+                        .map_err(|error| format!("{error:?}"))?;
+                }
+                Ok::<_, String>(session_id)
+            }));
+        }
+
+        let mut expected_sessions = Vec::new();
+        for handle in handles {
+            expected_sessions.push(
+                handle
+                    .await
+                    .map_err(|error| anyhow::anyhow!("observe worker join failed: {error}"))?
+                    .map_err(|error| anyhow::anyhow!("observe worker failed: {error}"))?,
+            );
+        }
+        expected_sessions.sort();
+
+        let runtime = service.reflex_runtime()?;
+        let runtime = runtime
+            .lock()
+            .map_err(|_err| anyhow::anyhow!("reflex runtime lock poisoned"))?;
+        let counts = runtime.storage_cf_row_counts()?;
+        assert_eq!(
+            cf_count(&counts, cf::CF_OBSERVATIONS),
+            (SESSION_COUNT * OBSERVES_PER_SESSION) as u64
+        );
+        assert_eq!(
+            cf_count(&counts, cf::CF_EVENTS),
+            (SESSION_COUNT * OBSERVES_PER_SESSION) as u64
+        );
+        assert_eq!(cf_count(&counts, cf::CF_SESSIONS), SESSION_COUNT as u64);
+
+        let observation_rows = runtime
+            .storage_cf_tail_rows(cf::CF_OBSERVATIONS, SESSION_COUNT * OBSERVES_PER_SESSION)?;
+        let event_rows =
+            runtime.storage_cf_tail_rows(cf::CF_EVENTS, SESSION_COUNT * OBSERVES_PER_SESSION)?;
+        let session_rows = runtime.storage_cf_prefix_rows(
+            cf::CF_SESSIONS,
+            b"session/v1/issue800-session-",
+            SESSION_COUNT,
+        )?;
+        drop(runtime);
+
+        let mut observation_counts = std::collections::BTreeMap::<String, usize>::new();
+        for (_key, row) in observation_rows {
+            let stored_observation: Value = serde_json::from_slice(&row)?;
+            let session_id = stored_observation["session_id"]
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("stored observation missing session_id"))?
+                .to_owned();
+            assert!(expected_sessions.binary_search(&session_id).is_ok());
+            assert_eq!(stored_observation["reason"], "observe");
+            assert_eq!(stored_observation["foreground"]["profile_id"], "notepad");
+            assert_eq!(
+                stored_observation["foreground"]["process_name"],
+                "notepad.exe"
+            );
+            *observation_counts.entry(session_id).or_default() += 1;
+        }
+        for session_id in &expected_sessions {
+            assert_eq!(
+                observation_counts.get(session_id).copied(),
+                Some(OBSERVES_PER_SESSION)
+            );
+        }
+
+        let mut event_counts = std::collections::BTreeMap::<String, usize>::new();
+        for (_key, row) in event_rows {
+            let stored_event: Value = serde_json::from_slice(&row)?;
+            let session_id = stored_event["session_id"]
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("stored event missing session_id"))?
+                .to_owned();
+            assert!(expected_sessions.binary_search(&session_id).is_ok());
+            assert_eq!(stored_event["kind"], "perception.observed");
+            assert_eq!(stored_event["source"], "perception");
+            *event_counts.entry(session_id).or_default() += 1;
+        }
+        for session_id in &expected_sessions {
+            assert_eq!(
+                event_counts.get(session_id).copied(),
+                Some(OBSERVES_PER_SESSION)
+            );
+        }
+
+        let mut stored_sessions = Vec::new();
+        for (_key, row) in session_rows {
+            let stored_session: Value = serde_json::from_slice(&row)?;
+            let session_id = stored_session["session_id"]
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("stored session missing session_id"))?
+                .to_owned();
+            assert!(expected_sessions.binary_search(&session_id).is_ok());
+            assert_eq!(stored_session["active_profile"], "notepad");
+            assert_eq!(
+                stored_session["profile_history"][0]["profile_id"],
+                "notepad"
+            );
+            stored_sessions.push(session_id);
+        }
+        stored_sessions.sort();
+        assert_eq!(stored_sessions, expected_sessions);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn session_teardown_removes_observe_audit_session_cache() -> anyhow::Result<()> {
+        let profiles = TempDir::new()?;
+        write_profile(
+            &profiles.path().join("notepad.toml"),
+            "notepad",
+            "productivity",
+        )?;
+        let service = service_with_profiles(profiles.path(), false)?;
+        install_synthetic_notepad_input(&service)?;
+        let session_id = "issue800-session-end";
+
+        service
+            .observe_for_mcp_session_id_for_test(Parameters(ObserveParams::default()), session_id)
+            .await?;
+        {
+            let state = service
+                .m3_state
+                .lock()
+                .map_err(|_err| anyhow::anyhow!("M3 service state lock poisoned"))?;
+            assert!(state.mcp_audit_sessions.contains_key(session_id));
+            assert_eq!(state.mcp_audit_sessions.len(), 1);
+        }
+
+        let lifecycle = service.session_lifecycle_state()?;
+        let report = lifecycle
+            .teardown_session(session_id, "test_session_end")
+            .await?;
+        assert!(report.audit_session.removed);
+        assert_eq!(report.audit_session.cache_sessions_before, 1);
+        assert_eq!(report.audit_session.cache_sessions_after, 0);
+        assert_eq!(report.failure_count, 0);
+        {
+            let state = service
+                .m3_state
+                .lock()
+                .map_err(|_err| anyhow::anyhow!("M3 service state lock poisoned"))?;
+            assert!(!state.mcp_audit_sessions.contains_key(session_id));
+            assert!(state.mcp_audit_sessions.is_empty());
+        }
+
+        let runtime = service.reflex_runtime()?;
+        let runtime = runtime
+            .lock()
+            .map_err(|_err| anyhow::anyhow!("reflex runtime lock poisoned"))?;
+        let counts = runtime.storage_cf_row_counts()?;
+        assert_eq!(cf_count(&counts, cf::CF_OBSERVATIONS), 1);
+        assert_eq!(cf_count(&counts, cf::CF_EVENTS), 1);
+        assert_eq!(cf_count(&counts, cf::CF_SESSIONS), 1);
+
+        Ok(())
+    }
+
     #[tokio::test]
     async fn act_clipboard_records_redacted_action_audit_rows() -> anyhow::Result<()> {
         let profiles = TempDir::new()?;

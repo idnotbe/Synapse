@@ -97,6 +97,7 @@ pub struct SessionTeardownReport {
     pub termination_marker_error_message: Option<String>,
     pub input: SessionInputCleanupReport,
     pub target: SessionTargetCleanupReport,
+    pub audit_session: SessionAuditSessionCleanupReport,
     pub cdp: SessionCdpCleanupReport,
     pub shell: SessionShellCleanupReport,
     pub processes: SessionProcessCleanupReport,
@@ -134,6 +135,16 @@ pub struct SessionTargetCleanupReport {
     pub target_cleared: bool,
     pub target_sessions_before: usize,
     pub target_sessions_after: usize,
+    pub failed: bool,
+    pub error_message: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SessionAuditSessionCleanupReport {
+    pub cache_sessions_before: usize,
+    pub cache_sessions_after: usize,
+    pub removed: bool,
     pub failed: bool,
     pub error_message: Option<String>,
 }
@@ -233,6 +244,7 @@ impl SessionTeardownReport {
             termination_marker_error_message: None,
             input: SessionInputCleanupReport::default(),
             target: SessionTargetCleanupReport::default(),
+            audit_session: SessionAuditSessionCleanupReport::default(),
             cdp: SessionCdpCleanupReport::default(),
             shell: SessionShellCleanupReport::default(),
             processes: SessionProcessCleanupReport::default(),
@@ -253,6 +265,9 @@ impl SessionTeardownReport {
             self.failure_count = self.failure_count.saturating_add(1);
         }
         if self.target.failed {
+            self.failure_count = self.failure_count.saturating_add(1);
+        }
+        if self.audit_session.failed {
             self.failure_count = self.failure_count.saturating_add(1);
         }
         self.failure_count = self
@@ -352,6 +367,7 @@ impl SessionLifecycleState {
         self.mark_terminated_session(&mut report);
         report.input = self.cleanup_inputs_and_lease(session_id).await;
         report.target = self.cleanup_target(session_id);
+        report.audit_session = self.cleanup_audit_session(session_id);
         report.cdp = cleanup_session_cdp_targets(&self.cdp_target_owners, session_id).await;
         report.shell = cleanup_shell_jobs(session_id, reason);
         report.processes = self.cleanup_owned_processes(session_id);
@@ -449,6 +465,11 @@ impl SessionLifecycleState {
         }
         if let Ok(targets) = self.session_targets.lock() {
             for session_id in targets.keys() {
+                add_if_stale(&mut candidates, active_sessions, session_id);
+            }
+        }
+        if let Ok(state) = self.m3_state.lock() {
+            for session_id in state.mcp_audit_sessions.keys() {
                 add_if_stale(&mut candidates, active_sessions, session_id);
             }
         }
@@ -563,6 +584,36 @@ impl SessionLifecycleState {
                 failed: true,
                 error_message: Some("session target registry lock poisoned".to_owned()),
                 ..SessionTargetCleanupReport::default()
+            },
+        }
+    }
+
+    fn cleanup_audit_session(&self, session_id: &str) -> SessionAuditSessionCleanupReport {
+        match self.m3_state.lock() {
+            Ok(mut state) => {
+                let before = state.mcp_audit_sessions.len();
+                let removed = state.mcp_audit_sessions.remove(session_id).is_some();
+                let after = state.mcp_audit_sessions.len();
+                tracing::info!(
+                    code = "MCP_SESSION_AUDIT_CACHE_CLEANUP",
+                    session_id,
+                    before,
+                    after,
+                    removed,
+                    "readback=m3_state.mcp_audit_sessions after=session_cache_removed"
+                );
+                SessionAuditSessionCleanupReport {
+                    cache_sessions_before: before,
+                    cache_sessions_after: after,
+                    removed,
+                    failed: false,
+                    error_message: None,
+                }
+            }
+            Err(_error) => SessionAuditSessionCleanupReport {
+                failed: true,
+                error_message: Some("M3 service state lock poisoned".to_owned()),
+                ..SessionAuditSessionCleanupReport::default()
             },
         }
     }
