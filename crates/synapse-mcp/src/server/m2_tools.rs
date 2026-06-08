@@ -1,13 +1,14 @@
 use super::{
-    ActClickParams, ActClickResponse, ActClipboardParams, ActClipboardResponse, ActClipboardVerb,
+    ActClickParams, ActClickResponse, ActClipboardParams, ActClipboardResponse,
     ActFocusWindowParams, ActFocusWindowResponse, ActKeymapParams, ActKeymapResponse, ActPadParams,
     ActPadResponse, ActPressParams, ActPressResponse, ActScrollParams, ActScrollResponse,
     ActSetValueParams, ActSetValueResponse, ActStrokeParams, ActStrokeResponse, ActTypeParams,
     ActTypeResponse, ErrorData, Json, Parameters, ReleaseAllParams, ReleaseAllResponse,
-    SynapseService, act_click_with_handle_and_lease, act_clipboard, act_focus_window,
-    act_focus_window_request_details, act_keymap_with_handle, act_pad_with_handle,
-    act_press_with_handle, act_scroll_with_handle, act_set_value, act_set_value_request_details,
-    act_stroke_validation_failure_details, act_stroke_with_handle, act_type_with_handle,
+    SynapseService, act_click_with_handle_and_lease, act_clipboard_session_buffer,
+    act_focus_window, act_focus_window_request_details, act_keymap_with_handle,
+    act_pad_with_handle, act_press_with_handle, act_scroll_with_handle, act_set_value,
+    act_set_value_request_details, act_stroke_validation_failure_details, act_stroke_with_handle,
+    act_type_with_handle,
     action_preflight::{ActionPreflightReadback, ForegroundProof},
     release_all_with_handles, tool, tool_router, validate_act_stroke_params,
 };
@@ -615,6 +616,40 @@ impl SynapseService {
         result.map(Json)
     }
 
+    #[cfg(test)]
+    pub(crate) async fn act_clipboard_for_session_test_entrypoint(
+        &self,
+        params: Parameters<ActClipboardParams>,
+        session_id: &str,
+    ) -> Result<Json<ActClipboardResponse>, ErrorData> {
+        let params = params.0;
+        let request_details = clipboard_request_audit_details(&params);
+        self.audit_action_started_with_details_for_session(
+            "act_clipboard",
+            &request_details,
+            session_id,
+        )?;
+        let result = self.act_clipboard_for_session(params, session_id, "session_clipboard_buffer");
+        match &result {
+            Ok(response) => {
+                self.audit_action_ok_with_details_for_session(
+                    "act_clipboard",
+                    &clipboard_response_audit_details(response),
+                    session_id,
+                )?;
+            }
+            Err(error) => {
+                self.audit_action_error_with_details_for_session(
+                    "act_clipboard",
+                    error,
+                    &request_details,
+                    session_id,
+                )?;
+            }
+        }
+        result.map(Json)
+    }
+
     #[tool(
         description = "Scroll vertically or horizontally at the current pointer or screen point"
     )]
@@ -736,62 +771,50 @@ impl SynapseService {
         result.map(Json)
     }
 
-    #[tool(description = "Read, write, or clear the system clipboard")]
+    #[tool(
+        description = "Read, write, or clear this MCP session's virtual clipboard buffer. The default path is background-safe: it does not touch the real OS clipboard and does not acquire the foreground/input lease."
+    )]
     pub async fn act_clipboard(
         &self,
         params: Parameters<ActClipboardParams>,
+        request_context: RequestContext<RoleServer>,
     ) -> Result<Json<ActClipboardResponse>, ErrorData> {
         let params = params.0;
+        let session_id = super::context::mcp_session_id_from_request_context(&request_context)?
+            .ok_or_else(|| {
+                mcp_error(
+                    error_codes::HTTP_SESSION_INVALID,
+                    "act_clipboard requires an MCP session id for session-scoped virtual clipboard state",
+                )
+            })?;
         tracing::info!(
             code = "MCP_TOOL_INVOCATION",
             kind = "act_clipboard",
             "tool.invocation kind=act_clipboard"
         );
-        let request_details = json!({
-            "verb": params.verb,
-            "format": params.format,
-            "text_len": params.text.as_ref().map(|text| text.chars().count()),
-        });
-        if matches!(
-            params.verb,
-            ActClipboardVerb::Write | ActClipboardVerb::Clear
-        ) && let Err(error) = self.ensure_supported_use_allows_action("act_clipboard")
-        {
-            self.audit_action_denied_with_details("act_clipboard", &error, &request_details);
-            return Err(error);
-        }
-        self.audit_action_started_with_details("act_clipboard", &request_details)?;
-        let _lease_guard = if matches!(
-            params.verb,
-            ActClipboardVerb::Write | ActClipboardVerb::Clear
-        ) {
-            match crate::m2::acquire_foreground_input_lease(
-                "act_clipboard",
-                crate::http::current_mcp_session_id().as_deref(),
-            ) {
-                Ok(guard) => Some(guard),
-                Err(error) => {
-                    self.audit_action_error_with_details(
-                        "act_clipboard",
-                        &error,
-                        &request_details,
-                    )?;
-                    return Err(error);
-                }
-            }
-        } else {
-            None
-        };
-        let result = act_clipboard(params).await;
+        let request_details = clipboard_request_audit_details(&params);
+        self.audit_action_started_with_details_for_session(
+            "act_clipboard",
+            &request_details,
+            &session_id,
+        )?;
+        let result =
+            self.act_clipboard_for_session(params, &session_id, "session_clipboard_buffer");
         match &result {
             Ok(response) => {
-                self.audit_action_ok_with_details(
+                self.audit_action_ok_with_details_for_session(
                     "act_clipboard",
                     &clipboard_response_audit_details(response),
+                    &session_id,
                 )?;
             }
             Err(error) => {
-                self.audit_action_error_with_details("act_clipboard", error, &request_details)?;
+                self.audit_action_error_with_details_for_session(
+                    "act_clipboard",
+                    error,
+                    &request_details,
+                    &session_id,
+                )?;
             }
         }
         result.map(Json)
@@ -1121,6 +1144,32 @@ struct ClickElementFingerprint {
 }
 
 impl SynapseService {
+    pub(crate) fn act_clipboard_for_session(
+        &self,
+        params: ActClipboardParams,
+        session_id: &str,
+        source_of_truth: &'static str,
+    ) -> Result<ActClipboardResponse, ErrorData> {
+        let result =
+            act_clipboard_session_buffer(params, session_id, self.session_clipboards_ref());
+        if let Err(error) = &result {
+            tracing::error!(
+                code = error
+                    .data
+                    .as_ref()
+                    .and_then(|data| data.get("code"))
+                    .and_then(|value| value.as_str())
+                    .unwrap_or(error_codes::TOOL_INTERNAL_ERROR),
+                session_id,
+                source_of_truth,
+                detail = %error.message,
+                data = ?error.data,
+                "act_clipboard session buffer operation failed"
+            );
+        }
+        result
+    }
+
     async fn act_click_with_verified_router(
         &self,
         handle: ActionHandle,
@@ -2775,8 +2824,24 @@ fn clipboard_response_audit_details(response: &ActClipboardResponse) -> Value {
             "cleared": response.cleared,
             "text_len": response.text_len,
             "text_present": response.text.is_some(),
+            "backing": response.backing,
+            "source_of_truth": response.source_of_truth,
+            "os_clipboard_touched": response.os_clipboard_touched,
+            "lease_required": response.lease_required,
             "elapsed_ms": response.elapsed_ms,
         },
+    })
+}
+
+fn clipboard_request_audit_details(params: &ActClipboardParams) -> Value {
+    json!({
+        "verb": params.verb,
+        "format": params.format,
+        "text_len": params.text.as_ref().map(|text| text.chars().count()),
+        "session_scoped": true,
+        "source_of_truth": "session_clipboard_buffer",
+        "os_clipboard_touched": false,
+        "lease_required": false,
     })
 }
 

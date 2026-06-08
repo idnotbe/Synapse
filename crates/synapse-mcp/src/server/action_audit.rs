@@ -130,6 +130,15 @@ impl SynapseService {
         self.write_action_audit_row(tool, "ok", None, details, None)
     }
 
+    pub(super) fn audit_action_ok_with_details_for_session(
+        &self,
+        tool: &'static str,
+        details: &Value,
+        session_id: &str,
+    ) -> Result<(), ErrorData> {
+        self.write_action_audit_row(tool, "ok", None, details, Some(session_id))
+    }
+
     pub(super) fn audit_action_error_with_details(
         &self,
         tool: &'static str,
@@ -146,6 +155,26 @@ impl SynapseService {
                 "request": details,
             }),
             None,
+        )
+    }
+
+    pub(super) fn audit_action_error_with_details_for_session(
+        &self,
+        tool: &'static str,
+        error: &ErrorData,
+        details: &Value,
+        session_id: &str,
+    ) -> Result<(), ErrorData> {
+        self.write_action_audit_row(
+            tool,
+            "error",
+            error_data_code(error),
+            &json!({
+                "message": error.message.to_string(),
+                "data": error.data.clone(),
+                "request": details,
+            }),
+            Some(session_id),
         )
     }
 

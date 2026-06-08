@@ -20,6 +20,7 @@ use synapse_storage::{Db, cf};
 use crate::{
     http::sse::SseState,
     m1::mcp_error,
+    m2::SharedSessionClipboardBuffers,
     m3::SharedM3State,
     m4::{self, OwnedProcessJob},
 };
@@ -78,6 +79,7 @@ pub(crate) struct SessionLifecycleState {
     m3_state: SharedM3State,
     session_targets: SharedSessionTargets,
     cdp_target_owners: SharedCdpTargetOwners,
+    session_clipboards: SharedSessionClipboardBuffers,
     session_registry: SharedSessionRegistry,
     session_processes: SharedSessionProcessResources,
     terminated_sessions: SharedTerminatedSessions,
@@ -99,6 +101,7 @@ pub struct SessionTeardownReport {
     pub target: SessionTargetCleanupReport,
     pub continuity: SessionContinuityCleanupReport,
     pub audit_session: SessionAuditSessionCleanupReport,
+    pub clipboard: SessionClipboardCleanupReport,
     pub cdp: SessionCdpCleanupReport,
     pub shell: SessionShellCleanupReport,
     pub processes: SessionProcessCleanupReport,
@@ -176,6 +179,18 @@ pub struct SessionAuditSessionCleanupReport {
     pub cache_sessions_before: usize,
     pub cache_sessions_after: usize,
     pub removed: bool,
+    pub failed: bool,
+    pub error_message: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SessionClipboardCleanupReport {
+    pub buffer_existed_before: bool,
+    pub buffer_count_before: usize,
+    pub removed: bool,
+    pub buffer_exists_after: bool,
+    pub buffer_count_after: usize,
     pub failed: bool,
     pub error_message: Option<String>,
 }
@@ -277,6 +292,7 @@ impl SessionTeardownReport {
             target: SessionTargetCleanupReport::default(),
             continuity: SessionContinuityCleanupReport::default(),
             audit_session: SessionAuditSessionCleanupReport::default(),
+            clipboard: SessionClipboardCleanupReport::default(),
             cdp: SessionCdpCleanupReport::default(),
             shell: SessionShellCleanupReport::default(),
             processes: SessionProcessCleanupReport::default(),
@@ -303,6 +319,9 @@ impl SessionTeardownReport {
             self.failure_count = self.failure_count.saturating_add(1);
         }
         if self.audit_session.failed {
+            self.failure_count = self.failure_count.saturating_add(1);
+        }
+        if self.clipboard.failed {
             self.failure_count = self.failure_count.saturating_add(1);
         }
         self.failure_count = self
@@ -338,6 +357,7 @@ impl SynapseService {
             m3_state: self.m3_state_handle(),
             session_targets: Arc::clone(&self.session_targets),
             cdp_target_owners: Arc::clone(&self.cdp_target_owners),
+            session_clipboards: Arc::clone(&self.session_clipboards),
             session_registry: Arc::clone(&self.session_registry),
             session_processes: Arc::clone(&self.session_processes),
             terminated_sessions: Arc::clone(&self.terminated_sessions),
@@ -404,6 +424,7 @@ impl SessionLifecycleState {
         report.target = self.cleanup_target(session_id);
         report.continuity = self.cleanup_continuity(session_id);
         report.audit_session = self.cleanup_audit_session(session_id);
+        report.clipboard = self.cleanup_clipboard(session_id);
         report.cdp = cleanup_session_cdp_targets(&self.cdp_target_owners, session_id).await;
         report.shell = cleanup_shell_jobs(session_id, reason);
         report.processes = self.cleanup_owned_processes(session_id);
@@ -555,6 +576,11 @@ impl SessionLifecycleState {
         if let Ok(owners) = self.cdp_target_owners.lock() {
             for owner in owners.values() {
                 add_if_stale(&mut candidates, active_sessions, &owner.session_id);
+            }
+        }
+        if let Ok(clipboards) = self.session_clipboards.lock() {
+            for session_id in clipboards.keys() {
+                add_if_stale(&mut candidates, active_sessions, session_id);
             }
         }
         if let Ok(processes) = self.session_processes.lock() {
@@ -724,6 +750,42 @@ impl SessionLifecycleState {
                 failed: true,
                 error_message: Some("M3 service state lock poisoned".to_owned()),
                 ..SessionAuditSessionCleanupReport::default()
+            },
+        }
+    }
+
+    fn cleanup_clipboard(&self, session_id: &str) -> SessionClipboardCleanupReport {
+        match self.session_clipboards.lock() {
+            Ok(mut clipboards) => {
+                let buffer_count_before = clipboards.len();
+                let buffer_existed_before = clipboards.contains_key(session_id);
+                let removed = clipboards.remove(session_id).is_some();
+                let buffer_exists_after = clipboards.contains_key(session_id);
+                let buffer_count_after = clipboards.len();
+                tracing::info!(
+                    code = "MCP_SESSION_CLIPBOARD_CLEANUP",
+                    session_id,
+                    buffer_count_before,
+                    buffer_count_after,
+                    buffer_existed_before,
+                    removed,
+                    buffer_exists_after,
+                    "readback=session_clipboard_buffer after=session_buffer_removed"
+                );
+                SessionClipboardCleanupReport {
+                    buffer_existed_before,
+                    buffer_count_before,
+                    removed,
+                    buffer_exists_after,
+                    buffer_count_after,
+                    failed: false,
+                    error_message: None,
+                }
+            }
+            Err(_error) => SessionClipboardCleanupReport {
+                failed: true,
+                error_message: Some("session clipboard registry lock poisoned".to_owned()),
+                ..SessionClipboardCleanupReport::default()
             },
         }
     }

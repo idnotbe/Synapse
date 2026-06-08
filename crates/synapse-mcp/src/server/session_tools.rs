@@ -137,7 +137,7 @@ impl SynapseService {
     }
 
     #[tool(
-        description = "Explicitly end this MCP session and atomically reclaim all resources owned by it: held inputs, input lease, active target, CDP targets, durable shell jobs, launched process resources, event subscriptions, persisted session row, and registry lifecycle. The optional session_id must equal the current caller session."
+        description = "Explicitly end this MCP session and atomically reclaim all resources owned by it: held inputs, input lease, active target, virtual clipboard buffer, CDP targets, durable shell jobs, launched process resources, event subscriptions, persisted session row, and registry lifecycle. The optional session_id must equal the current caller session."
     )]
     pub async fn session_end(
         &self,

@@ -36,17 +36,18 @@ use crate::{
     },
     m2::{
         ActClickParams, ActClickResponse, ActClipboardParams, ActClipboardResponse,
-        ActClipboardVerb, ActFocusWindowParams, ActFocusWindowResponse, ActKeymapParams,
-        ActKeymapResponse, ActPadParams, ActPadResponse, ActPressParams, ActPressResponse,
-        ActScrollParams, ActScrollResponse, ActSetValueParams, ActSetValueResponse,
-        ActStrokeParams, ActStrokeResponse, ActTypeParams, ActTypeResponse, M2ServiceConfig,
-        ReleaseAllParams, ReleaseAllResponse, SharedM2State, act_click_with_handle_and_lease,
-        act_clipboard, act_focus_window, act_focus_window_request_details, act_keymap_with_handle,
-        act_pad_with_handle, act_press_with_handle, act_scroll_with_handle, act_set_value,
+        ActFocusWindowParams, ActFocusWindowResponse, ActKeymapParams, ActKeymapResponse,
+        ActPadParams, ActPadResponse, ActPressParams, ActPressResponse, ActScrollParams,
+        ActScrollResponse, ActSetValueParams, ActSetValueResponse, ActStrokeParams,
+        ActStrokeResponse, ActTypeParams, ActTypeResponse, M2ServiceConfig, ReleaseAllParams,
+        ReleaseAllResponse, SharedM2State, SharedSessionClipboardBuffers,
+        act_click_with_handle_and_lease, act_clipboard_session_buffer, act_focus_window,
+        act_focus_window_request_details, act_keymap_with_handle, act_pad_with_handle,
+        act_press_with_handle, act_scroll_with_handle, act_set_value,
         act_set_value_request_details, act_stroke_validation_failure_details,
-        act_stroke_with_handle, act_type_with_handle, release_all_with_handles,
-        shared_m2_state_from_config_with_shutdown_reason, shared_m2_state_from_env,
-        validate_act_stroke_params,
+        act_stroke_with_handle, act_type_with_handle, new_session_clipboards,
+        release_all_with_handles, shared_m2_state_from_config_with_shutdown_reason,
+        shared_m2_state_from_env, validate_act_stroke_params,
     },
     m3::{
         M3ServiceConfig, SharedM3State,
@@ -210,6 +211,7 @@ pub struct SynapseService {
     drain_state: drain::DaemonDrainState,
     session_targets: SharedSessionTargets,
     cdp_target_owners: SharedCdpTargetOwners,
+    session_clipboards: SharedSessionClipboardBuffers,
     session_registry: SharedSessionRegistry,
     session_processes: session_lifecycle::SharedSessionProcessResources,
     terminated_sessions: session_lifecycle::SharedTerminatedSessions,
@@ -235,6 +237,7 @@ impl SynapseService {
             drain_state: drain::DaemonDrainState::default(),
             session_targets: Arc::new(Mutex::new(HashMap::new())),
             cdp_target_owners: Arc::new(Mutex::new(HashMap::new())),
+            session_clipboards: new_session_clipboards(),
             session_registry: Arc::new(Mutex::new(SessionRegistry::default())),
             session_processes: Arc::new(Mutex::new(BTreeMap::new())),
             terminated_sessions: Arc::new(Mutex::new(BTreeSet::new())),
@@ -271,6 +274,7 @@ impl SynapseService {
             drain_state: drain::DaemonDrainState::default(),
             session_targets: Arc::new(Mutex::new(HashMap::new())),
             cdp_target_owners: Arc::new(Mutex::new(HashMap::new())),
+            session_clipboards: new_session_clipboards(),
             session_registry: Arc::new(Mutex::new(SessionRegistry::default())),
             session_processes: Arc::new(Mutex::new(BTreeMap::new())),
             terminated_sessions: Arc::new(Mutex::new(BTreeSet::new())),
@@ -307,6 +311,7 @@ impl SynapseService {
             drain_state: drain::DaemonDrainState::default(),
             session_targets: Arc::new(Mutex::new(HashMap::new())),
             cdp_target_owners: Arc::new(Mutex::new(HashMap::new())),
+            session_clipboards: new_session_clipboards(),
             session_registry: Arc::new(Mutex::new(SessionRegistry::default())),
             session_processes: Arc::new(Mutex::new(BTreeMap::new())),
             terminated_sessions: Arc::new(Mutex::new(BTreeSet::new())),
@@ -346,6 +351,10 @@ impl SynapseService {
 
     pub(crate) const fn cdp_target_owners_ref(&self) -> &SharedCdpTargetOwners {
         &self.cdp_target_owners
+    }
+
+    pub(crate) const fn session_clipboards_ref(&self) -> &SharedSessionClipboardBuffers {
+        &self.session_clipboards
     }
 
     pub(crate) fn session_registry_handle(&self) -> SharedSessionRegistry {

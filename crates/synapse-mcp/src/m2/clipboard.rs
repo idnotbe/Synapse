@@ -1,9 +1,12 @@
-use std::time::Instant;
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+    time::{Instant, SystemTime, UNIX_EPOCH},
+};
 
 use rmcp::ErrorData;
 use rmcp::schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use synapse_action::{ActionError, ClipboardFormat};
 use synapse_core::error_codes;
 
 use crate::m1::mcp_error;
@@ -56,80 +59,106 @@ pub struct ActClipboardResponse {
     pub text: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text_len: Option<usize>,
+    pub backing: ActClipboardBacking,
+    pub source_of_truth: String,
+    pub os_clipboard_touched: bool,
+    pub lease_required: bool,
     pub elapsed_ms: u32,
     pub postcondition: ActPostcondition,
 }
 
-pub async fn act_clipboard(params: ActClipboardParams) -> Result<ActClipboardResponse, ErrorData> {
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ActClipboardBacking {
+    SessionBuffer,
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct SessionClipboardBuffer {
+    text: String,
+    last_format: Option<ActClipboardFormat>,
+    updated_at_unix_ms: u64,
+}
+
+pub(crate) type SharedSessionClipboardBuffers = Arc<Mutex<HashMap<String, SessionClipboardBuffer>>>;
+
+pub(crate) fn new_session_clipboards() -> SharedSessionClipboardBuffers {
+    Arc::new(Mutex::new(HashMap::new()))
+}
+
+pub(crate) fn act_clipboard_session_buffer(
+    params: ActClipboardParams,
+    session_id: &str,
+    buffers: &SharedSessionClipboardBuffers,
+) -> Result<ActClipboardResponse, ErrorData> {
     validate_params(&params)?;
+    validate_session_clipboard_write_format(&params)?;
     let started = Instant::now();
-    let format = params.format.to_clipboard_format();
-    let before_text = if params.verify_delta && !matches!(params.verb, ActClipboardVerb::Read) {
-        Some(
-            synapse_action::read_clipboard_text(format)
-                .map_err(|error| action_error_to_mcp(&error))?,
+    let mut guard = buffers.lock().map_err(|_err| {
+        mcp_error(
+            error_codes::TOOL_INTERNAL_ERROR,
+            "session clipboard buffer lock poisoned",
         )
+    })?;
+    let before_text = if params.verify_delta && !matches!(params.verb, ActClipboardVerb::Read) {
+        Some(session_clipboard_text(&guard, session_id))
     } else {
         None
     };
     let response = match params.verb {
         ActClipboardVerb::Read => {
-            let text = synapse_action::read_clipboard_text(format)
-                .map_err(|error| action_error_to_mcp(&error))?;
-            ActClipboardResponse {
-                ok: true,
-                verb: params.verb,
-                format: params.format,
-                written: false,
-                cleared: false,
-                text_len: Some(text.chars().count()),
-                text: Some(text),
-                elapsed_ms: elapsed_ms(started),
-                postcondition: postcondition_not_requested("act_clipboard", "clipboard_text"),
-            }
+            let text = session_clipboard_text(&guard, session_id);
+            session_response(
+                params.verb,
+                params.format,
+                false,
+                false,
+                Some(text.clone()),
+                Some(text.chars().count()),
+                started,
+                postcondition_not_requested("act_clipboard", "session_clipboard_buffer"),
+            )
         }
         ActClipboardVerb::Write => {
             let text = params
                 .text
                 .as_deref()
                 .ok_or_else(missing_write_text_error)?;
-            synapse_action::write_clipboard_text(format, text)
-                .map_err(|error| action_error_to_mcp(&error))?;
-            ActClipboardResponse {
-                ok: true,
-                verb: params.verb,
-                format: params.format,
-                written: true,
-                cleared: false,
-                text: None,
-                text_len: Some(text.chars().count()),
-                elapsed_ms: elapsed_ms(started),
-                postcondition: postcondition_not_requested("act_clipboard", "clipboard_text"),
-            }
+            let buffer = guard.entry(session_id.to_owned()).or_default();
+            buffer.text = text.to_owned();
+            buffer.last_format = Some(params.format);
+            buffer.updated_at_unix_ms = unix_time_ms_now();
+            session_response(
+                params.verb,
+                params.format,
+                true,
+                false,
+                None,
+                Some(text.chars().count()),
+                started,
+                postcondition_not_requested("act_clipboard", "session_clipboard_buffer"),
+            )
         }
         ActClipboardVerb::Clear => {
-            synapse_action::clear_clipboard().map_err(|error| action_error_to_mcp(&error))?;
-            ActClipboardResponse {
-                ok: true,
-                verb: params.verb,
-                format: params.format,
-                written: false,
-                cleared: true,
-                text: None,
-                text_len: None,
-                elapsed_ms: elapsed_ms(started),
-                postcondition: postcondition_not_requested("act_clipboard", "clipboard_text"),
-            }
+            guard.remove(session_id);
+            session_response(
+                params.verb,
+                params.format,
+                false,
+                true,
+                None,
+                None,
+                started,
+                postcondition_not_requested("act_clipboard", "session_clipboard_buffer"),
+            )
         }
     };
-    let response = if let Some(before) = before_text {
-        tokio::time::sleep(std::time::Duration::from_millis(u64::from(
-            params.verify_timeout_ms,
-        )))
-        .await;
-        let after = synapse_action::read_clipboard_text(format)
-            .map_err(|error| action_error_to_mcp(&error))?;
-        verify_clipboard_delta(response, &params, before, after)?
+    let after_text = before_text
+        .as_ref()
+        .map(|_| session_clipboard_text(&guard, session_id));
+    drop(guard);
+    let response = if let (Some(before), Some(after)) = (before_text, after_text) {
+        verify_clipboard_delta(response, &params, before, after, "session_clipboard_buffer")?
     } else {
         response
     };
@@ -138,22 +167,19 @@ pub async fn act_clipboard(params: ActClipboardParams) -> Result<ActClipboardRes
         kind = "act_clipboard",
         verb = response.verb.as_str(),
         format = response.format.as_str(),
+        backing = "session_buffer",
+        source_of_truth = %response.source_of_truth,
+        os_clipboard_touched = response.os_clipboard_touched,
+        lease_required = response.lease_required,
         written = response.written,
         cleared = response.cleared,
         text_len = response.text_len,
-        "readback=clipboard_backend tool=act_clipboard after_operation_readback"
+        "readback=session_clipboard_buffer tool=act_clipboard after_operation_readback"
     );
     Ok(response)
 }
 
 impl ActClipboardFormat {
-    const fn to_clipboard_format(self) -> ClipboardFormat {
-        match self {
-            Self::Text => ClipboardFormat::Text,
-            Self::Unicode => ClipboardFormat::Unicode,
-        }
-    }
-
     const fn as_str(self) -> &'static str {
         match self {
             Self::Text => "text",
@@ -191,6 +217,20 @@ fn validate_params(params: &ActClipboardParams) -> Result<(), ErrorData> {
     Ok(())
 }
 
+fn validate_session_clipboard_write_format(params: &ActClipboardParams) -> Result<(), ErrorData> {
+    if matches!(params.verb, ActClipboardVerb::Write)
+        && matches!(params.format, ActClipboardFormat::Text)
+        && let Some(text) = params.text.as_ref()
+        && !text.is_ascii()
+    {
+        return Err(mcp_error(
+            error_codes::TOOL_PARAMS_INVALID,
+            "act_clipboard format=text requires ASCII text; use format=unicode for Unicode text",
+        ));
+    }
+    Ok(())
+}
+
 fn missing_write_text_error() -> ErrorData {
     mcp_error(
         error_codes::TOOL_PARAMS_INVALID,
@@ -198,22 +238,19 @@ fn missing_write_text_error() -> ErrorData {
     )
 }
 
-fn action_error_to_mcp(error: &ActionError) -> ErrorData {
-    mcp_error(error.code(), error.to_string())
-}
-
 fn verify_clipboard_delta(
     mut response: ActClipboardResponse,
     params: &ActClipboardParams,
     before: String,
     after: String,
+    source_of_truth: &'static str,
 ) -> Result<ActClipboardResponse, ErrorData> {
     let before_signature = text_signature(&before);
     let after_signature = text_signature(&after);
     if before == after {
         return Err(no_observed_delta_error(
             "act_clipboard",
-            "clipboard_text",
+            source_of_truth,
             params.verify_timeout_ms,
             before_signature,
             after_signature,
@@ -230,7 +267,7 @@ fn verify_clipboard_delta(
     {
         return Err(postcondition_failed_error(
             "act_clipboard",
-            "clipboard_text",
+            source_of_truth,
             "clipboard text changed but did not equal requested write text",
             before_signature,
             after_signature,
@@ -245,7 +282,7 @@ fn verify_clipboard_delta(
     if matches!(params.verb, ActClipboardVerb::Clear) && !after.is_empty() {
         return Err(postcondition_failed_error(
             "act_clipboard",
-            "clipboard_text",
+            source_of_truth,
             "clipboard text changed but was not empty after clear",
             before_signature,
             after_signature,
@@ -258,12 +295,48 @@ fn verify_clipboard_delta(
     }
     response.postcondition = postcondition_observed_delta(
         "act_clipboard",
-        "clipboard_text",
+        source_of_truth,
         before_signature,
         after_signature,
         "observed clipboard text Source-of-Truth change",
     );
     Ok(response)
+}
+
+fn session_response(
+    verb: ActClipboardVerb,
+    format: ActClipboardFormat,
+    written: bool,
+    cleared: bool,
+    text: Option<String>,
+    text_len: Option<usize>,
+    started: Instant,
+    postcondition: ActPostcondition,
+) -> ActClipboardResponse {
+    ActClipboardResponse {
+        ok: true,
+        verb,
+        format,
+        written,
+        cleared,
+        text,
+        text_len,
+        backing: ActClipboardBacking::SessionBuffer,
+        source_of_truth: "session_clipboard_buffer".to_owned(),
+        os_clipboard_touched: false,
+        lease_required: false,
+        elapsed_ms: elapsed_ms(started),
+        postcondition,
+    }
+}
+
+fn session_clipboard_text(
+    buffers: &HashMap<String, SessionClipboardBuffer>,
+    session_id: &str,
+) -> String {
+    buffers
+        .get(session_id)
+        .map_or_else(String::new, |buffer| buffer.text.clone())
 }
 
 const fn default_clipboard_format() -> ActClipboardFormat {
@@ -274,12 +347,20 @@ fn elapsed_ms(started: Instant) -> u32 {
     u32::try_from(started.elapsed().as_millis()).unwrap_or(u32::MAX)
 }
 
+fn unix_time_ms_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| u64::try_from(duration.as_millis()).unwrap_or(u64::MAX))
+        .unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn text_format_non_ascii_reaches_backend_validation() {
+    fn session_text_format_non_ascii_fails_before_any_clipboard_backend() {
+        let buffers = new_session_clipboards();
         let params = ActClipboardParams {
             verb: ActClipboardVerb::Write,
             text: Some("unicode-clipboard-edge-雪".to_owned()),
@@ -288,6 +369,74 @@ mod tests {
             verify_timeout_ms: default_verify_timeout_ms(),
         };
 
-        assert!(validate_params(&params).is_ok());
+        let error = act_clipboard_session_buffer(params, "session-a", &buffers)
+            .expect_err("session CF_TEXT writes should reject non-ASCII text");
+
+        assert_eq!(
+            error.data.as_ref().and_then(|data| data.get("code")),
+            Some(&serde_json::json!(error_codes::TOOL_PARAMS_INVALID))
+        );
+    }
+
+    #[test]
+    fn session_clipboard_buffers_are_isolated_by_session_id() {
+        let buffers = new_session_clipboards();
+
+        let write_a = act_clipboard_session_buffer(
+            ActClipboardParams {
+                verb: ActClipboardVerb::Write,
+                text: Some("agent-a".to_owned()),
+                format: ActClipboardFormat::Unicode,
+                verify_delta: false,
+                verify_timeout_ms: default_verify_timeout_ms(),
+            },
+            "session-a",
+            &buffers,
+        )
+        .expect("session-a write");
+        assert!(!write_a.os_clipboard_touched);
+        assert!(!write_a.lease_required);
+
+        act_clipboard_session_buffer(
+            ActClipboardParams {
+                verb: ActClipboardVerb::Write,
+                text: Some("agent-b".to_owned()),
+                format: ActClipboardFormat::Unicode,
+                verify_delta: false,
+                verify_timeout_ms: default_verify_timeout_ms(),
+            },
+            "session-b",
+            &buffers,
+        )
+        .expect("session-b write");
+
+        let read_a = act_clipboard_session_buffer(
+            ActClipboardParams {
+                verb: ActClipboardVerb::Read,
+                text: None,
+                format: ActClipboardFormat::Unicode,
+                verify_delta: false,
+                verify_timeout_ms: default_verify_timeout_ms(),
+            },
+            "session-a",
+            &buffers,
+        )
+        .expect("session-a read");
+
+        let read_b = act_clipboard_session_buffer(
+            ActClipboardParams {
+                verb: ActClipboardVerb::Read,
+                text: None,
+                format: ActClipboardFormat::Unicode,
+                verify_delta: false,
+                verify_timeout_ms: default_verify_timeout_ms(),
+            },
+            "session-b",
+            &buffers,
+        )
+        .expect("session-b read");
+
+        assert_eq!(read_a.text.as_deref(), Some("agent-a"));
+        assert_eq!(read_b.text.as_deref(), Some("agent-b"));
     }
 }

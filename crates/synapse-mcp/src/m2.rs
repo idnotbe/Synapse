@@ -44,8 +44,11 @@ pub(crate) use click::{
     click_params_can_route_background_first, click_target_root_hwnd, click_tier_failed,
 };
 #[cfg(test)]
-pub use clipboard::ActClipboardFormat;
-pub use clipboard::{ActClipboardParams, ActClipboardResponse, ActClipboardVerb, act_clipboard};
+pub use clipboard::{ActClipboardFormat, ActClipboardVerb};
+pub use clipboard::{ActClipboardParams, ActClipboardResponse};
+pub(crate) use clipboard::{
+    SharedSessionClipboardBuffers, act_clipboard_session_buffer, new_session_clipboards,
+};
 pub use config::M2ServiceConfig;
 pub use focus_window::{
     ActFocusWindowParams, ActFocusWindowResponse, act_focus_window,
@@ -680,13 +683,6 @@ pub(crate) fn foreground_input_lease_ttl_for_hold_ms(hold_ms: u32) -> u64 {
                 .saturating_add(FOREGROUND_RESTORE_LEASE_MARGIN_MS),
         )
         .min(synapse_action::MAX_LEASE_TTL_MS)
-}
-
-pub(crate) fn acquire_foreground_input_lease(
-    tool: &'static str,
-    session_id: Option<&str>,
-) -> Result<ForegroundInputLeaseGuard, ErrorData> {
-    acquire_foreground_input_lease_with_ttl(tool, session_id, synapse_action::DEFAULT_LEASE_TTL_MS)
 }
 
 pub(crate) fn acquire_foreground_input_lease_with_ttl(

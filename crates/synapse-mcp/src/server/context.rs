@@ -1582,13 +1582,16 @@ mod scope_gate_tests {
         };
 
         let result = service
-            .act_clipboard(Parameters(ActClipboardParams {
-                verb: ActClipboardVerb::Read,
-                text: None,
-                format: ActClipboardFormat::Unicode,
-                verify_delta: false,
-                verify_timeout_ms: crate::m2::default_verify_timeout_ms(),
-            }))
+            .act_clipboard_for_session_test_entrypoint(
+                Parameters(ActClipboardParams {
+                    verb: ActClipboardVerb::Read,
+                    text: None,
+                    format: ActClipboardFormat::Unicode,
+                    verify_delta: false,
+                    verify_timeout_ms: crate::m2::default_verify_timeout_ms(),
+                }),
+                "clipboard-audit-test-session",
+            )
             .await;
 
         let (after_count, rows) = {
@@ -1608,11 +1611,21 @@ mod scope_gate_tests {
         let finished: Value = serde_json::from_slice(&rows[1].1)?;
         assert_eq!(started["tool"], "act_clipboard");
         assert_eq!(started["status"], "started");
+        assert_eq!(started["session_id"], "clipboard-audit-test-session");
+        assert_eq!(
+            started["audit_context"]["session_id"],
+            "clipboard-audit-test-session"
+        );
         assert_eq!(started["details"]["verb"], "read");
         assert_eq!(started["details"]["format"], "unicode");
         assert!(started["details"].get("text").is_none());
 
         assert_eq!(finished["tool"], "act_clipboard");
+        assert_eq!(finished["session_id"], "clipboard-audit-test-session");
+        assert_eq!(
+            finished["audit_context"]["session_id"],
+            "clipboard-audit-test-session"
+        );
         assert_eq!(
             finished["status"],
             if result.is_ok() { "ok" } else { "error" }
@@ -1623,6 +1636,63 @@ mod scope_gate_tests {
         } else {
             assert!(finished["details"].get("request").is_some());
         }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn session_teardown_removes_virtual_clipboard_buffer() -> anyhow::Result<()> {
+        let profiles = TempDir::new()?;
+        let service = service_with_profiles(profiles.path(), false)?;
+        let session_id = "clipboard-cleanup-session";
+
+        service.act_clipboard_for_session(
+            ActClipboardParams {
+                verb: ActClipboardVerb::Write,
+                text: Some("cleanup-known-input".to_owned()),
+                format: ActClipboardFormat::Unicode,
+                verify_delta: false,
+                verify_timeout_ms: crate::m2::default_verify_timeout_ms(),
+            },
+            session_id,
+            "session_clipboard_buffer",
+        )?;
+
+        let before = service.act_clipboard_for_session(
+            ActClipboardParams {
+                verb: ActClipboardVerb::Read,
+                text: None,
+                format: ActClipboardFormat::Unicode,
+                verify_delta: false,
+                verify_timeout_ms: crate::m2::default_verify_timeout_ms(),
+            },
+            session_id,
+            "session_clipboard_buffer",
+        )?;
+        assert_eq!(before.text.as_deref(), Some("cleanup-known-input"));
+
+        let report = service
+            .session_lifecycle_state()?
+            .teardown_session(session_id, "test_clipboard_cleanup")
+            .await?;
+
+        assert!(report.clipboard.buffer_existed_before);
+        assert!(report.clipboard.removed);
+        assert!(!report.clipboard.buffer_exists_after);
+        assert_eq!(report.failure_count, 0);
+
+        let after = service.act_clipboard_for_session(
+            ActClipboardParams {
+                verb: ActClipboardVerb::Read,
+                text: None,
+                format: ActClipboardFormat::Unicode,
+                verify_delta: false,
+                verify_timeout_ms: crate::m2::default_verify_timeout_ms(),
+            },
+            session_id,
+            "session_clipboard_buffer",
+        )?;
+        assert_eq!(after.text.as_deref(), Some(""));
+
         Ok(())
     }
 

@@ -32,8 +32,9 @@ pub use click_timing::{
     inter_click_delay_ms_for_window,
 };
 pub use clipboard::{
-    ClipboardFormat, clear as clear_clipboard, read_text as read_clipboard_text,
-    write_text as write_clipboard_text,
+    ClipboardFormat, ClipboardRestoreReport, ClipboardSnapshot, clear as clear_clipboard,
+    read_text as read_clipboard_text, restore as restore_clipboard_snapshot,
+    snapshot as snapshot_clipboard, with_restored_clipboard, write_text as write_clipboard_text,
 };
 pub use curve::sample_curve;
 pub use dynamics::{BIGRAMS, KeystrokeEvent, ModifierMask, sample_typing_schedule};

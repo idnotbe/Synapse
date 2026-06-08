@@ -6,6 +6,40 @@ pub enum ClipboardFormat {
     Unicode,
 }
 
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ClipboardSnapshot {
+    formats: Vec<ClipboardFormatSnapshot>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ClipboardFormatSnapshot {
+    format: u32,
+    bytes: Vec<u8>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ClipboardRestoreReport {
+    pub format_count: usize,
+    pub byte_count: usize,
+}
+
+impl ClipboardSnapshot {
+    #[must_use]
+    pub fn format_count(&self) -> usize {
+        self.formats.len()
+    }
+
+    #[must_use]
+    pub fn byte_count(&self) -> usize {
+        self.formats.iter().map(|format| format.bytes.len()).sum()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.formats.is_empty()
+    }
+}
+
 /// Reads text from the system clipboard in the requested text format.
 ///
 /// # Errors
@@ -43,13 +77,71 @@ pub fn clear() -> ActionResult<()> {
     platform::clear()
 }
 
+/// Snapshots the current system clipboard formats that Synapse can restore exactly.
+///
+/// # Errors
+///
+/// Returns an [`ActionError`] without modifying the clipboard when any current
+/// format cannot be copied into owned memory for later restore.
+pub fn snapshot() -> ActionResult<ClipboardSnapshot> {
+    platform::snapshot()
+}
+
+/// Restores a previously captured system clipboard snapshot.
+///
+/// # Errors
+///
+/// Returns an [`ActionError`] when opening, clearing, allocating, or setting any
+/// clipboard format fails. The caller must treat that as a failed user-state
+/// restoration, not a successful action.
+pub fn restore(snapshot: &ClipboardSnapshot) -> ActionResult<ClipboardRestoreReport> {
+    platform::restore(snapshot)
+}
+
+/// Runs an operation that may touch the system clipboard, then restores the
+/// original clipboard even when the operation itself fails.
+///
+/// # Errors
+///
+/// Returns the operation error if the operation fails and restore succeeds.
+/// Returns a restore error if restoration fails, including the operation error
+/// detail when both fail.
+pub fn with_restored_clipboard<T>(operation: impl FnOnce() -> ActionResult<T>) -> ActionResult<T> {
+    let snapshot = snapshot()?;
+    let operation_result = operation();
+    let restore_result = restore(&snapshot);
+    match (operation_result, restore_result) {
+        (Ok(value), Ok(_report)) => Ok(value),
+        (Err(operation_error), Ok(_report)) => Err(operation_error),
+        (Ok(_value), Err(restore_error)) => {
+            let restore_detail = restore_error.detail().to_owned();
+            Err(restore_error.with_detail(format!(
+                "system clipboard restore failed after clipboard-backed action succeeded: {restore_detail}"
+            )))
+        }
+        (Err(operation_error), Err(restore_error)) => {
+            let restore_detail = restore_error.detail().to_owned();
+            Err(restore_error.with_detail(format!(
+                "system clipboard restore failed after clipboard-backed action also failed; action_error_code={} action_error_detail={} restore_error_detail={restore_detail}",
+                operation_error.code(),
+                operation_error.detail()
+            )))
+        }
+    }
+}
+
 #[cfg(all(unix, not(target_os = "macos")))]
 mod platform {
     use std::sync::{Mutex, MutexGuard, OnceLock, PoisonError};
 
     use arboard::Clipboard;
 
-    use super::{ActionError, ActionResult, ClipboardFormat};
+    use super::{
+        ActionError, ActionResult, ClipboardFormat, ClipboardFormatSnapshot,
+        ClipboardRestoreReport, ClipboardSnapshot,
+    };
+
+    const VIRTUAL_UNICODE_FORMAT: u32 = 13;
 
     static CLIPBOARD: OnceLock<Mutex<Option<Clipboard>>> = OnceLock::new();
 
@@ -74,6 +166,40 @@ mod platform {
         clipboard(&mut guard, "clear")?
             .clear()
             .map_err(|err| arboard_error("clear", &err))
+    }
+
+    pub fn snapshot() -> ActionResult<ClipboardSnapshot> {
+        let text = read_text(ClipboardFormat::Unicode)?;
+        Ok(ClipboardSnapshot {
+            formats: vec![ClipboardFormatSnapshot {
+                format: VIRTUAL_UNICODE_FORMAT,
+                bytes: text.into_bytes(),
+            }],
+        })
+    }
+
+    pub fn restore(snapshot: &ClipboardSnapshot) -> ActionResult<ClipboardRestoreReport> {
+        let Some(format) = snapshot.formats.first() else {
+            clear()?;
+            return Ok(ClipboardRestoreReport::default());
+        };
+        if format.format != VIRTUAL_UNICODE_FORMAT || snapshot.formats.len() != 1 {
+            return Err(ActionError::BackendUnavailable {
+                detail:
+                    "Linux clipboard restore supports only the text snapshot captured by Synapse"
+                        .to_owned(),
+            });
+        }
+        let text = String::from_utf8(format.bytes.clone()).map_err(|err| {
+            ActionError::BackendUnavailable {
+                detail: format!("Linux clipboard snapshot text was not UTF-8: {err}"),
+            }
+        })?;
+        write_text(ClipboardFormat::Unicode, &text)?;
+        Ok(ClipboardRestoreReport {
+            format_count: snapshot.format_count(),
+            byte_count: snapshot.byte_count(),
+        })
     }
 
     fn clipboard_guard(
@@ -119,7 +245,9 @@ mod platform {
 
 #[cfg(not(any(windows, all(unix, not(target_os = "macos")))))]
 mod platform {
-    use super::{ActionError, ActionResult, ClipboardFormat};
+    use super::{
+        ActionError, ActionResult, ClipboardFormat, ClipboardRestoreReport, ClipboardSnapshot,
+    };
 
     pub fn read_text(_format: ClipboardFormat) -> ActionResult<String> {
         Err(unavailable("read"))
@@ -131,6 +259,14 @@ mod platform {
 
     pub fn clear() -> ActionResult<()> {
         Err(unavailable("clear"))
+    }
+
+    pub fn snapshot() -> ActionResult<ClipboardSnapshot> {
+        Err(unavailable("snapshot"))
+    }
+
+    pub fn restore(_snapshot: &ClipboardSnapshot) -> ActionResult<ClipboardRestoreReport> {
+        Err(unavailable("restore"))
     }
 
     fn unavailable(verb: &'static str) -> ActionError {
@@ -149,11 +285,11 @@ mod platform {
 
     use windows::{
         Win32::{
-            Foundation::{GlobalFree, HANDLE, HGLOBAL, HWND},
+            Foundation::{ERROR_SUCCESS, GetLastError, GlobalFree, HANDLE, HGLOBAL, HWND},
             System::{
                 DataExchange::{
-                    CloseClipboard, EmptyClipboard, GetClipboardData, IsClipboardFormatAvailable,
-                    OpenClipboard, SetClipboardData,
+                    CloseClipboard, EmptyClipboard, EnumClipboardFormats, GetClipboardData,
+                    IsClipboardFormatAvailable, OpenClipboard, SetClipboardData,
                 },
                 Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock},
             },
@@ -164,7 +300,10 @@ mod platform {
         core::w,
     };
 
-    use super::{ActionError, ActionResult, ClipboardFormat};
+    use super::{
+        ActionError, ActionResult, ClipboardFormat, ClipboardFormatSnapshot,
+        ClipboardRestoreReport, ClipboardSnapshot,
+    };
 
     const CF_TEXT: u32 = 1;
     const CF_UNICODETEXT: u32 = 13;
@@ -225,6 +364,60 @@ mod platform {
             EmptyClipboard()
         }
         .map_err(|err| windows_error("EmptyClipboard", &err))
+    }
+
+    pub fn snapshot() -> ActionResult<ClipboardSnapshot> {
+        let _clipboard = ClipboardGuard::open("snapshot", false)?;
+        let mut formats = Vec::new();
+        let mut previous = 0_u32;
+        loop {
+            let format = unsafe {
+                // SAFETY: The clipboard is open for this thread.
+                EnumClipboardFormats(previous)
+            };
+            if format == 0 {
+                let last_error = unsafe {
+                    // SAFETY: GetLastError reads the calling thread's last-error code.
+                    GetLastError()
+                };
+                if last_error == ERROR_SUCCESS {
+                    break;
+                }
+                return Err(ActionError::BackendUnavailable {
+                    detail: format!(
+                        "EnumClipboardFormats failed while snapshotting Windows clipboard after format {previous}: last_error={}",
+                        last_error.0
+                    ),
+                });
+            }
+            let handle = unsafe {
+                // SAFETY: The clipboard is open for this thread, and the format
+                // identifier was returned by EnumClipboardFormats.
+                GetClipboardData(format)
+            }
+            .map_err(|err| windows_error("GetClipboardData snapshot", &err))?;
+            let bytes = copy_hglobal_bytes(HGLOBAL(handle.0), format)?;
+            formats.push(ClipboardFormatSnapshot { format, bytes });
+            previous = format;
+        }
+        Ok(ClipboardSnapshot { formats })
+    }
+
+    pub fn restore(snapshot: &ClipboardSnapshot) -> ActionResult<ClipboardRestoreReport> {
+        let _clipboard = ClipboardGuard::open("restore", true)?;
+        unsafe {
+            // SAFETY: The clipboard is open for this thread and this process owns it.
+            EmptyClipboard()
+        }
+        .map_err(|err| windows_error("EmptyClipboard restore", &err))?;
+        for format in &snapshot.formats {
+            let memory = GlobalMemory::from_bytes(&format.bytes)?;
+            memory.give_to_clipboard_raw(format.format)?;
+        }
+        Ok(ClipboardRestoreReport {
+            format_count: snapshot.format_count(),
+            byte_count: snapshot.byte_count(),
+        })
     }
 
     struct ClipboardGuard {
@@ -377,11 +570,15 @@ mod platform {
             })
         }
 
-        fn give_to_clipboard(mut self, format: ClipboardFormat) -> ActionResult<()> {
+        fn give_to_clipboard(self, format: ClipboardFormat) -> ActionResult<()> {
+            self.give_to_clipboard_raw(format_code(format))
+        }
+
+        fn give_to_clipboard_raw(mut self, format: u32) -> ActionResult<()> {
             unsafe {
                 // SAFETY: The clipboard is open and SetClipboardData takes ownership
                 // of the movable memory handle on success.
-                SetClipboardData(format_code(format), Some(HANDLE(self.handle.0)))
+                SetClipboardData(format, Some(HANDLE(self.handle.0)))
             }
             .map_err(|err| windows_error("SetClipboardData", &err))?;
             self.owned = false;
@@ -475,6 +672,27 @@ mod platform {
                 started.elapsed().as_millis()
             ),
         }
+    }
+
+    fn copy_hglobal_bytes(handle: HGLOBAL, format: u32) -> ActionResult<Vec<u8>> {
+        let byte_len = unsafe {
+            // SAFETY: The handle was returned by GetClipboardData for an enumerated format.
+            GlobalSize(handle)
+        };
+        if byte_len == 0 {
+            return Err(ActionError::BackendUnavailable {
+                detail: format!(
+                    "Windows clipboard format {format} has zero GlobalSize and cannot be restored byte-for-byte"
+                ),
+            });
+        }
+        let locked = LockedGlobal::lock(handle, "snapshot")?;
+        let bytes = unsafe {
+            // SAFETY: The pointer comes from a locked global memory block, and byte_len
+            // is exactly GlobalSize for that block.
+            slice::from_raw_parts(locked.ptr().cast::<u8>(), byte_len)
+        };
+        Ok(bytes.to_vec())
     }
 }
 
