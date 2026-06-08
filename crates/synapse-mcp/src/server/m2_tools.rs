@@ -20,9 +20,10 @@ use crate::m2::postcondition::{
 };
 use crate::m2::{
     ActClickPostcondition, ActClickTierAttempt, CLICK_REASON_NO_OBSERVED_DELTA,
-    act_click_postmessage_with_params, act_stroke_error_details, act_stroke_request_details,
-    attach_click_tier_attempts, click_params_can_route_background_first, click_target_root_hwnd,
-    click_tier_failed, emitted_text,
+    CLICK_TIER_FOREGROUND, CLICK_TIER_POSTMESSAGE, act_click_postmessage_with_params,
+    act_stroke_error_details, act_stroke_request_details, attach_click_tier_attempts,
+    click_params_can_route_background_first, click_target_root_hwnd, click_tier_failed,
+    emitted_text,
 };
 use rmcp::{RoleServer, model::ErrorCode, service::RequestContext};
 use schemars::JsonSchema;
@@ -1314,17 +1315,33 @@ impl SynapseService {
                         ) && should_try_next_click_tier(&error) =>
                     {
                         let tier_attempts = click_tier_attempts_from_error(&error);
-                        self.act_click_try_postmessage_then_foreground(
-                            handle,
-                            recording,
-                            params,
-                            before,
-                            verify_timeout_ms,
-                            target_window_hwnd,
-                            tier_attempts,
-                            foreground_lease_session_id,
-                        )
-                        .await
+                        if should_try_click_postmessage_tier(&tier_attempts) {
+                            self.act_click_try_postmessage_then_foreground(
+                                handle,
+                                recording,
+                                params,
+                                before,
+                                verify_timeout_ms,
+                                target_window_hwnd,
+                                tier_attempts,
+                                foreground_lease_session_id,
+                            )
+                            .await
+                        } else if should_try_click_foreground_tier(&tier_attempts) {
+                            self.act_click_try_foreground(
+                                handle,
+                                recording,
+                                params,
+                                before,
+                                verify_timeout_ms,
+                                target_window_hwnd,
+                                tier_attempts,
+                                foreground_lease_session_id,
+                            )
+                            .await
+                        } else {
+                            Err(error)
+                        }
                     }
                     Err(error) => Err(error),
                 }
@@ -1334,17 +1351,33 @@ impl SynapseService {
                     && should_try_next_click_tier(&error) =>
             {
                 let tier_attempts = click_tier_attempts_from_error(&error);
-                self.act_click_try_postmessage_then_foreground(
-                    handle,
-                    recording,
-                    params,
-                    before,
-                    verify_timeout_ms,
-                    target_window_hwnd,
-                    tier_attempts,
-                    foreground_lease_session_id,
-                )
-                .await
+                if should_try_click_postmessage_tier(&tier_attempts) {
+                    self.act_click_try_postmessage_then_foreground(
+                        handle,
+                        recording,
+                        params,
+                        before,
+                        verify_timeout_ms,
+                        target_window_hwnd,
+                        tier_attempts,
+                        foreground_lease_session_id,
+                    )
+                    .await
+                } else if should_try_click_foreground_tier(&tier_attempts) {
+                    self.act_click_try_foreground(
+                        handle,
+                        recording,
+                        params,
+                        before,
+                        verify_timeout_ms,
+                        target_window_hwnd,
+                        tier_attempts,
+                        foreground_lease_session_id,
+                    )
+                    .await
+                } else {
+                    Err(error)
+                }
             }
             Err(error) => Err(error),
         }
@@ -1375,34 +1408,42 @@ impl SynapseService {
                     Ok(response) => Ok(response),
                     Err(error) if should_try_next_click_tier(&error) => {
                         let tier_attempts = click_tier_attempts_from_error(&error);
-                        self.act_click_try_foreground(
-                            handle,
-                            recording,
-                            params,
-                            before,
-                            verify_timeout_ms,
-                            target_window_hwnd,
-                            tier_attempts,
-                            foreground_lease_session_id,
-                        )
-                        .await
+                        if should_try_click_foreground_tier(&tier_attempts) {
+                            self.act_click_try_foreground(
+                                handle,
+                                recording,
+                                params,
+                                before,
+                                verify_timeout_ms,
+                                target_window_hwnd,
+                                tier_attempts,
+                                foreground_lease_session_id,
+                            )
+                            .await
+                        } else {
+                            Err(error)
+                        }
                     }
                     Err(error) => Err(error),
                 }
             }
             Err(error) if should_try_next_click_tier(&error) => {
                 let tier_attempts = click_tier_attempts_from_error(&error);
-                self.act_click_try_foreground(
-                    handle,
-                    recording,
-                    params,
-                    before,
-                    verify_timeout_ms,
-                    target_window_hwnd,
-                    tier_attempts,
-                    foreground_lease_session_id,
-                )
-                .await
+                if should_try_click_foreground_tier(&tier_attempts) {
+                    self.act_click_try_foreground(
+                        handle,
+                        recording,
+                        params,
+                        before,
+                        verify_timeout_ms,
+                        target_window_hwnd,
+                        tier_attempts,
+                        foreground_lease_session_id,
+                    )
+                    .await
+                } else {
+                    Err(error)
+                }
             }
             Err(error) => Err(error),
         }
@@ -2159,6 +2200,20 @@ fn should_try_next_click_tier(error: &ErrorData) -> bool {
                 | error_codes::ACTION_BACKEND_UNAVAILABLE
         )
     )
+}
+
+fn should_try_click_postmessage_tier(tier_attempts: &[ActClickTierAttempt]) -> bool {
+    !click_tier_attempted(tier_attempts, CLICK_TIER_POSTMESSAGE)
+        && !click_tier_attempted(tier_attempts, CLICK_TIER_FOREGROUND)
+}
+
+fn should_try_click_foreground_tier(tier_attempts: &[ActClickTierAttempt]) -> bool {
+    click_tier_attempted(tier_attempts, CLICK_TIER_POSTMESSAGE)
+        && !click_tier_attempted(tier_attempts, CLICK_TIER_FOREGROUND)
+}
+
+fn click_tier_attempted(tier_attempts: &[ActClickTierAttempt], tier: &str) -> bool {
+    tier_attempts.iter().any(|attempt| attempt.tier == tier)
 }
 
 fn click_error_data_code(error: &ErrorData) -> Option<&str> {
@@ -3177,6 +3232,73 @@ mod tests {
         );
     }
 
+    #[test]
+    fn click_router_respects_coordinate_fallback_disabled() {
+        let mut params = act_click_element_params();
+        params.use_invoke_pattern = true;
+        params.coordinate_fallback_on_unsupported = false;
+
+        let can_route = can_route_click_element_background_first(&params, None);
+
+        assert!(!can_route);
+    }
+
+    #[test]
+    fn click_router_keeps_direct_coordinate_element_route() {
+        let mut params = act_click_element_params();
+        params.use_invoke_pattern = false;
+        params.coordinate_fallback_on_unsupported = false;
+
+        let can_route = can_route_click_element_background_first(&params, None);
+
+        assert!(can_route);
+    }
+
+    #[test]
+    fn click_router_advances_without_replaying_attempted_tiers() {
+        let uia_failed = click_attempt(
+            "uia",
+            "failed",
+            Some(error_codes::ACTION_ELEMENT_PATTERN_UNSUPPORTED),
+        );
+        assert!(should_try_click_postmessage_tier(std::slice::from_ref(
+            &uia_failed
+        )));
+        assert!(!should_try_click_foreground_tier(std::slice::from_ref(
+            &uia_failed
+        )));
+
+        let postmessage_no_delta = click_attempt(
+            CLICK_TIER_POSTMESSAGE,
+            "failed",
+            Some(error_codes::ACTION_NO_OBSERVED_DELTA),
+        );
+        let after_postmessage = vec![uia_failed, postmessage_no_delta];
+        assert!(!should_try_click_postmessage_tier(&after_postmessage));
+        assert!(should_try_click_foreground_tier(&after_postmessage));
+
+        let foreground_no_delta = click_attempt(
+            CLICK_TIER_FOREGROUND,
+            "failed",
+            Some(error_codes::ACTION_NO_OBSERVED_DELTA),
+        );
+        let exhausted = vec![
+            click_attempt(
+                "uia",
+                "failed",
+                Some(error_codes::ACTION_ELEMENT_PATTERN_UNSUPPORTED),
+            ),
+            click_attempt(
+                CLICK_TIER_POSTMESSAGE,
+                "failed",
+                Some(error_codes::ACTION_NO_OBSERVED_DELTA),
+            ),
+            foreground_no_delta,
+        ];
+        assert!(!should_try_click_postmessage_tier(&exhausted));
+        assert!(!should_try_click_foreground_tier(&exhausted));
+    }
+
     fn foreground_proof(
         hwnd: i64,
         pid: u32,
@@ -3237,6 +3359,27 @@ mod tests {
             expected_foreground_process_regex: expected_process_regex.map(str::to_owned),
             expected_foreground_title_regex: expected_title_regex.map(str::to_owned),
             verify_timeout_ms: crate::m2::default_verify_timeout_ms(),
+        }
+    }
+
+    fn act_click_element_params() -> ActClickParams {
+        serde_json::from_value(json!({
+            "target": {
+                "element_id": "0x1000:0000002a00000001"
+            },
+            "verify_delta": true
+        }))
+        .expect("synthetic act_click params must deserialize through the public tool schema")
+    }
+
+    fn click_attempt(tier: &str, status: &str, error_code: Option<&str>) -> ActClickTierAttempt {
+        ActClickTierAttempt {
+            tier: tier.to_owned(),
+            status: status.to_owned(),
+            reason_code: error_code.map(str::to_owned),
+            error_code: error_code.map(str::to_owned),
+            detail: Some("synthetic regression attempt".to_owned()),
+            required_foreground: tier == CLICK_TIER_FOREGROUND,
         }
     }
 

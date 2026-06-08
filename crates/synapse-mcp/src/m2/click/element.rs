@@ -181,6 +181,17 @@ pub(super) async fn execute_element_click(
                         "act_click UIA pattern unsupported; coordinate fallback denied because element is not an enabled focusable edit/document-like target"
                     );
                 }
+                if error_code == error_codes::ACTION_ELEMENT_PATTERN_UNSUPPORTED
+                    && !params.coordinate_fallback_on_unsupported
+                {
+                    return Err(attach_click_tier_attempts(
+                        element_pattern_unsupported_coordinate_fallback_disabled_error(
+                            &element.element_id,
+                            error.detail(),
+                        ),
+                        tier_attempts,
+                    ));
+                }
                 if error_code == error_codes::ACTION_TARGET_INVALID
                     && params.coordinate_fallback_on_unsupported
                     && selection_item_select_readback_failed(error.detail())
@@ -577,6 +588,28 @@ fn selection_only_list_item_error(element_id: &synapse_core::ElementId, detail: 
             "detail_code": "UIA_SELECTION_ITEM_IS_NOT_CLICK_ACTIVATION",
             "element_id": element_id.as_str(),
             "recommended_pattern": "retry with coordinate_fallback_on_unsupported=true or click the element bbox center so the target receives the real click/activation event",
+        })),
+    )
+}
+
+fn element_pattern_unsupported_coordinate_fallback_disabled_error(
+    element_id: &synapse_core::ElementId,
+    detail: &str,
+) -> ErrorData {
+    ErrorData::new(
+        ErrorCode(-32099),
+        format!(
+            "element target exposes no supported UIA click control pattern and coordinate fallback is disabled: {detail}"
+        ),
+        Some(json!({
+            "code": error_codes::ACTION_ELEMENT_PATTERN_UNSUPPORTED,
+            "detail_code": "UIA_CONTROL_PATTERN_UNSUPPORTED",
+            "fallback_attempted": false,
+            "router_escalation_allowed": false,
+            "router_stop_reason": "coordinate_fallback_on_unsupported_false",
+            "element_id": element_id.to_string(),
+            "source_of_truth": "live UI Automation control-pattern availability on the re-resolved element",
+            "detail": detail,
         })),
     )
 }
@@ -1369,6 +1402,37 @@ mod tests {
         assert_eq!(
             data.get("element_id").and_then(serde_json::Value::as_str),
             Some(element_id.as_str())
+        );
+    }
+
+    #[test]
+    fn fallback_disabled_pattern_error_stops_router_explicitly() {
+        let element_id = synapse_core::ElementId::parse("0x1000:0000002a00000001")
+            .expect("synthetic element id must be valid");
+
+        let error = element_pattern_unsupported_coordinate_fallback_disabled_error(
+            &element_id,
+            "InvokePattern not exposed",
+        );
+
+        let data = error
+            .data
+            .as_ref()
+            .expect("fallback-disabled error should carry structured data");
+        println!("readback=act_click_fallback_disabled_pattern_error data={data}");
+        assert_eq!(
+            data.get("code").and_then(serde_json::Value::as_str),
+            Some(synapse_core::error_codes::ACTION_ELEMENT_PATTERN_UNSUPPORTED)
+        );
+        assert_eq!(
+            data.get("router_escalation_allowed")
+                .and_then(serde_json::Value::as_bool),
+            Some(false)
+        );
+        assert_eq!(
+            data.get("router_stop_reason")
+                .and_then(serde_json::Value::as_str),
+            Some("coordinate_fallback_on_unsupported_false")
         );
     }
 

@@ -437,7 +437,7 @@ pub(crate) fn click_params_can_route_background_first(params: &ActClickParams) -
             if synapse_a11y::cdp_backend_from_element_id(&element.element_id).is_some() {
                 return false;
             }
-            true
+            !params.use_invoke_pattern || params.coordinate_fallback_on_unsupported
         }
         ActClickTarget::Point(_) => false,
     }
