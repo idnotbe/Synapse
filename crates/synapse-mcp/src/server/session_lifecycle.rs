@@ -28,6 +28,7 @@ use crate::{
 use super::{
     CdpTargetOwner, SharedCdpTargetOwners, SharedSessionTargets, SynapseService,
     session_registry::{SharedSessionRegistry, unix_time_ms_now},
+    target_claims::{self, SharedTargetClaims, TargetClaimCleanupReport},
 };
 
 const MCP_SESSION_STORE_PREFIX: &str = "mcp/session/v1/";
@@ -81,6 +82,7 @@ pub(crate) struct SessionLifecycleState {
     cdp_target_owners: SharedCdpTargetOwners,
     session_clipboards: SharedSessionClipboardBuffers,
     session_registry: SharedSessionRegistry,
+    target_claims: SharedTargetClaims,
     session_processes: SharedSessionProcessResources,
     terminated_sessions: SharedTerminatedSessions,
     sse_state: SseState,
@@ -103,6 +105,7 @@ pub struct SessionTeardownReport {
     pub audit_session: SessionAuditSessionCleanupReport,
     pub clipboard: SessionClipboardCleanupReport,
     pub cdp: SessionCdpCleanupReport,
+    pub target_claims: TargetClaimCleanupReport,
     pub shell: SessionShellCleanupReport,
     pub processes: SessionProcessCleanupReport,
     pub subscriptions: SessionSubscriptionCleanupReport,
@@ -294,6 +297,7 @@ impl SessionTeardownReport {
             audit_session: SessionAuditSessionCleanupReport::default(),
             clipboard: SessionClipboardCleanupReport::default(),
             cdp: SessionCdpCleanupReport::default(),
+            target_claims: TargetClaimCleanupReport::default(),
             shell: SessionShellCleanupReport::default(),
             processes: SessionProcessCleanupReport::default(),
             subscriptions: SessionSubscriptionCleanupReport::default(),
@@ -322,6 +326,9 @@ impl SessionTeardownReport {
             self.failure_count = self.failure_count.saturating_add(1);
         }
         if self.clipboard.failed {
+            self.failure_count = self.failure_count.saturating_add(1);
+        }
+        if self.target_claims.failed {
             self.failure_count = self.failure_count.saturating_add(1);
         }
         self.failure_count = self
@@ -359,6 +366,7 @@ impl SynapseService {
             cdp_target_owners: Arc::clone(&self.cdp_target_owners),
             session_clipboards: Arc::clone(&self.session_clipboards),
             session_registry: Arc::clone(&self.session_registry),
+            target_claims: Arc::clone(&self.target_claims),
             session_processes: Arc::clone(&self.session_processes),
             terminated_sessions: Arc::clone(&self.terminated_sessions),
             sse_state: self.sse_state()?,
@@ -426,6 +434,7 @@ impl SessionLifecycleState {
         report.audit_session = self.cleanup_audit_session(session_id);
         report.clipboard = self.cleanup_clipboard(session_id);
         report.cdp = cleanup_session_cdp_targets(&self.cdp_target_owners, session_id).await;
+        report.target_claims = self.cleanup_target_claims(session_id);
         report.shell = cleanup_shell_jobs(session_id, reason);
         report.processes = self.cleanup_owned_processes(session_id);
         report.subscriptions = self.cleanup_subscriptions(session_id);
@@ -578,6 +587,11 @@ impl SessionLifecycleState {
                 add_if_stale(&mut candidates, active_sessions, &owner.session_id);
             }
         }
+        if let Ok(claims) = self.target_claims.lock() {
+            for read in claims.reads(unix_time_ms_now()) {
+                add_if_stale(&mut candidates, active_sessions, &read.owner_session_id);
+            }
+        }
         if let Ok(clipboards) = self.session_clipboards.lock() {
             for session_id in clipboards.keys() {
                 add_if_stale(&mut candidates, active_sessions, session_id);
@@ -691,6 +705,10 @@ impl SessionLifecycleState {
                 ..SessionTargetCleanupReport::default()
             },
         }
+    }
+
+    fn cleanup_target_claims(&self, session_id: &str) -> TargetClaimCleanupReport {
+        target_claims::cleanup_claims_for_session(&self.target_claims, session_id)
     }
 
     fn cleanup_continuity(&self, session_id: &str) -> SessionContinuityCleanupReport {

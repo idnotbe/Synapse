@@ -53,7 +53,7 @@ pub(crate) use clipboard::{
 pub use config::M2ServiceConfig;
 pub use focus_window::{
     ActFocusWindowParams, ActFocusWindowResponse, act_focus_window,
-    act_focus_window_request_details,
+    act_focus_window_request_details, act_focus_window_target_hwnd,
 };
 pub use pad::{ActPadParams, ActPadResponse, act_pad_with_handle};
 pub use postcondition::default_verify_timeout_ms;

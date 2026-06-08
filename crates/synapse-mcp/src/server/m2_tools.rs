@@ -4,11 +4,11 @@ use super::{
     ActPadResponse, ActPressParams, ActPressResponse, ActScrollParams, ActScrollResponse,
     ActSetValueParams, ActSetValueResponse, ActStrokeParams, ActStrokeResponse, ActTypeParams,
     ActTypeResponse, ErrorData, Json, Parameters, ReleaseAllParams, ReleaseAllResponse,
-    SynapseService, act_click_with_handle_and_lease, act_clipboard_session_buffer,
-    act_focus_window, act_focus_window_request_details, act_keymap_with_handle,
-    act_pad_with_handle, act_press_with_handle, act_scroll_with_handle, act_set_value,
-    act_set_value_request_details, act_stroke_validation_failure_details, act_stroke_with_handle,
-    act_type_with_handle,
+    SessionTarget, SynapseService, act_click_with_handle_and_lease, act_clipboard_session_buffer,
+    act_focus_window, act_focus_window_request_details, act_focus_window_target_hwnd,
+    act_keymap_with_handle, act_pad_with_handle, act_press_with_handle, act_scroll_with_handle,
+    act_set_value, act_set_value_request_details, act_stroke_validation_failure_details,
+    act_stroke_with_handle, act_type_with_handle,
     action_preflight::{ActionPreflightReadback, ForegroundProof},
     release_all_with_handles, tool, tool_router, validate_act_stroke_params,
 };
@@ -36,8 +36,9 @@ use synapse_action::{
     ActionStateSnapshot, RecordingBackend, ResolvedBackend, TokenBucketSnapshot,
 };
 use synapse_core::{
-    AccessibleNode, Action, Backend, FocusedElement, ForegroundContext, PathPoint, PathSpec, Point,
-    Rect, StrokeMotionModel, StrokeTiming, UiaPattern, VelocityProfile, error_codes,
+    AccessibleNode, Action, Backend, ElementId, FocusedElement, ForegroundContext, PathPoint,
+    PathSpec, Point, Rect, StrokeMotionModel, StrokeTiming, UiaPattern, VelocityProfile,
+    error_codes,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -148,6 +149,13 @@ impl SynapseService {
             self.audit_action_result_for_request("act_click", &result, &request_context)?;
             return result.map(Json);
         }
+        if let Err(error) = self.ensure_target_claim_allows_action(
+            "act_click",
+            click_claim_target(&params),
+            &request_context,
+        ) {
+            return audit_target_claim_denial(self, "act_click", error, &request_context);
+        }
         let target_window_hwnd = if params.verify_delta {
             match click_target_root_hwnd(&params) {
                 Ok(hwnd) => hwnd,
@@ -229,6 +237,13 @@ impl SynapseService {
             &action_preflight_details(&preflight),
             &request_context,
         )?;
+        if let Err(error) = self.ensure_target_claim_allows_action(
+            "act_type",
+            params.into_element.as_ref().and_then(element_claim_target),
+            &request_context,
+        ) {
+            return audit_target_claim_denial(self, "act_type", error, &request_context);
+        }
         let (handle, recording, _connection_closed_cancel) =
             self.m2_action_context_for_request(&request_context)?;
         if params.into_element.is_none()
@@ -311,6 +326,13 @@ impl SynapseService {
             }),
             &request_context,
         )?;
+        if let Err(error) = self.ensure_target_claim_allows_action(
+            "act_set_value",
+            element_claim_target(&params.element_id),
+            &request_context,
+        ) {
+            return audit_target_claim_denial(self, "act_set_value", error, &request_context);
+        }
         let result = act_set_value(params).await;
         self.audit_action_result_for_request("act_set_value", &result, &request_context)?;
         result.map(Json)
@@ -351,6 +373,24 @@ impl SynapseService {
             }),
             &request_context,
         )?;
+        let focus_claim_target = match act_focus_window_target_hwnd(&params) {
+            Ok(hwnd) => super::target_claims::window_session_target(hwnd),
+            Err(error) => {
+                return audit_target_claim_denial(
+                    self,
+                    "act_focus_window",
+                    error,
+                    &request_context,
+                );
+            }
+        };
+        if let Err(error) = self.ensure_target_claim_allows_action(
+            "act_focus_window",
+            Some(focus_claim_target),
+            &request_context,
+        ) {
+            return audit_target_claim_denial(self, "act_focus_window", error, &request_context);
+        }
         let mut lease_guard =
             match acquire_tool_foreground_input_lease("act_focus_window", &request_context) {
                 Ok(guard) => guard,
@@ -395,6 +435,11 @@ impl SynapseService {
             &action_preflight_details(&preflight),
             &request_context,
         )?;
+        if let Err(error) =
+            self.ensure_target_claim_allows_action("act_press", None, &request_context)
+        {
+            return audit_target_claim_denial(self, "act_press", error, &request_context);
+        }
         let foreground_change_policy = match act_press_foreground_change_policy(&params) {
             Ok(policy) => policy,
             Err(error) => {
@@ -489,6 +534,11 @@ impl SynapseService {
             }),
             &request_context,
         )?;
+        if let Err(error) =
+            self.ensure_target_claim_allows_action("act_keymap", None, &request_context)
+        {
+            return audit_target_claim_denial(self, "act_keymap", error, &request_context);
+        }
         let profile = {
             let runtime = self.profile_runtime()?;
             let active_profile_id = runtime
@@ -589,6 +639,11 @@ impl SynapseService {
             &act_stroke_audit_details(&stroke_details, &preflight),
             &request_context,
         )?;
+        if let Err(error) =
+            self.ensure_target_claim_allows_action("act_stroke", None, &request_context)
+        {
+            return audit_target_claim_denial(self, "act_stroke", error, &request_context);
+        }
         let before_delta_signature = if params.verify_delta {
             match self
                 .capture_action_delta_signature(160, None, true, None)
@@ -733,6 +788,13 @@ impl SynapseService {
             &action_preflight_details(&preflight),
             &request_context,
         )?;
+        if let Err(error) = self.ensure_target_claim_allows_action(
+            "act_scroll",
+            scroll_claim_target(&params),
+            &request_context,
+        ) {
+            return audit_target_claim_denial(self, "act_scroll", error, &request_context);
+        }
         let point_region = params.verify_delta_point_region();
         let before_delta_signature = if params.verify_delta && !params.uses_element_target() {
             match self
@@ -800,6 +862,11 @@ impl SynapseService {
             &action_preflight_details(&preflight),
             &request_context,
         )?;
+        if let Err(error) =
+            self.ensure_target_claim_allows_action("act_pad", None, &request_context)
+        {
+            return audit_target_claim_denial(self, "act_pad", error, &request_context);
+        }
         let (handle, recording, _connection_closed_cancel) =
             self.m2_action_context_for_request(&request_context)?;
         let snapshot_handle = if params.verify_delta {
@@ -1113,6 +1180,38 @@ fn foreground_lease_session_id(
     request_context: &RequestContext<RoleServer>,
 ) -> Result<Option<String>, ErrorData> {
     super::context::mcp_session_id_from_request_context(request_context)
+}
+
+fn audit_target_claim_denial<T: Serialize>(
+    service: &SynapseService,
+    tool: &'static str,
+    error: ErrorData,
+    request_context: &RequestContext<RoleServer>,
+) -> Result<Json<T>, ErrorData> {
+    let result: Result<T, ErrorData> = Err(error);
+    service.audit_action_result_for_request(tool, &result, request_context)?;
+    result.map(Json)
+}
+
+fn click_claim_target(params: &ActClickParams) -> Option<SessionTarget> {
+    click_target_root_hwnd(params)
+        .ok()
+        .flatten()
+        .map(super::target_claims::window_session_target)
+}
+
+fn element_claim_target(element_id: &ElementId) -> Option<SessionTarget> {
+    element_id
+        .parts()
+        .ok()
+        .map(|parts| super::target_claims::window_session_target(parts.hwnd))
+}
+
+fn scroll_claim_target(params: &ActScrollParams) -> Option<SessionTarget> {
+    params
+        .target
+        .as_ref()
+        .and_then(|target| element_claim_target(&target.element_id))
 }
 
 const fn click_delta_source_of_truth(target_window_hwnd: Option<i64>) -> &'static str {

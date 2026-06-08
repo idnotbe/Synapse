@@ -42,8 +42,8 @@ use crate::{
         ActStrokeResponse, ActTypeParams, ActTypeResponse, M2ServiceConfig, ReleaseAllParams,
         ReleaseAllResponse, SharedM2State, SharedSessionClipboardBuffers,
         act_click_with_handle_and_lease, act_clipboard_session_buffer, act_focus_window,
-        act_focus_window_request_details, act_keymap_with_handle, act_pad_with_handle,
-        act_press_with_handle, act_scroll_with_handle, act_set_value,
+        act_focus_window_request_details, act_focus_window_target_hwnd, act_keymap_with_handle,
+        act_pad_with_handle, act_press_with_handle, act_scroll_with_handle, act_set_value,
         act_set_value_request_details, act_stroke_validation_failure_details,
         act_stroke_with_handle, act_type_with_handle, new_session_clipboards,
         release_all_with_handles, shared_m2_state_from_config_with_shutdown_reason,
@@ -158,11 +158,13 @@ pub(crate) mod session_continuity;
 pub(crate) mod session_lifecycle;
 pub(crate) mod session_registry;
 mod session_tools;
+mod target_claims;
 mod target_policy;
 #[cfg(test)]
 mod tests;
 
 use session_registry::{SessionRegistry, SharedSessionRegistry};
+use target_claims::SharedTargetClaims;
 
 /// A single MCP session's active perception target (epic #720). When set,
 /// `observe`/`find`/`read_text`/`capture_screenshot` perceive this target
@@ -213,6 +215,7 @@ pub struct SynapseService {
     cdp_target_owners: SharedCdpTargetOwners,
     session_clipboards: SharedSessionClipboardBuffers,
     session_registry: SharedSessionRegistry,
+    target_claims: SharedTargetClaims,
     session_processes: session_lifecycle::SharedSessionProcessResources,
     terminated_sessions: session_lifecycle::SharedTerminatedSessions,
 }
@@ -239,6 +242,7 @@ impl SynapseService {
             cdp_target_owners: Arc::new(Mutex::new(HashMap::new())),
             session_clipboards: new_session_clipboards(),
             session_registry: Arc::new(Mutex::new(SessionRegistry::default())),
+            target_claims: Arc::new(Mutex::new(target_claims::TargetClaimRegistry::default())),
             session_processes: Arc::new(Mutex::new(BTreeMap::new())),
             terminated_sessions: Arc::new(Mutex::new(BTreeSet::new())),
         })
@@ -276,6 +280,7 @@ impl SynapseService {
             cdp_target_owners: Arc::new(Mutex::new(HashMap::new())),
             session_clipboards: new_session_clipboards(),
             session_registry: Arc::new(Mutex::new(SessionRegistry::default())),
+            target_claims: Arc::new(Mutex::new(target_claims::TargetClaimRegistry::default())),
             session_processes: Arc::new(Mutex::new(BTreeMap::new())),
             terminated_sessions: Arc::new(Mutex::new(BTreeSet::new())),
         })
@@ -313,6 +318,7 @@ impl SynapseService {
             cdp_target_owners: Arc::new(Mutex::new(HashMap::new())),
             session_clipboards: new_session_clipboards(),
             session_registry: Arc::new(Mutex::new(SessionRegistry::default())),
+            target_claims: Arc::new(Mutex::new(target_claims::TargetClaimRegistry::default())),
             session_processes: Arc::new(Mutex::new(BTreeMap::new())),
             terminated_sessions: Arc::new(Mutex::new(BTreeSet::new())),
         })
@@ -406,6 +412,7 @@ impl SynapseService {
             + Self::m2_tool_router()
             + Self::lease_tool_router()
             + Self::session_tool_router()
+            + Self::target_claim_tool_router()
             + Self::reality_tool_router()
             + Self::m3_tool_router()
             + Self::m4_tool_router();

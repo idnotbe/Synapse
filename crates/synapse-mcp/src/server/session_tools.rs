@@ -15,7 +15,8 @@ use synapse_core::error_codes;
 
 use super::{
     ErrorData, Json, Parameters, SessionTarget, SynapseService, TargetWire, mcp_error,
-    session_registry::SessionRegistryRead, session_registry::unix_time_ms_now, tool, tool_router,
+    session_registry::SessionRegistryRead, session_registry::unix_time_ms_now,
+    target_claims::TargetClaimRead, tool, tool_router,
 };
 
 #[derive(Clone, Debug, Deserialize, JsonSchema)]
@@ -69,6 +70,8 @@ pub struct SessionSummary {
     pub registry: SessionRegistryRead,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_target: Option<TargetWire>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub target_claims: Vec<TargetClaimRead>,
     pub lease: SessionLeaseReadback,
 }
 
@@ -193,10 +196,12 @@ impl SynapseService {
         let (registry_reads, stale_after_ms, registry_entry_count) =
             self.session_registry_reads(now_unix_ms)?;
         let targets = self.session_target_wires()?;
+        let target_claims_by_owner = self.target_claim_reads_by_owner()?;
         let lease_status = lease::status();
         let mut session_ids = registry_reads
             .keys()
             .chain(targets.keys())
+            .chain(target_claims_by_owner.keys())
             .cloned()
             .collect::<BTreeSet<_>>();
         if let Some(owner) = lease_status.owner_session_id.as_ref() {
@@ -208,6 +213,10 @@ impl SynapseService {
                 &session_id,
                 registry_reads.get(&session_id).cloned(),
                 targets.get(&session_id).cloned(),
+                target_claims_by_owner
+                    .get(&session_id)
+                    .cloned()
+                    .unwrap_or_default(),
                 &lease_status,
                 now_unix_ms,
                 stale_after_ms,
@@ -244,11 +253,16 @@ impl SynapseService {
             .session_target(Some(session_id))?
             .as_ref()
             .map(session_target_wire);
+        let target_claims = self
+            .target_claim_reads_by_owner()?
+            .remove(session_id)
+            .unwrap_or_default();
         let lease_status = lease::status();
         let session = build_session_summary(
             session_id,
             registry_reads.get(session_id).cloned(),
             active_target,
+            target_claims,
             &lease_status,
             now_unix_ms,
             stale_after_ms,
@@ -302,17 +316,21 @@ fn build_session_summary(
     session_id: &str,
     registry: Option<SessionRegistryRead>,
     active_target: Option<TargetWire>,
+    target_claims: Vec<TargetClaimRead>,
     lease_status: &synapse_action::LeaseStatus,
     now_unix_ms: u64,
     stale_after_ms: u64,
 ) -> Option<SessionSummary> {
     let registry = registry.or_else(|| {
-        (active_target.is_some() || lease_status.owner_session_id.as_deref() == Some(session_id))
-            .then(|| synthetic_registry_read(session_id, now_unix_ms, stale_after_ms))
+        (active_target.is_some()
+            || !target_claims.is_empty()
+            || lease_status.owner_session_id.as_deref() == Some(session_id))
+        .then(|| synthetic_registry_read(session_id, now_unix_ms, stale_after_ms))
     })?;
     Some(SessionSummary {
         registry,
         active_target,
+        target_claims,
         lease: SessionLeaseReadback {
             held: lease_status.held,
             owner_session_id: lease_status.owner_session_id.clone(),
@@ -410,8 +428,16 @@ mod tests {
             ttl_ms: Some(30_000),
             expires_in_ms: Some(29_999),
         };
-        let summary =
-            build_session_summary(session_id, None, None, &lease_status, 1_000, 500).unwrap();
+        let summary = build_session_summary(
+            session_id,
+            None,
+            None,
+            Vec::new(),
+            &lease_status,
+            1_000,
+            500,
+        )
+        .unwrap();
         assert_eq!(summary.registry.lifecycle, "unregistered");
         assert!(summary.lease.is_owner);
     }

@@ -164,6 +164,12 @@ pub fn act_focus_window_request_details(params: &ActFocusWindowParams) -> Value 
     })
 }
 
+pub fn act_focus_window_target_hwnd(params: &ActFocusWindowParams) -> Result<i64, ErrorData> {
+    validate_focus_window_params(params)?;
+    let requested = requested_target(params)?;
+    Ok(resolve_focus_target(&requested)?.hwnd)
+}
+
 fn validate_focus_window_params(params: &ActFocusWindowParams) -> Result<(), ErrorData> {
     if !(50..=5000).contains(&params.verify_timeout_ms) {
         return Err(mcp_error(
