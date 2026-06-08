@@ -38,6 +38,8 @@ const DEFAULT_LAUNCH_TIMEOUT_MS: u32 = 10_000;
 const MAX_LAUNCH_TIMEOUT_MS: u32 = 600_000;
 #[cfg(windows)]
 const SW_HIDE: u16 = 0;
+#[cfg(windows)]
+const SW_SHOWNOACTIVATE: u16 = 4;
 const DEFAULT_AGENT_SPAWN_WAIT_TIMEOUT_MS: u32 = 120_000;
 const MAX_AGENT_SPAWN_WAIT_TIMEOUT_MS: u32 = 600_000;
 const DEFAULT_AGENT_SPAWN_HOLD_OPEN_MS: u32 = 60_000;
@@ -2709,43 +2711,48 @@ fn validate_console_launch_visibility(params: &ActLaunchParams) -> Result<(), Er
 }
 
 fn spawn_launch_child(params: &ActLaunchParams) -> Result<u32, ErrorData> {
-    let needs_new_console = launch_target_needs_new_console(&params.target);
     #[cfg(windows)]
-    if needs_new_console {
-        return spawn_windows_console_child(params);
+    {
+        return spawn_windows_child(params);
     }
 
-    let mut command = StdCommand::new(&params.target);
-    command.args(&params.args);
-    if let Some(working_dir) = &params.working_dir {
-        command.current_dir(working_dir);
-    }
-    apply_launch_environment(&mut command, params)?;
-    if needs_new_console {
-        apply_new_console_creation_flags(&mut command);
-    } else {
-        command
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-    }
+    #[cfg(not(windows))]
+    {
+        let needs_new_console = launch_target_needs_new_console(&params.target);
 
-    let child = command.spawn().map_err(|error| {
-        launch_tool_error(
-            error_codes::ACTION_TARGET_INVALID,
-            format!("act_launch failed to spawn target: {error}"),
-            json!({
-                "code": error_codes::ACTION_TARGET_INVALID,
-                "target": params.target,
-                "args": params.args,
-                "working_dir": params.working_dir,
-                "reason": "spawn_failed",
-            }),
-        )
-    })?;
-    Ok(child.id())
+        let mut command = StdCommand::new(&params.target);
+        command.args(&params.args);
+        if let Some(working_dir) = &params.working_dir {
+            command.current_dir(working_dir);
+        }
+        apply_launch_environment(&mut command, params)?;
+        if needs_new_console {
+            apply_new_console_creation_flags(&mut command);
+        } else {
+            command
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+        }
+
+        let child = command.spawn().map_err(|error| {
+            launch_tool_error(
+                error_codes::ACTION_TARGET_INVALID,
+                format!("act_launch failed to spawn target: {error}"),
+                json!({
+                    "code": error_codes::ACTION_TARGET_INVALID,
+                    "target": params.target,
+                    "args": params.args,
+                    "working_dir": params.working_dir,
+                    "reason": "spawn_failed",
+                }),
+            )
+        })?;
+        Ok(child.id())
+    }
 }
 
+#[cfg(not(windows))]
 fn apply_launch_environment(
     command: &mut StdCommand,
     params: &ActLaunchParams,
@@ -2775,7 +2782,7 @@ fn launch_target_file_name(target: &str) -> String {
 }
 
 #[cfg(windows)]
-fn spawn_windows_console_child(params: &ActLaunchParams) -> Result<u32, ErrorData> {
+fn spawn_windows_child(params: &ActLaunchParams) -> Result<u32, ErrorData> {
     use windows::{
         Win32::{
             Foundation::CloseHandle,
@@ -2805,9 +2812,7 @@ fn spawn_windows_console_child(params: &ActLaunchParams) -> Result<u32, ErrorDat
     let startup_info = STARTUPINFOW {
         cb: startup_info_cb,
         dwFlags: STARTF_USESHOWWINDOW,
-        wShowWindow: match params.windows_console_window_state {
-            Some(LaunchWindowState::Hidden | LaunchWindowState::Normal) | None => SW_HIDE,
-        },
+        wShowWindow: windows_launch_show_window(params),
         ..Default::default()
     };
 
@@ -2823,7 +2828,7 @@ fn spawn_windows_console_child(params: &ActLaunchParams) -> Result<u32, ErrorDat
             None,
             None,
             false,
-            console_creation_flags(params),
+            windows_launch_creation_flags(params),
             Some(environment.as_ptr().cast()),
             current_dir,
             &raw const startup_info,
@@ -2853,17 +2858,27 @@ fn spawn_windows_console_child(params: &ActLaunchParams) -> Result<u32, ErrorDat
 }
 
 #[cfg(windows)]
-fn console_creation_flags(
+fn windows_launch_show_window(params: &ActLaunchParams) -> u16 {
+    if launch_target_needs_new_console(&params.target) {
+        SW_HIDE
+    } else {
+        SW_SHOWNOACTIVATE
+    }
+}
+
+#[cfg(windows)]
+fn windows_launch_creation_flags(
     params: &ActLaunchParams,
 ) -> windows::Win32::System::Threading::PROCESS_CREATION_FLAGS {
     use windows::Win32::System::Threading::{
         CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW, CREATE_UNICODE_ENVIRONMENT,
     };
 
-    let console_flag = match params.windows_console_window_state {
-        Some(LaunchWindowState::Hidden | LaunchWindowState::Normal) | None => CREATE_NO_WINDOW,
-    };
-    console_flag | CREATE_NEW_PROCESS_GROUP | CREATE_UNICODE_ENVIRONMENT
+    if launch_target_needs_new_console(&params.target) {
+        CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP | CREATE_UNICODE_ENVIRONMENT
+    } else {
+        CREATE_UNICODE_ENVIRONMENT
+    }
 }
 
 #[cfg(windows)]
@@ -3396,9 +3411,6 @@ fn validate_launch_environment_entry(key: &str, value: &str) -> Result<(), Error
 fn wide_null(value: &str) -> Vec<u16> {
     value.encode_utf16().chain(std::iter::once(0)).collect()
 }
-
-#[cfg(windows)]
-const fn apply_new_console_creation_flags(_command: &mut StdCommand) {}
 
 #[cfg(not(windows))]
 const fn apply_new_console_creation_flags(_command: &mut StdCommand) {}
@@ -6813,6 +6825,48 @@ mod tests {
                 "{target} should use normal GUI launch stdio handling"
             );
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_launch_startup_state_is_non_activating_for_gui_and_hidden_for_console() {
+        let gui = launch_params("notepad.exe", Vec::new(), 10_000);
+        let console = launch_params("cmd.exe", vec!["/c", "exit"], 10_000);
+
+        let gui_show = windows_launch_show_window(&gui);
+        let console_show = windows_launch_show_window(&console);
+
+        println!(
+            "readback=act_launch_startup_show_state before=gui:notepad.exe,console:cmd.exe after=gui:{gui_show} console:{console_show}"
+        );
+        assert_eq!(gui_show, SW_SHOWNOACTIVATE);
+        assert_eq!(console_show, SW_HIDE);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_launch_creation_flags_do_not_hide_gui_targets() {
+        use windows::Win32::System::Threading::{
+            CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW, CREATE_UNICODE_ENVIRONMENT,
+        };
+
+        let gui = launch_params("notepad.exe", Vec::new(), 10_000);
+        let console = launch_params("cmd.exe", vec!["/c", "exit"], 10_000);
+
+        let gui_flags = windows_launch_creation_flags(&gui);
+        let console_flags = windows_launch_creation_flags(&console);
+
+        println!(
+            "readback=act_launch_creation_flags before=gui:notepad.exe,console:cmd.exe after=gui:0x{:x} console:0x{:x}",
+            gui_flags.0, console_flags.0
+        );
+        assert_ne!(gui_flags.0 & CREATE_UNICODE_ENVIRONMENT.0, 0);
+        assert_eq!(gui_flags.0 & CREATE_NO_WINDOW.0, 0);
+        assert_eq!(gui_flags.0 & CREATE_NEW_PROCESS_GROUP.0, 0);
+
+        assert_ne!(console_flags.0 & CREATE_UNICODE_ENVIRONMENT.0, 0);
+        assert_ne!(console_flags.0 & CREATE_NO_WINDOW.0, 0);
+        assert_ne!(console_flags.0 & CREATE_NEW_PROCESS_GROUP.0, 0);
     }
 
     #[test]
