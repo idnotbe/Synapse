@@ -733,6 +733,7 @@ pub struct ActSpawnAgentLogPaths {
     pub stdout_path: String,
     pub stderr_path: String,
     pub final_message_path: String,
+    pub completion_status_path: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub debug_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -4730,31 +4731,31 @@ fn terminate_shell_job_process_tree(pid: u32) -> ShellJobTerminationReadback {
 
 #[cfg(windows)]
 fn terminate_shell_job_process_tree_platform(
-    pid: u32,
+    _pid: u32,
     process_ids: &[u32],
 ) -> ShellJobTerminationReadback {
-    let mut command = StdCommand::new("taskkill.exe");
-    command.args(["/PID", &pid.to_string(), "/T", "/F"]);
-    apply_no_window_std(&mut command);
-    match command.output() {
-        Ok(output) => {
-            let (remaining_process_ids, _waited_ms) =
-                wait_for_shell_job_process_tree_exit(process_ids, Duration::from_secs(5));
-            ShellJobTerminationReadback {
-                attempted: true,
-                status: if output.status.success() && remaining_process_ids.is_empty() {
-                    "terminated".to_owned()
-                } else {
-                    "termination_failed".to_owned()
-                },
-                remaining_process_ids,
-            }
+    let mut spawn_error = None;
+    for target_pid in process_ids.iter().rev() {
+        let mut command = StdCommand::new("taskkill.exe");
+        command.args(["/PID", &target_pid.to_string(), "/F"]);
+        apply_no_window_std(&mut command);
+        if let Err(error) = command.output() {
+            spawn_error = Some(error.to_string());
+            break;
         }
-        Err(error) => ShellJobTerminationReadback {
-            attempted: true,
-            status: format!("taskkill_spawn_failed:{error}"),
-            remaining_process_ids: shell_job_live_process_ids(process_ids),
+    }
+    let (remaining_process_ids, _waited_ms) =
+        wait_for_shell_job_process_tree_exit(process_ids, Duration::from_secs(5));
+    ShellJobTerminationReadback {
+        attempted: true,
+        status: if remaining_process_ids.is_empty() {
+            "terminated".to_owned()
+        } else if let Some(error) = spawn_error {
+            format!("taskkill_spawn_failed:{error}")
+        } else {
+            "termination_incomplete".to_owned()
         },
+        remaining_process_ids,
     }
 }
 
@@ -4795,24 +4796,39 @@ fn terminate_shell_job_process_tree_platform(
 }
 
 fn shell_job_process_tree_ids(root_pid: u32) -> Vec<u32> {
-    use sysinfo::{ProcessesToUpdate, System};
+    use sysinfo::{Pid, ProcessesToUpdate, System};
 
     let mut system = System::new_all();
     system.refresh_processes(ProcessesToUpdate::All, true);
     let mut ids = vec![root_pid];
-    ids.extend(shell_job_descendant_process_ids(&system, root_pid));
+    let Some(root_process) = system.process(Pid::from_u32(root_pid)) else {
+        return ids;
+    };
+    ids.extend(shell_job_descendant_process_ids(
+        &system,
+        root_pid,
+        root_process.start_time(),
+    ));
     ids.sort_unstable();
     ids.dedup();
     ids
 }
 
-fn shell_job_descendant_process_ids(system: &sysinfo::System, root_pid: u32) -> Vec<u32> {
+fn shell_job_descendant_process_ids(
+    system: &sysinfo::System,
+    root_pid: u32,
+    root_start_time: u64,
+) -> Vec<u32> {
     let mut descendants = Vec::new();
     let mut stack = vec![root_pid];
+    let mut visited = HashSet::from([root_pid]);
     while let Some(parent) = stack.pop() {
         for (pid, process) in system.processes() {
             if process.parent().map(|value| value.as_u32()) == Some(parent) {
                 let child = pid.as_u32();
+                if process.start_time() < root_start_time || !visited.insert(child) {
+                    continue;
+                }
                 descendants.push(child);
                 stack.push(child);
             }

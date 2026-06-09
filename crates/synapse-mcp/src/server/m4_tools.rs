@@ -432,6 +432,18 @@ impl SynapseService {
             Ok(process_job) => process_job,
             Err(error) => {
                 let cleanup = crate::m4::terminate_owned_process_tree(launch_response.pid);
+                let completion_artifacts = write_agent_spawn_daemon_terminal_artifacts(
+                    &files,
+                    &params,
+                    &spawn_id,
+                    "failed",
+                    "process job assignment failed before spawned agent completion",
+                    json!({
+                        "reason": "process_job_assign_failed",
+                        "source_error": error.message,
+                        "cleanup": cleanup,
+                    }),
+                );
                 return Err(agent_spawn_tool_error(
                     error_codes::ACTION_AGENT_SPAWN_FAILED,
                     "act_spawn_agent spawned the wrapper but failed to assign a session process job; exact spawned PID cleanup was attempted",
@@ -444,12 +456,25 @@ impl SynapseService {
                         "log_dir": files.log_dir.display().to_string(),
                         "source_error": error.message,
                         "cleanup": cleanup,
+                        "completion_artifacts": completion_artifacts,
                     }),
                 ));
             }
         };
         if let Err(error) = record_launch_process_history(self, &launch_params, &launch_response) {
             let cleanup = crate::m4::terminate_owned_process_tree(launch_response.pid);
+            let completion_artifacts = write_agent_spawn_daemon_terminal_artifacts(
+                &files,
+                &params,
+                &spawn_id,
+                "failed",
+                "process history recording failed before spawned agent completion",
+                json!({
+                    "reason": "process_history_record_failed",
+                    "source_error": error.message,
+                    "cleanup": cleanup,
+                }),
+            );
             return Err(agent_spawn_tool_error(
                 error_codes::ACTION_AGENT_SPAWN_FAILED,
                 "act_spawn_agent spawned the wrapper but failed to record process history; exact spawned PID cleanup was attempted",
@@ -462,6 +487,7 @@ impl SynapseService {
                     "log_dir": files.log_dir.display().to_string(),
                     "source_error": error.message,
                     "cleanup": cleanup,
+                    "completion_artifacts": completion_artifacts,
                 }),
             ));
         }
@@ -479,6 +505,19 @@ impl SynapseService {
             Ok(matched) => matched,
             Err(error) => {
                 let cleanup = crate::m4::terminate_owned_process_tree(launch_response.pid);
+                let completion_artifacts = write_agent_spawn_daemon_terminal_artifacts(
+                    &files,
+                    &params,
+                    &spawn_id,
+                    "session_timeout",
+                    "spawned agent did not register a ready MCP session before wait_timeout_ms",
+                    json!({
+                        "reason": "session_registry_readback_timeout",
+                        "wait_timeout_ms": params.wait_timeout_ms,
+                        "wait_error": error,
+                        "cleanup": cleanup,
+                    }),
+                );
                 return Err(agent_spawn_tool_error(
                     error_codes::ACTION_AGENT_SPAWN_SESSION_TIMEOUT,
                     "act_spawn_agent did not observe a fully provisioned MCP session before timeout; exact spawned PID cleanup was attempted",
@@ -497,6 +536,7 @@ impl SynapseService {
                         "final_message_tail": tail_file_lossy(&files.final_message_path, AGENT_SPAWN_LOG_TAIL_BYTES),
                         "wait_error": error,
                         "cleanup": cleanup,
+                        "completion_artifacts": completion_artifacts,
                     }),
                 ));
             }
@@ -514,6 +554,19 @@ impl SynapseService {
         };
         if let Err(error) = self.record_spawned_agent_metadata(&matched.session_id, metadata) {
             let cleanup = crate::m4::terminate_owned_process_tree(launch_response.pid);
+            let completion_artifacts = write_agent_spawn_daemon_terminal_artifacts(
+                &files,
+                &params,
+                &spawn_id,
+                "failed",
+                "spawned agent metadata recording failed before spawned agent completion",
+                json!({
+                    "reason": "spawned_agent_metadata_record_failed",
+                    "source_error": error.message,
+                    "session_id": matched.session_id,
+                    "cleanup": cleanup,
+                }),
+            );
             return Err(agent_spawn_tool_error(
                 error_codes::ACTION_AGENT_SPAWN_FAILED,
                 "act_spawn_agent observed the spawned session but failed to record session metadata; exact spawned PID cleanup was attempted",
@@ -528,6 +581,7 @@ impl SynapseService {
                     "log_dir": files.log_dir.display().to_string(),
                     "source_error": error.message,
                     "cleanup": cleanup,
+                    "completion_artifacts": completion_artifacts,
                 }),
             ));
         }
@@ -539,9 +593,23 @@ impl SynapseService {
                 Some(spawn_id.clone()),
                 launch_params.target.clone(),
                 process_job,
-            ),
+            )
+            .with_agent_cli(params.cli.as_str()),
         ) {
             let cleanup = crate::m4::terminate_owned_process_tree(launch_response.pid);
+            let completion_artifacts = write_agent_spawn_daemon_terminal_artifacts(
+                &files,
+                &params,
+                &spawn_id,
+                "failed",
+                "session process resource registration failed before spawned agent completion",
+                json!({
+                    "reason": "session_process_register_failed",
+                    "source_error": error.message,
+                    "session_id": matched.session_id,
+                    "cleanup": cleanup,
+                }),
+            );
             return Err(agent_spawn_tool_error(
                 error_codes::ACTION_AGENT_SPAWN_FAILED,
                 "act_spawn_agent observed the spawned session but failed to register the session process resource; exact spawned PID cleanup was attempted",
@@ -556,6 +624,7 @@ impl SynapseService {
                     "log_dir": files.log_dir.display().to_string(),
                     "source_error": error.message,
                     "cleanup": cleanup,
+                    "completion_artifacts": completion_artifacts,
                 }),
             ));
         }
@@ -688,6 +757,7 @@ struct AgentSpawnFiles {
     stdout_path: PathBuf,
     stderr_path: PathBuf,
     final_message_path: PathBuf,
+    completion_status_path: PathBuf,
     debug_path: Option<PathBuf>,
     mcp_config_path: Option<PathBuf>,
 }
@@ -700,6 +770,7 @@ impl AgentSpawnFiles {
             stdout_path: self.stdout_path.display().to_string(),
             stderr_path: self.stderr_path.display().to_string(),
             final_message_path: self.final_message_path.display().to_string(),
+            completion_status_path: self.completion_status_path.display().to_string(),
             debug_path: self
                 .debug_path
                 .as_ref()
@@ -730,6 +801,84 @@ fn agent_spawn_request_details(
         "launch_target": AGENT_SPAWN_LAUNCH_TARGET,
         "windows_console_window_state": "hidden",
     })
+}
+
+fn write_agent_spawn_daemon_terminal_artifacts(
+    files: &AgentSpawnFiles,
+    params: &ActSpawnAgentParams,
+    spawn_id: &str,
+    status: &str,
+    error_message: &str,
+    details: serde_json::Value,
+) -> serde_json::Value {
+    let completed_at_unix_ms = unix_time_ms_now();
+    let stdout_len = file_len(&files.stdout_path);
+    let stderr_len = file_len(&files.stderr_path);
+    let final_message = json!({
+        "schema_version": 1,
+        "spawn_id": spawn_id,
+        "cli": params.cli.as_str(),
+        "status": status,
+        "exit_code": null,
+        "error_message": error_message,
+        "message": "Synapse act_spawn_agent wrote this terminal artifact because the daemon ended the spawn before a final assistant response was available.",
+        "stdout_path": files.stdout_path.display().to_string(),
+        "stderr_path": files.stderr_path.display().to_string(),
+        "completion_status_path": files.completion_status_path.display().to_string(),
+        "details": details,
+    });
+    let final_write = serde_json::to_vec_pretty(&final_message)
+        .map_err(|error| error.to_string())
+        .and_then(|bytes| {
+            fs::write(&files.final_message_path, bytes).map_err(|error| error.to_string())
+        });
+    let final_len = file_len(&files.final_message_path);
+    let completion_status = json!({
+        "schema_version": 1,
+        "spawn_id": spawn_id,
+        "cli": params.cli.as_str(),
+        "status": status,
+        "exit_code": null,
+        "error_message": error_message,
+        "wrapper_started_at_unix_ms": null,
+        "completed_at_unix_ms": completed_at_unix_ms,
+        "elapsed_ms": null,
+        "requested_hold_open_ms": params.hold_open_ms,
+        "hold_open_elapsed_ms_met": false,
+        "final_message_path": files.final_message_path.display().to_string(),
+        "final_message_bytes": final_len,
+        "final_message_present": final_len > 0,
+        "final_message_source": "daemon_terminal_artifact_json",
+        "recovered_final_message_written": false,
+        "fallback_final_message_written": true,
+        "stdout_path": files.stdout_path.display().to_string(),
+        "stdout_line_count": null,
+        "last_stdout_event_type": null,
+        "stdout_bytes": stdout_len,
+        "stderr_path": files.stderr_path.display().to_string(),
+        "stderr_bytes": stderr_len,
+        "daemon_terminal_artifact": true,
+    });
+    let status_write = serde_json::to_vec_pretty(&completion_status)
+        .map_err(|error| error.to_string())
+        .and_then(|bytes| {
+            fs::write(&files.completion_status_path, bytes).map_err(|error| error.to_string())
+        });
+    let status_len = file_len(&files.completion_status_path);
+    json!({
+        "final_message_path": files.final_message_path.display().to_string(),
+        "final_message_write_ok": final_write.is_ok(),
+        "final_message_write_error": final_write.err(),
+        "final_message_bytes_after": final_len,
+        "completion_status_path": files.completion_status_path.display().to_string(),
+        "completion_status_write_ok": status_write.is_ok(),
+        "completion_status_write_error": status_write.err(),
+        "completion_status_bytes_after": status_len,
+    })
+}
+
+fn file_len(path: &Path) -> u64 {
+    fs::metadata(path).map_or(0, |metadata| metadata.len())
 }
 
 fn validate_spawn_target(target: &Option<ActSpawnAgentTarget>) -> Result<(), ErrorData> {
@@ -824,6 +973,7 @@ fn prepare_agent_spawn_files(
     let stdout_path = log_dir.join("stdout.jsonl");
     let stderr_path = log_dir.join("stderr.log");
     let final_message_path = log_dir.join("final-message.txt");
+    let completion_status_path = log_dir.join("completion-status.json");
     let debug_path =
         (params.cli == ActSpawnAgentCli::Claude).then(|| log_dir.join("claude-debug.log"));
     let mcp_config_path =
@@ -874,6 +1024,7 @@ fn prepare_agent_spawn_files(
         stdout_path,
         stderr_path,
         final_message_path,
+        completion_status_path,
         debug_path,
         mcp_config_path,
     })
@@ -960,22 +1111,19 @@ fn agent_spawn_powershell_script(
     let stdout_path = ps_single_quoted_path(&files.stdout_path);
     let stderr_path = ps_single_quoted_path(&files.stderr_path);
     let final_message_path = ps_single_quoted_path(&files.final_message_path);
+    let completion_status_path = ps_single_quoted_path(&files.completion_status_path);
     let working_dir = ps_single_quoted_path(working_dir);
-    let script = match params.cli {
+    let command_body = match params.cli {
         ActSpawnAgentCli::Codex => {
             let mcp_url_config = format!(
                 "mcp_servers.synapse.url={}",
                 toml_string_literal(&params.mcp_url)
             );
             format!(
-                "$ErrorActionPreference = 'Stop'\n\
-Set-Location -LiteralPath {working_dir}\n\
-$prompt = Get-Content -Raw -LiteralPath {prompt_path}\n\
-$codexArgs = @('exec','-C',{working_dir},'-s','danger-full-access','--json','-o',{final_message_path},'-c',{mcp_url_config},'-c','mcp_servers.synapse.bearer_token_env_var=\"SYNAPSE_BEARER_TOKEN\"','-')\n\
+                "$codexArgs = @('exec','-C',{working_dir},'-s','danger-full-access','--json','-o',{final_message_path},'-c',{mcp_url_config},'-c','mcp_servers.synapse.bearer_token_env_var=\"SYNAPSE_BEARER_TOKEN\"','-')\n\
 $prompt | & codex @codexArgs 1> {stdout_path} 2> {stderr_path}\n\
-exit $LASTEXITCODE\n",
+",
                 working_dir = working_dir,
-                prompt_path = prompt_path,
                 final_message_path = final_message_path,
                 mcp_url_config = ps_single_quote(&mcp_url_config),
                 stdout_path = stdout_path,
@@ -998,14 +1146,10 @@ exit $LASTEXITCODE\n",
             let debug_path = ps_single_quoted_path(debug_path);
             let mcp_config_path = ps_single_quoted_path(mcp_config_path);
             format!(
-                "$ErrorActionPreference = 'Stop'\n\
-Set-Location -LiteralPath {working_dir}\n\
-$prompt = Get-Content -Raw -LiteralPath {prompt_path}\n\
-$claudeArgs = @('-p','--verbose','--output-format','stream-json','--input-format','text','--permission-mode','bypassPermissions','--mcp-config',{mcp_config_path},'--strict-mcp-config','--add-dir',{working_dir},'--debug-file',{debug_path})\n\
+                "$claudeArgs = @('-p','--verbose','--output-format','stream-json','--input-format','text','--permission-mode','bypassPermissions','--mcp-config',{mcp_config_path},'--strict-mcp-config','--add-dir',{working_dir},'--debug-file',{debug_path})\n\
 $prompt | & claude @claudeArgs 1> {stdout_path} 2> {stderr_path}\n\
-exit $LASTEXITCODE\n",
+",
                 working_dir = working_dir,
-                prompt_path = prompt_path,
                 mcp_config_path = mcp_config_path,
                 debug_path = debug_path,
                 stdout_path = stdout_path,
@@ -1013,7 +1157,208 @@ exit $LASTEXITCODE\n",
             )
         }
     };
-    Ok(script)
+    Ok(agent_spawn_wrapper_powershell(
+        params,
+        &prompt_path,
+        &stdout_path,
+        &stderr_path,
+        &final_message_path,
+        &completion_status_path,
+        &working_dir,
+        &command_body,
+    ))
+}
+
+fn agent_spawn_wrapper_powershell(
+    params: &ActSpawnAgentParams,
+    prompt_path: &str,
+    stdout_path: &str,
+    stderr_path: &str,
+    final_message_path: &str,
+    completion_status_path: &str,
+    working_dir: &str,
+    command_body: &str,
+) -> String {
+    let cli = ps_single_quote(params.cli.as_str());
+    format!(
+        "$ErrorActionPreference = 'Stop'\n\
+$spawnId = {spawn_id_expr}\n\
+$spawnCli = {cli}\n\
+$requestedHoldOpenMs = [int64]{hold_open_ms}\n\
+$spawnPromptPath = {prompt_path}\n\
+$spawnStdoutPath = {stdout_path}\n\
+$spawnStderrPath = {stderr_path}\n\
+$spawnFinalMessagePath = {final_message_path}\n\
+$spawnCompletionStatusPath = {completion_status_path}\n\
+$spawnStartedAtUnixMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()\n\
+$spawnExitCode = 1\n\
+$spawnTerminalStatus = 'wrapper_error'\n\
+$spawnErrorMessage = $null\n\
+$spawnFinalMessageSource = $null\n\
+$spawnRecoveredFinalMessageWritten = $false\n\
+\n\
+function Get-SpawnFileLength([string]$Path) {{\n\
+    if (Test-Path -LiteralPath $Path) {{ return [int64](Get-Item -LiteralPath $Path).Length }}\n\
+    return [int64]0\n\
+}}\n\
+\n\
+function Get-SpawnStdoutSummary([string]$Path) {{\n\
+    $lineCount = 0\n\
+    $lastEventType = $null\n\
+    if (Test-Path -LiteralPath $Path) {{\n\
+        foreach ($line in Get-Content -LiteralPath $Path) {{\n\
+            if ([string]::IsNullOrWhiteSpace($line)) {{ continue }}\n\
+            $lineCount++\n\
+            try {{\n\
+                $event = $line | ConvertFrom-Json -ErrorAction Stop\n\
+                if ($null -ne $event.type) {{ $lastEventType = [string]$event.type }}\n\
+                elseif ($null -ne $event.item -and $null -ne $event.item.type) {{ $lastEventType = [string]$event.item.type }}\n\
+            }} catch {{}}\n\
+        }}\n\
+    }}\n\
+    return [pscustomobject]@{{ line_count = $lineCount; last_event_type = $lastEventType }}\n\
+}}\n\
+\n\
+function Get-SpawnFinalAssistantTextFromStdout([string]$Path) {{\n\
+    $finalText = $null\n\
+    if (Test-Path -LiteralPath $Path) {{\n\
+        foreach ($line in Get-Content -LiteralPath $Path) {{\n\
+            if ([string]::IsNullOrWhiteSpace($line)) {{ continue }}\n\
+            try {{\n\
+                $event = $line | ConvertFrom-Json -ErrorAction Stop\n\
+                if ($null -ne $event.item -and $event.item.type -eq 'agent_message' -and $null -ne $event.item.text) {{\n\
+                    $finalText = [string]$event.item.text\n\
+                }} elseif ($event.type -eq 'agent_message' -and $null -ne $event.text) {{\n\
+                    $finalText = [string]$event.text\n\
+                }} elseif ($event.type -eq 'message' -and $event.role -eq 'assistant' -and $null -ne $event.content) {{\n\
+                    if ($event.content -is [string]) {{\n\
+                        $finalText = [string]$event.content\n\
+                    }} else {{\n\
+                        $parts = @()\n\
+                        foreach ($part in $event.content) {{\n\
+                            if ($null -ne $part.text) {{ $parts += [string]$part.text }}\n\
+                        }}\n\
+                        if ($parts.Count -gt 0) {{ $finalText = [string]::Join(\"`n\", $parts) }}\n\
+                    }}\n\
+                }}\n\
+            }} catch {{}}\n\
+        }}\n\
+    }}\n\
+    return $finalText\n\
+}}\n\
+\n\
+function Write-SpawnRecoveredFinalMessage([string]$Text) {{\n\
+    Set-Content -LiteralPath $spawnFinalMessagePath -Value $Text -Encoding UTF8\n\
+    $script:spawnFinalMessageSource = 'stdout_jsonl_agent_message'\n\
+    $script:spawnRecoveredFinalMessageWritten = $true\n\
+}}\n\
+\n\
+function Write-SpawnFallbackFinalMessage([string]$Status, [int]$ExitCode, [string]$ErrorMessage) {{\n\
+    $stdoutSummary = Get-SpawnStdoutSummary -Path $spawnStdoutPath\n\
+    $fallback = [ordered]@{{\n\
+        schema_version = 1\n\
+        spawn_id = $spawnId\n\
+        cli = $spawnCli\n\
+        status = $Status\n\
+        exit_code = $ExitCode\n\
+        error_message = $ErrorMessage\n\
+        message = 'No final assistant response artifact was produced by the spawned agent CLI; this file was written by the Synapse act_spawn_agent wrapper.'\n\
+        stdout_path = $spawnStdoutPath\n\
+        stderr_path = $spawnStderrPath\n\
+        completion_status_path = $spawnCompletionStatusPath\n\
+        stdout_line_count = $stdoutSummary.line_count\n\
+        last_stdout_event_type = $stdoutSummary.last_event_type\n\
+    }}\n\
+    $fallback | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $spawnFinalMessagePath -Encoding UTF8\n\
+    $script:spawnFinalMessageSource = 'wrapper_fallback_json'\n\
+}}\n\
+\n\
+function Write-SpawnCompletionStatus([string]$Status, [int]$ExitCode, [string]$ErrorMessage, [bool]$FallbackFinalMessageWritten) {{\n\
+    $now = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()\n\
+    $elapsed = [int64]($now - $spawnStartedAtUnixMs)\n\
+    $stdoutSummary = Get-SpawnStdoutSummary -Path $spawnStdoutPath\n\
+    $finalBytes = Get-SpawnFileLength -Path $spawnFinalMessagePath\n\
+    $statusObject = [ordered]@{{\n\
+        schema_version = 1\n\
+        spawn_id = $spawnId\n\
+        cli = $spawnCli\n\
+        status = $Status\n\
+        exit_code = $ExitCode\n\
+        error_message = $ErrorMessage\n\
+        wrapper_started_at_unix_ms = $spawnStartedAtUnixMs\n\
+        completed_at_unix_ms = $now\n\
+        elapsed_ms = $elapsed\n\
+        requested_hold_open_ms = $requestedHoldOpenMs\n\
+        hold_open_elapsed_ms_met = ($elapsed -ge $requestedHoldOpenMs)\n\
+        final_message_path = $spawnFinalMessagePath\n\
+        final_message_bytes = $finalBytes\n\
+        final_message_present = ($finalBytes -gt 0)\n\
+        final_message_source = $spawnFinalMessageSource\n\
+        recovered_final_message_written = $spawnRecoveredFinalMessageWritten\n\
+        fallback_final_message_written = $FallbackFinalMessageWritten\n\
+        stdout_path = $spawnStdoutPath\n\
+        stdout_line_count = $stdoutSummary.line_count\n\
+        last_stdout_event_type = $stdoutSummary.last_event_type\n\
+        stderr_path = $spawnStderrPath\n\
+        stderr_bytes = (Get-SpawnFileLength -Path $spawnStderrPath)\n\
+    }}\n\
+    $statusObject | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $spawnCompletionStatusPath -Encoding UTF8\n\
+}}\n\
+\n\
+try {{\n\
+    Write-SpawnCompletionStatus -Status 'running' -ExitCode -1 -ErrorMessage $null -FallbackFinalMessageWritten:$false\n\
+    Set-Location -LiteralPath {working_dir}\n\
+    $prompt = Get-Content -Raw -LiteralPath $spawnPromptPath\n\
+{command_body}\
+    $spawnExitCode = if ($null -eq $LASTEXITCODE) {{ 0 }} else {{ [int]$LASTEXITCODE }}\n\
+    $spawnTerminalStatus = if ($spawnExitCode -eq 0) {{ 'completed' }} else {{ 'failed' }}\n\
+}} catch {{\n\
+    $spawnErrorMessage = $_.Exception.Message\n\
+    $spawnExitCode = 1\n\
+    $spawnTerminalStatus = 'wrapper_error'\n\
+    try {{ Add-Content -LiteralPath $spawnStderrPath -Value (\"SYNAPSE_AGENT_SPAWN_WRAPPER_ERROR: \" + $spawnErrorMessage) }} catch {{}}\n\
+}} finally {{\n\
+    $finalBytesBeforeFallback = Get-SpawnFileLength -Path $spawnFinalMessagePath\n\
+    $fallbackWritten = $false\n\
+    if ($spawnTerminalStatus -eq 'completed' -and $finalBytesBeforeFallback -gt 0) {{\n\
+        $finalStatus = 'ok'\n\
+        $spawnFinalMessageSource = 'cli_output_file'\n\
+    }} elseif ($spawnTerminalStatus -eq 'completed') {{\n\
+        $recoveredFinalText = Get-SpawnFinalAssistantTextFromStdout -Path $spawnStdoutPath\n\
+        if (-not [string]::IsNullOrWhiteSpace($recoveredFinalText)) {{\n\
+            Write-SpawnRecoveredFinalMessage -Text $recoveredFinalText\n\
+            $finalStatus = 'ok'\n\
+            $spawnErrorMessage = $null\n\
+        }} else {{\n\
+            $finalStatus = 'missing_final_response'\n\
+            $spawnErrorMessage = 'spawned agent CLI exited 0 but did not write final-message.txt and no assistant message was recoverable from stdout.jsonl'\n\
+            Write-SpawnFallbackFinalMessage -Status $finalStatus -ExitCode $spawnExitCode -ErrorMessage $spawnErrorMessage\n\
+            $fallbackWritten = $true\n\
+        }}\n\
+    }} elseif ($spawnTerminalStatus -eq 'wrapper_error') {{\n\
+        $finalStatus = 'wrapper_error'\n\
+        Write-SpawnFallbackFinalMessage -Status $finalStatus -ExitCode $spawnExitCode -ErrorMessage $spawnErrorMessage\n\
+        $fallbackWritten = $true\n\
+    }} else {{\n\
+        $finalStatus = 'failed'\n\
+        if ($null -eq $spawnErrorMessage) {{ $spawnErrorMessage = \"spawned agent CLI exited with code $spawnExitCode\" }}\n\
+        Write-SpawnFallbackFinalMessage -Status $finalStatus -ExitCode $spawnExitCode -ErrorMessage $spawnErrorMessage\n\
+        $fallbackWritten = $true\n\
+    }}\n\
+    Write-SpawnCompletionStatus -Status $finalStatus -ExitCode $spawnExitCode -ErrorMessage $spawnErrorMessage -FallbackFinalMessageWritten:$fallbackWritten\n\
+}}\n\
+exit $spawnExitCode\n",
+        spawn_id_expr = "$env:SYNAPSE_AGENT_SPAWN_ID",
+        cli = cli,
+        hold_open_ms = params.hold_open_ms,
+        prompt_path = prompt_path,
+        stdout_path = stdout_path,
+        stderr_path = stderr_path,
+        final_message_path = final_message_path,
+        completion_status_path = completion_status_path,
+        working_dir = working_dir,
+        command_body = command_body,
+    )
 }
 
 fn ps_single_quoted_path(path: &Path) -> String {

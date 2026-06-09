@@ -5,6 +5,8 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet},
+    fs,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -33,6 +35,8 @@ use super::{
 
 const MCP_SESSION_STORE_PREFIX: &str = "mcp/session/v1/";
 const PROCESS_JOB_CLOSE_WAIT: Duration = Duration::from_secs(5);
+const ACT_SPAWN_AGENT_TOOL_NAME: &str = "act_spawn_agent";
+const AGENT_SPAWN_COMPLETION_GRACE: Duration = Duration::from_secs(30);
 
 pub(crate) type SharedSessionProcessResources =
     Arc<Mutex<BTreeMap<String, BTreeMap<u32, SessionProcessResource>>>>;
@@ -50,6 +54,7 @@ pub(crate) struct SessionProcessResource {
     pub registered_at_unix_ms: u64,
     pub resource_id: Option<String>,
     pub launch_target: String,
+    pub agent_cli: Option<String>,
     pub process_job: Option<OwnedProcessJob>,
 }
 
@@ -69,8 +74,14 @@ impl SessionProcessResource {
             registered_at_unix_ms: unix_time_ms_now(),
             resource_id,
             launch_target,
+            agent_cli: None,
             process_job: Some(process_job),
         }
+    }
+
+    pub(crate) fn with_agent_cli(mut self, agent_cli: &str) -> Self {
+        self.agent_cli = Some(agent_cli.to_owned());
+        self
     }
 }
 
@@ -243,11 +254,17 @@ pub struct SessionProcessCleanupItem {
     pub pid: u32,
     pub resource_id: Option<String>,
     pub launch_target: String,
+    pub agent_cli: Option<String>,
     pub registered_at_unix_ms: u64,
     pub process_ids_before: Vec<u32>,
     pub live_process_ids_before: Vec<u32>,
     pub job_handle_dropped: bool,
+    pub natural_exit_wait_ms: u64,
     pub force_termination_status: Option<String>,
+    pub completion_status_path: Option<String>,
+    pub completion_status_before_cleanup: Option<String>,
+    pub completion_artifact_cleanup_status: Option<String>,
+    pub completion_artifact_cleanup_error: Option<String>,
     pub remaining_process_ids_after: Vec<u32>,
 }
 
@@ -280,6 +297,184 @@ pub struct SessionRegistryCleanupReport {
     pub reason_code: String,
     pub failed: bool,
     pub error_message: Option<String>,
+}
+
+#[derive(Debug)]
+struct AgentSpawnCleanupRead {
+    spawn_id: String,
+    log_dir: PathBuf,
+    stdout_path: PathBuf,
+    stderr_path: PathBuf,
+    final_message_path: PathBuf,
+    completion_status_path: PathBuf,
+}
+
+impl AgentSpawnCleanupRead {
+    fn for_resource(resource: &SessionProcessResource) -> Option<Self> {
+        if resource.tool != ACT_SPAWN_AGENT_TOOL_NAME {
+            return None;
+        }
+        let spawn_id = resource.resource_id.as_ref()?;
+        if !spawn_id.starts_with("agent-spawn-") {
+            return None;
+        }
+        let local_appdata = std::env::var_os("LOCALAPPDATA")?;
+        let log_dir = PathBuf::from(local_appdata)
+            .join("Synapse")
+            .join("agent-spawns")
+            .join(spawn_id);
+        Some(Self {
+            spawn_id: spawn_id.clone(),
+            stdout_path: log_dir.join("stdout.jsonl"),
+            stderr_path: log_dir.join("stderr.log"),
+            final_message_path: log_dir.join("final-message.txt"),
+            completion_status_path: log_dir.join("completion-status.json"),
+            log_dir,
+        })
+    }
+
+    fn completion_status(&self) -> Option<String> {
+        let bytes = fs::read(&self.completion_status_path).ok()?;
+        let status = serde_json::from_slice::<serde_json::Value>(&bytes).ok()?;
+        status
+            .get("status")
+            .and_then(|value| value.as_str())
+            .map(ToOwned::to_owned)
+    }
+
+    fn has_terminal_completion_status(&self) -> bool {
+        self.completion_status()
+            .is_some_and(|status| status != "running")
+    }
+
+    fn write_terminal_artifact(
+        &self,
+        status: &str,
+        resource: &SessionProcessResource,
+        process_ids_before: &[u32],
+        live_process_ids_before: &[u32],
+        remaining_process_ids_after: &[u32],
+        natural_exit_wait_ms: u64,
+        force_termination_status: Option<&str>,
+    ) -> Result<String, String> {
+        if self.has_terminal_completion_status() {
+            return Ok("already_terminal".to_owned());
+        }
+        let final_message_len_before = file_len(&self.final_message_path);
+        let stdout_len = file_len(&self.stdout_path);
+        let stderr_len = file_len(&self.stderr_path);
+        let (stdout_line_count, last_stdout_event_type) = stdout_summary(&self.stdout_path);
+        let details = json!({
+            "reason": "session_teardown_before_spawn_completion_artifact",
+            "session_id": &resource.session_id,
+            "tool": resource.tool,
+            "pid": resource.pid,
+            "resource_id": &resource.resource_id,
+            "launch_target": &resource.launch_target,
+            "agent_cli": &resource.agent_cli,
+            "registered_at_unix_ms": resource.registered_at_unix_ms,
+            "process_ids_before": process_ids_before,
+            "live_process_ids_before": live_process_ids_before,
+            "remaining_process_ids_after": remaining_process_ids_after,
+            "natural_exit_wait_ms": natural_exit_wait_ms,
+            "force_termination_status": force_termination_status,
+        });
+        if final_message_len_before == 0 {
+            let final_message = json!({
+                "schema_version": 1,
+                "spawn_id": &self.spawn_id,
+                "cli": resource.agent_cli.as_deref().unwrap_or("unknown"),
+                "status": status,
+                "exit_code": null,
+                "error_message": "spawned agent session ended before a terminal completion artifact was written",
+                "message": "Synapse session cleanup wrote this terminal artifact because the spawned process ended or was reclaimed without a final assistant response artifact.",
+                "stdout_path": self.stdout_path.display().to_string(),
+                "stderr_path": self.stderr_path.display().to_string(),
+                "completion_status_path": self.completion_status_path.display().to_string(),
+                "details": details,
+            });
+            let bytes = serde_json::to_vec_pretty(&final_message).map_err(|error| {
+                format!("failed to encode agent spawn cleanup final-message artifact: {error}")
+            })?;
+            fs::write(&self.final_message_path, bytes).map_err(|error| {
+                format!(
+                    "failed to write agent spawn cleanup final-message artifact {}: {error}",
+                    self.final_message_path.display()
+                )
+            })?;
+        }
+        let completed_at_unix_ms = unix_time_ms_now();
+        let final_message_len_after = file_len(&self.final_message_path);
+        let completion_status = json!({
+            "schema_version": 1,
+            "spawn_id": &self.spawn_id,
+            "cli": resource.agent_cli.as_deref().unwrap_or("unknown"),
+            "status": status,
+            "exit_code": null,
+            "error_message": "spawned agent session ended before a terminal completion artifact was written",
+            "wrapper_started_at_unix_ms": null,
+            "completed_at_unix_ms": completed_at_unix_ms,
+            "elapsed_ms": null,
+            "requested_hold_open_ms": null,
+            "hold_open_elapsed_ms_met": false,
+            "final_message_path": self.final_message_path.display().to_string(),
+            "final_message_bytes": final_message_len_after,
+            "final_message_present": final_message_len_after > 0,
+            "final_message_source": "session_cleanup_artifact_json",
+            "recovered_final_message_written": false,
+            "fallback_final_message_written": final_message_len_before == 0,
+            "stdout_path": self.stdout_path.display().to_string(),
+            "stdout_line_count": stdout_line_count,
+            "last_stdout_event_type": last_stdout_event_type,
+            "stdout_bytes": stdout_len,
+            "stderr_path": self.stderr_path.display().to_string(),
+            "stderr_bytes": stderr_len,
+            "daemon_terminal_artifact": true,
+            "session_cleanup_artifact": true,
+            "log_dir": self.log_dir.display().to_string(),
+            "details": details,
+        });
+        let bytes = serde_json::to_vec_pretty(&completion_status).map_err(|error| {
+            format!("failed to encode agent spawn cleanup completion-status artifact: {error}")
+        })?;
+        fs::write(&self.completion_status_path, bytes).map_err(|error| {
+            format!(
+                "failed to write agent spawn cleanup completion-status artifact {}: {error}",
+                self.completion_status_path.display()
+            )
+        })?;
+        Ok(status.to_owned())
+    }
+}
+
+fn file_len(path: &Path) -> u64 {
+    fs::metadata(path).map_or(0, |metadata| metadata.len())
+}
+
+fn stdout_summary(path: &Path) -> (u64, Option<String>) {
+    let Ok(stdout) = fs::read_to_string(path) else {
+        return (0, None);
+    };
+    let mut line_count = 0;
+    let mut last_event_type = None;
+    for line in stdout.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        line_count += 1;
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(line) {
+            if let Some(event_type) = value.get("type").and_then(|value| value.as_str()) {
+                last_event_type = Some(event_type.to_owned());
+            } else if let Some(event_type) = value
+                .get("item")
+                .and_then(|item| item.get("type"))
+                .and_then(|value| value.as_str())
+            {
+                last_event_type = Some(event_type.to_owned());
+            }
+        }
+    }
+    (line_count, last_event_type)
 }
 
 impl SessionTeardownReport {
@@ -829,12 +1024,33 @@ impl SessionLifecycleState {
             let process_ids = m4::owned_process_tree_ids(resource.pid);
             let live_before = m4::owned_live_process_ids(&process_ids);
             let job_handle_dropped = resource.process_job.is_some();
+            let agent_spawn_cleanup = AgentSpawnCleanupRead::for_resource(&resource);
+            let mut natural_exit_wait_ms = 0;
+            let mut completion_status_before_cleanup = agent_spawn_cleanup
+                .as_ref()
+                .and_then(|cleanup| cleanup.completion_status());
+            let mut completion_artifact_cleanup_status = None;
+            let mut completion_artifact_cleanup_error = None;
+            let mut remaining = live_before.clone();
+
+            if agent_spawn_cleanup.is_some() && !remaining.is_empty() {
+                let (_after_natural_wait, waited_ms) = m4::wait_for_owned_process_tree_exit(
+                    &process_ids,
+                    AGENT_SPAWN_COMPLETION_GRACE,
+                );
+                natural_exit_wait_ms = waited_ms;
+                completion_status_before_cleanup = agent_spawn_cleanup
+                    .as_ref()
+                    .and_then(|cleanup| cleanup.completion_status());
+            }
+
             if job_handle_dropped {
                 report.job_close_attempted = report.job_close_attempted.saturating_add(1);
             }
             drop(resource.process_job.take());
-            let (mut remaining, _waited_ms) =
+            let (after_job_drop, _waited_ms) =
                 m4::wait_for_owned_process_tree_exit(&process_ids, PROCESS_JOB_CLOSE_WAIT);
+            remaining = after_job_drop;
             let mut force_termination_status = None;
             if !remaining.is_empty() {
                 report.force_termination_attempted =
@@ -842,6 +1058,31 @@ impl SessionLifecycleState {
                 let forced = m4::terminate_owned_process_tree(resource.pid);
                 force_termination_status = Some(forced.status);
                 remaining = forced.remaining_process_ids;
+            }
+            if let Some(cleanup) = &agent_spawn_cleanup {
+                if !cleanup.has_terminal_completion_status() {
+                    let status = if force_termination_status.is_some() {
+                        "session_cleanup_forced"
+                    } else {
+                        "session_cleanup_no_completion"
+                    };
+                    match cleanup.write_terminal_artifact(
+                        status,
+                        &resource,
+                        &process_ids,
+                        &live_before,
+                        &remaining,
+                        natural_exit_wait_ms,
+                        force_termination_status.as_deref(),
+                    ) {
+                        Ok(write_status) => {
+                            completion_artifact_cleanup_status = Some(write_status);
+                        }
+                        Err(error) => {
+                            completion_artifact_cleanup_error = Some(error);
+                        }
+                    }
+                }
             }
             if remaining.is_empty() {
                 report.terminated = report.terminated.saturating_add(1);
@@ -853,11 +1094,19 @@ impl SessionLifecycleState {
                 pid: resource.pid,
                 resource_id: resource.resource_id,
                 launch_target: resource.launch_target,
+                agent_cli: resource.agent_cli,
                 registered_at_unix_ms: resource.registered_at_unix_ms,
                 process_ids_before: process_ids,
                 live_process_ids_before: live_before,
                 job_handle_dropped,
+                natural_exit_wait_ms,
                 force_termination_status,
+                completion_status_path: agent_spawn_cleanup
+                    .as_ref()
+                    .map(|cleanup| cleanup.completion_status_path.display().to_string()),
+                completion_status_before_cleanup,
+                completion_artifact_cleanup_status,
+                completion_artifact_cleanup_error,
                 remaining_process_ids_after: remaining,
             });
         }
