@@ -187,6 +187,12 @@ async fn cdp_probe_chromium_without_port_surfaces_unreachable_code() {
         after.reason_code.as_deref(),
         Some(error_codes::A11Y_CDP_UNREACHABLE)
     );
+    assert!(
+        after
+            .detail
+            .as_deref()
+            .is_some_and(|detail| detail.contains("chrome://inspect/#remote-debugging"))
+    );
 }
 
 #[tokio::test]
@@ -234,6 +240,12 @@ fn blocking_cdp_probe_chromium_without_port_surfaces_unreachable_code() {
     assert_eq!(
         after.reason_code.as_deref(),
         Some(error_codes::A11Y_CDP_UNREACHABLE)
+    );
+    assert!(
+        after
+            .detail
+            .as_deref()
+            .is_some_and(|detail| detail.contains("SYNAPSE_CDP_PORTS"))
     );
 }
 

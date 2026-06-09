@@ -38,9 +38,9 @@ Browser observations carry diagnostics so agents can tell the difference between
   `reason_code = "A11Y_CDP_UNREACHABLE"`: the foreground process is Chromium
   family, but no probed debug port accepted a connection. The diagnostics
   include the exact localhost ports/endpoints checked and a detail string that
-  says an existing-browser attach requires remote debugging to be enabled for
-  that running browser instance. Synapse then attempts OCR over tiled browser
-  content. If readable text is found,
+  distinguishes raw CDP HTTP attach from Chrome's newer auto-connect permission
+  flow. Synapse then attempts OCR over tiled browser content. If readable text is
+  found,
   `diagnostics.web_path = "ocr"` and OCR text nodes appear in `elements`; if OCR
   has no usable text or capture is unavailable, `web_path` remains `uia_only`.
 - CDP attach errors use the same diagnostics object with
@@ -69,6 +69,13 @@ That dedicated profile is intentional. Chrome 136 and newer ignore
 `--user-data-dir` is also supplied. A normally launched primary-profile Chrome
 can therefore be impossible for Synapse to inspect through CDP.
 
+Chrome 144 and newer also have a user-consented auto-connect flow at
+`chrome://inspect/#remote-debugging`. That flow is not the same thing as a raw
+`http://127.0.0.1:<port>/json/version` endpoint and cannot be discovered by
+adding ports to `SYNAPSE_CDP_PORTS`. It requires a client that speaks Chrome's
+auto-connect permission protocol, or a native browser bridge such as the
+Synapse Chrome extension path tracked separately.
+
 By default the automation profile is temporary and per launch. Set
 `SYNAPSE_CDP_USER_DATA_DIR` when a stable automation profile is needed, for
 example to keep a login session across runs. Do not point it at the user's
@@ -96,7 +103,8 @@ browser session, the supported attach path is:
    set `SYNAPSE_CDP_PORTS` to include that port and restart only the Synapse
    daemon, not the browser.
 5. If Chrome's own UI supports enabling remote debugging for the running
-   browser, enable it from that browser session, then re-run `observe`.
+   browser, treat that as the Chrome 144+ auto-connect permission flow. Do not
+   expect it to make `/json/version` reachable through `SYNAPSE_CDP_PORTS`.
 6. If the current browser session still exposes no endpoint, fail closed with
    `web_path = "uia_only"` or `ocr`; do not claim DOM/control readback. Relaunch
    is a user/session decision because it changes the authenticated browser

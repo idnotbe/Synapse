@@ -35,6 +35,11 @@ pub const DEFAULT_CDP_PORT: u16 = 9222;
 
 /// Environment override for the probed port list, e.g. `9222,9333`.
 const CDP_PORTS_ENV: &str = "SYNAPSE_CDP_PORTS";
+const CDP_UNREACHABLE_DETAIL: &str = "no reachable loopback CDP HTTP endpoint on checked ports; manual /json/version attach \
+     requires Chrome/Edge to be started with --remote-debugging-port and, on Chrome 136+, \
+     a non-default --user-data-dir. Chrome 144+ chrome://inspect/#remote-debugging is an \
+     auto-connect permission flow, not a raw HTTP endpoint Synapse can probe through \
+     SYNAPSE_CDP_PORTS";
 
 #[must_use]
 pub fn cdp_capabilities() -> Vec<CdpCapability> {
@@ -199,7 +204,7 @@ pub fn probe_chromium_cdp_blocking(
         process_name,
         error_codes::A11Y_CDP_UNREACHABLE,
         checked_ports,
-        "no reachable loopback CDP endpoint on checked ports; existing Chrome attach requires remote debugging to be enabled for that running browser instance",
+        CDP_UNREACHABLE_DETAIL,
     )
 }
 
@@ -229,7 +234,7 @@ pub async fn probe_chromium_cdp(
         process_name,
         error_codes::A11Y_CDP_UNREACHABLE,
         checked_ports,
-        "no reachable loopback CDP endpoint on checked ports; existing Chrome attach requires remote debugging to be enabled for that running browser instance",
+        CDP_UNREACHABLE_DETAIL,
     )
 }
 

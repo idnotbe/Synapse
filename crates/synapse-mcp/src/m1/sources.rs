@@ -1199,9 +1199,12 @@ fn populate_cdp_diagnostics(input: &mut ObservationInput) {
             process_name = %process_name,
             pid,
             probed_ports = ?ports,
-            "Chromium foreground has no reachable CDP debug port; web DOM is not \
-             exposed. Launch the browser via act_launch (opens a debug port) or set \
-             SYNAPSE_CDP_PORTS to an existing remote-debugging port."
+            "Chromium foreground has no reachable CDP HTTP endpoint; web DOM is not \
+             exposed. Launch the browser via act_launch for a dedicated debug profile, \
+             set SYNAPSE_CDP_PORTS to an already-running browser that was started with \
+             remote-debugging-port and a non-default user-data-dir, or use a real \
+             Chrome 144+ auto-connect/native browser bridge when existing-profile \
+             state is required."
         );
     }
     input.cdp = Some(diagnostics);
