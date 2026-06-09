@@ -80,6 +80,46 @@ async fn health_and_action_tools_appear_in_tools_list_with_schema() -> anyhow::R
             .is_some_and(|description| description.contains("coordinate_fallback_on_unsupported"))
     );
 
+    let set_target_tool = tools
+        .iter()
+        .find(|tool| tool.get("name") == Some(&Value::String("set_target".to_owned())))
+        .context("set_target tool missing")?;
+    assert_eq!(set_target_tool["inputSchema"]["type"], "object");
+    assert_eq!(
+        set_target_tool["inputSchema"]["additionalProperties"],
+        Value::Bool(false)
+    );
+    assert_eq!(
+        set_target_tool["inputSchema"]["required"],
+        serde_json::json!(["target"])
+    );
+    let target_schema = &set_target_tool["inputSchema"]["properties"]["target"];
+    let target_variants = target_schema["oneOf"]
+        .as_array()
+        .context("set_target target schema oneOf missing")?;
+    assert_eq!(target_variants.len(), 2);
+    assert!(
+        target_variants
+            .iter()
+            .any(|variant| variant["properties"]["kind"]["const"] == "window"
+                && variant["required"] == serde_json::json!(["kind", "window_hwnd"])
+                && variant["properties"]["window_hwnd"]["type"] == "integer")
+    );
+    assert!(
+        target_variants
+            .iter()
+            .any(|variant| variant["properties"]["kind"]["const"] == "cdp"
+                && variant["required"]
+                    == serde_json::json!(["kind", "window_hwnd", "cdp_target_id"])
+                && variant["properties"]["cdp_target_id"]["type"] == "string")
+    );
+    let set_target_description = set_target_tool["description"]
+        .as_str()
+        .context("set_target description missing")?;
+    assert!(set_target_description.contains("\"kind\":\"window\""));
+    assert!(set_target_description.contains("\"kind\":\"cdp\""));
+    assert!(set_target_description.contains("Legacy {\"hwnd\":...} is intentionally unsupported"));
+
     let type_tool = tools
         .iter()
         .find(|tool| tool.get("name") == Some(&Value::String("act_type".to_owned())))

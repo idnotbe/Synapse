@@ -7,7 +7,8 @@ use super::{
     TargetWire, empty_input_schema, mcp_error, observe_include, observe_input,
     populate_audio_summary, populate_clipboard_summary, populate_detection_from_state,
     populate_fs_recent, read_text_request_uncached, resolve_read_text_request,
-    set_capture_target_in_state, set_perception_mode_in_state, tool, tool_router,
+    set_capture_target_in_state, set_perception_mode_in_state, set_target_input_schema, tool,
+    tool_router,
 };
 use rmcp::{RoleServer, service::RequestContext};
 
@@ -327,7 +328,8 @@ impl SynapseService {
     }
 
     #[tool(
-        description = "Bind this MCP session's active perception target to a specific window (by HWND). While set, observe/find/read_text/capture_screenshot perceive THIS window without foregrounding it, so many agents observe different windows concurrently. Validates the window is live and snapshottable, echoing its title/process. Errors TARGET_WINDOW_NOT_FOUND for a dead/invalid HWND."
+        description = "Bind this MCP session's active perception target. Accepted target shapes are {\"kind\":\"window\",\"window_hwnd\":<integer>} or {\"kind\":\"cdp\",\"window_hwnd\":<integer>,\"cdp_target_id\":\"<target id>\"}. While set, observe/find/read_text/capture_screenshot perceive THIS window/tab without foregrounding it, so many agents observe different windows concurrently. Legacy {\"hwnd\":...} is intentionally unsupported. Validates the window is live and snapshottable, echoing its title/process. Errors TARGET_WINDOW_NOT_FOUND for a dead/invalid HWND.",
+        input_schema = set_target_input_schema()
     )]
     pub async fn set_target(
         &self,

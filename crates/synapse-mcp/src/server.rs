@@ -32,7 +32,7 @@ use crate::{
         find_snapshot_depth, match_find_input, mcp_error, observe_include, observe_input,
         populate_clipboard_summary, populate_detection_from_state, populate_fs_recent,
         read_text_request_uncached, resolve_read_text_request, set_capture_target_in_state,
-        set_perception_mode_in_state,
+        set_perception_mode_in_state, set_target_input_schema,
     },
     m2::{
         ActClickParams, ActClickResponse, ActClipboardParams, ActClipboardResponse,

@@ -10,7 +10,7 @@ use std::{
 
 use rmcp::{ErrorData, handler::server::common, model::JsonObject, schemars::JsonSchema};
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{Map, Value, json};
 use synapse_capture::{
     CAPTURE_CHANNEL_CAPACITY, CaptureBackend, CaptureConfig, CaptureController, CaptureTarget,
     CaptureThreadPriority, resolve_capture_target,
@@ -367,7 +367,7 @@ pub struct SetPerceptionModeResponse {
 /// `set_target` request: bind this MCP session's active perception target
 /// (epic #720, issue #736). Window targeting binds a native HWND; CDP
 /// targeting binds a specific browser tab target within a browser HWND.
-#[derive(Clone, Debug, Deserialize, JsonSchema)]
+#[derive(Clone, Debug, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum SetTargetParam {
     Window {
@@ -377,6 +377,82 @@ pub enum SetTargetParam {
         window_hwnd: i64,
         cdp_target_id: String,
     },
+}
+
+impl<'de> Deserialize<'de> for SetTargetParam {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = Value::deserialize(deserializer)?;
+        parse_set_target_param(value).map_err(serde::de::Error::custom)
+    }
+}
+
+const SET_TARGET_ACCEPTED_SHAPES: &str = "accepted set_target target shapes are {\"kind\":\"window\",\"window_hwnd\":<integer>} or {\"kind\":\"cdp\",\"window_hwnd\":<integer>,\"cdp_target_id\":\"<target id>\"}";
+
+fn parse_set_target_param(value: Value) -> Result<SetTargetParam, String> {
+    let object = value.as_object().ok_or_else(|| {
+        format!("set_target target must be an object; {SET_TARGET_ACCEPTED_SHAPES}")
+    })?;
+    if object.contains_key("hwnd") && !object.contains_key("kind") {
+        return Err(format!(
+            "set_target target does not accept legacy field `hwnd`; use `window_hwnd` with `kind:\"window\"`. {SET_TARGET_ACCEPTED_SHAPES}"
+        ));
+    }
+    let kind = object.get("kind").and_then(Value::as_str).ok_or_else(|| {
+        format!("set_target target is missing string field `kind`; {SET_TARGET_ACCEPTED_SHAPES}")
+    })?;
+    match kind {
+        "window" => parse_set_target_window(object),
+        "cdp" => parse_set_target_cdp(object),
+        other => Err(format!(
+            "set_target target kind must be `window` or `cdp`, got {other:?}; {SET_TARGET_ACCEPTED_SHAPES}"
+        )),
+    }
+}
+
+fn parse_set_target_window(object: &Map<String, Value>) -> Result<SetTargetParam, String> {
+    reject_unknown_set_target_fields(object, &["kind", "window_hwnd"])?;
+    Ok(SetTargetParam::Window {
+        window_hwnd: required_i64(object, "window_hwnd")?,
+    })
+}
+
+fn parse_set_target_cdp(object: &Map<String, Value>) -> Result<SetTargetParam, String> {
+    reject_unknown_set_target_fields(object, &["kind", "window_hwnd", "cdp_target_id"])?;
+    let cdp_target_id = object
+        .get("cdp_target_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            format!("set_target cdp target requires string field `cdp_target_id`; {SET_TARGET_ACCEPTED_SHAPES}")
+        })?
+        .to_owned();
+    Ok(SetTargetParam::Cdp {
+        window_hwnd: required_i64(object, "window_hwnd")?,
+        cdp_target_id,
+    })
+}
+
+fn reject_unknown_set_target_fields(
+    object: &Map<String, Value>,
+    accepted: &[&str],
+) -> Result<(), String> {
+    if let Some(field) = object
+        .keys()
+        .find(|field| !accepted.contains(&field.as_str()))
+    {
+        return Err(format!(
+            "set_target target field `{field}` is not accepted; {SET_TARGET_ACCEPTED_SHAPES}"
+        ));
+    }
+    Ok(())
+}
+
+fn required_i64(object: &Map<String, Value>, field: &str) -> Result<i64, String> {
+    object.get(field).and_then(Value::as_i64).ok_or_else(|| {
+        format!("set_target target requires integer field `{field}`; {SET_TARGET_ACCEPTED_SHAPES}")
+    })
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema)]
@@ -469,6 +545,61 @@ pub struct CdpCloseTabResponse {
 
 pub fn empty_input_schema() -> Arc<JsonObject> {
     common::schema_for_type::<EmptyParams>()
+}
+
+pub fn set_target_input_schema() -> Arc<JsonObject> {
+    json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["target"],
+        "properties": {
+            "target": {
+                "description": "Accepted target union. Use {\"kind\":\"window\",\"window_hwnd\":<integer>} for a native HWND, or {\"kind\":\"cdp\",\"window_hwnd\":<integer>,\"cdp_target_id\":\"<target id>\"} for a browser tab target. Legacy {\"hwnd\":...} is intentionally unsupported.",
+                "oneOf": [
+                    {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": ["kind", "window_hwnd"],
+                        "properties": {
+                            "kind": {
+                                "type": "string",
+                                "const": "window",
+                                "description": "Bind a native top-level window HWND."
+                            },
+                            "window_hwnd": {
+                                "type": "integer",
+                                "description": "Native top-level window HWND to bind to this MCP session."
+                            }
+                        }
+                    },
+                    {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": ["kind", "window_hwnd", "cdp_target_id"],
+                        "properties": {
+                            "kind": {
+                                "type": "string",
+                                "const": "cdp",
+                                "description": "Bind a browser CDP target within a Chromium window."
+                            },
+                            "window_hwnd": {
+                                "type": "integer",
+                                "description": "Native browser window HWND whose CDP endpoint owns the target."
+                            },
+                            "cdp_target_id": {
+                                "type": "string",
+                                "description": "CDP Target.getTargets targetId for the tab/page to bind."
+                            }
+                        }
+                    }
+                ]
+            }
+        }
+    })
+    .as_object()
+    .expect("set_target input schema is a JSON object")
+    .clone()
+    .into()
 }
 
 #[derive(Clone, Debug, Default, Deserialize, JsonSchema)]
@@ -1799,6 +1930,42 @@ mod tests {
         ProfileOcr, ProfileUseScope, SensorStatus, WebPerceptionPath,
     };
     use synapse_perception::TextRegion;
+
+    #[test]
+    fn set_target_deserialize_names_canonical_shapes() {
+        let canonical: SetTargetParams = serde_json::from_value(json!({
+            "target": {
+                "kind": "window",
+                "window_hwnd": 1234
+            }
+        }))
+        .expect("canonical window target shape must deserialize");
+        match canonical.target {
+            SetTargetParam::Window { window_hwnd } => assert_eq!(window_hwnd, 1234),
+            SetTargetParam::Cdp { .. } => panic!("expected window target"),
+        }
+
+        let alias_error = serde_json::from_value::<SetTargetParams>(json!({
+            "target": {
+                "hwnd": 1234
+            }
+        }))
+        .expect_err("legacy hwnd alias must fail loudly")
+        .to_string();
+        assert!(alias_error.contains("does not accept legacy field `hwnd`"));
+        assert!(alias_error.contains("\"kind\":\"window\""));
+        assert!(alias_error.contains("window_hwnd"));
+
+        let missing_kind_error = serde_json::from_value::<SetTargetParams>(json!({
+            "target": {
+                "window_hwnd": 1234
+            }
+        }))
+        .expect_err("missing kind must name accepted target shapes")
+        .to_string();
+        assert!(missing_kind_error.contains("missing string field `kind`"));
+        assert!(missing_kind_error.contains("\"kind\":\"cdp\""));
+    }
 
     /// Real-window Full-State-Verification for per-agent target perception
     /// (#736/#737): bind a BACKGROUND window as the target and prove `observe`
