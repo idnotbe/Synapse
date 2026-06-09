@@ -6,7 +6,7 @@ use synapse_test_utils::stdio_mcp_client::StdioMcpClient;
 
 const MATRIX_DOC: &str = include_str!("../../../docs/multi-agent-capability-matrix.md");
 
-const EXPECTED_MATRIX_TOOLS: [&str; 52] = [
+const EXPECTED_MATRIX_TOOLS: [&str; 55] = [
     "act_click",
     "act_clipboard",
     "act_combo",
@@ -26,6 +26,9 @@ const EXPECTED_MATRIX_TOOLS: [&str; 52] = [
     "act_type",
     "action_diagnostic_queue_full_setup",
     "action_diagnostic_rate_limit_override",
+    "agent_inbox",
+    "agent_send",
+    "agent_wait",
     "audio_tail",
     "audio_transcribe",
     "capture_screenshot",
@@ -270,6 +273,7 @@ fn listed_matrix_scope_tools(tools: &[Value]) -> anyhow::Result<BTreeSet<String>
 fn is_matrix_scope_tool(name: &str) -> bool {
     name.starts_with("act_")
         || name.starts_with("action_diagnostic_")
+        || name.starts_with("agent_")
         || name.starts_with("audio_")
         || name.starts_with("cdp_")
         || name.starts_with("control_lease_")

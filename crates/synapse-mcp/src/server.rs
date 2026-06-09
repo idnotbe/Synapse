@@ -16,7 +16,7 @@ use rmcp::{
 use serde::{Deserialize, Serialize};
 use synapse_action::{ActionHandle, ActionStateSnapshot, RecordingBackend};
 use synapse_core::{Health, SubsystemHealth, error_codes};
-use tokio::sync::watch;
+use tokio::sync::{Notify, watch};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
@@ -123,6 +123,7 @@ use crate::{
 
 mod action_audit;
 mod action_preflight;
+mod agent_mailbox;
 mod audit_context;
 mod context;
 pub(crate) mod drain;
@@ -215,6 +216,7 @@ pub struct SynapseService {
     cdp_target_owners: SharedCdpTargetOwners,
     session_clipboards: SharedSessionClipboardBuffers,
     session_registry: SharedSessionRegistry,
+    mailbox_notify: Arc<Notify>,
     target_claims: SharedTargetClaims,
     session_processes: session_lifecycle::SharedSessionProcessResources,
     terminated_sessions: session_lifecycle::SharedTerminatedSessions,
@@ -242,6 +244,7 @@ impl SynapseService {
             cdp_target_owners: Arc::new(Mutex::new(HashMap::new())),
             session_clipboards: new_session_clipboards(),
             session_registry: Arc::new(Mutex::new(SessionRegistry::default())),
+            mailbox_notify: Arc::new(Notify::new()),
             target_claims: Arc::new(Mutex::new(target_claims::TargetClaimRegistry::default())),
             session_processes: Arc::new(Mutex::new(BTreeMap::new())),
             terminated_sessions: Arc::new(Mutex::new(BTreeSet::new())),
@@ -280,6 +283,7 @@ impl SynapseService {
             cdp_target_owners: Arc::new(Mutex::new(HashMap::new())),
             session_clipboards: new_session_clipboards(),
             session_registry: Arc::new(Mutex::new(SessionRegistry::default())),
+            mailbox_notify: Arc::new(Notify::new()),
             target_claims: Arc::new(Mutex::new(target_claims::TargetClaimRegistry::default())),
             session_processes: Arc::new(Mutex::new(BTreeMap::new())),
             terminated_sessions: Arc::new(Mutex::new(BTreeSet::new())),
@@ -318,6 +322,7 @@ impl SynapseService {
             cdp_target_owners: Arc::new(Mutex::new(HashMap::new())),
             session_clipboards: new_session_clipboards(),
             session_registry: Arc::new(Mutex::new(SessionRegistry::default())),
+            mailbox_notify: Arc::new(Notify::new()),
             target_claims: Arc::new(Mutex::new(target_claims::TargetClaimRegistry::default())),
             session_processes: Arc::new(Mutex::new(BTreeMap::new())),
             terminated_sessions: Arc::new(Mutex::new(BTreeSet::new())),
@@ -371,6 +376,10 @@ impl SynapseService {
         &self.session_registry
     }
 
+    pub(crate) fn mailbox_notify_handle(&self) -> Arc<Notify> {
+        Arc::clone(&self.mailbox_notify)
+    }
+
     /// Resolves the session's active target, if any. The cloned value is
     /// returned after the map guard is dropped.
     pub(crate) fn session_target(
@@ -412,6 +421,7 @@ impl SynapseService {
             + Self::m2_tool_router()
             + Self::lease_tool_router()
             + Self::session_tool_router()
+            + Self::agent_mailbox_tool_router()
             + Self::target_claim_tool_router()
             + Self::reality_tool_router()
             + Self::m3_tool_router()
