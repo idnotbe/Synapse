@@ -355,17 +355,49 @@ impl AgentSpawnCleanupRead {
         live_process_ids_before: &[u32],
         remaining_process_ids_after: &[u32],
         natural_exit_wait_ms: u64,
+        job_close_terminated_processes: bool,
         force_termination_status: Option<&str>,
     ) -> Result<String, String> {
         if self.has_terminal_completion_status() {
             return Ok("already_terminal".to_owned());
         }
+        let completion_status_before_cleanup = self.completion_status();
         let final_message_len_before = file_len(&self.final_message_path);
         let stdout_len = file_len(&self.stdout_path);
         let stderr_len = file_len(&self.stderr_path);
         let (stdout_line_count, last_stdout_event_type) = stdout_summary(&self.stdout_path);
+        let recovered_from_final_message = final_message_len_before > 0
+            && remaining_process_ids_after.is_empty()
+            && !job_close_terminated_processes
+            && force_termination_status.is_none();
+        let artifact_status = if recovered_from_final_message {
+            "ok"
+        } else {
+            status
+        };
+        let artifact_error_message = if recovered_from_final_message {
+            serde_json::Value::Null
+        } else {
+            json!("spawned agent session ended before a terminal completion artifact was written")
+        };
+        let hold_open_elapsed_ms_met = if recovered_from_final_message {
+            serde_json::Value::Null
+        } else {
+            json!(false)
+        };
+        let final_message_source = if recovered_from_final_message {
+            "preexisting_final_message"
+        } else if final_message_len_before > 0 {
+            "preexisting_final_message_without_terminal_status"
+        } else {
+            "session_cleanup_artifact_json"
+        };
         let details = json!({
-            "reason": "session_teardown_before_spawn_completion_artifact",
+            "reason": if recovered_from_final_message {
+                "session_teardown_recovered_preexisting_final_message"
+            } else {
+                "session_teardown_before_spawn_completion_artifact"
+            },
             "session_id": &resource.session_id,
             "tool": resource.tool,
             "pid": resource.pid,
@@ -373,10 +405,13 @@ impl AgentSpawnCleanupRead {
             "launch_target": &resource.launch_target,
             "agent_cli": &resource.agent_cli,
             "registered_at_unix_ms": resource.registered_at_unix_ms,
+            "completion_status_before_cleanup": completion_status_before_cleanup,
+            "completion_status_recovered_from_final_message": recovered_from_final_message,
             "process_ids_before": process_ids_before,
             "live_process_ids_before": live_process_ids_before,
             "remaining_process_ids_after": remaining_process_ids_after,
             "natural_exit_wait_ms": natural_exit_wait_ms,
+            "job_close_terminated_processes": job_close_terminated_processes,
             "force_termination_status": force_termination_status,
         });
         if final_message_len_before == 0 {
@@ -409,18 +444,18 @@ impl AgentSpawnCleanupRead {
             "schema_version": 1,
             "spawn_id": &self.spawn_id,
             "cli": resource.agent_cli.as_deref().unwrap_or("unknown"),
-            "status": status,
+            "status": artifact_status,
             "exit_code": null,
-            "error_message": "spawned agent session ended before a terminal completion artifact was written",
+            "error_message": artifact_error_message,
             "wrapper_started_at_unix_ms": null,
             "completed_at_unix_ms": completed_at_unix_ms,
             "elapsed_ms": null,
             "requested_hold_open_ms": null,
-            "hold_open_elapsed_ms_met": false,
+            "hold_open_elapsed_ms_met": hold_open_elapsed_ms_met,
             "final_message_path": self.final_message_path.display().to_string(),
             "final_message_bytes": final_message_len_after,
             "final_message_present": final_message_len_after > 0,
-            "final_message_source": "session_cleanup_artifact_json",
+            "final_message_source": final_message_source,
             "recovered_final_message_written": false,
             "fallback_final_message_written": final_message_len_before == 0,
             "stdout_path": self.stdout_path.display().to_string(),
@@ -431,6 +466,13 @@ impl AgentSpawnCleanupRead {
             "stderr_bytes": stderr_len,
             "daemon_terminal_artifact": true,
             "session_cleanup_artifact": true,
+            "completion_status_source": if recovered_from_final_message {
+                "session_cleanup_recovered_from_final_message"
+            } else {
+                "session_cleanup_artifact_json"
+            },
+            "completion_status_before_cleanup": completion_status_before_cleanup,
+            "completion_status_recovered_from_final_message": recovered_from_final_message,
             "log_dir": self.log_dir.display().to_string(),
             "details": details,
         });
@@ -443,7 +485,11 @@ impl AgentSpawnCleanupRead {
                 self.completion_status_path.display()
             )
         })?;
-        Ok(status.to_owned())
+        Ok(if recovered_from_final_message {
+            "recovered_final_message".to_owned()
+        } else {
+            status.to_owned()
+        })
     }
 }
 
@@ -452,9 +498,10 @@ fn file_len(path: &Path) -> u64 {
 }
 
 fn stdout_summary(path: &Path) -> (u64, Option<String>) {
-    let Ok(stdout) = fs::read_to_string(path) else {
+    let Ok(stdout) = fs::read(path) else {
         return (0, None);
     };
+    let stdout = String::from_utf8_lossy(&stdout);
     let mut line_count = 0;
     let mut last_event_type = None;
     for line in stdout.lines() {
@@ -1032,13 +1079,15 @@ impl SessionLifecycleState {
             let mut completion_artifact_cleanup_status = None;
             let mut completion_artifact_cleanup_error = None;
             let mut remaining = live_before.clone();
+            let mut remaining_after_natural_wait = live_before.clone();
 
             if agent_spawn_cleanup.is_some() && !remaining.is_empty() {
-                let (_after_natural_wait, waited_ms) = m4::wait_for_owned_process_tree_exit(
+                let (after_natural_wait, waited_ms) = m4::wait_for_owned_process_tree_exit(
                     &process_ids,
                     AGENT_SPAWN_COMPLETION_GRACE,
                 );
                 natural_exit_wait_ms = waited_ms;
+                remaining_after_natural_wait = after_natural_wait;
                 completion_status_before_cleanup = agent_spawn_cleanup
                     .as_ref()
                     .and_then(|cleanup| cleanup.completion_status());
@@ -1051,6 +1100,8 @@ impl SessionLifecycleState {
             let (after_job_drop, _waited_ms) =
                 m4::wait_for_owned_process_tree_exit(&process_ids, PROCESS_JOB_CLOSE_WAIT);
             remaining = after_job_drop;
+            let job_close_terminated_processes =
+                !remaining_after_natural_wait.is_empty() && remaining.is_empty();
             let mut force_termination_status = None;
             if !remaining.is_empty() {
                 report.force_termination_attempted =
@@ -1063,6 +1114,8 @@ impl SessionLifecycleState {
                 if !cleanup.has_terminal_completion_status() {
                     let status = if force_termination_status.is_some() {
                         "session_cleanup_forced"
+                    } else if job_close_terminated_processes {
+                        "session_cleanup_job_closed"
                     } else {
                         "session_cleanup_no_completion"
                     };
@@ -1073,6 +1126,7 @@ impl SessionLifecycleState {
                         &live_before,
                         &remaining,
                         natural_exit_wait_ms,
+                        job_close_terminated_processes,
                         force_termination_status.as_deref(),
                     ) {
                         Ok(write_status) => {
