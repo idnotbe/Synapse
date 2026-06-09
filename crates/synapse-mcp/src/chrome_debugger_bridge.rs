@@ -171,6 +171,19 @@ pub(crate) struct ChromeDebuggerClickPoint {
     pub target_id: String,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub(crate) struct ChromeDebuggerTypeResult {
+    pub x: f64,
+    pub y: f64,
+    pub target_id: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub(crate) struct ChromeDebuggerNodeValue {
+    pub value: String,
+    pub target_id: String,
+}
+
 #[derive(Debug, Deserialize)]
 struct ExtensionSnapshotResponse {
     nodes: Vec<ExtensionDomNode>,
@@ -702,6 +715,56 @@ pub(crate) async fn click_node(
     serde_json::from_value::<ChromeDebuggerClickPoint>(result).map_err(|error| {
         ChromeDebuggerBridgeError::protocol(format!(
             "decode Chrome debugger click response: {error}"
+        ))
+    })
+}
+
+pub(crate) async fn type_node(
+    hwnd: i64,
+    foreground_title: &str,
+    target_id_hint: Option<&str>,
+    backend_node_id: i64,
+    text: &str,
+) -> Result<ChromeDebuggerTypeResult, ChromeDebuggerBridgeError> {
+    let result = bridge()
+        .send_command(
+            "typeNode",
+            json!({
+                "hwnd": hwnd,
+                "foregroundTitle": foreground_title,
+                "targetIdHint": target_id_hint,
+                "backendNodeId": backend_node_id,
+                "text": text,
+            }),
+        )
+        .await?;
+    serde_json::from_value::<ChromeDebuggerTypeResult>(result).map_err(|error| {
+        ChromeDebuggerBridgeError::protocol(format!(
+            "decode Chrome debugger type response: {error}"
+        ))
+    })
+}
+
+pub(crate) async fn node_value(
+    hwnd: i64,
+    foreground_title: &str,
+    target_id_hint: Option<&str>,
+    backend_node_id: i64,
+) -> Result<ChromeDebuggerNodeValue, ChromeDebuggerBridgeError> {
+    let result = bridge()
+        .send_command(
+            "nodeValue",
+            json!({
+                "hwnd": hwnd,
+                "foregroundTitle": foreground_title,
+                "targetIdHint": target_id_hint,
+                "backendNodeId": backend_node_id,
+            }),
+        )
+        .await?;
+    serde_json::from_value::<ChromeDebuggerNodeValue>(result).map_err(|error| {
+        ChromeDebuggerBridgeError::protocol(format!(
+            "decode Chrome debugger node value response: {error}"
         ))
     })
 }

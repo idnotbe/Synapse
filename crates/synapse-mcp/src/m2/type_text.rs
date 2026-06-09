@@ -130,54 +130,55 @@ async fn cdp_type_into_element(
             )
         })?
         .hwnd;
-    let endpoint = synapse_a11y::endpoint_for_window(hwnd).ok_or_else(|| {
-        mcp_error(
-            error_codes::A11Y_CDP_UNREACHABLE,
-            format!(
-                "no reachable CDP endpoint for web element {element_id} (browser closed or debug port gone)"
-            ),
-        )
-    })?;
     let title_hint = synapse_a11y::foreground_context(hwnd)
         .map(|context| context.window_title)
         .unwrap_or_default();
     let target_id_hint = synapse_a11y::cdp_target_from_element_id(element_id);
+    let endpoint = synapse_a11y::endpoint_for_window(hwnd);
+    let transport = if endpoint.is_some() {
+        "raw_cdp"
+    } else {
+        "chrome_debugger_extension"
+    };
     let before = if verify_delta {
         Some(
-            synapse_a11y::cdp_node_value(
-                &endpoint,
+            cdp_or_extension_node_value(
+                endpoint.as_deref(),
+                hwnd,
                 &title_hint,
                 target_id_hint.as_deref(),
                 backend_node_id,
             )
             .await
-            .map_err(|err| mcp_error(err.code(), err.to_string()))?,
+            .map_err(|err| cdp_transport_error("node value before readback", err))?,
         )
     } else {
         None
     };
-    synapse_a11y::cdp_type_node(
-        &endpoint,
+    cdp_or_extension_type_node(
+        endpoint.as_deref(),
+        hwnd,
         &title_hint,
         target_id_hint.as_deref(),
         backend_node_id,
         emitted,
     )
     .await
-    .map_err(|err| mcp_error(err.code(), err.to_string()))?;
+    .map_err(|err| cdp_transport_error("insert text", err))?;
     let postcondition = if let Some(before) = before {
         tokio::time::sleep(std::time::Duration::from_millis(u64::from(
             verify_timeout_ms,
         )))
         .await;
-        let after = synapse_a11y::cdp_node_value(
-            &endpoint,
+        let after = cdp_or_extension_node_value(
+            endpoint.as_deref(),
+            hwnd,
             &title_hint,
             target_id_hint.as_deref(),
             backend_node_id,
         )
         .await
-        .map_err(|err| mcp_error(err.code(), err.to_string()))?;
+        .map_err(|err| cdp_transport_error("node value after readback", err))?;
         verify_cdp_type_delta(verify_timeout_ms, emitted, before, after)?
     } else {
         postcondition_not_requested("act_type", "cdp_node.value")
@@ -186,6 +187,7 @@ async fn cdp_type_into_element(
         code = "M2_ACT_TYPE_CDP_INSERT_TEXT",
         element_id = %element_id,
         chars_typed,
+        transport,
         "readback=act_type_into_element method=cdp_insert_text chars_typed={chars_typed}"
     );
     Ok(ActTypeResponse {
@@ -199,6 +201,93 @@ async fn cdp_type_into_element(
         minimum_linear_ms_per_char: MIN_SAFE_LINEAR_MS_PER_CHAR,
         postcondition,
     })
+}
+
+#[cfg(windows)]
+enum CdpTypeTransportError {
+    Raw(synapse_a11y::A11yError),
+    Extension(crate::chrome_debugger_bridge::ChromeDebuggerBridgeError),
+}
+
+#[cfg(windows)]
+impl CdpTypeTransportError {
+    fn code(&self) -> &'static str {
+        match self {
+            Self::Raw(error) => error.code(),
+            Self::Extension(error) => error.code(),
+        }
+    }
+
+    fn detail(&self) -> String {
+        match self {
+            Self::Raw(error) => error.to_string(),
+            Self::Extension(error) => {
+                format!(
+                    "Chrome debugger extension type transport failed: {}",
+                    error.detail()
+                )
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
+fn cdp_transport_error(operation: &str, error: CdpTypeTransportError) -> ErrorData {
+    mcp_error(
+        error.code(),
+        format!("act_type CDP {operation} failed: {}", error.detail()),
+    )
+}
+
+#[cfg(windows)]
+async fn cdp_or_extension_node_value(
+    endpoint: Option<&str>,
+    hwnd: i64,
+    title_hint: &str,
+    target_id_hint: Option<&str>,
+    backend_node_id: i64,
+) -> Result<String, CdpTypeTransportError> {
+    if let Some(endpoint) = endpoint {
+        return synapse_a11y::cdp_node_value(endpoint, title_hint, target_id_hint, backend_node_id)
+            .await
+            .map_err(CdpTypeTransportError::Raw);
+    }
+    crate::chrome_debugger_bridge::node_value(hwnd, title_hint, target_id_hint, backend_node_id)
+        .await
+        .map(|readback| readback.value)
+        .map_err(CdpTypeTransportError::Extension)
+}
+
+#[cfg(windows)]
+async fn cdp_or_extension_type_node(
+    endpoint: Option<&str>,
+    hwnd: i64,
+    title_hint: &str,
+    target_id_hint: Option<&str>,
+    backend_node_id: i64,
+    emitted: &str,
+) -> Result<(), CdpTypeTransportError> {
+    if let Some(endpoint) = endpoint {
+        return synapse_a11y::cdp_type_node(
+            endpoint,
+            title_hint,
+            target_id_hint,
+            backend_node_id,
+            emitted,
+        )
+        .await
+        .map_err(CdpTypeTransportError::Raw);
+    }
+    crate::chrome_debugger_bridge::type_node(
+        hwnd,
+        title_hint,
+        target_id_hint,
+        backend_node_id,
+        emitted,
+    )
+    .await
+    .map(|_result| ())
+    .map_err(CdpTypeTransportError::Extension)
 }
 
 pub async fn act_type_with_handle(

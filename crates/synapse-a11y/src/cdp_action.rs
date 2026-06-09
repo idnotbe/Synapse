@@ -418,6 +418,9 @@ pub async fn cdp_node_value(
                     if (this === null || this === undefined) { return ''; }
                     if ('value' in this) { return String(this.value ?? ''); }
                     if ('checked' in this) { return String(Boolean(this.checked)); }
+                    if (this.isContentEditable && this.innerText !== null && this.innerText !== undefined) {
+                        return String(this.innerText).replace(/\\n$/, '');
+                    }
                     if (this.textContent !== null && this.textContent !== undefined) {
                         return String(this.textContent);
                     }

@@ -92,6 +92,8 @@ async function handleCommand(command) {
       result = await handleSnapshot(params);
     } else if (kind === "clickNode") {
       result = await handleClickNode(params);
+    } else if (kind === "typeNode") {
+      result = await handleTypeNode(params);
     } else if (kind === "nodeValue") {
       result = await handleNodeValue(params);
     } else {
@@ -197,6 +199,56 @@ async function handleClickNode(params) {
   });
 }
 
+async function handleTypeNode(params) {
+  const backendNodeId = requiredNumber(params.backendNodeId, "backendNodeId");
+  const text = String(params.text ?? "");
+  const selected = await selectPageTarget(params);
+  return await withAttached(selected, async (debuggee) => {
+    await sendCdp(debuggee, "DOM.scrollIntoViewIfNeeded", { backendNodeId });
+    const bbox = await boxForBackend(debuggee, backendNodeId);
+    if (!bbox || bbox.w <= 0 || bbox.h <= 0) {
+      throw bridgeError(ERROR_AXTREE_FAILED, `backendNodeId ${backendNodeId} has no focusable box model`);
+    }
+    const point = {
+      x: bbox.x + bbox.w / 2,
+      y: bbox.y + bbox.h / 2
+    };
+    await sendCdp(debuggee, "Input.dispatchMouseEvent", {
+      type: "mouseMoved",
+      x: point.x,
+      y: point.y,
+      button: "none",
+      buttons: 0,
+      clickCount: 0
+    });
+    await sendCdp(debuggee, "Input.dispatchMouseEvent", {
+      type: "mousePressed",
+      x: point.x,
+      y: point.y,
+      button: "left",
+      buttons: 1,
+      clickCount: 1
+    });
+    await sendCdp(debuggee, "Input.dispatchMouseEvent", {
+      type: "mouseReleased",
+      x: point.x,
+      y: point.y,
+      button: "left",
+      buttons: 0,
+      clickCount: 1
+    });
+    try {
+      await sendCdp(debuggee, "DOM.focus", { backendNodeId });
+    } catch (_) {
+      // The click above is the authoritative focus/caret placement. Some AX
+      // wrapper nodes are not directly focusable even though the click lands
+      // in the editable control.
+    }
+    await sendCdp(debuggee, "Input.insertText", { text });
+    return { x: point.x, y: point.y, target_id: selected.target.id };
+  });
+}
+
 async function handleNodeValue(params) {
   const backendNodeId = requiredNumber(params.backendNodeId, "backendNodeId");
   const selected = await selectPageTarget(params);
@@ -214,6 +266,9 @@ async function handleNodeValue(params) {
         if (this === null || this === undefined) { return ""; }
         if ("value" in this) { return String(this.value ?? ""); }
         if ("checked" in this) { return String(Boolean(this.checked)); }
+        if (this.isContentEditable && this.innerText !== null && this.innerText !== undefined) {
+          return String(this.innerText).replace(/\\n$/, "");
+        }
         if (this.textContent !== null && this.textContent !== undefined) {
           return String(this.textContent);
         }
