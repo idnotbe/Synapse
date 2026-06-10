@@ -626,6 +626,7 @@ impl SynapseService {
                         "wait_timeout_ms": params.wait_timeout_ms,
                         "target": params.target,
                         "log_dir": files.log_dir.display().to_string(),
+                        "readiness_files": agent_spawn_readiness_file_readback(&files),
                         "stdout_tail": tail_file_lossy(&files.stdout_path, AGENT_SPAWN_LOG_TAIL_BYTES),
                         "stderr_tail": tail_file_lossy(&files.stderr_path, AGENT_SPAWN_LOG_TAIL_BYTES),
                         "final_message_tail": tail_file_lossy(&files.final_message_path, AGENT_SPAWN_LOG_TAIL_BYTES),
@@ -681,6 +682,7 @@ impl SynapseService {
                         "target": params.target,
                         "log_dir": files.log_dir.display().to_string(),
                         "task_started_path": files.task_started_path.display().to_string(),
+                        "readiness_files": agent_spawn_readiness_file_readback(&files),
                         "stdout_tail": tail_file_lossy(&files.stdout_path, AGENT_SPAWN_LOG_TAIL_BYTES),
                         "stderr_tail": tail_file_lossy(&files.stderr_path, AGENT_SPAWN_LOG_TAIL_BYTES),
                         "final_message_tail": tail_file_lossy(&files.final_message_path, AGENT_SPAWN_LOG_TAIL_BYTES),
@@ -827,47 +829,68 @@ impl SynapseService {
                     "data": error.data,
                 })
             })?;
-            let sessions_json = list
-                .sessions
-                .iter()
-                .map(|summary| {
-                    json!({
-                        "session_id": summary.registry.session_id,
-                        "agent_kind": summary.registry.agent_kind,
-                        "client_name": summary.registry.client_name,
-                        "lifecycle": summary.registry.lifecycle,
-                        "started_at_unix_ms": summary.registry.started_at_unix_ms,
-                        "last_action": summary.registry.last_action,
-                        "active_target": summary.active_target,
-                    })
-                })
-                .collect::<Vec<_>>();
-            last_observed = json!({
-                "reason": "candidate_not_ready",
-                "sessions": sessions_json,
-            });
-
-            for summary in list.sessions {
-                if !spawn_session_candidate_matches(
-                    &summary,
+            let mut matched_session = None;
+            let session_count = list.sessions.len();
+            let mut sessions_json = Vec::new();
+            let mut readiness_reason_counts: BTreeMap<String, u64> = BTreeMap::new();
+            let mut candidate_readiness = Vec::new();
+            for summary in &list.sessions {
+                let readiness = spawn_session_candidate_readiness(
+                    summary,
                     params,
                     before_session_ids,
                     launched_at_unix_ms,
-                ) {
-                    continue;
+                );
+                let reason = readiness
+                    .get("reason")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown")
+                    .to_owned();
+                *readiness_reason_counts.entry(reason.clone()).or_default() += 1;
+                if matched_session.is_none()
+                    && readiness.get("ready").and_then(Value::as_bool) == Some(true)
+                {
+                    matched_session = Some(MatchedSpawnSession {
+                        session_id: summary.registry.session_id.clone(),
+                        registered_at_unix_ms: unix_time_ms_now(),
+                        agent_process_id: discover_agent_process_id(launcher_pid, params.cli),
+                    });
                 }
-                let agent_process_id = discover_agent_process_id(launcher_pid, params.cli);
-                return Ok(MatchedSpawnSession {
-                    session_id: summary.registry.session_id,
-                    registered_at_unix_ms: unix_time_ms_now(),
-                    agent_process_id,
-                });
+                if reason != "session_existed_before_spawn"
+                    && candidate_readiness.len() < AGENT_SPAWN_RECORDED_ATTEMPT_LIMIT
+                {
+                    candidate_readiness.push(json!({
+                        "session_id": summary.registry.session_id,
+                        "started_at_unix_ms": summary.registry.started_at_unix_ms,
+                        "last_action": summary.registry.last_action,
+                        "active_target": summary.active_target,
+                        "readiness": readiness.clone(),
+                    }));
+                }
+                if sessions_json.len() < AGENT_SPAWN_RECORDED_ATTEMPT_LIMIT {
+                    sessions_json.push(spawn_session_observation(summary, readiness));
+                }
+            }
+            last_observed = json!({
+                "reason": "candidate_not_ready",
+                "session_count": session_count,
+                "sessions_recorded": sessions_json.len(),
+                "readiness_reason_counts": readiness_reason_counts,
+                "candidate_readiness_recorded": candidate_readiness.len(),
+                "candidate_readiness": candidate_readiness,
+                "sessions": sessions_json,
+                "readiness_files": agent_spawn_readiness_file_readback(files),
+            });
+
+            if let Some(matched) = matched_session {
+                return Ok(matched);
             }
 
             if process_has_exited(launcher_pid) {
                 return Err(json!({
                     "reason": "launcher_process_exited_before_registry_match",
                     "launcher_process_id": launcher_pid,
+                    "readiness_files": agent_spawn_readiness_file_readback(files),
                     "stdout_tail": tail_file_lossy(&files.stdout_path, AGENT_SPAWN_LOG_TAIL_BYTES),
                     "stderr_tail": tail_file_lossy(&files.stderr_path, AGENT_SPAWN_LOG_TAIL_BYTES),
                     "final_message_tail": tail_file_lossy(&files.final_message_path, AGENT_SPAWN_LOG_TAIL_BYTES),
@@ -2601,29 +2624,105 @@ fn read_json_file_lossy(path: &Path) -> Option<Value> {
     serde_json::from_slice(&bytes).ok()
 }
 
-fn spawn_session_candidate_matches(
+fn agent_spawn_readiness_file_readback(files: &AgentSpawnFiles) -> Value {
+    json!({
+        "task_started_path": files.task_started_path.display().to_string(),
+        "task_started_bytes": file_len(&files.task_started_path),
+        "task_started": read_json_file_lossy(&files.task_started_path),
+        "completion_status_path": files.completion_status_path.display().to_string(),
+        "completion_status_bytes": file_len(&files.completion_status_path),
+        "completion_status": read_json_file_lossy(&files.completion_status_path),
+        "stdout_path": files.stdout_path.display().to_string(),
+        "stdout_bytes": file_len(&files.stdout_path),
+        "stderr_path": files.stderr_path.display().to_string(),
+        "stderr_bytes": file_len(&files.stderr_path),
+        "final_message_path": files.final_message_path.display().to_string(),
+        "final_message_bytes": file_len(&files.final_message_path),
+    })
+}
+
+fn spawn_session_observation(
+    summary: &super::session_tools::SessionSummary,
+    readiness: Value,
+) -> Value {
+    json!({
+        "session_id": summary.registry.session_id,
+        "agent_kind": summary.registry.agent_kind,
+        "client_name": summary.registry.client_name,
+        "client_version": summary.registry.client_version,
+        "lifecycle": summary.registry.lifecycle,
+        "started_at_unix_ms": summary.registry.started_at_unix_ms,
+        "last_seen_unix_ms": summary.registry.last_seen_unix_ms,
+        "last_seen_ms_ago": summary.registry.last_seen_ms_ago,
+        "last_action": summary.registry.last_action,
+        "active_target": summary.active_target,
+        "readiness": readiness,
+    })
+}
+
+fn spawn_session_candidate_readiness(
     summary: &super::session_tools::SessionSummary,
     params: &ActSpawnAgentParams,
     before_session_ids: &BTreeSet<String>,
     launched_at_unix_ms: u64,
-) -> bool {
+) -> Value {
     if before_session_ids.contains(&summary.registry.session_id) {
-        return false;
+        return json!({
+            "ready": false,
+            "reason": "session_existed_before_spawn",
+            "expected": "new distinct MCP session id",
+        });
     }
     if summary.registry.started_at_unix_ms + 2_000 < launched_at_unix_ms {
-        return false;
+        return json!({
+            "ready": false,
+            "reason": "session_started_before_spawn_window",
+            "started_at_unix_ms": summary.registry.started_at_unix_ms,
+            "launched_at_unix_ms": launched_at_unix_ms,
+            "allowed_clock_skew_ms": 2000,
+        });
     }
     if !summary_matches_cli(summary, params.cli) {
-        return false;
+        return json!({
+            "ready": false,
+            "reason": "session_cli_mismatch",
+            "expected_cli": params.cli.as_str(),
+            "agent_kind": summary.registry.agent_kind,
+            "client_name": summary.registry.client_name,
+        });
     }
     if let Some(expected) = &params.target {
-        matches_target_wire(summary.active_target.as_ref(), expected)
+        if matches_target_wire(summary.active_target.as_ref(), expected) {
+            json!({
+                "ready": true,
+                "reason": "target_bound",
+            })
+        } else {
+            json!({
+                "ready": false,
+                "reason": "target_mismatch",
+                "expected_target": expected,
+                "active_target": summary.active_target,
+            })
+        }
+    } else if summary
+        .registry
+        .last_action
+        .as_deref()
+        .is_some_and(|action| action.starts_with("tools/call:"))
+    {
+        json!({
+            "ready": true,
+            "reason": "tool_call_observed",
+            "last_action": summary.registry.last_action,
+        })
     } else {
-        summary
-            .registry
-            .last_action
-            .as_deref()
-            .is_some_and(|action| action.starts_with("tools/call:"))
+        json!({
+            "ready": false,
+            "reason": "tool_call_not_observed",
+            "last_action": summary.registry.last_action,
+            "expected": "last_action beginning with tools/call:",
+        })
     }
 }
 
