@@ -483,7 +483,7 @@ impl SynapseService {
     }
 
     #[tool(
-        description = "Open a visible Chromium tab in the background using raw CDP Target.createTarget(background=true) or the installed Chrome debugger bridge chrome.tabs.create(active=false), bind it to this MCP session, and return target-table readback. Requires an explicit browser window_hwnd or an existing session target; it never uses the human's current foreground as a fallback."
+        description = "Open a visible Chromium tab in the background using raw CDP Target.createTarget(background=true) or the installed normal Chrome bridge chrome.tabs.create(active=false), bind it to this MCP session, and return target-table readback. Requires an explicit browser window_hwnd or an existing session target; it never uses the human's current foreground as a fallback."
     )]
     pub async fn cdp_open_tab(
         &self,
@@ -1150,7 +1150,7 @@ impl SynapseService {
             process_name = %process_name,
             target_count_before = opened.target_count_before,
             target_count_after = opened.target_count_after,
-            "readback=chrome.debugger.getTargets outcome=target_present"
+            "readback=chrome.tabs.query outcome=target_present"
         );
         Ok(CdpOpenTabResponse {
             session_id: session_id.to_owned(),
@@ -1288,7 +1288,7 @@ impl SynapseService {
                 owner_created_at_unix_ms = owner.created_at_unix_ms,
                 target_count_before = closed.target_count_before,
                 target_count_after = closed.target_count_after,
-                "readback=chrome.debugger.getTargets outcome=target_absent"
+                "readback=chrome.tabs.query outcome=target_absent"
             );
             return Ok(CdpCloseTabResponse {
                 session_id: session_id.to_owned(),
@@ -1552,7 +1552,7 @@ fn chrome_debugger_default_endpoint() -> String {
 }
 
 fn chrome_debugger_endpoint(extension_id: &str) -> String {
-    format!("chrome-extension://{extension_id}/chrome.debugger")
+    format!("chrome-extension://{extension_id}/chrome.tabs")
 }
 
 fn validate_cdp_target_id(cdp_target_id: &str) -> Result<(), ErrorData> {
@@ -1681,6 +1681,7 @@ fn cdp_endpoint_for_action_log(_window_hwnd: i64) -> String {
 
 fn is_chrome_debugger_endpoint(endpoint: &str) -> bool {
     endpoint.starts_with("chrome-extension://")
+        && (endpoint.ends_with("/chrome.tabs") || endpoint.ends_with("/chrome.debugger"))
 }
 
 fn unix_ms_now() -> u64 {

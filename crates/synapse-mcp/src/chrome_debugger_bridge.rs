@@ -36,7 +36,7 @@ const NATIVE_DAEMON_RECONNECT_DELAY: Duration = Duration::from_secs(1);
 const MAX_NATIVE_MESSAGE_FROM_CHROME: usize = 64 * 1024 * 1024;
 const MAX_NATIVE_MESSAGE_TO_CHROME: usize = 1024 * 1024;
 const UNKNOWN_NATIVE_HOST_ID_FRAGMENT: &str = "unknown chrome debugger native host_id";
-const INSTALL_GUIDANCE: &str = "install the bundled Synapse Chrome extension from extensions\\synapse-chrome-debugger, register the native host with scripts\\install-synapse-chrome-debugger.ps1, and launch Chrome with --silent-debugger-extension-api before using attach-capable debugger bridge commands; expected extension_id=leoocgnkjnplbfdbklajepahofecgfbk native_host=com.synapse.chrome_debugger";
+const INSTALL_GUIDANCE: &str = "install the bundled Synapse Chrome extension from extensions\\synapse-chrome-debugger and register the native host with scripts\\install-synapse-chrome-debugger.ps1; the normal end-user bridge uses chrome.tabs without the debugger permission, and attach-capable debugger commands require an explicit debugger-enabled bridge plus Chrome launched with --silent-debugger-extension-api; expected extension_id=leoocgnkjnplbfdbklajepahofecgfbk native_host=com.synapse.chrome_debugger";
 const TOKEN_ENV: &str = "SYNAPSE_BEARER_TOKEN";
 const APPDATA_ENV: &str = "APPDATA";
 

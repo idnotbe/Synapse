@@ -8,6 +8,7 @@ const ERROR_EXTENSION_TIMEOUT = "A11Y_CDP_EXTENSION_TIMEOUT";
 const ERROR_EXTENSION_UNAVAILABLE = "A11Y_CDP_EXTENSION_UNAVAILABLE";
 const SILENT_DEBUGGER_SWITCH = "--silent-debugger-extension-api";
 const DETACH_SURFACE_MS = 5000;
+const TAB_TARGET_PREFIX = "chrome-tab:";
 
 let nativePort = null;
 let reconnectTimer = null;
@@ -58,26 +59,28 @@ function scheduleReconnect(detail) {
 
 chrome.runtime.onInstalled.addListener(connectNative);
 chrome.runtime.onStartup.addListener(connectNative);
-chrome.debugger.onDetach.addListener((source, reason) => {
-  const tabId = source.tabId;
-  const intentional = typeof tabId === "number" && intentionalDetachTabs.has(tabId);
-  if (typeof source.tabId === "number") {
-    attachedTabs.delete(source.tabId);
-    if (intentional) {
-      intentionalDetachTabs.delete(source.tabId);
-    } else {
-      recentDetachByTab.set(source.tabId, Date.now());
+if (chrome.debugger?.onDetach) {
+  chrome.debugger.onDetach.addListener((source, reason) => {
+    const tabId = source.tabId;
+    const intentional = typeof tabId === "number" && intentionalDetachTabs.has(tabId);
+    if (typeof source.tabId === "number") {
+      attachedTabs.delete(source.tabId);
+      if (intentional) {
+        intentionalDetachTabs.delete(source.tabId);
+      } else {
+        recentDetachByTab.set(source.tabId, Date.now());
+      }
     }
-  }
-  postNative({
-    type: "event",
-    event: "debuggerDetached",
-    tabId: source.tabId ?? null,
-    targetId: source.targetId ?? null,
-    intentional,
-    reason
+    postNative({
+      type: "event",
+      event: "debuggerDetached",
+      tabId: source.tabId ?? null,
+      targetId: source.targetId ?? null,
+      intentional,
+      reason
+    });
   });
-});
+}
 
 connectNative();
 
@@ -117,7 +120,8 @@ async function handleCommand(command) {
 }
 
 async function handleSnapshot(params) {
-  const selected = await selectPageTarget(params);
+  requireAttachSuppressionVerified(params);
+  const selected = await selectDebuggerPageTarget(params);
   return await withAttached(selected, params, async (debuggee) => {
     await sendCdp(debuggee, "Accessibility.enable", {});
     const tree = await sendCdp(debuggee, "Accessibility.getFullAXTree", {});
@@ -169,7 +173,8 @@ async function handleSnapshot(params) {
 
 async function handleClickNode(params) {
   const backendNodeId = requiredNumber(params.backendNodeId, "backendNodeId");
-  const selected = await selectPageTarget(params);
+  requireAttachSuppressionVerified(params);
+  const selected = await selectDebuggerPageTarget(params);
   return await withAttached(selected, params, async (debuggee) => {
     await sendCdp(debuggee, "DOM.scrollIntoViewIfNeeded", { backendNodeId });
     const bbox = await boxForBackend(debuggee, backendNodeId);
@@ -213,7 +218,8 @@ async function handleClickNode(params) {
 async function handleTypeNode(params) {
   const backendNodeId = requiredNumber(params.backendNodeId, "backendNodeId");
   const text = String(params.text ?? "");
-  const selected = await selectPageTarget(params);
+  requireAttachSuppressionVerified(params);
+  const selected = await selectDebuggerPageTarget(params);
   return await withAttached(selected, params, async (debuggee) => {
     await sendCdp(debuggee, "DOM.scrollIntoViewIfNeeded", { backendNodeId });
     const bbox = await boxForBackend(debuggee, backendNodeId);
@@ -262,7 +268,8 @@ async function handleTypeNode(params) {
 
 async function handleNodeValue(params) {
   const backendNodeId = requiredNumber(params.backendNodeId, "backendNodeId");
-  const selected = await selectPageTarget(params);
+  requireAttachSuppressionVerified(params);
+  const selected = await selectDebuggerPageTarget(params);
   return await withAttached(selected, params, async (debuggee) => {
     const resolved = await sendCdp(debuggee, "DOM.resolveNode", { backendNodeId });
     const objectId = resolved?.object?.objectId;
@@ -295,7 +302,7 @@ async function handleNodeValue(params) {
 
 async function handleOpenTab(params) {
   const requestedUrl = normalizeOpenUrl(params.url);
-  const beforePages = await pageTargets();
+  const beforePages = await tabTargets();
   let tab;
   try {
     tab = await chrome.tabs.create({
@@ -308,8 +315,8 @@ async function handleOpenTab(params) {
   if (!tab || typeof tab.id !== "number") {
     throw bridgeError(ERROR_AXTREE_FAILED, "chrome.tabs.create returned no numeric tab id");
   }
-  const target = await waitForTargetForTab(tab.id, 10000);
-  const afterPages = await pageTargets();
+  const target = await waitForTabTarget(tab.id, 10000);
+  const afterPages = await tabTargets();
   return {
     extension_id: chrome.runtime.id,
     target_id: target.id,
@@ -324,8 +331,8 @@ async function handleOpenTab(params) {
 }
 
 async function handleCloseTab(params) {
-  const selected = await selectPageTarget(params, { requireTargetId: true });
-  const beforePages = await pageTargets();
+  const selected = await selectTabTarget(params, { requireTargetId: true });
+  const beforePages = await tabTargets();
   try {
     await chrome.tabs.remove(selected.tabId);
   } catch (error) {
@@ -342,7 +349,7 @@ async function handleCloseTab(params) {
 }
 
 async function handleTargetInfo(params) {
-  const selected = await selectPageTarget(params, { requireTargetId: true });
+  const selected = await selectTabTarget(params, { requireTargetId: true });
   return {
     extension_id: chrome.runtime.id,
     target_id: selected.target.id,
@@ -356,7 +363,7 @@ async function handleTargetInfo(params) {
 }
 
 async function handleNavigateTab(params) {
-  const selected = await selectPageTarget(params, { requireTargetId: true });
+  const selected = await selectTabTarget(params, { requireTargetId: true });
   const action = normalizeNavigateAction(params.action);
   const requestedUrl = action === "navigate" ? requiredUrl(params.url) : null;
   const waitTimeoutMs = normalizeWaitTimeout(params.waitTimeoutMs);
@@ -418,8 +425,8 @@ async function handleNavigateTab(params) {
   };
 }
 
-async function selectPageTarget(params, options = {}) {
-  const pages = await pageTargets();
+async function selectDebuggerPageTarget(params, options = {}) {
+  const pages = await debuggerPageTargets();
   if (pages.length === 0) {
     throw bridgeError(ERROR_ATTACH_FAILED, "chrome.debugger.getTargets returned no page targets");
   }
@@ -470,9 +477,73 @@ async function selectPageTarget(params, options = {}) {
   return selectedPage(pages[0], pages.length, "fallback_first_page");
 }
 
-async function pageTargets() {
+async function selectTabTarget(params, options = {}) {
+  const tabs = await tabTargets();
+  if (tabs.length === 0) {
+    throw bridgeError(ERROR_AXTREE_FAILED, "chrome.tabs.query returned no tab targets");
+  }
+  const targetIdHint = String(params.targetIdHint || "").trim();
+  const tabIdHint = tabIdFromTargetId(targetIdHint);
+  if (Number.isInteger(tabIdHint)) {
+    const selectedById = tabs.find((target) => target.tabId === tabIdHint);
+    if (selectedById) {
+      return selectedPage(selectedById, tabs.length, "chrome_tab_id_hint");
+    }
+    throw bridgeError(
+      ERROR_AXTREE_FAILED,
+      `targetIdHint ${targetIdHint} did not match any chrome.tabs tab id`
+    );
+  }
+  if (options.requireTargetId) {
+    throw bridgeError(
+      ERROR_AXTREE_FAILED,
+      targetIdHint
+        ? `targetIdHint ${targetIdHint} is not a tabs bridge target id; expected ${TAB_TARGET_PREFIX}<tabId>`
+        : `targetIdHint is required for mutating tab navigation; expected ${TAB_TARGET_PREFIX}<tabId>`
+    );
+  }
+  const urlHint = String(params.foregroundUrlHint || "").trim();
+  const titleHint = String(params.foregroundTitle || "").trim();
+  if (urlHint) {
+    const matches = tabs.filter((target) => urlMatchesHint(target.url || "", urlHint));
+    if (matches.length === 1) {
+      return selectedPage(matches[0], tabs.length, "url_hint");
+    }
+    if (matches.length > 1) {
+      throw bridgeError(ERROR_AXTREE_FAILED, `url hint matched ${matches.length} tab targets`);
+    }
+  }
+  if (titleHint) {
+    const matches = tabs.filter((target) => {
+      const title = target.title || "";
+      return title && (titleHint.includes(title) || title.includes(titleHint));
+    });
+    if (matches.length === 1) {
+      return selectedPage(matches[0], tabs.length, "foreground_title");
+    }
+    if (matches.length > 1) {
+      throw bridgeError(ERROR_AXTREE_FAILED, `title hint matched ${matches.length} tab targets`);
+    }
+  }
+  return selectedPage(tabs[0], tabs.length, "fallback_first_tab");
+}
+
+async function debuggerPageTargets() {
+  ensureDebuggerApiAvailable();
   const targets = await chrome.debugger.getTargets();
   return targets.filter((target) => target.type === "page" && typeof target.tabId === "number");
+}
+
+async function tabTargets() {
+  let tabs;
+  try {
+    tabs = await chrome.tabs.query({});
+  } catch (error) {
+    throw bridgeError(ERROR_AXTREE_FAILED, `chrome.tabs.query: ${errorMessage(error)}`);
+  }
+  return tabs
+    .filter((tab) => typeof tab.id === "number")
+    .map((tab) => tabTargetFromTab(tab));
 }
 
 function selectedPage(target, targetCandidateCount, selectionReason) {
@@ -484,6 +555,32 @@ function selectedPage(target, targetCandidateCount, selectionReason) {
     targetCandidateCount,
     selectionReason
   };
+}
+
+function tabTargetFromTab(tab) {
+  return {
+    id: targetIdForTabId(tab.id),
+    tabId: tab.id,
+    type: "page",
+    url: String(tab.pendingUrl || tab.url || ""),
+    title: String(tab.title || ""),
+    attached: false
+  };
+}
+
+function targetIdForTabId(tabId) {
+  return `${TAB_TARGET_PREFIX}${tabId}`;
+}
+
+function tabIdFromTargetId(targetId) {
+  if (!targetId.startsWith(TAB_TARGET_PREFIX)) {
+    return null;
+  }
+  const value = Number(targetId.slice(TAB_TARGET_PREFIX.length));
+  if (!Number.isSafeInteger(value) || value < 0) {
+    return null;
+  }
+  return value;
 }
 
 async function withAttached(selected, params, operation) {
@@ -507,7 +604,24 @@ function requireAttachSuppressionVerified(params) {
   );
 }
 
+function ensureDebuggerApiAvailable() {
+  if (
+    chrome.debugger?.attach &&
+    chrome.debugger?.detach &&
+    chrome.debugger?.getTargets &&
+    chrome.debugger?.sendCommand
+  ) {
+    return;
+  }
+  throw bridgeError(
+    ERROR_DEBUGGER_WARNING_UNSUPPRESSED,
+    `chrome.debugger API is unavailable because the normal end-user Synapse Chrome Bridge is installed without the debugger permission; ` +
+      `attach-capable commands require an explicit debugger-enabled bridge plus ${SILENT_DEBUGGER_SWITCH}`
+  );
+}
+
 async function attachForCommand(selected) {
+  ensureDebuggerApiAvailable();
   const tabId = selected.tabId;
   const recentDetachAt = recentDetachByTab.get(tabId);
   if (recentDetachAt && Date.now() - recentDetachAt < DETACH_SURFACE_MS) {
@@ -673,11 +787,11 @@ function buttonMask(button) {
   return 0;
 }
 
-async function waitForTargetForTab(tabId, waitTimeoutMs) {
+async function waitForTabTarget(tabId, waitTimeoutMs) {
   const started = Date.now();
   let lastCount = 0;
   while (Date.now() - started <= waitTimeoutMs) {
-    const pages = await pageTargets();
+    const pages = await tabTargets();
     lastCount = pages.length;
     const target = pages.find((candidate) => candidate.tabId === tabId);
     if (target?.id) {
@@ -687,7 +801,7 @@ async function waitForTargetForTab(tabId, waitTimeoutMs) {
   }
   throw bridgeError(
     ERROR_EXTENSION_TIMEOUT,
-    `chrome.debugger.getTargets did not expose a page target for new tab ${tabId} within ${waitTimeoutMs} ms; lastPageTargetCount=${lastCount}`
+    `chrome.tabs.query did not expose a tab target for new tab ${tabId} within ${waitTimeoutMs} ms; lastTabTargetCount=${lastCount}`
   );
 }
 
@@ -695,7 +809,7 @@ async function waitForTargetAbsent(targetId, waitTimeoutMs) {
   const started = Date.now();
   let pages = [];
   while (Date.now() - started <= waitTimeoutMs) {
-    pages = await pageTargets();
+    pages = await tabTargets();
     if (!pages.some((candidate) => candidate.id === targetId)) {
       return pages;
     }
@@ -703,7 +817,7 @@ async function waitForTargetAbsent(targetId, waitTimeoutMs) {
   }
   throw bridgeError(
     ERROR_EXTENSION_TIMEOUT,
-    `chrome.debugger.getTargets still contains closed target ${JSON.stringify(targetId)} after ${waitTimeoutMs} ms; lastPageTargetCount=${pages.length}`
+    `chrome.tabs.query still contains closed target ${JSON.stringify(targetId)} after ${waitTimeoutMs} ms; lastTabTargetCount=${pages.length}`
   );
 }
 
@@ -792,7 +906,7 @@ async function tabPageState(tabId, fallbackTarget = null) {
   } catch (error) {
     throw bridgeError(ERROR_AXTREE_FAILED, `chrome.tabs.get(${tabId}): ${errorMessage(error)}`);
   }
-  const target = await targetForTab(tabId).catch(() => fallbackTarget);
+  const target = tabTargetFromTab(tab);
   return {
     target_id: String(target?.id || fallbackTarget?.id || ""),
     url: String(tab.pendingUrl || tab.url || target?.url || fallbackTarget?.url || ""),
@@ -801,15 +915,6 @@ async function tabPageState(tabId, fallbackTarget = null) {
     history_current_index: -1,
     history_entry_count: 0
   };
-}
-
-async function targetForTab(tabId) {
-  const pages = await pageTargets();
-  const target = pages.find((candidate) => candidate.tabId === tabId);
-  if (!target) {
-    throw bridgeError(ERROR_ATTACH_FAILED, `chrome.debugger.getTargets did not expose a page target for tab ${tabId}`);
-  }
-  return target;
 }
 
 function tabsNavigationMethod(action) {

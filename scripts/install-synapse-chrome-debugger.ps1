@@ -12,6 +12,15 @@ $manifestPath = Join-Path $extensionDir 'manifest.json'
 if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
     throw "SYNAPSE_CHROME_EXTENSION_MANIFEST_MISSING path=$manifestPath"
 }
+$extensionManifest = Get-Content -Raw -LiteralPath $manifestPath | ConvertFrom-Json
+$requiredPermissions = @($extensionManifest.permissions)
+$optionalPermissions = @($extensionManifest.optional_permissions)
+if ($requiredPermissions -contains 'debugger') {
+    throw "SYNAPSE_CHROME_EXTENSION_REQUIRED_DEBUGGER_PERMISSION_FORBIDDEN path=$manifestPath remediation=normal end-user bridge must use chrome.tabs without required debugger permission"
+}
+if ($optionalPermissions -contains 'debugger') {
+    throw "SYNAPSE_CHROME_EXTENSION_OPTIONAL_DEBUGGER_PERMISSION_FORBIDDEN path=$manifestPath remediation=Chrome does not allow debugger as optional permission; use a separate debugger-enabled bridge only with --silent-debugger-extension-api"
+}
 if (-not (Test-Path -LiteralPath $SynapseNativeHostExe -PathType Leaf)) {
     throw "SYNAPSE_CHROME_NATIVE_HOST_BINARY_MISSING path=$SynapseNativeHostExe remediation=build/install synapse-chrome-native-host first"
 }
@@ -23,7 +32,7 @@ $hostName = 'com.synapse.chrome_debugger'
 $hostManifestPath = Join-Path $nativeRoot "$hostName.json"
 $hostManifest = [ordered]@{
     name = $hostName
-    description = 'Synapse Chrome debugger native-messaging bridge (no-console host)'
+    description = 'Synapse Chrome tabs/native-messaging bridge (no-console host)'
     path = (Resolve-Path -LiteralPath $SynapseNativeHostExe).Path
     type = 'stdio'
     allowed_origins = @("chrome-extension://$ExtensionId/")
@@ -83,8 +92,10 @@ $chromeProcesses = @(Get-CimInstance Win32_Process -Filter "Name='chrome.exe'" -
     binary = $readbackManifest.path
     extension_id = $ExtensionId
     extension_dir = $extensionDir
-    background_navigation_backend = 'chrome.tabs_no_debugger_attach'
-    attach_popup_prevention = 'daemon_command_line_preflight_plus_extension_attestation_gate'
+    background_navigation_backend = 'chrome.tabs_no_debugger_permission'
+    attach_popup_prevention = 'normal_bridge_has_no_required_debugger_permission_plus_daemon_preflight_extension_attestation_gate'
+    required_debugger_permission_present = $false
+    optional_debugger_permission_present = $false
     silent_debugger_switch_required_for_attach_commands = $true
     silent_debugger_switch = $silentDebuggerSwitch
     current_chrome_processes = $chromeProcesses

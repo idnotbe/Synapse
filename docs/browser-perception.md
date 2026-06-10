@@ -21,10 +21,13 @@ nodes into the normal element list. Those nodes are queryable through `find` and
 actionable by `act_click`, `act_type`, and `act_stroke`.
 
 When no endpoint is reachable, Synapse does not silently pretend the DOM was
-observed. For the user's normal Chrome profile, Synapse next tries the bundled
-Chrome debugger extension/native-messaging bridge. If that bridge is not
-installed, connected, or allowed by Chrome, the UIA tree is still returned, but
-it is the browser shell, not the page DOM.
+observed. For the user's normal Chrome profile, Synapse can use the bundled
+Chrome extension/native-messaging bridge for background tab control through
+`chrome.tabs`. DOM attach through the debugger API is intentionally unavailable
+in the normal end-user bridge unless a debugger-enabled path is explicitly
+configured and popup suppression is proven. If no CDP endpoint or debugger path
+is available, the UIA tree is still returned, but it is the browser shell, not
+the page DOM.
 
 ## Diagnostics
 
@@ -41,9 +44,10 @@ Browser observations carry diagnostics so agents can tell the difference between
   family, but no probed debug port accepted a connection. The diagnostics
   include the exact localhost ports/endpoints checked and a detail string that
   distinguishes raw CDP HTTP attach from Chrome's newer auto-connect permission
-  flow. If the Chrome debugger extension bridge is connected, Synapse can still
-  upgrade this observation to `diagnostics.cdp.status = "ok"` and
-  `diagnostics.web_path = "cdp"` through `chrome.debugger`.
+  flow. The normal end-user Chrome bridge remains available for `chrome.tabs`
+  background tab control, but it does not upgrade DOM observation through
+  `chrome.debugger` unless an explicit debugger-enabled path is installed and
+  popup suppression is proven.
 - `diagnostics.cdp.status = "A11Y_CDP_EXTENSION_UNAVAILABLE"` with matching
   `reason_code = "A11Y_CDP_EXTENSION_UNAVAILABLE"`: raw CDP was unreachable and
   the normal-profile Chrome extension/native host is not connected. The detail
@@ -63,10 +67,10 @@ The intended strategy ladder is:
 
 1. Raw CDP DOM and accessibility tree for Chromium page content when a real
    loopback debug endpoint exists.
-2. Chrome debugger extension/native-messaging CDP for the user's normal Chrome
-   profile when raw CDP is unreachable.
-3. Non-attach Chrome extension `chrome.tabs` navigation for normal-profile
+2. Non-attach Chrome extension `chrome.tabs` navigation for normal-profile
    background tab open, close, navigate, reload, back, and forward.
+3. Explicit debugger-enabled extension/native-messaging CDP only when popup
+   suppression is proven by Chrome process command-line readback.
 4. OCR/capture over tiled browser content when CDP is down or attach fails.
 5. Explicit `uia_only` for browser chrome/native UI when neither DOM nor OCR
    produced page content.
@@ -129,16 +133,19 @@ Chrome session, the supported attach path is:
    `cdp_navigate_tab`). This path uses `chrome.tabs.create`,
    `chrome.tabs.remove`, `chrome.tabs.update`, `chrome.tabs.reload`,
    `chrome.tabs.goBack`, and `chrome.tabs.goForward`; it must not call
-   `chrome.debugger.attach`.
+   `chrome.debugger.getTargets` or `chrome.debugger.attach`. Its target IDs are
+   synthetic `chrome-tab:<tabId>` IDs backed by `chrome.tabs` readback.
 8. Before using attach-capable Chrome debugger extension commands, read the
    target Chrome process command line and require
    `--silent-debugger-extension-api`. Chrome intentionally shows a
    "`started debugging this browser`" warning UI when an extension calls
-   `chrome.debugger.attach` without that switch. Synapse therefore fails closed
+   `chrome.debugger.attach` without that switch. The normal end-user extension
+   does not require the `debugger` permission. Synapse therefore fails closed
    with `A11Y_CDP_DEBUGGER_WARNING_UNSUPPRESSED` before attach if the switch is
-   absent or unreadable. The extension must also refuse attach-capable commands
-   unless the daemon includes a verified suppression attestation, which prevents
-   stale native commands from surfacing the browser warning.
+   absent, unreadable, or the normal bridge lacks debugger capability. The
+   extension must also refuse attach-capable commands unless the daemon includes
+   a verified suppression attestation, which prevents stale native commands from
+   surfacing the browser warning.
 9. If the current browser session still exposes no endpoint or extension bridge,
    fail closed with
    `web_path = "uia_only"` or `ocr`; do not claim DOM/control readback. Relaunch

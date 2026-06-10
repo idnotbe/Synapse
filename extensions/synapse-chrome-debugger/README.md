@@ -1,10 +1,9 @@
-# Synapse Chrome Debugger Bridge
+# Synapse Chrome Bridge
 
 This unpacked MV3 extension lets the Synapse daemon inspect and control the
-user's normal Chrome profile through Chrome Native Messaging. CDP perception and
-element actions use `chrome.debugger`; background tab open/close/navigation use
-non-attach `chrome.tabs` APIs so normal navigation does not show Chrome's
-debugger warning UI.
+user's normal Chrome profile through Chrome Native Messaging. The normal
+end-user bridge is tabs-first: background tab open/close/navigation use
+`chrome.tabs` APIs and the extension does not require the `debugger` permission.
 
 Stable extension ID: `leoocgnkjnplbfdbklajepahofecgfbk`
 
@@ -17,18 +16,22 @@ scripts\install-synapse-chrome-debugger.ps1
 ```
 
 Then load this directory as an unpacked extension from `chrome://extensions`.
-The extension keeps one `runtime.connectNative()` port open and sends real CDP
-commands only after the daemon asks through the local authenticated bridge.
+The extension keeps one `runtime.connectNative()` port open and executes
+`chrome.tabs` commands only after the daemon asks through the local
+authenticated bridge.
 
 Background tab commands (`openTab`, `closeTab`, and `navigateTab`) use
 `chrome.tabs.create`, `chrome.tabs.remove`, `chrome.tabs.update`,
 `chrome.tabs.reload`, `chrome.tabs.goBack`, and `chrome.tabs.goForward`. They do
-not call `chrome.debugger.attach`.
+not call `chrome.debugger.getTargets` or `chrome.debugger.attach`; target IDs
+returned by this path are synthetic `chrome-tab:<tabId>` IDs backed by
+`chrome.tabs` readback.
 
 Attach-capable commands (`snapshot`, `clickNode`, `typeNode`, and `nodeValue`)
-are fail-closed unless the target Chrome process was launched with
-`--silent-debugger-extension-api`. Without that switch, Chrome intentionally
-shows its "`started debugging this browser`" warning UI when an extension calls
+are unavailable in the normal end-user install unless a separate
+debugger-enabled path is explicitly configured. Without
+`--silent-debugger-extension-api`, Chrome intentionally shows its "`started
+debugging this browser`" warning UI when an extension calls
 `chrome.debugger.attach`. Synapse checks the target window owner PID and process
 command line before attach; if the switch is absent or unreadable, Synapse
 returns `A11Y_CDP_DEBUGGER_WARNING_UNSUPPRESSED` and does not call

@@ -58,7 +58,7 @@
 .PARAMETER ChromeNativeHostExePath
   Installed path for the Chrome native-messaging bridge. Setup builds this
   binary with the daemon and installs it next to synapse-mcp.exe so Chrome
-  debugger bridge restart fixes are not left stale after daemon updates.
+  bridge restart fixes are not left stale after daemon updates.
 
 .PARAMETER MaintenanceLockPath
   File-lock Source of Truth that serializes setup/remove across multiple
