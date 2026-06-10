@@ -67,7 +67,10 @@
   blocked_permissions=["debugger","nativeMessaging"]. The default policy scope
   is the wildcard "*" entry so current and future external debugger/nativeMessaging
   extensions cannot load. Setup still fails closed until Chrome policy/profile
-  and process readback prove the external surface is gone. Passing
+  and process readback prove the external surface is gone. If policy is
+  persisted but the running Chrome profile/process has not consumed it, setup
+  reports SYNAPSE_CHROME_POLICY_PENDING_CHROME_RELOAD. Already-compliant
+  policy is accepted before any write/elevation attempt. Passing
   -ApplyExternalChromeDebuggerPolicy:$false is diagnostic-only and cannot certify
   a popup-free end-user host.
 

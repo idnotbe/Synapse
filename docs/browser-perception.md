@@ -170,7 +170,10 @@ Chrome session, the supported attach path is:
    setup attempts a one-time elevated hidden PowerShell helper for HKLM and
    reads back the helper's JSON evidence file before continuing. Canceling UAC,
    missing evidence, or a failed elevated registry readback remains a hard
-   failure. The standalone bridge verifier applies the same policy by default
+   failure. Before attempting any policy write, the standalone bridge verifier
+   reads HKCU/HKLM and accepts an already-compliant policy as `existing_policy`
+   so repeated setup runs do not relaunch an elevated helper for no state
+   change. The standalone bridge verifier applies the same policy by default
    with `scripts\install-synapse-chrome-debugger.ps1`.
    Passing `-ApplyExternalChromeDebuggerPolicy:$false` is diagnostic-only and
    cannot certify a popup-free end-user host. `-ChromePolicyBlockScope
@@ -180,7 +183,11 @@ Chrome session, the supported attach path is:
    policy hive, including the elevated HKLM helper when allowed, can persist
    and read back the required policy. After policy is written, refresh/restart
    Chrome and rerun the verifier; do not certify popup-free readiness until the
-   separate profile/process readback shows the external surface is gone.
+   separate profile/process readback shows the external surface is gone. If the
+   policy readback is already correct but Chrome's running profile/process
+   still reports the external surface, the verifier fails closed with
+   `SYNAPSE_CHROME_POLICY_PENDING_CHROME_RELOAD` and includes the policy,
+   profile, and process readback that must change before acceptance.
    Runtime `observe` diagnostics also include a live
    `external_chrome_popup_risk` profile/process summary when Synapse refuses a
    normal-profile attach-capable command, so remaining popups are attributed to

@@ -284,6 +284,119 @@ function Write-ChromeExternalDebuggerPolicyAuto {
     throw "SYNAPSE_CHROME_POLICY_REMEDIATION_WRITE_FAILED_ALL_HIVES requested_hive=$Hive block_scope=$BlockScope auto_elevate=$AutoElevate attempts=$attemptDetail remediation=setup could not persist Chrome ExtensionSettings blocked_permissions=[debugger,nativeMessaging] in any allowed hive; approve the one-time elevated HKLM policy writer, rerun setup elevated, repair HKCU Software\Policies ACL so the current user can write, or disable/remove the named external Chrome extension/native host before certifying popup-free state"
 }
 
+function Test-ChromePolicyReadbackBlocksPopupSurfaces {
+    param(
+        [object]$PolicyReadback,
+        [string[]]$ExternalExtensionIds
+    )
+
+    if ($null -eq $PolicyReadback -or -not $PolicyReadback.readback_ok) {
+        return $false
+    }
+    $policyJson = [string]$PolicyReadback.policy_json
+    if ([string]::IsNullOrWhiteSpace($policyJson)) {
+        return $false
+    }
+    try {
+        $settings = $policyJson | ConvertFrom-Json -ErrorAction Stop
+    } catch {
+        return $false
+    }
+
+    function Test-PolicyEntryBlocksPopupPermissions {
+        param(
+            [Parameter(Mandatory = $true)]
+            [object]$Settings,
+            [Parameter(Mandatory = $true)]
+            [string]$EntryName
+        )
+
+        $property = @($Settings.PSObject.Properties | Where-Object { $_.Name -eq $EntryName } | Select-Object -First 1)
+        if ($property.Count -eq 0) {
+            return $false
+        }
+        $blocked = @($property[0].Value.blocked_permissions)
+        return ($blocked -contains 'debugger' -and $blocked -contains 'nativeMessaging')
+    }
+
+    if (Test-PolicyEntryBlocksPopupPermissions -Settings $settings -EntryName '*') {
+        return $true
+    }
+
+    $ids = @($ExternalExtensionIds | Where-Object { $_ -match '^[a-p]{32}$' } | Sort-Object -Unique)
+    if ($ids.Count -eq 0) {
+        return $false
+    }
+    foreach ($id in $ids) {
+        if (-not (Test-PolicyEntryBlocksPopupPermissions -Settings $settings -EntryName $id)) {
+            return $false
+        }
+    }
+    return $true
+}
+
+function Read-ExistingChromeExternalDebuggerPolicy {
+    param(
+        [ValidateSet('Auto', 'HKCU', 'HKLM')]
+        [string]$Hive,
+        [string[]]$ExternalExtensionIds,
+        [ValidateSet('AllExtensions', 'DetectedExtensions')]
+        [string]$BlockScope = 'AllExtensions'
+    )
+
+    $ids = @($ExternalExtensionIds | Where-Object { $_ -match '^[a-p]{32}$' } | Sort-Object -Unique)
+    $attempts = @()
+    foreach ($candidateHive in (Get-ChromePolicyHiveCandidates -Hive $Hive)) {
+        try {
+            $settings = Read-ChromeExtensionSettingsPolicy -Hive $candidateHive
+            $readback = [pscustomobject]@{
+                hive = $candidateHive
+                path = Get-ChromePolicyRoot -Hive $candidateHive
+                value_name = 'ExtensionSettings'
+                blocked_extension_ids = $ids
+                block_scope = $BlockScope
+                policy_entries = @()
+                readback_ok = $true
+                policy_json = ConvertTo-CompressedJson -Value $settings
+                existing_policy = $true
+                requested_hive = $Hive
+                attempted_hives = $null
+            }
+            $blocks = Test-ChromePolicyReadbackBlocksPopupSurfaces `
+                -PolicyReadback $readback `
+                -ExternalExtensionIds $ids
+            $attempts += [pscustomobject]@{
+                hive = $candidateHive
+                ok = $blocks
+                existing_policy = $true
+                path = $readback.path
+            }
+            if ($blocks) {
+                $entries = @()
+                $parsed = $readback.policy_json | ConvertFrom-Json
+                foreach ($entryName in @('*') + $ids) {
+                    $property = @($parsed.PSObject.Properties | Where-Object { $_.Name -eq $entryName } | Select-Object -First 1)
+                    if ($property.Count -gt 0) {
+                        $entries += $entryName
+                    }
+                }
+                $readback.policy_entries = @($entries | Sort-Object -Unique)
+                $readback.attempted_hives = $attempts
+                return $readback
+            }
+        } catch {
+            $attempts += [pscustomobject]@{
+                hive = $candidateHive
+                ok = $false
+                existing_policy = $true
+                path = Get-ChromePolicyRoot -Hive $candidateHive
+                error = $_.Exception.Message
+            }
+        }
+    }
+    return $null
+}
+
 function Invoke-ElevatedChromeExternalDebuggerPolicy {
     param(
         [string[]]$ExternalExtensionIds,
@@ -568,6 +681,8 @@ $chromeProcesses = @(Get-CimInstance Win32_Process -Filter "Name='chrome.exe'" -
     $commandLine = [string]$_.CommandLine
     [pscustomobject]@{
         pid = [int]$_.ProcessId
+        parent_pid = [int]$_.ParentProcessId
+        creation_date = [string]$_.CreationDate
         command_line_readable = -not [string]::IsNullOrWhiteSpace($commandLine)
         has_silent_debugger_switch = $commandLine -match '(^|\s)--silent-debugger-extension-api(\s|=|$)'
     }
@@ -670,14 +785,33 @@ $externalHazardExtensionIds = @(
 $chromePolicyReadback = $null
 if ($ApplyExternalChromeDebuggerPolicy -and
     ($externalHazardExtensionIds.Count -gt 0 -or $ChromePolicyBlockScope -eq 'AllExtensions')) {
-    $chromePolicyReadback = Write-ChromeExternalDebuggerPolicyAuto `
+    $chromePolicyReadback = Read-ExistingChromeExternalDebuggerPolicy `
         -Hive $ChromePolicyHive `
         -ExternalExtensionIds $externalHazardExtensionIds `
         -BlockScope $ChromePolicyBlockScope
+    if ($null -eq $chromePolicyReadback) {
+        $chromePolicyReadback = Write-ChromeExternalDebuggerPolicyAuto `
+            -Hive $ChromePolicyHive `
+            -ExternalExtensionIds $externalHazardExtensionIds `
+            -BlockScope $ChromePolicyBlockScope
+    }
 }
 
 if (-not $AllowExternalChromeDebuggerOrNativeMessaging -and
     ($externalDebuggerOrNativeExtensions.Count -gt 0 -or $externalNativeMessagingProcesses.Count -gt 0)) {
+    $policyBlocksPopupSurfaces = Test-ChromePolicyReadbackBlocksPopupSurfaces `
+        -PolicyReadback $chromePolicyReadback `
+        -ExternalExtensionIds $externalHazardExtensionIds
+    $errorCode = if ($policyBlocksPopupSurfaces) {
+        'SYNAPSE_CHROME_POLICY_PENDING_CHROME_RELOAD'
+    } else {
+        'SYNAPSE_CHROME_EXTERNAL_DEBUGGER_OR_NATIVE_SURFACE_PRESENT'
+    }
+    $remediation = if ($policyBlocksPopupSurfaces) {
+        'Chrome ExtensionSettings blocked_permissions=[debugger,nativeMessaging] is persisted, but the running Chrome profile/process Source of Truth still exposes the external surface; reload Chrome policies from chrome://policy or restart Chrome, then rerun this verifier. Synapse will not certify popup-free readiness until the separate profile/process readback is clean.'
+    } else {
+        'HKCU/HKLM Chrome ExtensionSettings wildcard "*" blocked_permissions=[debugger,nativeMessaging], or disable/remove the offending extension, then refresh/restart Chrome and rerun this verifier'
+    }
     $detail = [pscustomobject]@{
         external_debugger_or_native_extensions = $externalDebuggerOrNativeExtensions
         external_debugger_extensions = $externalDebuggerExtensions
@@ -685,9 +819,11 @@ if (-not $AllowExternalChromeDebuggerOrNativeMessaging -and
         external_hazard_extension_ids = $externalHazardExtensionIds
         current_chrome_processes = $chromeProcesses
         chrome_policy_readback = $chromePolicyReadback
-        chrome_policy_remediation = 'HKCU/HKLM Chrome ExtensionSettings wildcard "*" blocked_permissions=[debugger,nativeMessaging], or disable/remove the offending extension, then refresh/restart Chrome and rerun this verifier'
+        chrome_policy_blocks_popup_surfaces = $policyBlocksPopupSurfaces
+        chrome_policy_pending_chrome_reload = $policyBlocksPopupSurfaces
+        chrome_policy_remediation = $remediation
     } | ConvertTo-Json -Depth 8 -Compress
-    throw "SYNAPSE_CHROME_EXTERNAL_DEBUGGER_OR_NATIVE_SURFACE_PRESENT detail=$detail remediation=normal end-user systems cannot be certified banner-free while another active Chrome extension can call chrome.debugger or a live external native-messaging wrapper can surface a console/window; pass -AllowExternalChromeDebuggerOrNativeMessaging only for diagnostic attribution, never for popup-free acceptance"
+    throw "$errorCode detail=$detail remediation=$remediation"
 }
 
 [pscustomobject]@{

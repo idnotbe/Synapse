@@ -92,6 +92,10 @@ HKLM, and accepts the setup only after a separate policy readback proves that
 `blocked_permissions=["debugger","nativeMessaging"]` was merged into the Chrome
 `ExtensionSettings` wildcard `"*"` policy entry. This blocks current and future
 extensions from loading with those permissions.
+Before attempting a policy write, the verifier reads HKCU/HKLM and accepts an
+already-compliant policy as `existing_policy=true`; repeated setup runs should
+not relaunch an elevated helper when the policy Source of Truth is already
+correct.
 If the current process cannot write either hive, setup attempts a one-time
 elevated hidden PowerShell helper that writes the same supported policy to HKLM
 and returns a JSON evidence file. Canceling UAC or failing the elevated readback
@@ -114,6 +118,9 @@ per-hive registry path, ACL/readback failure, elevated-helper evidence path when
 attempted, and remediation.
 After policy is written, Chrome must reload policy or restart; the verifier
 still fails closed until the profile/process SoT shows the external debugger or
-native-messaging surface is gone.
+native-messaging surface is gone. When the registry policy is correct but the
+running Chrome profile/process SoT has not consumed it yet, the verifier reports
+`SYNAPSE_CHROME_POLICY_PENDING_CHROME_RELOAD` with the policy, profile, and
+process readback instead of the generic external-surface error.
 Passing `-ApplyExternalChromeDebuggerPolicy:$false` is diagnostic-only and
 cannot certify the host as popup-free.
