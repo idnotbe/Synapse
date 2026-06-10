@@ -837,10 +837,11 @@ if (-not $AllowExternalChromeDebuggerOrNativeMessaging -and
     daemon_bridge_transport = 'direct_localhost_websocket'
     daemon_bridge_origin = "chrome-extension://$ExtensionId"
     background_navigation_backend = 'chrome.tabs_no_debugger_permission_no_native_messaging'
-    reconnect_driver = 'chrome.alarms_30s_direct_localhost_register'
+    reconnect_driver = 'chrome.alarms_30s_direct_localhost_register_dormant_on_unsafe_profile'
     attach_popup_prevention = 'normal_bridge_tabs_only_no_debugger_api_no_nativeMessaging_permission_plus_daemon_side_attach_disabled'
     normal_bridge_attach_commands_available = $false
     normal_bridge_debugger_api_calls_present = $false
+    expected_extension_id_guard_present = $true
     required_alarms_permission_present = ($requiredPermissions -contains 'alarms')
     required_debugger_permission_present = $false
     optional_debugger_permission_present = $false

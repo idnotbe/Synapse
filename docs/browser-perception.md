@@ -31,8 +31,9 @@ current Chrome profile/process readback shows any external extension or native
 host with `debugger` or `nativeMessaging`, because those surfaces can create the
 same operator-visible debugger/native-host popup when tab events occur.
 On unsafe hosts, the daemon refuses the direct bridge registration itself with
-`A11Y_CDP_DEBUGGER_WARNING_UNSUPPRESSED`, and the extension backs off its
-reconnect alarm instead of repeatedly waking the normal Chrome profile.
+`A11Y_CDP_DEBUGGER_WARNING_UNSUPPRESSED`, and the extension clears its reconnect
+alarm and stays dormant until Chrome or the extension restarts instead of
+repeatedly waking the normal Chrome profile.
 
 ## Diagnostics
 
@@ -135,7 +136,12 @@ Chrome session, the supported attach path is:
    `cmd.exe` intermediary on Windows. The extension uses a daemon-issued bridge
    token, a 20s WebSocket keepalive while connected, and a 30s `chrome.alarms`
    reconnect tick so the MV3 service worker reconnects after daemon restarts
-   without native messaging.
+   without native messaging. If the daemon refuses registration because the live
+   Chrome profile/process SoT is unsafe, the service worker clears that alarm
+   and remains dormant until Chrome or the extension restarts.
+   If Chrome loads the unpacked directory under any extension ID other than
+   `leoocgnkjnplbfdbklajepahofecgfbk`, the service worker clears the same alarm
+   and remains dormant before making any daemon HTTP request.
    The verifier removes stale Synapse native-host registration from all Windows
    Chrome lookup hives (`HKCU`/`HKLM`, 32-bit and 64-bit views) and fails closed
    with per-key readback/ACL evidence if any Synapse native-host registration

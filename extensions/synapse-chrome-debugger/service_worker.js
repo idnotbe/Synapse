@@ -1,9 +1,11 @@
 const PROTOCOL_VERSION = 1;
+const EXPECTED_EXTENSION_ID = "leoocgnkjnplbfdbklajepahofecgfbk";
 const DAEMON_BASE_URL = "http://127.0.0.1:7700";
 const ERROR_ATTACH_FAILED = "A11Y_CDP_ATTACH_FAILED";
 const ERROR_AXTREE_FAILED = "A11Y_CDP_AXTREE_FAILED";
 const ERROR_DEBUGGER_WARNING_UNSUPPRESSED = "A11Y_CDP_DEBUGGER_WARNING_UNSUPPRESSED";
 const ERROR_EXTENSION_TIMEOUT = "A11Y_CDP_EXTENSION_TIMEOUT";
+const ERROR_EXTENSION_ID_MISMATCH = "SYNAPSE_CHROME_EXTENSION_ID_MISMATCH";
 const TAB_TARGET_PREFIX = "chrome-tab:";
 const BRIDGE_TOKEN_HEADER = "X-Synapse-Bridge-Token";
 const DAEMON_WS_BASE_URL = "ws://127.0.0.1:7700";
@@ -11,8 +13,6 @@ const WEBSOCKET_KEEPALIVE_MS = 20000;
 const RECONNECT_ALARM_NAME = "synapse-daemon-reconnect";
 const RECONNECT_ALARM_PERIOD_MINUTES = 0.5;
 const RECONNECT_DELAY_MS = 30000;
-const UNSAFE_PROFILE_RECONNECT_ALARM_PERIOD_MINUTES = 30;
-const UNSAFE_PROFILE_RECONNECT_DELAY_MS = UNSAFE_PROFILE_RECONNECT_ALARM_PERIOD_MINUTES * 60 * 1000;
 
 let hostId = null;
 let bridgeToken = null;
@@ -22,7 +22,15 @@ let webSocket = null;
 let keepAliveTimer = null;
 
 function startBridge() {
-  ensureReconnectAlarm(RECONNECT_ALARM_PERIOD_MINUTES, { preserveLonger: true });
+  if (chrome.runtime.id !== EXPECTED_EXTENSION_ID) {
+    disableBridgeUntilChromeRestart(
+      `extension id mismatch: actual=${chrome.runtime.id} expected=${EXPECTED_EXTENSION_ID}; ` +
+        `reload the unpacked extension from the Synapse extension directory so the daemon can ` +
+        `authenticate the bridge origin`,
+      ERROR_EXTENSION_ID_MISMATCH
+    );
+    return;
+  }
   connectDaemon();
 }
 
@@ -67,13 +75,14 @@ function connectDaemon() {
   }
   connectInFlight = registerDaemon()
     .catch((error) => {
-      const unsafeProfile = error?.code === ERROR_DEBUGGER_WARNING_UNSUPPRESSED;
-      scheduleReconnect(`direct daemon register failed: ${errorMessage(error)}`, {
-        delayMs: unsafeProfile ? UNSAFE_PROFILE_RECONNECT_DELAY_MS : RECONNECT_DELAY_MS,
-        alarmPeriodMinutes: unsafeProfile
-          ? UNSAFE_PROFILE_RECONNECT_ALARM_PERIOD_MINUTES
-          : RECONNECT_ALARM_PERIOD_MINUTES
-      });
+      if (error?.code === ERROR_DEBUGGER_WARNING_UNSUPPRESSED) {
+        disableBridgeUntilChromeRestart(
+          `direct daemon register refused unsafe profile: ${errorMessage(error)}`,
+          ERROR_DEBUGGER_WARNING_UNSUPPRESSED
+        );
+        return;
+      }
+      scheduleReconnect(`direct daemon register failed: ${errorMessage(error)}`);
     })
     .finally(() => {
       connectInFlight = null;
@@ -133,6 +142,23 @@ function scheduleReconnect(detail, options = {}) {
   console.warn(
     `Synapse daemon bridge disconnected: ${detail}; reconnectDelayMs=${delayMs}; ` +
       `alarmPeriodMinutes=${alarmPeriodMinutes}`
+  );
+}
+
+function disableBridgeUntilChromeRestart(detail, code) {
+  closeWebSocket();
+  hostId = null;
+  bridgeToken = null;
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
+  chrome.alarms.clear(RECONNECT_ALARM_NAME).catch((error) => {
+    console.error(`Synapse daemon bridge dormant alarm clear failed: ${errorMessage(error)}`);
+  });
+  console.error(
+    `Synapse daemon bridge disabled until Chrome or extension restart: ${detail}; ` +
+      `code=${code}`
   );
 }
 

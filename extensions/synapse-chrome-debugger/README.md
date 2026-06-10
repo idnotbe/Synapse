@@ -10,6 +10,11 @@ restarted local daemon.
 
 Stable extension ID: `leoocgnkjnplbfdbklajepahofecgfbk`
 
+The service worker checks `chrome.runtime.id` against that stable ID before it
+contacts the daemon. If Chrome loads the unpacked directory under any other ID,
+the bridge clears its reconnect alarm and stays dormant until the extension is
+reloaded correctly.
+
 Install/verify the local bridge registration with:
 
 ```powershell
@@ -39,9 +44,10 @@ Registration is also fail-closed. If the daemon sees any live Chrome
 profile/process Source of Truth that is not popup-free, it refuses the direct
 bridge registration with `A11Y_CDP_DEBUGGER_WARNING_UNSUPPRESSED` before
 accepting a Chrome-hosted command channel. The service worker treats that exact
-error as an unsafe-profile condition and backs off to a 30 minute reconnect
-alarm instead of retrying every second. This keeps the failure visible while
-preventing repeated background wakeups on an unsafe end-user Chrome profile.
+error as an unsafe-profile condition, clears its reconnect timer/alarm, and
+stays dormant until Chrome or the extension restarts. This keeps the failure
+visible while preventing repeated background wakeups on an unsafe end-user
+Chrome profile.
 
 Background tab commands (`openTab`, `closeTab`, and `navigateTab`) use
 `chrome.tabs.create`, `chrome.tabs.remove`, `chrome.tabs.update`,
