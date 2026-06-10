@@ -6,10 +6,15 @@ param(
     [string]$ChromePolicyHive = 'Auto',
     [ValidateSet('AllExtensions', 'DetectedExtensions')]
     [string]$ChromePolicyBlockScope = 'AllExtensions',
-    [switch]$AllowExternalChromeDebuggerOrNativeMessaging
+    [bool]$AutoElevateChromePolicy = $true,
+    [switch]$AllowExternalChromeDebuggerOrNativeMessaging,
+    [switch]$ChromePolicyOnly,
+    [string[]]$ChromePolicyExternalExtensionIds = @(),
+    [string]$ChromePolicyEvidencePath
 )
 
 $ErrorActionPreference = 'Stop'
+Import-Module Microsoft.PowerShell.Security -ErrorAction SilentlyContinue
 
 function ConvertTo-CompressedJson {
     param(
@@ -75,6 +80,22 @@ function Get-ChromePolicyHiveCandidates {
         return @('HKCU', 'HKLM')
     }
     return @($Hive)
+}
+
+function Quote-ProcessArgument {
+    param([Parameter(Mandatory = $true)][string]$Value)
+    if ($Value.Length -eq 0) {
+        return '""'
+    }
+    if ($Value -notmatch '[\s"]') {
+        return $Value
+    }
+    return '"' + ($Value -replace '"', '\"') + '"'
+}
+
+function Quote-PowerShellLiteral {
+    param([Parameter(Mandatory = $true)][string]$Value)
+    return "'" + ($Value -replace "'", "''") + "'"
 }
 
 function Read-ChromeExtensionSettingsPolicy {
@@ -202,7 +223,8 @@ function Write-ChromeExternalDebuggerPolicyAuto {
         [string]$Hive,
         [string[]]$ExternalExtensionIds,
         [ValidateSet('AllExtensions', 'DetectedExtensions')]
-        [string]$BlockScope = 'AllExtensions'
+        [string]$BlockScope = 'AllExtensions',
+        [bool]$AutoElevate = $true
     )
 
     $attempts = @()
@@ -231,8 +253,156 @@ function Write-ChromeExternalDebuggerPolicyAuto {
         }
     }
 
+    if ($AutoElevate -and ($Hive -eq 'Auto' -or $Hive -eq 'HKLM')) {
+        try {
+            $result = Invoke-ElevatedChromeExternalDebuggerPolicy `
+                -ExternalExtensionIds $ExternalExtensionIds `
+                -BlockScope $BlockScope
+            $attempts += [pscustomobject]@{
+                hive = 'HKLM'
+                ok = $true
+                elevated = $true
+                path = $result.path
+                policy_entries = $result.policy_entries
+                evidence_path = $result.elevation_evidence_path
+            }
+            $result | Add-Member -NotePropertyName requested_hive -NotePropertyValue $Hive -Force
+            $result | Add-Member -NotePropertyName attempted_hives -NotePropertyValue $attempts -Force
+            return $result
+        } catch {
+            $attempts += [pscustomobject]@{
+                hive = 'HKLM'
+                ok = $false
+                elevated = $true
+                path = Get-ChromePolicyRoot -Hive 'HKLM'
+                error = $_.Exception.Message
+            }
+        }
+    }
+
     $attemptDetail = ConvertTo-CompressedJson -Value ([object[]]@($attempts)) -Depth 10
-    throw "SYNAPSE_CHROME_POLICY_REMEDIATION_WRITE_FAILED_ALL_HIVES requested_hive=$Hive block_scope=$BlockScope attempts=$attemptDetail remediation=setup could not persist Chrome ExtensionSettings blocked_permissions=[debugger,nativeMessaging] in any allowed hive; run setup elevated so HKLM can be written, repair HKCU Software\Policies ACL so the current user can write, or disable/remove the named external Chrome extension/native host before certifying popup-free state"
+    throw "SYNAPSE_CHROME_POLICY_REMEDIATION_WRITE_FAILED_ALL_HIVES requested_hive=$Hive block_scope=$BlockScope auto_elevate=$AutoElevate attempts=$attemptDetail remediation=setup could not persist Chrome ExtensionSettings blocked_permissions=[debugger,nativeMessaging] in any allowed hive; approve the one-time elevated HKLM policy writer, rerun setup elevated, repair HKCU Software\Policies ACL so the current user can write, or disable/remove the named external Chrome extension/native host before certifying popup-free state"
+}
+
+function Invoke-ElevatedChromeExternalDebuggerPolicy {
+    param(
+        [string[]]$ExternalExtensionIds,
+        [ValidateSet('AllExtensions', 'DetectedExtensions')]
+        [string]$BlockScope = 'AllExtensions'
+    )
+
+    if ([string]::IsNullOrWhiteSpace($PSCommandPath) -or -not (Test-Path -LiteralPath $PSCommandPath -PathType Leaf)) {
+        throw "SYNAPSE_CHROME_POLICY_ELEVATION_SCRIPT_PATH_MISSING path=$PSCommandPath remediation=run the verifier from a real .ps1 file so the elevated helper can execute the same audited policy writer"
+    }
+    $powershellExe = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    if (-not (Test-Path -LiteralPath $powershellExe -PathType Leaf)) {
+        throw "SYNAPSE_CHROME_POLICY_ELEVATION_POWERSHELL_MISSING path=$powershellExe remediation=repair Windows PowerShell or rerun setup from an elevated PowerShell host"
+    }
+
+    $evidenceRoot = Join-Path $env:TEMP 'synapse-chrome-policy-elevation'
+    New-Item -ItemType Directory -Force -Path $evidenceRoot | Out-Null
+    $evidencePath = Join-Path $evidenceRoot ("policy-{0}.json" -f ([guid]::NewGuid().ToString('n')))
+    $runnerPath = Join-Path $evidenceRoot ("policy-runner-{0}.ps1" -f ([guid]::NewGuid().ToString('n')))
+    $ids = @($ExternalExtensionIds | Where-Object { $_ -match '^[a-p]{32}$' } | Sort-Object -Unique)
+    $idsLiteral = '@(' + (($ids | ForEach-Object { Quote-PowerShellLiteral $_ }) -join ',') + ')'
+    $policyCommand = @(
+        '&',
+        (Quote-PowerShellLiteral $PSCommandPath),
+        '-ChromePolicyOnly',
+        '-ChromePolicyHive', 'HKLM',
+        '-ChromePolicyBlockScope', (Quote-PowerShellLiteral $BlockScope),
+        '-AutoElevateChromePolicy', '$false',
+        '-ChromePolicyEvidencePath', (Quote-PowerShellLiteral $evidencePath),
+        '-ChromePolicyExternalExtensionIds', $idsLiteral
+    ) -join ' '
+    $runner = @"
+`$ErrorActionPreference = 'Stop'
+try {
+    $policyCommand
+    exit `$LASTEXITCODE
+} catch {
+    `$payload = [ordered]@{
+        ok = `$false
+        mode = 'chrome_policy_elevated_runner'
+        error = `$_.Exception.Message
+    }
+    Set-Content -LiteralPath $(Quote-PowerShellLiteral $evidencePath) -Value (`$payload | ConvertTo-Json -Depth 12 -Compress) -Encoding UTF8
+    Write-Error `$_.Exception.Message
+    exit 1
+}
+"@
+    Set-Content -LiteralPath $runnerPath -Value $runner -Encoding UTF8
+    $argumentTokens = @(
+        '-NoProfile',
+        '-ExecutionPolicy', 'Bypass',
+        '-File', (Quote-ProcessArgument $runnerPath)
+    )
+
+    try {
+        $process = Start-Process `
+            -FilePath $powershellExe `
+            -ArgumentList ($argumentTokens -join ' ') `
+            -Verb RunAs `
+            -WindowStyle Hidden `
+            -Wait `
+            -PassThru `
+            -ErrorAction Stop
+    } catch {
+        Remove-Item -LiteralPath $runnerPath -Force -ErrorAction SilentlyContinue
+        throw "SYNAPSE_CHROME_POLICY_ELEVATION_START_FAILED path=$powershellExe evidence_path=$evidencePath detail=$($_.Exception.Message) remediation=approve the one-time UAC prompt, rerun setup from an elevated shell, or disable/remove the named external Chrome extension/native host"
+    }
+    Remove-Item -LiteralPath $runnerPath -Force -ErrorAction SilentlyContinue
+
+    if (-not (Test-Path -LiteralPath $evidencePath -PathType Leaf)) {
+        throw "SYNAPSE_CHROME_POLICY_ELEVATION_NO_EVIDENCE exit_code=$($process.ExitCode) evidence_path=$evidencePath remediation=elevated helper did not write its policy evidence file; inspect Windows event logs/UAC denial and rerun setup elevated"
+    }
+    try {
+        $payload = Get-Content -Raw -LiteralPath $evidencePath | ConvertFrom-Json -ErrorAction Stop
+    } catch {
+        throw "SYNAPSE_CHROME_POLICY_ELEVATION_EVIDENCE_INVALID exit_code=$($process.ExitCode) evidence_path=$evidencePath detail=$($_.Exception.Message) remediation=elevated helper evidence was not valid JSON"
+    }
+    if ($process.ExitCode -ne 0 -or -not $payload.ok) {
+        $detail = ConvertTo-CompressedJson -Value $payload -Depth 10
+        throw "SYNAPSE_CHROME_POLICY_ELEVATION_FAILED exit_code=$($process.ExitCode) evidence_path=$evidencePath detail=$detail remediation=elevated HKLM Chrome policy write failed; rerun setup elevated or repair policy registry permissions"
+    }
+    $result = $payload.result
+    $result | Add-Member -NotePropertyName elevated -NotePropertyValue $true -Force
+    $result | Add-Member -NotePropertyName elevation_evidence_path -NotePropertyValue $evidencePath -Force
+    return $result
+}
+
+if ($ChromePolicyOnly) {
+    try {
+        # Policy-only is the elevated child contract; never recurse into elevation.
+        $policyOnlyReadback = Write-ChromeExternalDebuggerPolicyAuto `
+            -Hive $ChromePolicyHive `
+            -ExternalExtensionIds $ChromePolicyExternalExtensionIds `
+            -BlockScope $ChromePolicyBlockScope `
+            -AutoElevate:$false
+        $payload = [ordered]@{
+            ok = $true
+            mode = 'chrome_policy_only'
+            result = $policyOnlyReadback
+        }
+        if (-not [string]::IsNullOrWhiteSpace($ChromePolicyEvidencePath)) {
+            New-Item -ItemType Directory -Force -Path (Split-Path -Parent $ChromePolicyEvidencePath) | Out-Null
+            Set-Content -LiteralPath $ChromePolicyEvidencePath -Value (ConvertTo-CompressedJson -Value $payload -Depth 12) -Encoding UTF8
+        }
+        [pscustomobject]$payload
+        exit 0
+    } catch {
+        $payload = [ordered]@{
+            ok = $false
+            mode = 'chrome_policy_only'
+            error = $_.Exception.Message
+        }
+        if (-not [string]::IsNullOrWhiteSpace($ChromePolicyEvidencePath)) {
+            New-Item -ItemType Directory -Force -Path (Split-Path -Parent $ChromePolicyEvidencePath) | Out-Null
+            Set-Content -LiteralPath $ChromePolicyEvidencePath -Value (ConvertTo-CompressedJson -Value $payload -Depth 12) -Encoding UTF8
+        }
+        Write-Error $_.Exception.Message
+        exit 1
+    }
 }
 
 function Get-SynapseNativeHostRegistryTargets {

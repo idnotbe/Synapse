@@ -92,6 +92,10 @@ HKLM, and accepts the setup only after a separate policy readback proves that
 `blocked_permissions=["debugger","nativeMessaging"]` was merged into the Chrome
 `ExtensionSettings` wildcard `"*"` policy entry. This blocks current and future
 extensions from loading with those permissions.
+If the current process cannot write either hive, setup attempts a one-time
+elevated hidden PowerShell helper that writes the same supported policy to HKLM
+and returns a JSON evidence file. Canceling UAC or failing the elevated readback
+is a hard setup failure, not a warning.
 Passing `-ApplyExternalChromeDebuggerPolicy:$false` is diagnostic-only and cannot
 certify an end-user host as popup-free.
 
@@ -106,7 +110,8 @@ Use `-ChromePolicyBlockScope DetectedExtensions` only when the operator
 intentionally wants to limit remediation to the currently discovered extension
 IDs. If no allowed hive can persist the policy, the script fails with
 `SYNAPSE_CHROME_POLICY_REMEDIATION_WRITE_FAILED_ALL_HIVES` and includes the
-per-hive registry path, ACL/readback failure, and remediation.
+per-hive registry path, ACL/readback failure, elevated-helper evidence path when
+attempted, and remediation.
 After policy is written, Chrome must reload policy or restart; the verifier
 still fails closed until the profile/process SoT shows the external debugger or
 native-messaging surface is gone.

@@ -84,6 +84,13 @@
   DetectedExtensions limits the policy merge to the offending extension IDs
   found in the current Chrome profile/process Source of Truth.
 
+.PARAMETER AutoElevateChromePolicy
+  Enabled by default. If HKCU/HKLM Chrome policy writes fail from the current
+  unelevated process, setup launches a one-time elevated hidden PowerShell
+  helper to write the supported HKLM ExtensionSettings policy, then reads back
+  the exact policy evidence file and registry value. If UAC is canceled or HKLM
+  still cannot be written, setup fails closed with the helper evidence.
+
 .PARAMETER MaintenanceLockPath
   File-lock Source of Truth that serializes setup/remove across multiple
   agents. The file contents name the owning PID and cleanup policy; the held
@@ -112,6 +119,7 @@ param(
     [string]$ChromePolicyHive = 'Auto',
     [ValidateSet('AllExtensions', 'DetectedExtensions')]
     [string]$ChromePolicyBlockScope = 'AllExtensions',
+    [bool]$AutoElevateChromePolicy = $true,
     [string]$CargoTarget = "$env:LOCALAPPDATA\synapse\build-target",
     [string]$DbPath      = "$env:LOCALAPPDATA\synapse\db-daemon",
     [string]$ProfilesDir = "$env:USERPROFILE\.cargo\bin\profiles",
@@ -142,7 +150,8 @@ function Invoke-SynapseChromeBridgeVerifier {
         [ValidateSet('Auto', 'HKCU', 'HKLM')]
         [string]$PolicyHive = 'Auto',
         [ValidateSet('AllExtensions', 'DetectedExtensions')]
-        [string]$PolicyBlockScope = 'AllExtensions'
+        [string]$PolicyBlockScope = 'AllExtensions',
+        [bool]$AutoElevatePolicy = $true
     )
 
     if (-not (Test-Path -LiteralPath $InstallerPath -PathType Leaf)) {
@@ -152,6 +161,7 @@ function Invoke-SynapseChromeBridgeVerifier {
         SynapseNativeHostExe = $NativeHostExePath
         ChromePolicyHive = $PolicyHive
         ChromePolicyBlockScope = $PolicyBlockScope
+        AutoElevateChromePolicy = $AutoElevatePolicy
     }
     if ($ApplyExternalPolicy) {
         $chromeBridgeArgs.ApplyExternalChromeDebuggerPolicy = $true
@@ -2247,7 +2257,8 @@ $chromeBridgePreflight = Invoke-SynapseChromeBridgeVerifier `
     -NativeHostExePath $ChromeNativeHostExePath `
     -ApplyExternalPolicy:$ApplyExternalChromeDebuggerPolicy `
     -PolicyHive $ChromePolicyHive `
-    -PolicyBlockScope $ChromePolicyBlockScope
+    -PolicyBlockScope $ChromePolicyBlockScope `
+    -AutoElevatePolicy $AutoElevateChromePolicy
 Info ("Chrome direct bridge preflight accepted transport={0} extension_id={1} native_host_registry_present={2} native_host_manifest_present={3} policy_scope={4} policy_block_scope={5}" -f `
     $chromeBridgePreflight.daemon_bridge_transport, `
     $chromeBridgePreflight.extension_id, `
@@ -2300,7 +2311,8 @@ $chromeBridgeReadback = Invoke-SynapseChromeBridgeVerifier `
     -NativeHostExePath $ChromeNativeHostExePath `
     -ApplyExternalPolicy:$ApplyExternalChromeDebuggerPolicy `
     -PolicyHive $ChromePolicyHive `
-    -PolicyBlockScope $ChromePolicyBlockScope
+    -PolicyBlockScope $ChromePolicyBlockScope `
+    -AutoElevatePolicy $AutoElevateChromePolicy
 Info ("Chrome direct bridge verified transport={0} extension_id={1} native_host_registry_present={2} native_host_manifest_present={3} policy_scope={4} policy_block_scope={5}" -f `
     $chromeBridgeReadback.daemon_bridge_transport, `
     $chromeBridgeReadback.extension_id, `

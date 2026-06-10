@@ -166,17 +166,21 @@ Chrome session, the supported attach path is:
    and then HKLM, and accepts setup only after a separate readback proves
    `blocked_permissions=["debugger","nativeMessaging"]` is present in the
    wildcard `"*"` policy entry, so current and future extensions cannot load
-   with those permissions. The standalone bridge verifier applies the same
-   policy by default with `scripts\install-synapse-chrome-debugger.ps1`.
+   with those permissions. If the current process cannot write either hive,
+   setup attempts a one-time elevated hidden PowerShell helper for HKLM and
+   reads back the helper's JSON evidence file before continuing. Canceling UAC,
+   missing evidence, or a failed elevated registry readback remains a hard
+   failure. The standalone bridge verifier applies the same policy by default
+   with `scripts\install-synapse-chrome-debugger.ps1`.
    Passing `-ApplyExternalChromeDebuggerPolicy:$false` is diagnostic-only and
    cannot certify a popup-free end-user host. `-ChromePolicyBlockScope
    DetectedExtensions` limits the merge to currently discovered extension IDs.
    The scripts fail with
    `SYNAPSE_CHROME_POLICY_REMEDIATION_WRITE_FAILED_ALL_HIVES` if no allowed
-   policy hive can persist and read back the required policy. After policy is
-   written, refresh/restart Chrome and rerun the verifier; do not certify
-   popup-free readiness until the separate profile/process readback shows the
-   external surface is gone.
+   policy hive, including the elevated HKLM helper when allowed, can persist
+   and read back the required policy. After policy is written, refresh/restart
+   Chrome and rerun the verifier; do not certify popup-free readiness until the
+   separate profile/process readback shows the external surface is gone.
    Runtime `observe` diagnostics also include a live
    `external_chrome_popup_risk` profile/process summary when Synapse refuses a
    normal-profile attach-capable command, so remaining popups are attributed to
