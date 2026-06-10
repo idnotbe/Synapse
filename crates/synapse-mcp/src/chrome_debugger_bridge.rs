@@ -153,13 +153,162 @@ impl ChromeDebuggerBridgeError {
     }
 
     fn normal_bridge_attach_disabled(hwnd: i64, command_kind: &str) -> Self {
+        let external_surface_hint = external_chrome_surface_hint();
         Self {
             code: error_codes::A11Y_CDP_DEBUGGER_WARNING_UNSUPPRESSED,
             detail: format!(
-                "normal Synapse Chrome Bridge refused attach-capable command {command_kind:?} before queueing any Chrome command; hwnd={hwnd} reason=the normal end-user bridge is tabs-only and contains no daemon-side chrome.debugger attach transport remediation=use raw CDP from a Synapse-launched automation profile for DOM/action CDP"
+                "normal Synapse Chrome Bridge refused attach-capable command {command_kind:?} before queueing any Chrome command; hwnd={hwnd} reason=the normal end-user bridge is tabs-only and contains no daemon-side chrome.debugger attach transport{external_surface_hint} remediation=use raw CDP from a Synapse-launched automation profile for DOM/action CDP; if an end-user popup remains, disable/remove the named external Chrome extension or apply Chrome ExtensionSettings blocked_permissions=[debugger,nativeMessaging] and rerun scripts\\install-synapse-chrome-debugger.ps1"
             ),
         }
     }
+}
+
+fn external_chrome_surface_hint() -> String {
+    let mut rows = external_chrome_profile_surfaces();
+    rows.extend(external_chrome_native_messaging_processes());
+    if rows.is_empty() {
+        return String::new();
+    }
+    rows.sort();
+    rows.dedup();
+    let shown = rows.iter().take(8).cloned().collect::<Vec<_>>().join(" | ");
+    let extra = rows.len().saturating_sub(8);
+    let suffix = if extra == 0 {
+        String::new()
+    } else {
+        format!(" | +{extra} more")
+    };
+    format!(" external_chrome_popup_risk={shown}{suffix}")
+}
+
+fn external_chrome_profile_surfaces() -> Vec<String> {
+    let Some(local_appdata) = std::env::var_os("LOCALAPPDATA") else {
+        return Vec::new();
+    };
+    let user_data_root = PathBuf::from(local_appdata)
+        .join("Google")
+        .join("Chrome")
+        .join("User Data");
+    let Ok(profile_dirs) = std::fs::read_dir(user_data_root) else {
+        return Vec::new();
+    };
+
+    let mut rows = Vec::new();
+    for profile_dir in profile_dirs.flatten() {
+        let Ok(file_type) = profile_dir.file_type() else {
+            continue;
+        };
+        if !file_type.is_dir() || profile_dir.file_name() == "Snapshots" {
+            continue;
+        }
+        let profile = profile_dir.file_name().to_string_lossy().into_owned();
+        for pref_file in ["Secure Preferences", "Preferences"] {
+            let pref_path = profile_dir.path().join(pref_file);
+            let Ok(raw) = std::fs::read_to_string(&pref_path) else {
+                continue;
+            };
+            let Ok(pref) = serde_json::from_str::<Value>(&raw) else {
+                rows.push(format!(
+                    "profile={profile} pref={pref_file} parse_error=true"
+                ));
+                continue;
+            };
+            let Some(settings) = pref
+                .get("extensions")
+                .and_then(|value| value.get("settings"))
+                .and_then(Value::as_object)
+            else {
+                continue;
+            };
+            for (extension_id, setting) in settings {
+                if extension_id == EXTENSION_ID {
+                    continue;
+                }
+                let permissions = active_api_permissions(setting);
+                let has_debugger = permissions
+                    .iter()
+                    .any(|permission| permission == "debugger");
+                let has_native = permissions
+                    .iter()
+                    .any(|permission| permission == "nativeMessaging");
+                if !has_debugger && !has_native {
+                    continue;
+                }
+                let name = setting
+                    .get("manifest")
+                    .and_then(|manifest| manifest.get("name"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("<unnamed>");
+                rows.push(format!(
+                    "profile={profile} pref={pref_file} extension_id={extension_id} name={name:?} active_api={}",
+                    permissions.join(",")
+                ));
+            }
+        }
+    }
+    rows
+}
+
+fn active_api_permissions(setting: &Value) -> Vec<String> {
+    let mut permissions = setting
+        .get("active_permissions")
+        .and_then(|value| value.get("api"))
+        .and_then(Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(Value::as_str)
+                .map(ToOwned::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    permissions.sort();
+    permissions.dedup();
+    permissions
+}
+
+fn external_chrome_native_messaging_processes() -> Vec<String> {
+    use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
+
+    let mut system = System::new();
+    system.refresh_processes_specifics(
+        ProcessesToUpdate::All,
+        true,
+        ProcessRefreshKind::everything(),
+    );
+    system
+        .processes()
+        .iter()
+        .filter_map(|(pid, process)| {
+            let command_line = process
+                .cmd()
+                .iter()
+                .map(|part| part.to_string_lossy())
+                .collect::<Vec<_>>()
+                .join(" ");
+            if !command_line.contains("chrome.nativeMessaging")
+                || command_line.contains(EXTENSION_ID)
+            {
+                return None;
+            }
+            let extension_id = command_line
+                .split("chrome-extension://")
+                .nth(1)
+                .and_then(|tail| tail.get(0..32))
+                .filter(|candidate| {
+                    candidate.len() == 32
+                        && candidate
+                            .chars()
+                            .all(|character| ('a'..='p').contains(&character))
+                })
+                .unwrap_or("<unknown>");
+            Some(format!(
+                "native_messaging_process pid={} name={} extension_id={extension_id}",
+                pid.as_u32(),
+                process.name().to_string_lossy()
+            ))
+        })
+        .collect()
 }
 
 #[derive(Clone, Debug)]

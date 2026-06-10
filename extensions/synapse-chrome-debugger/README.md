@@ -48,6 +48,13 @@ SoT so the host can remove the external surface or apply a Chrome
 `ExtensionSettings.blocked_permissions` policy before treating the system as
 popup-free.
 
+Runtime Chrome observations follow the same rule. If raw CDP is unavailable and
+Synapse refuses a normal-profile attach-capable command, the diagnostic detail
+includes any external Chrome `debugger` or `nativeMessaging` profile/process
+surface found at that moment. A remaining end-user debugger/native-host popup is
+therefore attributed to a concrete extension or process instead of being
+reported as an ambiguous Synapse bridge failure.
+
 To apply the supported Chrome policy remediation for the discovered external
 extensions, run:
 
