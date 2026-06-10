@@ -38,3 +38,12 @@ rejects them immediately and contains no `chrome.debugger` API calls, so a
 stale daemon command or stale permission grant cannot surface Chrome's
 "started debugging this browser" warning from the Synapse bridge. DOM attach
 requires raw CDP on a dedicated Synapse-launched automation profile.
+
+The install verifier also fails closed when the live Chrome profile contains an
+active external extension with the `debugger` permission, or when Chrome has a
+live external native-messaging wrapper process. Those are separate browser
+surfaces that can produce the same end-user popup/window even though Synapse's
+bridge is tabs-only. The verifier names the extension ID, profile, and process
+SoT so the host can remove the external surface or apply a Chrome
+`ExtensionSettings.blocked_permissions` policy before treating the system as
+popup-free.

@@ -143,7 +143,14 @@ Chrome session, the supported attach path is:
    `chrome.debugger.attach` without `--silent-debugger-extension-api`; Synapse's
    normal bridge therefore cannot use that API. DOM attach for a normal Chrome
    profile requires raw CDP on a dedicated Synapse-launched automation profile.
-9. If the current browser session still exposes no endpoint or extension bridge,
+9. The verifier fails closed if the live Chrome profile has another active
+   extension with the `debugger` permission, or if Chrome is already running an
+   external native-messaging wrapper process. Those surfaces can display the
+   same user-visible debugger/native-host popup even though Synapse is not the
+   caller. The remediation is to disable/remove the external extension or apply
+   a Chrome `ExtensionSettings.blocked_permissions` policy to that extension,
+   refresh/restart Chrome, and rerun the verifier.
+10. If the current browser session still exposes no endpoint or extension bridge,
    fail closed with
    `web_path = "uia_only"` or `ocr`; do not claim DOM/control readback. Relaunch
    is a user/session decision because it changes the authenticated browser

@@ -1,9 +1,14 @@
 param(
     [string]$SynapseNativeHostExe = "$env:USERPROFILE\.cargo\bin\synapse-chrome-native-host.exe",
-    [string]$ExtensionId = "leoocgnkjnplbfdbklajepahofecgfbk"
+    [string]$ExtensionId = "leoocgnkjnplbfdbklajepahofecgfbk",
+    [switch]$AllowExternalChromeDebuggerOrNativeMessaging
 )
 
 $ErrorActionPreference = 'Stop'
+
+if ($ExtensionId -notmatch '^[a-p]{32}$') {
+    throw "SYNAPSE_CHROME_EXTENSION_ID_INVALID extension_id=$ExtensionId remediation=Chrome extension IDs are 32 lowercase characters in the range a-p; refusing to inspect profiles with an ambiguous extension identity"
+}
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $extensionDir = Join-Path $repoRoot 'extensions\synapse-chrome-debugger'
@@ -63,6 +68,7 @@ $chromeUserDataRoot = Join-Path $env:LOCALAPPDATA 'Google\Chrome\User Data'
 $synapseChromeProfileReadback = @()
 $staleSynapseActivePermissions = @()
 $externalDebuggerOrNativeExtensions = @()
+$externalDebuggerExtensions = @()
 if (Test-Path -LiteralPath $chromeUserDataRoot -PathType Container) {
     $profileDirs = @(Get-ChildItem -LiteralPath $chromeUserDataRoot -Directory -ErrorAction SilentlyContinue |
         Where-Object { $_.Name -ne 'Snapshots' })
@@ -110,7 +116,7 @@ if (Test-Path -LiteralPath $chromeUserDataRoot -PathType Container) {
                         $staleSynapseActivePermissions += $row
                     }
                 } elseif ($activeApi -contains 'debugger' -or $activeApi -contains 'nativeMessaging') {
-                    $externalDebuggerOrNativeExtensions += [pscustomobject]@{
+                    $externalRow = [pscustomobject]@{
                         profile = $profileDir.Name
                         pref_file = $prefFileName
                         extension_id = $extensionProperty.Name
@@ -118,6 +124,10 @@ if (Test-Path -LiteralPath $chromeUserDataRoot -PathType Container) {
                         location = $setting.location
                         manifest_path = $setting.path
                         active_api = $activeApi
+                    }
+                    $externalDebuggerOrNativeExtensions += $externalRow
+                    if ($activeApi -contains 'debugger') {
+                        $externalDebuggerExtensions += $externalRow
                     }
                 }
             }
@@ -135,6 +145,17 @@ $externalNativeMessagingProcesses = @(Get-CimInstance Win32_Process -ErrorAction
         $_.CommandLine -notmatch [regex]::Escape($ExtensionId)
     } |
     Select-Object ProcessId, ParentProcessId, Name, ExecutablePath, CommandLine)
+
+if (-not $AllowExternalChromeDebuggerOrNativeMessaging -and
+    ($externalDebuggerExtensions.Count -gt 0 -or $externalNativeMessagingProcesses.Count -gt 0)) {
+    $detail = [pscustomobject]@{
+        external_debugger_extensions = $externalDebuggerExtensions
+        external_native_messaging_processes = $externalNativeMessagingProcesses
+        current_chrome_processes = $chromeProcesses
+        chrome_policy_remediation = 'HKCU/HKLM Chrome ExtensionSettings blocked_permissions=[debugger,nativeMessaging] for the offending extension, or disable/remove that extension, then refresh/restart Chrome and rerun this verifier'
+    } | ConvertTo-Json -Depth 8 -Compress
+    throw "SYNAPSE_CHROME_EXTERNAL_DEBUGGER_OR_NATIVE_SURFACE_PRESENT detail=$detail remediation=normal end-user systems cannot be certified banner-free while another active Chrome extension can call chrome.debugger or a live external native-messaging wrapper can surface a console/window; pass -AllowExternalChromeDebuggerOrNativeMessaging only for diagnostic attribution, never for popup-free acceptance"
+}
 
 [pscustomobject]@{
     ok = $true
@@ -164,5 +185,6 @@ $externalNativeMessagingProcesses = @(Get-CimInstance Win32_Process -ErrorAction
     current_chrome_processes = $chromeProcesses
     synapse_chrome_profile_readback = $synapseChromeProfileReadback
     external_debugger_or_native_extensions = $externalDebuggerOrNativeExtensions
+    external_debugger_extensions = $externalDebuggerExtensions
     external_native_messaging_processes = $externalNativeMessagingProcesses
 }
