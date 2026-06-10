@@ -1,6 +1,6 @@
 use synapse_core::Rect;
 
-use crate::{CaptureError, CapturedBgraBitmap, platform};
+use crate::{CaptureError, CapturedBgraBitmap, CapturedWindowBgraBitmap, platform};
 
 // `CapturedFrame`/`CapturedSoftwareBitmap` only feed the Windows-only WinRT
 // `SoftwareBitmap` helpers below.
@@ -19,6 +19,20 @@ pub fn captured_frame_region_to_software_bitmap(
     region: Rect,
 ) -> Result<CapturedSoftwareBitmap, CaptureError> {
     platform::captured_frame_region_to_software_bitmap(frame, region)
+}
+
+#[cfg(windows)]
+/// Copies a captured frame region into raw BGRA bytes.
+///
+/// # Errors
+///
+/// Returns [`CaptureError`] when the region is empty/outside the frame, the
+/// frame format is unsupported, or the D3D copy fails.
+pub fn captured_frame_region_to_bgra_bitmap(
+    frame: &CapturedFrame,
+    region: Rect,
+) -> Result<CapturedBgraBitmap, CaptureError> {
+    platform::captured_frame_region_to_bgra_bitmap(frame, region)
 }
 
 #[cfg(windows)]
@@ -47,4 +61,30 @@ pub fn screen_region_to_software_bitmap(
 /// (Windows), or `GraphicsApiUnsupported` on any non-Windows build.
 pub fn screen_region_to_bgra_bitmap(region: Rect) -> Result<CapturedBgraBitmap, CaptureError> {
     platform::screen_region_to_bgra_bitmap(region)
+}
+
+/// Captures a window-relative region into raw BGRA bytes. Windows uses WGC
+/// `CreateForWindow` first and falls back to `PrintWindow(PW_RENDERFULLCONTENT)`
+/// with the backend reported in the result. Non-Windows builds fail loudly.
+///
+/// # Errors
+///
+/// Returns [`CaptureError`] when the HWND/region is invalid, no WGC frame
+/// arrives, `PrintWindow` fails, or the bitmap copy fails.
+pub fn window_region_to_bgra_bitmap(
+    hwnd: i64,
+    region: Rect,
+    timeout_ms: u64,
+) -> Result<CapturedWindowBgraBitmap, CaptureError> {
+    platform::window_region_to_bgra_bitmap(hwnd, region, timeout_ms)
+}
+
+/// Converts a client-relative region to the full-window coordinate space used
+/// by WGC/PrintWindow frames for this HWND.
+///
+/// # Errors
+///
+/// Returns [`CaptureError`] when the HWND cannot be resolved.
+pub fn client_region_to_window_region(hwnd: i64, region: Rect) -> Result<Rect, CaptureError> {
+    platform::client_region_to_window_region(hwnd, region)
 }

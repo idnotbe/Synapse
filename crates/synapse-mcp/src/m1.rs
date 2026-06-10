@@ -285,6 +285,10 @@ pub struct CaptureScreenshotParams {
     pub path: String,
     #[serde(default)]
     pub region: Option<Rect>,
+    /// Explicit per-call window override (HWND). Takes precedence over the
+    /// session's active target. When set, `region` is client-relative.
+    #[serde(default)]
+    pub window_hwnd: Option<i64>,
     #[serde(default)]
     pub overwrite: bool,
 }

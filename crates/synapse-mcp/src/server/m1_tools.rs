@@ -265,17 +265,50 @@ impl SynapseService {
     }
 
     #[tool(
-        description = "Capture the current foreground window or explicit screen region to a caller-specified PNG/JPEG file"
+        description = "Capture a PNG/JPEG screenshot. With window_hwnd or this MCP session's active target, captures that window in the background using per-window WGC with PrintWindow fallback and interprets region as client-relative. With no target, preserves legacy foreground-window or absolute screen-region capture."
     )]
     pub async fn capture_screenshot(
         &self,
         params: Parameters<CaptureScreenshotParams>,
+        request_context: RequestContext<RoleServer>,
     ) -> Result<Json<CaptureScreenshotResponse>, ErrorData> {
         tracing::info!(
             code = "MCP_TOOL_INVOCATION",
             kind = "capture_screenshot",
             "tool.invocation kind=capture_screenshot"
         );
+        let session_target_hwnd = self.request_session_target_hwnd(&request_context)?;
+        if let Some(window_hwnd) = params.0.window_hwnd.or(session_target_hwnd) {
+            let target_context = resolve_capture_target_window_context(window_hwnd)?;
+            let region = match params.0.region {
+                Some(client_region) => synapse_capture::client_region_to_window_region(
+                    window_hwnd,
+                    client_region,
+                )
+                .map_err(|error| {
+                    mcp_error(
+                        error.code(),
+                        format!(
+                            "capture_screenshot could not convert client-relative region {client_region:?} for target {window_hwnd:#x}: {error}"
+                        ),
+                    )
+                })?,
+                None => Rect {
+                    x: 0,
+                    y: 0,
+                    w: target_context.window_bounds.w,
+                    h: target_context.window_bounds.h,
+                },
+            };
+            return capture_target_window_screenshot_to_file(
+                &params.0,
+                window_hwnd,
+                region,
+                Some(target_context),
+            )
+            .map(Json);
+        }
+
         let foreground = if params.0.region.is_some() {
             synapse_a11y::current_foreground_context().ok()
         } else {
@@ -296,7 +329,7 @@ impl SynapseService {
                     "capture_screenshot requires a region when no foreground window is available",
                 )
             })?;
-        capture_screenshot_to_file(&params.0, region, foreground).map(Json)
+        capture_screen_screenshot_to_file(&params.0, region, foreground).map(Json)
     }
 
     #[tool(description = "Set the active capture target")]
@@ -1679,7 +1712,26 @@ pub(crate) fn validate_target_window(hwnd: i64) -> Result<(String, String), Erro
     Ok((context.window_title, context.process_name))
 }
 
-fn capture_screenshot_to_file(
+fn resolve_capture_target_window_context(hwnd: i64) -> Result<ForegroundContext, ErrorData> {
+    synapse_capture::validate_hwnd(hwnd).map_err(|error| {
+        mcp_error(
+            error_codes::TARGET_WINDOW_NOT_FOUND,
+            format!("capture_screenshot window_hwnd {hwnd:#x} is not a live window: {error}"),
+        )
+    })?;
+    synapse_a11y::foreground_context(hwnd).map_err(|error| {
+        mcp_error(
+            error_codes::TARGET_WINDOW_NOT_FOUND,
+            format!(
+                "capture_screenshot window_hwnd {hwnd:#x} could not be resolved for perception: {error}"
+            ),
+        )
+    })
+}
+
+const WINDOW_SCREENSHOT_TIMEOUT_MS: u64 = 1500;
+
+fn capture_screen_screenshot_to_file(
     params: &CaptureScreenshotParams,
     region: Rect,
     foreground: Option<ForegroundContext>,
@@ -1695,6 +1747,63 @@ fn capture_screenshot_to_file(
         )
     })?;
     let bitmap_sha256 = sha256_hex(&captured.bytes);
+    write_screenshot_bitmap(
+        params,
+        output_path,
+        format,
+        captured,
+        "gdi_screen_region_bgra",
+        bitmap_sha256,
+        foreground,
+    )
+}
+
+fn capture_target_window_screenshot_to_file(
+    params: &CaptureScreenshotParams,
+    window_hwnd: i64,
+    region: Rect,
+    foreground: Option<ForegroundContext>,
+) -> Result<CaptureScreenshotResponse, ErrorData> {
+    validate_screenshot_region(region)?;
+    let output_path = screenshot_output_path(&params.path)?;
+    let format = screenshot_format_from_path(&output_path)?;
+    ensure_screenshot_path_available(&output_path, params.overwrite)?;
+    let captured = synapse_capture::window_region_to_bgra_bitmap(
+        window_hwnd,
+        region,
+        WINDOW_SCREENSHOT_TIMEOUT_MS,
+    )
+    .map_err(|error| {
+        mcp_error(
+            error.code(),
+            format!(
+                "capture_screenshot failed for target window {window_hwnd:#x} region {region:?}: {error}"
+            ),
+        )
+    })?;
+    let capture_backend = captured.capture_backend;
+    let captured = captured.bitmap;
+    let bitmap_sha256 = sha256_hex(&captured.bytes);
+    write_screenshot_bitmap(
+        params,
+        output_path,
+        format,
+        captured,
+        capture_backend,
+        bitmap_sha256,
+        foreground,
+    )
+}
+
+fn write_screenshot_bitmap(
+    params: &CaptureScreenshotParams,
+    output_path: PathBuf,
+    format: CaptureScreenshotFormat,
+    captured: synapse_capture::CapturedBgraBitmap,
+    capture_backend: &str,
+    bitmap_sha256: String,
+    foreground: Option<ForegroundContext>,
+) -> Result<CaptureScreenshotResponse, ErrorData> {
     let temp_path = screenshot_temp_path(&output_path);
     if temp_path.try_exists().map_err(|error| {
         mcp_error(
@@ -1736,7 +1845,7 @@ fn capture_screenshot_to_file(
     Ok(CaptureScreenshotResponse {
         path: output_path.to_string_lossy().into_owned(),
         format,
-        capture_backend: "gdi_screen_region_bgra".to_owned(),
+        capture_backend: capture_backend.to_owned(),
         region: captured.region,
         width: captured.width,
         height: captured.height,
@@ -2841,8 +2950,8 @@ fn template_value(field_name: &str, path: &str, index: usize) -> PerceptionResul
 #[cfg(all(test, windows))]
 mod tests {
     use super::{
-        SessionTarget, TargetWire, ocr_cache_key, sha256_hex, target_wire, template_value,
-        validate_target_window,
+        SessionTarget, TargetWire, ocr_cache_key, resolve_capture_target_window_context,
+        sha256_hex, target_wire, template_value, validate_target_window,
     };
     use synapse_core::error_codes;
 
@@ -2860,6 +2969,21 @@ mod tests {
             .and_then(serde_json::Value::as_str);
         assert_eq!(code, Some(error_codes::TARGET_WINDOW_NOT_FOUND));
         println!("readback=set_target edge=dead_hwnd code={code:?}");
+    }
+
+    #[test]
+    fn capture_target_window_context_rejects_dead_hwnd() {
+        let error = match resolve_capture_target_window_context(0xDEAD) {
+            Ok(resolved) => panic!("dead hwnd unexpectedly resolved for screenshot: {resolved:?}"),
+            Err(error) => error,
+        };
+        let code = error
+            .data
+            .as_ref()
+            .and_then(|data| data.get("code"))
+            .and_then(serde_json::Value::as_str);
+        assert_eq!(code, Some(error_codes::TARGET_WINDOW_NOT_FOUND));
+        println!("readback=capture_screenshot edge=dead_hwnd code={code:?}");
     }
 
     #[test]

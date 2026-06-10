@@ -1,8 +1,8 @@
 use synapse_core::{Point, Rect};
 
 use crate::{
-    CaptureConfig, CaptureError, CaptureThreadPriority, CapturedBgraBitmap, DpiAwarenessStatus,
-    controller::CaptureThreadContext,
+    CaptureConfig, CaptureError, CaptureThreadPriority, CapturedBgraBitmap,
+    CapturedWindowBgraBitmap, DpiAwarenessStatus, controller::CaptureThreadContext,
 };
 
 /// Builds the error returned by every capture entry point on non-Windows builds.
@@ -54,6 +54,18 @@ pub fn run_dxgi_capture(
 /// fabricated pixels, so OCR/detection callers never operate on mock image data.
 #[cfg(not(windows))]
 pub fn screen_region_to_bgra_bitmap(_region: Rect) -> Result<CapturedBgraBitmap, CaptureError> {
+    Err(capture_backend_unavailable())
+}
+
+pub fn window_region_to_bgra_bitmap(
+    _hwnd: i64,
+    _region: Rect,
+    _timeout_ms: u64,
+) -> Result<CapturedWindowBgraBitmap, CaptureError> {
+    Err(capture_backend_unavailable())
+}
+
+pub fn client_region_to_window_region(_hwnd: i64, _region: Rect) -> Result<Rect, CaptureError> {
     Err(capture_backend_unavailable())
 }
 

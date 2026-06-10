@@ -80,6 +80,12 @@ pub struct CapturedBgraBitmap {
     pub bytes: Vec<u8>,
 }
 
+#[derive(Clone, Debug)]
+pub struct CapturedWindowBgraBitmap {
+    pub bitmap: CapturedBgraBitmap,
+    pub capture_backend: &'static str,
+}
+
 // Note: a `CapturedFrame::synthetic(..)` constructor used to exist here for
 // non-Windows builds. It fabricated placeholder frames so the capture loop on
 // Linux/macOS appeared to succeed while feeding mock pixels into perception. It
