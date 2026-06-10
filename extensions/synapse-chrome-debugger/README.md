@@ -30,13 +30,10 @@ returned by this path are synthetic `chrome-tab:<tabId>` IDs backed by
 `chrome.tabs` readback.
 
 Attach-capable commands (`snapshot`, `clickNode`, `typeNode`, and `nodeValue`)
-are unavailable in the normal end-user install unless a separate
-debugger-enabled path is explicitly configured. Without
-`--silent-debugger-extension-api`, Chrome intentionally shows its "`started
-debugging this browser`" warning UI when an extension calls
-`chrome.debugger.attach`. Synapse checks the target window owner PID and process
-command line before attach; if the switch is absent or unreadable, Synapse
-returns `A11Y_CDP_DEBUGGER_WARNING_UNSUPPRESSED` and does not call
-`chrome.debugger.attach`. The extension also requires the daemon's explicit
-suppression attestation on attach-capable daemon commands, so stale or malformed
-daemon commands fail before `chrome.debugger.attach`.
+are unavailable in the normal end-user install. The normal service worker
+rejects them immediately and contains no `chrome.debugger` API calls, so a
+stale daemon command or stale permission grant cannot surface Chrome's
+"started debugging this browser" warning from the Synapse bridge. DOM attach
+requires raw CDP on a dedicated Synapse-launched automation profile, or a
+separate debugger-enabled bridge that is not the normal end-user extension and
+is used only with Chrome launched under `--silent-debugger-extension-api`.

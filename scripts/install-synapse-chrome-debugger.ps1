@@ -60,6 +60,83 @@ $chromeProcesses = @(Get-CimInstance Win32_Process -Filter "Name='chrome.exe'" -
     }
 })
 
+$chromeUserDataRoot = Join-Path $env:LOCALAPPDATA 'Google\Chrome\User Data'
+$synapseChromeProfileReadback = @()
+$staleSynapseActivePermissions = @()
+$externalDebuggerOrNativeExtensions = @()
+if (Test-Path -LiteralPath $chromeUserDataRoot -PathType Container) {
+    $profileDirs = @(Get-ChildItem -LiteralPath $chromeUserDataRoot -Directory -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -ne 'Snapshots' })
+    foreach ($profileDir in $profileDirs) {
+        foreach ($prefFileName in @('Secure Preferences', 'Preferences')) {
+            $prefPath = Join-Path $profileDir.FullName $prefFileName
+            if (-not (Test-Path -LiteralPath $prefPath -PathType Leaf)) {
+                continue
+            }
+            try {
+                $pref = Get-Content -Raw -LiteralPath $prefPath | ConvertFrom-Json -ErrorAction Stop
+            } catch {
+                $synapseChromeProfileReadback += [pscustomobject]@{
+                    profile = $profileDir.Name
+                    pref_file = $prefFileName
+                    path = $prefPath
+                    parse_error = $_.Exception.Message
+                }
+                continue
+            }
+            if (-not $pref.extensions -or -not $pref.extensions.settings) {
+                continue
+            }
+            foreach ($extensionProperty in $pref.extensions.settings.PSObject.Properties) {
+                $setting = $extensionProperty.Value
+                $activeApi = @()
+                if ($setting.active_permissions -and $setting.active_permissions.api) {
+                    $activeApi = @($setting.active_permissions.api)
+                }
+                $grantedApi = @()
+                if ($setting.granted_permissions -and $setting.granted_permissions.api) {
+                    $grantedApi = @($setting.granted_permissions.api)
+                }
+                if ($extensionProperty.Name -eq $ExtensionId) {
+                    $row = [pscustomobject]@{
+                        profile = $profileDir.Name
+                        pref_file = $prefFileName
+                        path = $prefPath
+                        manifest_path = $setting.path
+                        active_api = $activeApi
+                        granted_api = $grantedApi
+                    }
+                    $synapseChromeProfileReadback += $row
+                    if ($activeApi -contains 'debugger' -or $activeApi -contains 'nativeMessaging') {
+                        $staleSynapseActivePermissions += $row
+                    }
+                } elseif ($activeApi -contains 'debugger' -or $activeApi -contains 'nativeMessaging') {
+                    $externalDebuggerOrNativeExtensions += [pscustomobject]@{
+                        profile = $profileDir.Name
+                        pref_file = $prefFileName
+                        extension_id = $extensionProperty.Name
+                        name = $setting.manifest.name
+                        location = $setting.location
+                        manifest_path = $setting.path
+                        active_api = $activeApi
+                    }
+                }
+            }
+        }
+    }
+}
+if ($staleSynapseActivePermissions.Count -gt 0) {
+    $detail = $staleSynapseActivePermissions | ConvertTo-Json -Depth 6 -Compress
+    throw "SYNAPSE_CHROME_EXTENSION_STALE_ACTIVE_DEBUGGER_PERMISSION extension_id=$ExtensionId detail=$detail remediation=reload the unpacked Synapse Chrome Bridge from chrome://extensions or remove/re-add it; the normal bridge must be active with tabs only before setup can pass"
+}
+
+$externalNativeMessagingProcesses = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+    Where-Object {
+        $_.CommandLine -match 'chrome\.nativeMessaging' -and
+        $_.CommandLine -notmatch [regex]::Escape($ExtensionId)
+    } |
+    Select-Object ProcessId, ParentProcessId, Name, ExecutablePath, CommandLine)
+
 [pscustomobject]@{
     ok = $true
     native_host = $hostName
@@ -71,7 +148,9 @@ $chromeProcesses = @(Get-CimInstance Win32_Process -Filter "Name='chrome.exe'" -
     daemon_bridge_transport = 'direct_localhost_websocket'
     daemon_bridge_origin = "chrome-extension://$ExtensionId"
     background_navigation_backend = 'chrome.tabs_no_debugger_permission_no_native_messaging'
-    attach_popup_prevention = 'normal_bridge_has_no_required_debugger_permission_no_nativeMessaging_permission_plus_daemon_preflight_extension_attestation_gate'
+    attach_popup_prevention = 'normal_bridge_tabs_only_no_debugger_api_no_nativeMessaging_permission_plus_profile_active_permission_gate'
+    normal_bridge_attach_commands_available = $false
+    normal_bridge_debugger_api_calls_present = $false
     required_debugger_permission_present = $false
     optional_debugger_permission_present = $false
     required_native_messaging_permission_present = $false
@@ -82,4 +161,7 @@ $chromeProcesses = @(Get-CimInstance Win32_Process -Filter "Name='chrome.exe'" -
     silent_debugger_switch_required_for_attach_commands = $true
     silent_debugger_switch = $silentDebuggerSwitch
     current_chrome_processes = $chromeProcesses
+    synapse_chrome_profile_readback = $synapseChromeProfileReadback
+    external_debugger_or_native_extensions = $externalDebuggerOrNativeExtensions
+    external_native_messaging_processes = $externalNativeMessagingProcesses
 }

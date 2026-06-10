@@ -139,17 +139,16 @@ Chrome session, the supported attach path is:
    `chrome.tabs.goBack`, and `chrome.tabs.goForward`; it must not call
    `chrome.debugger.getTargets` or `chrome.debugger.attach`. Its target IDs are
    synthetic `chrome-tab:<tabId>` IDs backed by `chrome.tabs` readback.
-8. Before using attach-capable Chrome debugger extension commands, read the
-   target Chrome process command line and require
-   `--silent-debugger-extension-api`. Chrome intentionally shows a
+8. The normal end-user extension is structurally tabs-only: it does not request
+   `debugger`, does not call `chrome.debugger`, and rejects attach-capable
+   commands before any browser debugger startup. Chrome intentionally shows a
    "`started debugging this browser`" warning UI when an extension calls
-   `chrome.debugger.attach` without that switch. The normal end-user extension
-   does not require the `debugger` permission. Synapse therefore fails closed
-   with `A11Y_CDP_DEBUGGER_WARNING_UNSUPPRESSED` before attach if the switch is
-   absent, unreadable, or the normal bridge lacks debugger capability. The
-   extension must also refuse attach-capable commands unless the daemon includes
-   a verified suppression attestation, which prevents stale native commands from
-   surfacing the browser warning.
+   `chrome.debugger.attach` without `--silent-debugger-extension-api`; Synapse's
+   normal bridge therefore cannot use that API. DOM attach for a normal Chrome
+   profile requires raw CDP on a dedicated Synapse-launched automation profile,
+   or a separate debugger-enabled bridge that is not the normal extension and
+   is only used with the silent debugger switch proven by process command-line
+   readback.
 9. If the current browser session still exposes no endpoint or extension bridge,
    fail closed with
    `web_path = "uia_only"` or `ocr`; do not claim DOM/control readback. Relaunch
