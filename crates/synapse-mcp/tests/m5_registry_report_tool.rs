@@ -57,7 +57,7 @@ async fn install_curated_package(
     manifest_dir: &Path,
 ) -> anyhow::Result<()> {
     let manifest = prepare_manifest(
-        "docs/computergames/fixtures/curated_starter_registry/curated_luanti_package_manifest.toml",
+        "crates/synapse-profiles/tests/fixtures/profile_registry/curated_starter_registry/curated_luanti_package_manifest.toml",
         manifest_dir,
         "curated.toml",
     )?;
@@ -141,7 +141,7 @@ async fn quarantine_bad_signature_package(
     manifest_dir: &Path,
 ) -> anyhow::Result<()> {
     let manifest = prepare_manifest(
-        "docs/computergames/fixtures/profile_package_manifest/edge_bad_signature_package_manifest.toml",
+        "crates/synapse-profiles/tests/fixtures/profile_registry/profile_package_manifest/edge_bad_signature_package_manifest.toml",
         manifest_dir,
         "bad-signature.toml",
     )?;

@@ -59,7 +59,7 @@ async fn curated_productivity_package_accepts_single_token_profile_id() -> anyho
 
     let manifests = TempDir::new()?;
     let manifest_path = prepare_manifest(
-        "docs/computergames/fixtures/curated_starter_registry/curated_notepad_package_manifest.toml",
+        "crates/synapse-profiles/tests/fixtures/profile_registry/curated_starter_registry/curated_notepad_package_manifest.toml",
         manifests.path(),
         "curated-notepad.toml",
     )?;
@@ -96,7 +96,7 @@ async fn curated_productivity_package_accepts_single_token_profile_id() -> anyho
     assert_eq!(value["quality_signal"], "profile_quality.notepad");
 
     let mismatch_path = prepare_manifest(
-        "docs/computergames/fixtures/curated_starter_registry/edge_notepad_profile_mismatch_manifest.toml",
+        "crates/synapse-profiles/tests/fixtures/profile_registry/curated_starter_registry/edge_notepad_profile_mismatch_manifest.toml",
         manifests.path(),
         "notepad-profile-mismatch.toml",
     )?;
@@ -259,7 +259,7 @@ async fn install_curated_manifest(
     manifest_dir: &Path,
 ) -> anyhow::Result<PathBuf> {
     let manifest_path = prepare_manifest(
-        "docs/computergames/fixtures/curated_starter_registry/curated_luanti_package_manifest.toml",
+        "crates/synapse-profiles/tests/fixtures/profile_registry/curated_starter_registry/curated_luanti_package_manifest.toml",
         manifest_dir,
         "curated.toml",
     )?;
@@ -322,7 +322,7 @@ async fn install_vscode_curated_manifest(
     manifest_dir: &Path,
 ) -> anyhow::Result<PathBuf> {
     let manifest_path = prepare_manifest(
-        "docs/computergames/fixtures/curated_starter_registry/curated_vscode_package_manifest.toml",
+        "crates/synapse-profiles/tests/fixtures/profile_registry/curated_starter_registry/curated_vscode_package_manifest.toml",
         manifest_dir,
         "curated-vscode.toml",
     )?;
@@ -394,7 +394,7 @@ async fn install_terminal_curated_manifest(
     manifest_dir: &Path,
 ) -> anyhow::Result<PathBuf> {
     let manifest_path = prepare_manifest(
-        "docs/computergames/fixtures/curated_starter_registry/curated_terminal_package_manifest.toml",
+        "crates/synapse-profiles/tests/fixtures/profile_registry/curated_starter_registry/curated_terminal_package_manifest.toml",
         manifest_dir,
         "curated-terminal.toml",
     )?;
@@ -468,7 +468,7 @@ async fn install_chrome_curated_manifest(
     manifest_dir: &Path,
 ) -> anyhow::Result<PathBuf> {
     let manifest_path = prepare_manifest(
-        "docs/computergames/fixtures/curated_starter_registry/curated_chrome_package_manifest.toml",
+        "crates/synapse-profiles/tests/fixtures/profile_registry/curated_starter_registry/curated_chrome_package_manifest.toml",
         manifest_dir,
         "curated-chrome.toml",
     )?;
@@ -545,7 +545,7 @@ async fn install_minecraft_curated_manifest(
     manifest_dir: &Path,
 ) -> anyhow::Result<PathBuf> {
     let manifest_path = prepare_manifest(
-        "docs/computergames/fixtures/curated_starter_registry/curated_minecraft_package_manifest.toml",
+        "crates/synapse-profiles/tests/fixtures/profile_registry/curated_starter_registry/curated_minecraft_package_manifest.toml",
         manifest_dir,
         "curated-minecraft.toml",
     )?;
@@ -638,7 +638,7 @@ async fn assert_vscode_edge_manifests_fail_closed(
     manifest_dir: &Path,
 ) -> anyhow::Result<()> {
     let unknown_scope_path = prepare_manifest(
-        "docs/computergames/fixtures/curated_starter_registry/edge_vscode_unknown_use_scope_manifest.toml",
+        "crates/synapse-profiles/tests/fixtures/profile_registry/curated_starter_registry/edge_vscode_unknown_use_scope_manifest.toml",
         manifest_dir,
         "vscode-unknown-scope.toml",
     )?;
@@ -650,7 +650,7 @@ async fn assert_vscode_edge_manifests_fail_closed(
         .await?;
     assert_eq!(unknown_scope["data"]["code"], "PROFILE_PARSE_ERROR");
     let missing_compat_path = prepare_manifest(
-        "docs/computergames/fixtures/curated_starter_registry/edge_vscode_missing_compatibility_manifest.toml",
+        "crates/synapse-profiles/tests/fixtures/profile_registry/curated_starter_registry/edge_vscode_missing_compatibility_manifest.toml",
         manifest_dir,
         "vscode-missing-compat.toml",
     )?;
@@ -662,7 +662,7 @@ async fn assert_vscode_edge_manifests_fail_closed(
         .await?;
     assert_eq!(missing_compat["data"]["code"], "PROFILE_PARSE_ERROR");
     let mismatch_path = prepare_manifest(
-        "docs/computergames/fixtures/curated_starter_registry/edge_vscode_profile_mismatch_manifest.toml",
+        "crates/synapse-profiles/tests/fixtures/profile_registry/curated_starter_registry/edge_vscode_profile_mismatch_manifest.toml",
         manifest_dir,
         "vscode-profile-mismatch.toml",
     )?;
@@ -682,7 +682,7 @@ async fn assert_terminal_edge_manifests_fail_closed(
     manifest_dir: &Path,
 ) -> anyhow::Result<()> {
     let unknown_scope_path = prepare_manifest(
-        "docs/computergames/fixtures/curated_starter_registry/edge_terminal_unknown_use_scope_manifest.toml",
+        "crates/synapse-profiles/tests/fixtures/profile_registry/curated_starter_registry/edge_terminal_unknown_use_scope_manifest.toml",
         manifest_dir,
         "terminal-unknown-scope.toml",
     )?;
@@ -694,7 +694,7 @@ async fn assert_terminal_edge_manifests_fail_closed(
         .await?;
     assert_eq!(unknown_scope["data"]["code"], "PROFILE_PARSE_ERROR");
     let missing_compat_path = prepare_manifest(
-        "docs/computergames/fixtures/curated_starter_registry/edge_terminal_missing_compatibility_manifest.toml",
+        "crates/synapse-profiles/tests/fixtures/profile_registry/curated_starter_registry/edge_terminal_missing_compatibility_manifest.toml",
         manifest_dir,
         "terminal-missing-compat.toml",
     )?;
@@ -706,7 +706,7 @@ async fn assert_terminal_edge_manifests_fail_closed(
         .await?;
     assert_eq!(missing_compat["data"]["code"], "PROFILE_PARSE_ERROR");
     let mismatch_path = prepare_manifest(
-        "docs/computergames/fixtures/curated_starter_registry/edge_terminal_profile_mismatch_manifest.toml",
+        "crates/synapse-profiles/tests/fixtures/profile_registry/curated_starter_registry/edge_terminal_profile_mismatch_manifest.toml",
         manifest_dir,
         "terminal-profile-mismatch.toml",
     )?;
@@ -726,7 +726,7 @@ async fn assert_chrome_edge_manifests_fail_closed(
     manifest_dir: &Path,
 ) -> anyhow::Result<()> {
     let unknown_scope_path = prepare_manifest(
-        "docs/computergames/fixtures/curated_starter_registry/edge_chrome_unknown_use_scope_manifest.toml",
+        "crates/synapse-profiles/tests/fixtures/profile_registry/curated_starter_registry/edge_chrome_unknown_use_scope_manifest.toml",
         manifest_dir,
         "chrome-unknown-scope.toml",
     )?;
@@ -738,7 +738,7 @@ async fn assert_chrome_edge_manifests_fail_closed(
         .await?;
     assert_eq!(unknown_scope["data"]["code"], "PROFILE_PARSE_ERROR");
     let missing_compat_path = prepare_manifest(
-        "docs/computergames/fixtures/curated_starter_registry/edge_chrome_missing_compatibility_manifest.toml",
+        "crates/synapse-profiles/tests/fixtures/profile_registry/curated_starter_registry/edge_chrome_missing_compatibility_manifest.toml",
         manifest_dir,
         "chrome-missing-compat.toml",
     )?;
@@ -750,7 +750,7 @@ async fn assert_chrome_edge_manifests_fail_closed(
         .await?;
     assert_eq!(missing_compat["data"]["code"], "PROFILE_PARSE_ERROR");
     let mismatch_path = prepare_manifest(
-        "docs/computergames/fixtures/curated_starter_registry/edge_chrome_profile_mismatch_manifest.toml",
+        "crates/synapse-profiles/tests/fixtures/profile_registry/curated_starter_registry/edge_chrome_profile_mismatch_manifest.toml",
         manifest_dir,
         "chrome-profile-mismatch.toml",
     )?;
@@ -770,7 +770,7 @@ async fn assert_minecraft_edge_manifests_fail_closed(
     manifest_dir: &Path,
 ) -> anyhow::Result<()> {
     let unknown_scope_path = prepare_manifest(
-        "docs/computergames/fixtures/curated_starter_registry/edge_minecraft_unknown_use_scope_manifest.toml",
+        "crates/synapse-profiles/tests/fixtures/profile_registry/curated_starter_registry/edge_minecraft_unknown_use_scope_manifest.toml",
         manifest_dir,
         "minecraft-unknown-scope.toml",
     )?;
@@ -782,7 +782,7 @@ async fn assert_minecraft_edge_manifests_fail_closed(
         .await?;
     assert_eq!(unknown_scope["data"]["code"], "PROFILE_PARSE_ERROR");
     let missing_compat_path = prepare_manifest(
-        "docs/computergames/fixtures/curated_starter_registry/edge_minecraft_missing_compatibility_manifest.toml",
+        "crates/synapse-profiles/tests/fixtures/profile_registry/curated_starter_registry/edge_minecraft_missing_compatibility_manifest.toml",
         manifest_dir,
         "minecraft-missing-compat.toml",
     )?;
@@ -794,7 +794,7 @@ async fn assert_minecraft_edge_manifests_fail_closed(
         .await?;
     assert_eq!(missing_compat["data"]["code"], "PROFILE_PARSE_ERROR");
     let remote_allowed_path = prepare_manifest(
-        "docs/computergames/fixtures/curated_starter_registry/edge_minecraft_remote_allowed_manifest.toml",
+        "crates/synapse-profiles/tests/fixtures/profile_registry/curated_starter_registry/edge_minecraft_remote_allowed_manifest.toml",
         manifest_dir,
         "minecraft-remote-allowed.toml",
     )?;
@@ -806,7 +806,7 @@ async fn assert_minecraft_edge_manifests_fail_closed(
         .await?;
     assert_eq!(remote_allowed["data"]["code"], "PROFILE_PARSE_ERROR");
     let mismatch_path = prepare_manifest(
-        "docs/computergames/fixtures/curated_starter_registry/edge_minecraft_profile_mismatch_manifest.toml",
+        "crates/synapse-profiles/tests/fixtures/profile_registry/curated_starter_registry/edge_minecraft_profile_mismatch_manifest.toml",
         manifest_dir,
         "minecraft-profile-mismatch.toml",
     )?;
@@ -826,7 +826,7 @@ async fn assert_edge_manifests_fail_closed(
     manifest_dir: &Path,
 ) -> anyhow::Result<()> {
     let unknown_scope_path = prepare_manifest(
-        "docs/computergames/fixtures/curated_starter_registry/edge_unknown_use_scope_manifest.toml",
+        "crates/synapse-profiles/tests/fixtures/profile_registry/curated_starter_registry/edge_unknown_use_scope_manifest.toml",
         manifest_dir,
         "unknown-scope.toml",
     )?;
@@ -838,7 +838,7 @@ async fn assert_edge_manifests_fail_closed(
         .await?;
     assert_eq!(unknown_scope["data"]["code"], "PROFILE_PARSE_ERROR");
     let missing_compat_path = prepare_manifest(
-        "docs/computergames/fixtures/curated_starter_registry/edge_missing_compatibility_manifest.toml",
+        "crates/synapse-profiles/tests/fixtures/profile_registry/curated_starter_registry/edge_missing_compatibility_manifest.toml",
         manifest_dir,
         "missing-compat.toml",
     )?;

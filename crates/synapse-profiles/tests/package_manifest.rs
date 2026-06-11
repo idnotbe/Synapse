@@ -184,7 +184,7 @@ fn package_manifest_accepts_signed_fixture_metadata() -> TestResult {
     assert_eq!(manifest.signatures[0].algorithm, "ed25519");
     assert_eq!(
         package_signature_payload_digest(&manifest),
-        "sha256:4013ce772c32c5ba641d78848ba1b04add3224fe7fab12822572e6343b5b38c7"
+        "sha256:fe01d11e5ceadefec7f1101c5a4271fc5f1140d6ab2389eff452b40a9dcc432a"
     );
     Ok(())
 }
@@ -281,22 +281,18 @@ fn package_manifest_rejects_metadata_instruction_marker() -> TestResult {
 
 fn fixture(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("..")
-        .join("docs")
-        .join("computergames")
+        .join("tests")
         .join("fixtures")
+        .join("profile_registry")
         .join("profile_package_manifest")
         .join(name)
 }
 
 fn curated_fixture(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("..")
-        .join("docs")
-        .join("computergames")
+        .join("tests")
         .join("fixtures")
+        .join("profile_registry")
         .join("curated_starter_registry")
         .join(name)
 }
