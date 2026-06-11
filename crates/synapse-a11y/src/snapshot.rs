@@ -68,6 +68,18 @@ pub fn focused_element_node() -> A11yResult<AccessibleNode> {
     platform::focused_element_node()
 }
 
+/// Returns the UIA element currently focused within a target window's GUI
+/// thread, if that focus belongs to the target window or an owned child/popup.
+///
+/// # Errors
+///
+/// Returns a structured UIA error when target-thread focus cannot be read or
+/// the focused element cannot be resolved, or `A11Y_NOT_AVAILABLE` on
+/// non-Windows platforms.
+pub fn focused_element_node_in_window(hwnd: i64) -> A11yResult<Option<AccessibleNode>> {
+    platform::focused_element_node_in_window(hwnd)
+}
+
 /// Returns the UIA element at a screen-space point as a plain `AccessibleNode`.
 ///
 /// # Errors

@@ -1,5 +1,10 @@
-use std::time::{Duration, Instant};
-use std::{collections::HashSet, sync::Mutex};
+use std::{
+    collections::HashSet,
+    ffi::c_void,
+    mem,
+    sync::Mutex,
+    time::{Duration, Instant},
+};
 
 use synapse_core::{AccessibleNode, AccessibleSubtree, ElementId, Point, UiaPattern, element_id};
 use uiautomation::{
@@ -10,7 +15,13 @@ use uiautomation::{
     },
     variants::Variant,
 };
-use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
+use windows::Win32::{
+    Foundation::HWND,
+    UI::WindowsAndMessaging::{
+        GA_ROOT, GA_ROOTOWNER, GUITHREADINFO, GW_OWNER, GetAncestor, GetForegroundWindow,
+        GetGUIThreadInfo, GetWindow, GetWindowThreadProcessId, IsWindow,
+    },
+};
 
 use crate::{A11yError, A11yResult, ElementSearchScope};
 
@@ -140,6 +151,73 @@ pub fn focused_element_node() -> A11yResult<AccessibleNode> {
             .unwrap_or(foreground_hwnd.0 as isize as i64);
         node_from_cached_element(&element, None, 0, root_hwnd, 0)
     })
+}
+
+pub fn focused_element_node_in_window(hwnd: i64) -> A11yResult<Option<AccessibleNode>> {
+    let target = valid_hwnd(hwnd)?;
+    let thread_id = unsafe { GetWindowThreadProcessId(target, None) };
+    if thread_id == 0 {
+        return Err(A11yError::NoForeground {
+            detail: format!(
+                "GetWindowThreadProcessId returned no GUI thread for hwnd 0x{:x}",
+                target.0 as isize
+            ),
+        });
+    }
+
+    let mut info = GUITHREADINFO {
+        cbSize: u32::try_from(mem::size_of::<GUITHREADINFO>())
+            .map_err(|_err| A11yError::internal("GUITHREADINFO size does not fit cbSize"))?,
+        ..Default::default()
+    };
+    unsafe { GetGUIThreadInfo(thread_id, &raw mut info) }.map_err(|err| {
+        A11yError::internal(format!(
+            "GetGUIThreadInfo failed for hwnd 0x{:x} thread_id={thread_id}: {err}",
+            target.0 as isize
+        ))
+    })?;
+
+    let focus = info.hwndFocus;
+    if focus.0.is_null() {
+        return Ok(None);
+    }
+    if !unsafe { IsWindow(Some(focus)) }.as_bool() {
+        tracing::debug!(
+            code = "A11Y_TARGET_FOCUS_HWND_STALE",
+            target_hwnd = target.0 as isize,
+            focus_hwnd = focus.0 as isize,
+            "target GUI thread reported a stale focused HWND"
+        );
+        return Ok(None);
+    }
+    if !focus_belongs_to_target(target, focus) {
+        tracing::debug!(
+            code = "A11Y_TARGET_FOCUS_OUTSIDE_TARGET",
+            target_hwnd = target.0 as isize,
+            focus_hwnd = focus.0 as isize,
+            "target GUI thread focus was outside the requested target root/owner chain"
+        );
+        return Ok(None);
+    }
+
+    let focus_raw = focus.0 as isize;
+    let target_raw = target.0 as isize as i64;
+    with_automation_operation(
+        format!(
+            "focused_element_node_in_window target=0x{:x} focus=0x{focus_raw:x}",
+            target.0 as isize
+        ),
+        SNAPSHOT_WORKER_REPLY_TIMEOUT,
+        move |automation| {
+            let cache = create_cache_request(automation, 0, ElementMode::Full, TreeView::Control)?;
+            let element = automation
+                .element_from_handle_build_cache(Handle::from(focus_raw), &cache)
+                .map_err(map_uia_error)?;
+            let mut node = node_from_cached_element(&element, None, 0, target_raw, 0)?;
+            node.focused = true;
+            Ok(Some(node))
+        },
+    )
 }
 
 pub fn element_node_from_point(point: Point) -> A11yResult<AccessibleNode> {
@@ -329,6 +407,67 @@ fn find_by_name_and_pattern_from_root(
         .map(|element| node_from_cached_element(&element, None, 0, root_hwnd, 0))
         .next()
         .transpose()
+}
+
+fn valid_hwnd(hwnd: i64) -> A11yResult<HWND> {
+    let hwnd = HWND(hwnd as *mut c_void);
+    if hwnd.0.is_null() {
+        return Err(A11yError::NoForeground {
+            detail: "HWND was null".to_owned(),
+        });
+    }
+    if unsafe { IsWindow(Some(hwnd)) }.as_bool() {
+        Ok(hwnd)
+    } else {
+        Err(A11yError::NoForeground {
+            detail: format!("HWND 0x{:x} is not a valid window", hwnd.0 as isize),
+        })
+    }
+}
+
+fn focus_belongs_to_target(target: HWND, focus: HWND) -> bool {
+    if target.0 == focus.0 {
+        return true;
+    }
+    let target_root = ancestor_or_self(target, GA_ROOT);
+    let focus_root = ancestor_or_self(focus, GA_ROOT);
+    if focus_root.0 == target_root.0 {
+        return true;
+    }
+    let target_owner = ancestor_or_self(target, GA_ROOTOWNER);
+    let focus_owner = ancestor_or_self(focus, GA_ROOTOWNER);
+    focus_owner.0 == target_root.0
+        || focus_owner.0 == target_owner.0
+        || owner_chain_contains(focus_root, target_root, target_owner)
+}
+
+fn ancestor_or_self(
+    hwnd: HWND,
+    flags: windows::Win32::UI::WindowsAndMessaging::GET_ANCESTOR_FLAGS,
+) -> HWND {
+    let ancestor = unsafe { GetAncestor(hwnd, flags) };
+    if ancestor.0.is_null() { hwnd } else { ancestor }
+}
+
+fn owner_chain_contains(mut hwnd: HWND, target_root: HWND, target_owner: HWND) -> bool {
+    for _ in 0..32 {
+        let owner = match unsafe { GetWindow(hwnd, GW_OWNER) } {
+            Ok(owner) => owner,
+            Err(_) => return false,
+        };
+        if owner.0.is_null() {
+            return false;
+        }
+        if owner.0 == target_root.0 || owner.0 == target_owner.0 {
+            return true;
+        }
+        let owner_root = ancestor_or_self(owner, GA_ROOT);
+        if owner_root.0 == target_root.0 || owner_root.0 == target_owner.0 {
+            return true;
+        }
+        hwnd = owner;
+    }
+    false
 }
 fn snapshot_at_depth(
     automation: &UIAutomation,

@@ -373,6 +373,44 @@ mod tests {
             }
         );
     }
+
+    #[cfg(windows)]
+    #[test]
+    fn target_focus_scope_does_not_fallback_to_root() {
+        let nodes = vec![
+            node(0, 0, "Target Window", "Window", false),
+            node(1, 1, "Editor", "Edit", false),
+        ];
+
+        assert!(focused_from_nodes(&nodes, FocusSupplementScope::TargetWindow(0x1234)).is_none());
+
+        let Some(global) = focused_from_nodes(&nodes, FocusSupplementScope::GlobalForeground)
+        else {
+            panic!("global foreground observations keep the legacy root fallback");
+        };
+        assert_eq!(global.name, "Target Window");
+        assert_eq!(global.role, "Window");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn target_focus_scope_preserves_focused_value_metadata() {
+        let root = node(0, 0, "Target Window", "Window", false);
+        let mut edit = node(1, 1, "Editor", "Edit", true);
+        edit.value = Some("known-background-value".to_owned());
+        edit.patterns = vec![UiaPattern::Value];
+
+        let Some(focused) =
+            focused_from_nodes(&[root, edit], FocusSupplementScope::TargetWindow(0x1234))
+        else {
+            panic!("focused target node should be selected");
+        };
+
+        assert_eq!(focused.name, "Editor");
+        assert_eq!(focused.role, "Edit");
+        assert_eq!(focused.value.as_deref(), Some("known-background-value"));
+        assert_eq!(focused.patterns, vec![UiaPattern::Value]);
+    }
 }
 
 pub struct FsRecentTracker {
@@ -897,7 +935,12 @@ pub fn platform_input(depth: u32, mode: PerceptionMode) -> Result<ObservationInp
             a11y_error(&err)
         }
     })?;
-    let mut input = input_from_tree_and_foreground(tree, foreground, mode)?;
+    let mut input = input_from_tree_and_foreground(
+        tree,
+        foreground,
+        mode,
+        FocusSupplementScope::GlobalForeground,
+    )?;
     input.is_minimized = synapse_a11y::is_window_minimized(hwnd).unwrap_or(false);
     Ok(input)
 }
@@ -913,7 +956,12 @@ pub fn window_input_from_hwnd(
     if synapse_a11y::is_window_minimized(hwnd).map_err(|err| a11y_error(&err))? {
         let mut input = match synapse_a11y::snapshot_window_from_hwnd(hwnd, depth) {
             Ok(tree) => {
-                let mut input = input_from_tree_and_foreground(tree, foreground, mode)?;
+                let mut input = input_from_tree_and_foreground(
+                    tree,
+                    foreground,
+                    mode,
+                    FocusSupplementScope::TargetWindow(hwnd),
+                )?;
                 input.is_minimized = true;
                 mark_sparse_minimized_target_a11y(&mut input);
                 input
@@ -969,7 +1017,12 @@ pub fn window_input_from_hwnd(
             ));
         }
     };
-    let mut input = input_from_tree_and_foreground(tree, foreground, mode)?;
+    let mut input = input_from_tree_and_foreground(
+        tree,
+        foreground,
+        mode,
+        FocusSupplementScope::TargetWindow(hwnd),
+    )?;
     input.is_minimized = false;
     mark_sparse_target_a11y(&mut input);
     Ok(input)
@@ -989,7 +1042,12 @@ pub fn element_input_from_id(
         })?
         .hwnd;
     let foreground = windows_foreground_context(hwnd)?;
-    let mut input = input_from_tree_and_foreground(tree, foreground, mode)?;
+    let mut input = input_from_tree_and_foreground(
+        tree,
+        foreground,
+        mode,
+        FocusSupplementScope::TargetWindow(hwnd),
+    )?;
     input.is_minimized = synapse_a11y::is_window_minimized(hwnd).unwrap_or(false);
     Ok(input)
 }
@@ -1158,23 +1216,33 @@ fn validate_live_target_hwnd(hwnd: i64) -> Result<(), ErrorData> {
 }
 
 #[cfg(windows)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FocusSupplementScope {
+    GlobalForeground,
+    TargetWindow(i64),
+}
+
+#[cfg(windows)]
+impl FocusSupplementScope {
+    const fn fallback_to_root(self) -> bool {
+        matches!(self, Self::GlobalForeground)
+    }
+}
+
+#[cfg(windows)]
 fn input_from_tree_and_foreground(
     mut tree: synapse_core::AccessibleSubtree,
     foreground: ForegroundContext,
     mode: PerceptionMode,
+    focus_scope: FocusSupplementScope,
 ) -> Result<ObservationInput, ErrorData> {
     let snapshot_depth = tree.max_depth;
     rebase_nodes_to_foreground(&mut tree.nodes, &foreground);
-    let focused = tree
-        .nodes
-        .iter()
-        .find(|node| node.focused)
-        .or_else(|| tree.nodes.first())
-        .map(focused_from_node);
+    let focused = focused_from_nodes(&tree.nodes, focus_scope);
     let mut input = ObservationInput::new(foreground);
     input.focused = focused;
     input.elements = tree.nodes;
-    supplement_focused_element(&mut input);
+    supplement_focused_element(&mut input, focus_scope);
     input.a11y_status = SensorStatus::Healthy;
     populate_cdp_diagnostics(&mut input);
     supplement_chromium_renderer_accessibility(&mut input, snapshot_depth);
@@ -1187,6 +1255,23 @@ fn input_from_tree_and_foreground(
         input.mode_override = Some(mode);
     }
     Ok(input)
+}
+
+#[cfg(windows)]
+fn focused_from_nodes(
+    nodes: &[AccessibleNode],
+    focus_scope: FocusSupplementScope,
+) -> Option<FocusedElement> {
+    nodes
+        .iter()
+        .find(|node| node.focused)
+        .or_else(|| {
+            focus_scope
+                .fallback_to_root()
+                .then(|| nodes.first())
+                .flatten()
+        })
+        .map(focused_from_node)
 }
 
 #[cfg(windows)]
@@ -1230,7 +1315,15 @@ pub fn hidden_desktop_input_from_worker_snapshot(
 }
 
 #[cfg(windows)]
-fn supplement_focused_element(input: &mut ObservationInput) {
+fn supplement_focused_element(input: &mut ObservationInput, focus_scope: FocusSupplementScope) {
+    match focus_scope {
+        FocusSupplementScope::GlobalForeground => supplement_global_focused_element(input),
+        FocusSupplementScope::TargetWindow(hwnd) => supplement_target_focused_element(input, hwnd),
+    }
+}
+
+#[cfg(windows)]
+fn supplement_global_focused_element(input: &mut ObservationInput) {
     let Ok(mut focused_node) = synapse_a11y::focused_element_node() else {
         return;
     };
@@ -1241,6 +1334,34 @@ fn supplement_focused_element(input: &mut ObservationInput) {
         return;
     }
     rebase_nodes_to_foreground(std::slice::from_mut(&mut focused_node), &input.foreground);
+    set_focused_node(input, focused_node);
+}
+
+#[cfg(windows)]
+fn supplement_target_focused_element(input: &mut ObservationInput, hwnd: i64) {
+    match synapse_a11y::focused_element_node_in_window(hwnd) {
+        Ok(Some(mut focused_node)) => {
+            rebase_nodes_to_foreground(std::slice::from_mut(&mut focused_node), &input.foreground);
+            set_focused_node(input, focused_node);
+        }
+        Ok(None) => {
+            input.focused = None;
+        }
+        Err(error) => {
+            tracing::warn!(
+                code = "A11Y_TARGET_FOCUSED_ELEMENT_READ_FAILED",
+                hwnd,
+                error_code = error.code(),
+                error = %error,
+                "target-window focused element readback failed"
+            );
+            input.focused = None;
+        }
+    }
+}
+
+#[cfg(windows)]
+fn set_focused_node(input: &mut ObservationInput, focused_node: AccessibleNode) {
     input.focused = Some(focused_from_node(&focused_node));
     if !input
         .elements

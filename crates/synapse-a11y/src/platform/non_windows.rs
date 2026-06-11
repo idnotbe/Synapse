@@ -131,6 +131,12 @@ pub fn focused_element_node() -> A11yResult<AccessibleNode> {
     ))
 }
 
+pub fn focused_element_node_in_window(_hwnd: i64) -> A11yResult<Option<AccessibleNode>> {
+    Err(A11yError::not_available(
+        "target-window UIA focused element lookup requires Windows",
+    ))
+}
+
 pub fn element_node_from_point(_point: Point) -> A11yResult<AccessibleNode> {
     Err(A11yError::not_available(
         "UIA element hit testing requires Windows",
