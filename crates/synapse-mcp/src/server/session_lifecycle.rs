@@ -56,6 +56,7 @@ pub(crate) struct SessionProcessResource {
     pub launch_target: String,
     pub agent_cli: Option<String>,
     pub process_job: Option<OwnedProcessJob>,
+    pub desktop_lease: Option<m4::LaunchDesktopLease>,
 }
 
 impl SessionProcessResource {
@@ -76,11 +77,20 @@ impl SessionProcessResource {
             launch_target,
             agent_cli: None,
             process_job: Some(process_job),
+            desktop_lease: None,
         }
     }
 
     pub(crate) fn with_agent_cli(mut self, agent_cli: &str) -> Self {
         self.agent_cli = Some(agent_cli.to_owned());
+        self
+    }
+
+    pub(crate) fn with_desktop_lease(
+        mut self,
+        desktop_lease: Option<m4::LaunchDesktopLease>,
+    ) -> Self {
+        self.desktop_lease = desktop_lease;
         self
     }
 }
@@ -265,6 +275,14 @@ pub struct SessionProcessCleanupItem {
     pub completion_status_before_cleanup: Option<String>,
     pub completion_artifact_cleanup_status: Option<String>,
     pub completion_artifact_cleanup_error: Option<String>,
+    pub desktop_name: Option<String>,
+    pub desktop_close_attempted: bool,
+    pub desktop_close_succeeded: Option<bool>,
+    pub desktop_close_error: Option<String>,
+    pub desktop_window_process_ids_before: Vec<u32>,
+    pub desktop_window_termination_attempted: bool,
+    pub desktop_window_termination_status: Option<String>,
+    pub desktop_window_process_ids_after: Vec<u32>,
     pub remaining_process_ids_after: Vec<u32>,
 }
 
@@ -857,6 +875,16 @@ impl SessionLifecycleState {
                 if read.lifecycle == "stale" {
                     add_if_stale(&mut candidates, active_sessions, &read.session_id);
                 }
+                if spawned_agent_process_exited(&read) && candidates.insert(read.session_id.clone())
+                {
+                    tracing::warn!(
+                        code = "MCP_SESSION_SPAWNED_AGENT_PROCESS_EXITED",
+                        session_id = %read.session_id,
+                        spawned_agent = ?read.spawned_agent,
+                        active_session_count = active_sessions.len(),
+                        "readback=session_registry edge=spawned_primary_process_gone before=session_teardown_candidate"
+                    );
+                }
             }
         }
         candidates
@@ -1080,6 +1108,10 @@ impl SessionLifecycleState {
             let mut completion_artifact_cleanup_error = None;
             let mut remaining = live_before.clone();
             let mut remaining_after_natural_wait = live_before.clone();
+            let desktop_name = resource
+                .desktop_lease
+                .as_ref()
+                .map(|desktop| desktop.name().to_owned());
 
             if agent_spawn_cleanup.is_some() && !remaining.is_empty() {
                 let (after_natural_wait, waited_ms) = m4::wait_for_owned_process_tree_exit(
@@ -1138,7 +1170,31 @@ impl SessionLifecycleState {
                     }
                 }
             }
-            if remaining.is_empty() {
+            let desktop_close = resource
+                .desktop_lease
+                .take()
+                .map(m4::LaunchDesktopLease::close);
+            let desktop_cleanup_succeeded =
+                desktop_close.as_ref().is_none_or(|close| close.succeeded);
+            let desktop_close_name = desktop_close.as_ref().map(|close| close.name.clone());
+            let desktop_window_process_ids_before = desktop_close
+                .as_ref()
+                .map_or_else(Vec::new, |close| close.window_process_ids_before.clone());
+            let desktop_window_termination_attempted = desktop_close
+                .as_ref()
+                .is_some_and(|close| close.window_termination_attempted);
+            let desktop_window_termination_status = desktop_close
+                .as_ref()
+                .and_then(|close| close.window_termination_status.clone());
+            let desktop_window_process_ids_after = desktop_close
+                .as_ref()
+                .map_or_else(Vec::new, |close| close.window_process_ids_after.clone());
+            if !desktop_window_process_ids_after.is_empty() {
+                remaining.extend(desktop_window_process_ids_after.iter().copied());
+                remaining.sort_unstable();
+                remaining.dedup();
+            }
+            if remaining.is_empty() && desktop_cleanup_succeeded {
                 report.terminated = report.terminated.saturating_add(1);
             } else {
                 report.failed = report.failed.saturating_add(1);
@@ -1161,6 +1217,16 @@ impl SessionLifecycleState {
                 completion_status_before_cleanup,
                 completion_artifact_cleanup_status,
                 completion_artifact_cleanup_error,
+                desktop_name: desktop_close_name.or(desktop_name),
+                desktop_close_attempted: desktop_close
+                    .as_ref()
+                    .is_some_and(|close| close.attempted),
+                desktop_close_succeeded: desktop_close.as_ref().map(|close| close.succeeded),
+                desktop_close_error: desktop_close.and_then(|close| close.error_message),
+                desktop_window_process_ids_before,
+                desktop_window_termination_attempted,
+                desktop_window_termination_status,
+                desktop_window_process_ids_after,
                 remaining_process_ids_after: remaining,
             });
         }
@@ -1428,6 +1494,19 @@ fn add_if_stale(
     }
 }
 
+fn spawned_agent_process_exited(read: &super::session_registry::SessionRegistryRead) -> bool {
+    if read.closed_at_unix_ms.is_some() {
+        return false;
+    }
+    let Some(spawned_agent) = read.spawned_agent.as_ref() else {
+        return false;
+    };
+    let process_id = spawned_agent
+        .agent_process_id
+        .unwrap_or(spawned_agent.launcher_process_id);
+    !m4::process_exists(process_id)
+}
+
 fn session_store_db(m3_state: &SharedM3State) -> Result<Arc<Db>, String> {
     let mut state = m3_state.lock().map_err(|_error| {
         "M3 service state lock poisoned during session-store cleanup".to_owned()
@@ -1480,4 +1559,102 @@ fn session_teardown_error(report: SessionTeardownReport) -> ErrorData {
             "report": report,
         })),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{process::Command, time::Duration};
+
+    use crate::server::session_registry::{SessionRegistryRead, SpawnedAgentRead};
+
+    use super::*;
+
+    fn spawned_read(
+        session_id: &str,
+        agent_process_id: Option<u32>,
+        launcher_process_id: u32,
+        closed: bool,
+    ) -> SessionRegistryRead {
+        SessionRegistryRead {
+            session_id: session_id.to_owned(),
+            transport: "http".to_owned(),
+            client_name: Some("claude-code".to_owned()),
+            client_version: Some("test".to_owned()),
+            protocol_version: Some("test".to_owned()),
+            agent_kind: "claude".to_owned(),
+            lifecycle: if closed { "closed" } else { "live" }.to_owned(),
+            started_at_unix_ms: 1_000,
+            last_seen_unix_ms: 1_000,
+            last_seen_ms_ago: 0,
+            stale_after_ms: 300_000,
+            closed_at_unix_ms: closed.then_some(1_100),
+            last_action: Some("tools/call:act_launch".to_owned()),
+            last_reason_code: None,
+            spawned_agent: Some(SpawnedAgentRead {
+                spawn_id: "spawn-test".to_owned(),
+                cli: "claude".to_owned(),
+                launcher_process_id,
+                agent_process_id,
+                started_by_session_id: Some("parent".to_owned()),
+                launched_at_unix_ms: 999,
+                launch_target: "pwsh.exe".to_owned(),
+                log_dir: r"C:\temp\spawn-test".to_owned(),
+            }),
+        }
+    }
+
+    fn exited_child_pid() -> u32 {
+        #[cfg(windows)]
+        let mut command = {
+            use std::os::windows::process::CommandExt;
+            let mut command = Command::new("cmd.exe");
+            command.args(["/C", "exit", "0"]);
+            command.creation_flags(0x0800_0000);
+            command
+        };
+        #[cfg(not(windows))]
+        let mut command = {
+            let mut command = Command::new("sh");
+            command.args(["-c", "true"]);
+            command
+        };
+        let mut child = command
+            .spawn()
+            .expect("short-lived child should spawn for process liveness regression");
+        let pid = child.id();
+        let status = child
+            .wait()
+            .expect("short-lived child should produce exit status");
+        assert!(status.success(), "short-lived child exited with {status}");
+        for _ in 0..50 {
+            if !m4::process_exists(pid) {
+                return pid;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!("short-lived child pid {pid} still appears live after exit");
+    }
+
+    #[test]
+    fn spawned_agent_live_process_is_not_exit_candidate() {
+        let read = spawned_read("live-session", Some(std::process::id()), 0, false);
+
+        assert!(!spawned_agent_process_exited(&read));
+    }
+
+    #[test]
+    fn spawned_agent_dead_process_is_exit_candidate() {
+        let dead_pid = exited_child_pid();
+        let read = spawned_read("dead-session", Some(dead_pid), 0, false);
+
+        assert!(spawned_agent_process_exited(&read));
+    }
+
+    #[test]
+    fn spawned_agent_closed_session_is_not_exit_candidate() {
+        let dead_pid = exited_child_pid();
+        let read = spawned_read("closed-session", Some(dead_pid), 0, true);
+
+        assert!(!spawned_agent_process_exited(&read));
+    }
 }

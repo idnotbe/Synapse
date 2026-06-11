@@ -700,6 +700,12 @@ pub struct ActLaunchParams {
     #[serde(default)]
     #[schemars(default)]
     pub windows_console_window_state: Option<LaunchWindowState>,
+    /// Optional Windows desktop routing. Supported values are
+    /// `agent:session`, `agent:<current Mcp-Session-Id>`, and
+    /// `existing:<desktop-name>`.
+    #[serde(default)]
+    #[schemars(default)]
+    pub desktop: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
@@ -925,6 +931,20 @@ pub struct ActLaunchResponse {
     /// Title observed for the verified CDP target URL, when available.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cdp_verified_title: Option<String>,
+    /// Desktop routing readback when `desktop` was requested.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub desktop: Option<ActLaunchDesktopReadback>,
+}
+
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ActLaunchDesktopReadback {
+    pub requested: String,
+    pub scope: String,
+    pub name: String,
+    pub startup_desktop: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
 }
 
 pub fn launch_request_details(params: &ActLaunchParams) -> serde_json::Value {
@@ -939,6 +959,7 @@ pub fn launch_request_details(params: &ActLaunchParams) -> serde_json::Value {
         "cdp_debug": params.cdp_debug,
         "force_renderer_accessibility": params.force_renderer_accessibility,
         "windows_console_window_state": params.windows_console_window_state,
+        "desktop": params.desktop,
         "windows_new_console": launch_target_needs_new_console(&params.target),
         "request_sha256": launch_request_sha256(params).ok(),
     })
@@ -985,6 +1006,8 @@ pub fn launch_process_history_row(
         "cdp_user_data_dir": response.cdp_user_data_dir,
         "cdp_verified_url": response.cdp_verified_url,
         "cdp_verified_title": response.cdp_verified_title,
+        "desktop": params.desktop,
+        "desktop_readback": response.desktop,
     });
     encode_json(&row).map_err(|error| {
         mcp_error(
@@ -1906,6 +1929,7 @@ fn launch_request_sha256(params: &ActLaunchParams) -> Result<String, ErrorData> 
         "cdp_debug": params.cdp_debug,
         "force_renderer_accessibility": params.force_renderer_accessibility,
         "windows_console_window_state": params.windows_console_window_state,
+        "desktop": params.desktop,
     });
     let bytes = serde_json::to_vec(&payload).map_err(|error| {
         mcp_error(
@@ -1920,6 +1944,14 @@ pub async fn launch(
     config: &M4ServiceConfig,
     params: ActLaunchParams,
 ) -> Result<ActLaunchResponse, ErrorData> {
+    Ok(launch_for_session(config, params, None).await?.response)
+}
+
+pub(crate) async fn launch_for_session(
+    config: &M4ServiceConfig,
+    params: ActLaunchParams,
+    session_id: Option<&str>,
+) -> Result<ActLaunchOutcome, ErrorData> {
     validate_launch_params(&params)?;
     let command_line = launch_command_line(&params)?;
     let Some(matched_pattern) = config.launch_match(&command_line) else {
@@ -1973,7 +2005,12 @@ pub async fn launch(
         cdp_launch.as_ref(),
         force_renderer_accessibility,
     );
-    let pid = spawn_launch_child(&spawn_params)?;
+    let launch_desktop = prepare_launch_desktop(params.desktop.as_deref(), session_id)?;
+    let desktop_readback = launch_desktop
+        .as_ref()
+        .map(PreparedLaunchDesktop::to_response);
+    let spawned = spawn_launch_child(&spawn_params, launch_desktop)?;
+    let pid = spawned.pid;
     let cdp = if let Some(launch) = &cdp_launch {
         resolve_launched_cdp_port(pid, launch).await
     } else {
@@ -2008,21 +2045,32 @@ pub async fn launch(
         wait_requested = params.wait_for_window_title_regex.is_some(),
         idempotency_present = params.idempotency_key.is_some(),
         cdp_debug_port = ?cdp.port,
+        desktop = ?desktop_readback,
         cdp_verified_url = ?cdp_target.as_ref().map(|target| target.url.as_str()),
         "readback=act_launch after=process_spawn"
     );
-    Ok(ActLaunchResponse {
-        pid,
-        hwnd: window.hwnd,
-        matched_title: window.matched_title,
-        launched_at,
-        reason: window.reason,
-        cdp_debug_port: cdp.port,
-        cdp_endpoint: cdp.endpoint,
-        cdp_user_data_dir: cdp.user_data_dir,
-        cdp_verified_url: cdp_target.as_ref().map(|target| target.url.clone()),
-        cdp_verified_title: cdp_target.and_then(|target| target.title),
+    Ok(ActLaunchOutcome {
+        response: ActLaunchResponse {
+            pid,
+            hwnd: window.hwnd,
+            matched_title: window.matched_title,
+            launched_at,
+            reason: window.reason,
+            cdp_debug_port: cdp.port,
+            cdp_endpoint: cdp.endpoint,
+            cdp_user_data_dir: cdp.user_data_dir,
+            cdp_verified_url: cdp_target.as_ref().map(|target| target.url.clone()),
+            cdp_verified_title: cdp_target.and_then(|target| target.title),
+            desktop: desktop_readback,
+        },
+        desktop_lease: spawned.desktop_lease,
     })
+}
+
+#[derive(Debug)]
+pub(crate) struct ActLaunchOutcome {
+    pub response: ActLaunchResponse,
+    pub desktop_lease: Option<LaunchDesktopLease>,
 }
 
 /// Planned CDP-debug augmentation for a Chromium-family launch (#684).
@@ -2782,8 +2830,107 @@ fn validate_launch_params(params: &ActLaunchParams) -> Result<(), ErrorData> {
         })?;
     }
     validate_console_launch_visibility(params)?;
+    validate_launch_desktop_option(params)?;
     validate_chromium_debug_launch_policy(params)?;
     Ok(())
+}
+
+fn validate_launch_desktop_option(params: &ActLaunchParams) -> Result<(), ErrorData> {
+    let Some(desktop) = params.desktop.as_deref() else {
+        return Ok(());
+    };
+    if params.wait_for_window_title_regex.is_some() {
+        return Err(launch_tool_error(
+            error_codes::TOOL_PARAMS_INVALID,
+            "act_launch desktop routing cannot be combined with wait_for_window_title_regex until hidden-desktop window enumeration is the verified wait source",
+            json!({
+                "code": error_codes::TOOL_PARAMS_INVALID,
+                "reason": "desktop_window_wait_not_supported",
+                "desktop": desktop,
+                "wait_for_window_title_regex": params.wait_for_window_title_regex,
+            }),
+        ));
+    }
+    validate_launch_desktop_request(desktop)
+}
+
+fn validate_launch_desktop_request(desktop: &str) -> Result<(), ErrorData> {
+    let trimmed = desktop.trim();
+    if trimmed.is_empty() || trimmed != desktop {
+        return Err(launch_desktop_params_error(
+            "act_launch desktop must not be empty or padded with whitespace",
+            desktop,
+            "desktop_empty_or_padded",
+        ));
+    }
+    if desktop.len() > 512 {
+        return Err(launch_desktop_params_error(
+            "act_launch desktop must be <= 512 bytes",
+            desktop,
+            "desktop_too_long",
+        ));
+    }
+    if let Some(rest) = desktop.strip_prefix("agent:") {
+        if rest.is_empty() {
+            return Err(launch_desktop_params_error(
+                "act_launch desktop agent scope must be agent:session or agent:<current-session-id>",
+                desktop,
+                "desktop_agent_scope_empty",
+            ));
+        }
+        validate_desktop_leaf_name(rest, desktop, "desktop_agent_scope_invalid")?;
+        return Ok(());
+    }
+    if let Some(rest) = desktop.strip_prefix("existing:") {
+        validate_desktop_leaf_name(rest, desktop, "desktop_existing_name_invalid")?;
+        return Ok(());
+    }
+    Err(launch_desktop_params_error(
+        "act_launch desktop must be agent:session, agent:<current-session-id>, or existing:<desktop-name>",
+        desktop,
+        "desktop_scope_unsupported",
+    ))
+}
+
+fn validate_desktop_leaf_name(
+    name: &str,
+    requested: &str,
+    reason: &'static str,
+) -> Result<(), ErrorData> {
+    if name.is_empty() || name.len() > 128 {
+        return Err(launch_desktop_params_error(
+            "act_launch desktop leaf name must be 1..=128 bytes",
+            requested,
+            reason,
+        ));
+    }
+    if name
+        .chars()
+        .any(|ch| ch == '\\' || ch == '\0' || ch.is_control())
+    {
+        return Err(launch_desktop_params_error(
+            "act_launch desktop leaf name must not contain backslash, NUL, or control characters",
+            requested,
+            reason,
+        ));
+    }
+    Ok(())
+}
+
+fn launch_desktop_params_error(
+    message: &'static str,
+    requested: &str,
+    reason: &'static str,
+) -> ErrorData {
+    launch_tool_error(
+        error_codes::TOOL_PARAMS_INVALID,
+        message,
+        json!({
+            "code": error_codes::TOOL_PARAMS_INVALID,
+            "reason": reason,
+            "desktop": requested,
+        }),
+    )
 }
 
 fn validate_chromium_debug_launch_policy(params: &ActLaunchParams) -> Result<(), ErrorData> {
@@ -2967,14 +3114,33 @@ fn validate_console_launch_visibility(params: &ActLaunchParams) -> Result<(), Er
     Ok(())
 }
 
-fn spawn_launch_child(params: &ActLaunchParams) -> Result<u32, ErrorData> {
+struct SpawnedLaunchChild {
+    pid: u32,
+    desktop_lease: Option<LaunchDesktopLease>,
+}
+
+fn spawn_launch_child(
+    params: &ActLaunchParams,
+    desktop: Option<PreparedLaunchDesktop>,
+) -> Result<SpawnedLaunchChild, ErrorData> {
     #[cfg(windows)]
     {
-        return spawn_windows_child(params);
+        return spawn_windows_child(params, desktop);
     }
 
     #[cfg(not(windows))]
     {
+        if desktop.is_some() {
+            return Err(launch_tool_error(
+                error_codes::TOOL_PARAMS_INVALID,
+                "act_launch desktop routing is only supported on Windows",
+                json!({
+                    "code": error_codes::TOOL_PARAMS_INVALID,
+                    "reason": "desktop_option_windows_only",
+                    "target": params.target,
+                }),
+            ));
+        }
         let needs_new_console = launch_target_needs_new_console(&params.target);
 
         let mut command = StdCommand::new(&params.target);
@@ -3005,7 +3171,10 @@ fn spawn_launch_child(params: &ActLaunchParams) -> Result<u32, ErrorData> {
                 }),
             )
         })?;
-        Ok(child.id())
+        Ok(SpawnedLaunchChild {
+            pid: child.id(),
+            desktop_lease: None,
+        })
     }
 }
 
@@ -3039,7 +3208,10 @@ fn launch_target_file_name(target: &str) -> String {
 }
 
 #[cfg(windows)]
-fn spawn_windows_child(params: &ActLaunchParams) -> Result<u32, ErrorData> {
+fn spawn_windows_child(
+    params: &ActLaunchParams,
+    desktop: Option<PreparedLaunchDesktop>,
+) -> Result<SpawnedLaunchChild, ErrorData> {
     use windows::{
         Win32::{
             Foundation::CloseHandle,
@@ -3053,6 +3225,9 @@ fn spawn_windows_child(params: &ActLaunchParams) -> Result<u32, ErrorData> {
     let command_line = launch_command_line(params)?;
     let mut command_line_wide = wide_null(&command_line);
     let current_dir_wide = params.working_dir.as_ref().map(|dir| wide_null(dir));
+    let desktop_wide = desktop
+        .as_ref()
+        .map(|desktop| wide_null(desktop.startup_desktop()));
     let environment = launch_environment_block(params)?;
     let startup_info_cb = u32::try_from(std::mem::size_of::<STARTUPINFOW>()).map_err(|error| {
         launch_tool_error(
@@ -3068,6 +3243,9 @@ fn spawn_windows_child(params: &ActLaunchParams) -> Result<u32, ErrorData> {
 
     let startup_info = STARTUPINFOW {
         cb: startup_info_cb,
+        lpDesktop: desktop_wide
+            .as_ref()
+            .map_or(PWSTR::null(), |desktop| PWSTR(desktop.as_ptr().cast_mut())),
         dwFlags: STARTF_USESHOWWINDOW,
         wShowWindow: windows_launch_show_window(params),
         ..Default::default()
@@ -3098,20 +3276,414 @@ fn spawn_windows_child(params: &ActLaunchParams) -> Result<u32, ErrorData> {
             let pid = process_info.dwProcessId;
             let _ = unsafe { CloseHandle(process_info.hThread) };
             let _ = unsafe { CloseHandle(process_info.hProcess) };
-            Ok(pid)
+            Ok(SpawnedLaunchChild {
+                pid,
+                desktop_lease: desktop.map(|desktop| desktop.lease),
+            })
         }
         Err(error) => Err(launch_tool_error(
             error_codes::ACTION_TARGET_INVALID,
-            format!("act_launch failed to spawn console target: {error}"),
+            format!("act_launch failed to spawn target: {error}"),
             json!({
                 "code": error_codes::ACTION_TARGET_INVALID,
                 "target": params.target,
                 "args": params.args,
                 "working_dir": params.working_dir,
                 "reason": "spawn_failed",
+                "desktop": params.desktop,
+                "source_error": error.to_string(),
             }),
         )),
     }
+}
+
+#[derive(Debug)]
+struct PreparedLaunchDesktop {
+    requested: String,
+    scope: &'static str,
+    name: String,
+    startup_desktop: String,
+    session_id: Option<String>,
+    lease: LaunchDesktopLease,
+}
+
+impl PreparedLaunchDesktop {
+    fn startup_desktop(&self) -> &str {
+        &self.startup_desktop
+    }
+
+    fn to_response(&self) -> ActLaunchDesktopReadback {
+        ActLaunchDesktopReadback {
+            requested: self.requested.clone(),
+            scope: self.scope.to_owned(),
+            name: self.name.clone(),
+            startup_desktop: self.startup_desktop.clone(),
+            session_id: self.session_id.clone(),
+        }
+    }
+}
+
+#[cfg(windows)]
+#[derive(Debug)]
+pub(crate) struct LaunchDesktopLease {
+    name: String,
+    terminate_windows_on_close: bool,
+    handle: Option<windows::Win32::System::StationsAndDesktops::HDESK>,
+}
+
+#[cfg(not(windows))]
+#[derive(Debug)]
+pub(crate) struct LaunchDesktopLease {
+    name: String,
+    terminate_windows_on_close: bool,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct LaunchDesktopCloseReadback {
+    pub name: String,
+    pub attempted: bool,
+    pub succeeded: bool,
+    pub error_message: Option<String>,
+    pub window_process_ids_before: Vec<u32>,
+    pub window_termination_attempted: bool,
+    pub window_termination_status: Option<String>,
+    pub window_process_ids_after: Vec<u32>,
+}
+
+impl LaunchDesktopLease {
+    pub(crate) fn name(&self) -> &str {
+        &self.name
+    }
+}
+
+#[cfg(windows)]
+impl LaunchDesktopLease {
+    pub(crate) fn close(mut self) -> LaunchDesktopCloseReadback {
+        let name = std::mem::take(&mut self.name);
+        let terminate_windows_on_close = self.terminate_windows_on_close;
+        let Some(handle) = self.handle.take() else {
+            return LaunchDesktopCloseReadback {
+                name,
+                attempted: false,
+                succeeded: true,
+                error_message: None,
+                window_process_ids_before: Vec::new(),
+                window_termination_attempted: false,
+                window_termination_status: None,
+                window_process_ids_after: Vec::new(),
+            };
+        };
+
+        let mut errors = Vec::new();
+        let mut window_process_ids_before = Vec::new();
+        let mut window_process_ids_after = Vec::new();
+        let mut window_termination_attempted = false;
+        let mut window_termination_status = None;
+
+        if terminate_windows_on_close {
+            match desktop_window_process_ids(handle) {
+                Ok(process_ids) => {
+                    window_process_ids_before = process_ids;
+                    if !window_process_ids_before.is_empty() {
+                        window_termination_attempted = true;
+                        let termination = terminate_owned_process_ids(&window_process_ids_before);
+                        window_termination_status = Some(termination.status.clone());
+                        window_process_ids_after = termination.remaining_process_ids;
+                    }
+                }
+                Err(error) => errors.push(error),
+            }
+
+            if window_termination_attempted && window_process_ids_after.is_empty() {
+                match desktop_window_process_ids(handle) {
+                    Ok(after) => {
+                        window_process_ids_after = after;
+                    }
+                    Err(error) => errors.push(error),
+                }
+            }
+
+            if !window_process_ids_after.is_empty() {
+                errors.push(format!(
+                    "desktop {name:?} still has live window process ids after termination: {window_process_ids_after:?}"
+                ));
+            }
+        }
+
+        if let Err(error) =
+            unsafe { windows::Win32::System::StationsAndDesktops::CloseDesktop(handle) }
+        {
+            errors.push(error.to_string());
+        }
+
+        LaunchDesktopCloseReadback {
+            name,
+            attempted: true,
+            succeeded: errors.is_empty(),
+            error_message: (!errors.is_empty()).then(|| errors.join("; ")),
+            window_process_ids_before,
+            window_termination_attempted,
+            window_termination_status,
+            window_process_ids_after,
+        }
+    }
+}
+
+#[cfg(not(windows))]
+impl LaunchDesktopLease {
+    pub(crate) fn close(self) -> LaunchDesktopCloseReadback {
+        LaunchDesktopCloseReadback {
+            name: self.name,
+            attempted: false,
+            succeeded: true,
+            error_message: None,
+            window_process_ids_before: Vec::new(),
+            window_termination_attempted: false,
+            window_termination_status: None,
+            window_process_ids_after: Vec::new(),
+        }
+    }
+}
+
+#[cfg(windows)]
+impl Drop for LaunchDesktopLease {
+    fn drop(&mut self) {
+        if let Some(handle) = self.handle.take() {
+            if self.terminate_windows_on_close {
+                match desktop_window_process_ids(handle) {
+                    Ok(process_ids) if !process_ids.is_empty() => {
+                        let termination = terminate_owned_process_ids(&process_ids);
+                        if !termination.remaining_process_ids.is_empty() {
+                            tracing::warn!(
+                                code = "ACT_LAUNCH_DESKTOP_DROP_REMAINING_WINDOWS",
+                                desktop = %self.name,
+                                process_ids_before = ?process_ids,
+                                remaining_process_ids = ?termination.remaining_process_ids,
+                                "readback=act_launch_desktop_drop after=window_process_cleanup_failed"
+                            );
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        tracing::warn!(
+                            code = "ACT_LAUNCH_DESKTOP_DROP_ENUM_FAILED",
+                            desktop = %self.name,
+                            error = %error,
+                            "readback=act_launch_desktop_drop after=window_process_enum_failed"
+                        );
+                    }
+                }
+            }
+            if let Err(error) =
+                unsafe { windows::Win32::System::StationsAndDesktops::CloseDesktop(handle) }
+            {
+                tracing::warn!(
+                    code = "ACT_LAUNCH_DESKTOP_DROP_CLOSE_FAILED",
+                    desktop = %self.name,
+                    error = %error,
+                    "readback=act_launch_desktop_drop after=close_failed"
+                );
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
+unsafe impl Send for LaunchDesktopLease {}
+
+fn prepare_launch_desktop(
+    requested: Option<&str>,
+    session_id: Option<&str>,
+) -> Result<Option<PreparedLaunchDesktop>, ErrorData> {
+    let Some(requested) = requested else {
+        return Ok(None);
+    };
+    let Some(session_id) = session_id else {
+        return Err(launch_tool_error(
+            error_codes::HTTP_SESSION_INVALID,
+            "act_launch desktop routing requires an MCP session id so teardown can reclaim the desktop handle",
+            json!({
+                "code": error_codes::HTTP_SESSION_INVALID,
+                "reason": "desktop_requires_mcp_session",
+                "desktop": requested,
+            }),
+        ));
+    };
+    #[cfg(not(windows))]
+    {
+        let _ = session_id;
+        return Err(launch_tool_error(
+            error_codes::TOOL_PARAMS_INVALID,
+            "act_launch desktop routing is only supported on Windows",
+            json!({
+                "code": error_codes::TOOL_PARAMS_INVALID,
+                "reason": "desktop_option_windows_only",
+                "desktop": requested,
+            }),
+        ));
+    }
+    #[cfg(windows)]
+    {
+        let (scope, name) = if let Some(rest) = requested.strip_prefix("agent:") {
+            if rest != "session" && rest != session_id {
+                return Err(launch_tool_error(
+                    error_codes::TOOL_PARAMS_INVALID,
+                    "act_launch desktop agent scope must target the current MCP session",
+                    json!({
+                        "code": error_codes::TOOL_PARAMS_INVALID,
+                        "reason": "desktop_agent_session_mismatch",
+                        "desktop": requested,
+                        "current_session_id": session_id,
+                    }),
+                ));
+            }
+            ("agent_session", hidden_desktop_name_for_session(session_id))
+        } else if let Some(rest) = requested.strip_prefix("existing:") {
+            ("existing", rest.to_owned())
+        } else {
+            return Err(launch_desktop_params_error(
+                "act_launch desktop must be agent:session, agent:<current-session-id>, or existing:<desktop-name>",
+                requested,
+                "desktop_scope_unsupported",
+            ));
+        };
+        let lease = open_launch_desktop(requested, scope, &name)?;
+        Ok(Some(PreparedLaunchDesktop {
+            requested: requested.to_owned(),
+            scope,
+            startup_desktop: name.clone(),
+            name,
+            session_id: (scope == "agent_session").then(|| session_id.to_owned()),
+            lease,
+        }))
+    }
+}
+
+fn hidden_desktop_name_for_session(session_id: &str) -> String {
+    let digest = sha256_hex(session_id.as_bytes());
+    format!("SynapseAgent_{}", &digest[..24])
+}
+
+#[cfg(windows)]
+fn open_launch_desktop(
+    requested: &str,
+    scope: &str,
+    name: &str,
+) -> Result<LaunchDesktopLease, ErrorData> {
+    use windows::{
+        Win32::System::StationsAndDesktops::{
+            CreateDesktopW, DESKTOP_CONTROL_FLAGS, DESKTOP_CREATEMENU, DESKTOP_CREATEWINDOW,
+            DESKTOP_ENUMERATE, DESKTOP_HOOKCONTROL, DESKTOP_READ_CONTROL, DESKTOP_READOBJECTS,
+            DESKTOP_WRITEOBJECTS, OpenDesktopW,
+        },
+        core::PCWSTR,
+    };
+
+    let access = DESKTOP_CREATEMENU.0
+        | DESKTOP_CREATEWINDOW.0
+        | DESKTOP_ENUMERATE.0
+        | DESKTOP_HOOKCONTROL.0
+        | DESKTOP_READOBJECTS.0
+        | DESKTOP_READ_CONTROL.0
+        | DESKTOP_WRITEOBJECTS.0;
+    let name_wide = wide_null(name);
+    let handle = if scope == "agent_session" {
+        unsafe {
+            CreateDesktopW(
+                PCWSTR(name_wide.as_ptr()),
+                PCWSTR::null(),
+                None,
+                DESKTOP_CONTROL_FLAGS::default(),
+                access,
+                None,
+            )
+        }
+        .map_err(|error| {
+            launch_tool_error(
+                error_codes::ACTION_TARGET_INVALID,
+                format!("act_launch failed to create or reuse hidden desktop '{name}': {error}"),
+                json!({
+                    "code": error_codes::ACTION_TARGET_INVALID,
+                    "reason": "desktop_create_failed",
+                    "desktop": requested,
+                    "desktop_name": name,
+                    "source_error": error.to_string(),
+                }),
+            )
+        })?
+    } else {
+        unsafe {
+            OpenDesktopW(
+                PCWSTR(name_wide.as_ptr()),
+                DESKTOP_CONTROL_FLAGS::default(),
+                false,
+                access,
+            )
+        }
+        .map_err(|error| {
+            launch_tool_error(
+                error_codes::ACTION_TARGET_INVALID,
+                format!("act_launch failed to open existing desktop '{name}': {error}"),
+                json!({
+                    "code": error_codes::ACTION_TARGET_INVALID,
+                    "reason": "desktop_open_failed",
+                    "desktop": requested,
+                    "desktop_name": name,
+                    "source_error": error.to_string(),
+                }),
+            )
+        })?
+    };
+    Ok(LaunchDesktopLease {
+        name: name.to_owned(),
+        terminate_windows_on_close: scope == "agent_session",
+        handle: Some(handle),
+    })
+}
+
+#[cfg(windows)]
+fn desktop_window_process_ids(
+    handle: windows::Win32::System::StationsAndDesktops::HDESK,
+) -> Result<Vec<u32>, String> {
+    use windows::Win32::{
+        Foundation::LPARAM, System::StationsAndDesktops::EnumDesktopWindows,
+        UI::WindowsAndMessaging::GetWindowThreadProcessId,
+    };
+    use windows::core::BOOL;
+
+    struct Search {
+        process_ids: Vec<u32>,
+    }
+
+    unsafe extern "system" fn enum_window(
+        hwnd: windows::Win32::Foundation::HWND,
+        lparam: LPARAM,
+    ) -> BOOL {
+        let search = unsafe { &mut *(lparam.0 as *mut Search) };
+        let mut process_id = 0_u32;
+        unsafe {
+            GetWindowThreadProcessId(hwnd, Some(&raw mut process_id));
+        }
+        if process_id != 0 && process_id != std::process::id() {
+            search.process_ids.push(process_id);
+        }
+        BOOL(1)
+    }
+
+    let mut search = Search {
+        process_ids: Vec::new(),
+    };
+    unsafe {
+        EnumDesktopWindows(
+            Some(handle),
+            Some(enum_window),
+            LPARAM((&raw mut search).cast::<core::ffi::c_void>() as isize),
+        )
+    }
+    .map_err(|error| format!("EnumDesktopWindows failed for hidden desktop: {error}"))?;
+    search.process_ids.sort_unstable();
+    search.process_ids.dedup();
+    Ok(search.process_ids)
 }
 
 #[cfg(windows)]
@@ -5186,6 +5758,10 @@ pub(crate) fn wait_for_owned_process_tree_exit(
     wait_for_shell_job_process_tree_exit(process_ids, timeout)
 }
 
+pub(crate) fn process_exists(pid: u32) -> bool {
+    owned_live_process_ids(&[pid]).contains(&pid)
+}
+
 pub fn terminate_owned_process_tree(pid: u32) -> OwnedProcessTerminationReadback {
     let process_ids = shell_job_process_tree_ids(pid);
     let live_process_ids_before = shell_job_live_process_ids(&process_ids);
@@ -5203,6 +5779,32 @@ pub fn terminate_owned_process_tree(pid: u32) -> OwnedProcessTerminationReadback
     let termination = terminate_shell_job_process_tree_platform(pid, &process_ids);
     OwnedProcessTerminationReadback {
         pid,
+        process_ids,
+        live_process_ids_before,
+        attempted: termination.attempted,
+        status: termination.status,
+        remaining_process_ids: termination.remaining_process_ids,
+    }
+}
+
+pub(crate) fn terminate_owned_process_ids(process_ids: &[u32]) -> OwnedProcessTerminationReadback {
+    let mut process_ids = process_ids.to_vec();
+    process_ids.sort_unstable();
+    process_ids.dedup();
+    let live_process_ids_before = shell_job_live_process_ids(&process_ids);
+    if live_process_ids_before.is_empty() {
+        return OwnedProcessTerminationReadback {
+            pid: 0,
+            process_ids,
+            live_process_ids_before,
+            attempted: false,
+            status: "already_exited".to_owned(),
+            remaining_process_ids: Vec::new(),
+        };
+    }
+    let termination = terminate_shell_job_process_tree_platform(0, &process_ids);
+    OwnedProcessTerminationReadback {
+        pid: 0,
         process_ids,
         live_process_ids_before,
         attempted: termination.attempted,
@@ -6273,7 +6875,90 @@ mod tests {
             cdp_debug: None,
             force_renderer_accessibility: None,
             windows_console_window_state: None,
+            desktop: None,
         }
+    }
+
+    #[test]
+    fn launch_desktop_option_rejects_invalid_shapes() {
+        let cases = [
+            ("", "desktop_empty_or_padded"),
+            (" agent:session", "desktop_empty_or_padded"),
+            ("agent:", "desktop_agent_scope_empty"),
+            ("existing:", "desktop_existing_name_invalid"),
+            ("existing:bad\\name", "desktop_existing_name_invalid"),
+            ("default", "desktop_scope_unsupported"),
+        ];
+
+        for (desktop, reason) in cases {
+            let mut params = launch_params("notepad.exe", Vec::new(), 10_000);
+            params.desktop = Some(desktop.to_owned());
+            let error = validate_launch_params(&params)
+                .expect_err("invalid desktop shape should fail closed");
+            println!(
+                "readback=act_launch_desktop_validation edge={reason} before={desktop:?} after={:?}",
+                error.data
+            );
+            assert_eq!(
+                error
+                    .data
+                    .as_ref()
+                    .and_then(|data| data.get("reason"))
+                    .and_then(|reason| reason.as_str()),
+                Some(reason)
+            );
+        }
+    }
+
+    #[test]
+    fn launch_desktop_option_refuses_visible_window_wait() {
+        let mut params = launch_params("notepad.exe", Vec::new(), 10_000);
+        params.desktop = Some("agent:session".to_owned());
+        params.wait_for_window_title_regex = Some(".*".to_owned());
+
+        let error = validate_launch_params(&params)
+            .expect_err("desktop launch should not use visible-desktop window wait");
+
+        println!(
+            "readback=act_launch_desktop_validation edge=wait_refused before=desktop:{:?},wait:{:?} after={:?}",
+            params.desktop, params.wait_for_window_title_regex, error.data
+        );
+        assert_eq!(
+            error
+                .data
+                .as_ref()
+                .and_then(|data| data.get("reason"))
+                .and_then(|reason| reason.as_str()),
+            Some("desktop_window_wait_not_supported")
+        );
+    }
+
+    #[test]
+    fn launch_desktop_agent_scope_is_session_bound() {
+        let error = prepare_launch_desktop(Some("agent:other-session"), Some("current-session"))
+            .expect_err("agent desktop scope must match current session");
+
+        println!(
+            "readback=act_launch_desktop_scope edge=session_mismatch before=request:agent:other-session,current:current-session after={:?}",
+            error.data
+        );
+        assert_eq!(
+            error
+                .data
+                .as_ref()
+                .and_then(|data| data.get("reason"))
+                .and_then(|reason| reason.as_str()),
+            Some("desktop_agent_session_mismatch")
+        );
+        assert_eq!(
+            hidden_desktop_name_for_session("current-session"),
+            hidden_desktop_name_for_session("current-session")
+        );
+        assert_ne!(
+            hidden_desktop_name_for_session("current-session"),
+            hidden_desktop_name_for_session("other-session")
+        );
+        assert!(hidden_desktop_name_for_session("current-session").len() <= 128);
     }
 
     #[test]
@@ -7650,6 +8335,7 @@ mod tests {
             cdp_user_data_dir: None,
             cdp_verified_url: None,
             cdp_verified_title: None,
+            desktop: None,
         };
 
         let row = launch_process_history_row(&params, &response)
@@ -7689,6 +8375,7 @@ mod tests {
             cdp_user_data_dir: Some("C:\\Temp\\synapse-cdp-profiles\\synthetic".to_owned()),
             cdp_verified_url: Some("https://example.test/".to_owned()),
             cdp_verified_title: Some("Synthetic CDP Page".to_owned()),
+            desktop: None,
         };
 
         let row = launch_process_history_row(&params, &response)

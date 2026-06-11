@@ -6,7 +6,7 @@ use super::{
     ActSpawnAgentResponse, ActSpawnAgentTarget, ErrorData, Json, LaunchWindowState,
     MAX_AGENT_SPAWN_WAIT_TIMEOUT_MS, Parameters, RunShellAuthorization, ShellExecutionContext,
     SynapseService, assign_owned_process_job, authorize_run_shell, authorize_run_shell_start,
-    cancel_shell_job, execute_combo, launch, launch_process_history_row,
+    cancel_shell_job, execute_combo, launch, launch_for_session, launch_process_history_row,
     launch_process_history_row_key, launch_request_details, mcp_error,
     prepare_run_shell_params_for_context, prepare_run_shell_start_params_for_context,
     required_combo_permissions, run_authorized_shell, run_shell_idempotency_completed_row,
@@ -235,7 +235,9 @@ impl SynapseService {
         result.map(Json)
     }
 
-    #[tool(description = "Launch an allowlisted local process and optionally wait for a window")]
+    #[tool(
+        description = "Launch an allowlisted local process, optionally on a session-owned hidden desktop, and optionally wait for a visible-desktop window when no desktop override is used"
+    )]
     pub async fn act_launch(
         &self,
         params: Parameters<ActLaunchParams>,
@@ -262,8 +264,15 @@ impl SynapseService {
         } else {
             self.audit_action_started_with_details("act_launch", &launch_request_details(&params))?;
         }
-        let result = match launch(&self.m4_config, params.clone()).await {
-            Ok(response) => {
+        let result = match launch_for_session(
+            &self.m4_config,
+            params.clone(),
+            session_id.as_deref(),
+        )
+        .await
+        {
+            Ok(mut outcome) => {
+                let response = outcome.response.clone();
                 let process_job = if session_id.is_some() {
                     match assign_owned_process_job(response.pid, "act_launch", None) {
                         Ok(process_job) => Some(process_job),
@@ -306,7 +315,8 @@ impl SynapseService {
                             None,
                             params.target.clone(),
                             process_job,
-                        ),
+                        )
+                        .with_desktop_lease(outcome.desktop_lease.take()),
                     ) {
                         let cleanup = crate::m4::terminate_owned_process_tree(response.pid);
                         return Err(launch_lifecycle_tool_error(
@@ -489,6 +499,7 @@ impl SynapseService {
             cdp_debug: Some(false),
             force_renderer_accessibility: None,
             windows_console_window_state: Some(LaunchWindowState::Hidden),
+            desktop: None,
         };
 
         let launch_response = match launch(&self.m4_config, launch_params.clone()).await {
