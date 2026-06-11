@@ -16,7 +16,7 @@
   agent with direct source-of-truth readback; automated tests, scripts,
   benchmarks, GitHub Actions, and CI are supporting evidence only.
 - Retired the physical hardware-HID path after the software-only input decision
-  in #588. The live action backends are now `software` and `vigem`; the legacy
+  in #588. The active documented action backend is now `software`; the legacy
   `hardware` token remains only as a fail-closed compatibility value that
   returns `ACTION_BACKEND_UNAVAILABLE`.
 
@@ -44,9 +44,8 @@ Actions/CI.
   `HID_PROTOCOL_HANDSHAKE_FAILED`, `HID_FIRMWARE_VERSION_MISMATCH`,
   `HID_COMMAND_REJECTED`, `HID_LINK_TIMEOUT`,
   `SAFETY_SHELL_DENIED_BY_POLICY`, and `SAFETY_LAUNCH_DENIED_BY_POLICY`.
-- Recorded ADR-0008 through ADR-0012 for Synapse Pico VID/PID, HID controller
-  vs XInput, default detection model, aim-track EMA smoothing, and hardware
-  action coalescing.
+- Recorded ADR-0008 through ADR-0012 for Synapse Pico VID/PID, default
+  detection model, aim-track EMA smoothing, and hardware action coalescing.
 ## v0.1.0-m3 - 2026-05-25
 
 M3 adds the reflex, storage, profile, audio, replay, and HTTP/SSE runtime
@@ -75,15 +74,11 @@ surface for Synapse, shipping from manual configured-host FSV rather than CI.
 M2 adds the action MVP for the configured Windows host with manual FSV as the
 release gate.
 
-- Added the nine M2 MCP action tools: `act_click`, `act_type`, `act_press`,
-  `act_aim`, `act_drag`, `act_scroll`, `act_pad`, `act_clipboard`, and
-  `release_all`.
-- Wired real Windows input paths for keyboard, mouse, UIA InvokePattern, and
-  ViGEm-backed virtual Xbox 360 controller reports.
+- Added the M2 MCP action tools: `act_click`, `act_type`, `act_press`,
+  `act_aim`, `act_drag`, `act_scroll`, `act_clipboard`, and `release_all`.
+- Wired real Windows input paths for keyboard, mouse, and UIA InvokePattern.
 - Added ReleaseAll safety coverage for explicit cleanup, shutdown, SIGINT,
   stdio disconnect, and panic paths.
-- Verified the configured host's ViGEmBus installation through driver/device
-  readback, live `act_pad`, XInput state, `release_all`, and daemon logs.
 - Clarified that M2 ships from manual configured-host FSV, not GitHub
   Actions/CI or missing-dependency portability tests.
 

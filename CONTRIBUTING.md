@@ -46,7 +46,7 @@ the roadmap (see the README "What's left on the docket" section).
    cargo test --workspace
    ```
 3. Synapse is **Windows-native** for its real perception/action paths (Win32
-   `SendInput`, UI Automation, WGC/DXGI, ViGEmBus). Behavior that touches those
+   `SendInput`, UI Automation, WGC/DXGI). Behavior that touches those
    surfaces should be verified on Windows — the project uses manual Full State
    Verification (FSV) on the configured Windows host as the shipping gate (see the
    README "Agent Doctrine" section). Automated tests are supporting evidence, not a

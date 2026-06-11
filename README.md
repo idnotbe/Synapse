@@ -45,7 +45,7 @@ each in its own isolated session, while you keep your mouse.
 Everything runs **on your machine**. No screen-scraping cloud service, no remote
 agent, no data leaving your PC. Synapse is Windows-native to the metal: Win32
 `SendInput`, UI Automation, Windows Graphics Capture / DXGI, WASAPI audio, and
-ViGEmBus virtual controllers.
+local process control.
 
 ---
 
@@ -82,7 +82,7 @@ All of it is **window-targetable**: point a session at a specific window with
 
 ### 🖱️ It can act — precise, human-like control
 
-<img src="docs/assets/action.png" alt="Synapse moves the mouse, types, draws, and uses a controller" align="left" width="42%">
+<img src="docs/assets/action.png" alt="Synapse moves the mouse, types, and draws" align="left" width="42%">
 
 Real input, synthesized through Win32 — not brittle macros:
 
@@ -93,7 +93,6 @@ Real input, synthesized through Win32 — not brittle macros:
   keystroke dynamics, press chords, or fire profile-defined key aliases.
 - **`act_set_value`** — set a field's value directly through UI Automation and
   read it back from the source of truth — no keystrokes needed.
-- **`act_pad`** — a full **virtual Xbox / DualShock controller** via ViGEmBus.
 - **`act_clipboard`, `act_combo`, `act_launch`, `act_focus_window`** — clipboard
   round-trips, timed input sequences, launching apps (including *hidden*
   launches that never flash a window), and explicit, lease-gated window focus.
@@ -140,7 +139,7 @@ strategy ladder.
 <img src="docs/assets/humanized-motion.png" alt="Humanized wind-mouse motion versus robotic linear movement" align="left" width="42%">
 
 Robotic, perfectly-straight cursor teleports are a tell — and some UIs
-(canvases, games, drag-and-drop) outright break on them. `act_stroke` generates
+(canvases and drag-and-drop workflows) outright break on them. `act_stroke` generates
 **physically plausible motion**:
 
 - A **wind-mouse model** with gravity and turbulence terms, so every path bends
@@ -308,7 +307,7 @@ flowchart LR
     subgraph B["⚙️ Synapse — one shared Rust daemon (local)"]
         SES["🪪 Sessions · targets · leases<br/>per-agent isolation"]
         P["👁️ Perception<br/>UIA · CDP · capture · OCR · audio"]
-        ACT["🖱️ Action<br/>UIA patterns · CDP · SendInput · ViGEm"]
+        ACT["🖱️ Action<br/>UIA patterns · CDP · SendInput"]
         RX["⚡ Reflex runtime<br/>1ms scheduler"]
         ST["💾 Storage<br/>RocksDB audit trail<br/>mailboxes · blackboard"]
         PR["🧩 Profiles + registry"]
@@ -548,15 +547,6 @@ The 1ms reflex scheduler reacts ~100,000× faster than a cloud round-trip, and
 WASAPI audio capture + Whisper transcription, background form-fill through UIA
 value patterns, and event subscriptions — three sensory channels, one agent.
 
-**🎮 Hands on a controller**
-
-> *"Plug in a virtual Xbox controller, launch the game, and run the practice
-> drill we profiled: hold left stick 70% forward, feather the trigger at each
-> checkpoint, and bail with release_all if the pause menu appears."*
-
-ViGEmBus gives the agent a *real* controller the game can't tell from hardware,
-and reflexes handle the timing humans can't.
-
 **🖥️ A self-driving install**
 
 > *"Here's the vendor's setup wizard. Click through it: take a reality baseline
@@ -589,7 +579,7 @@ At a glance:
 |---|---|
 | **Perception** | `observe` · `find` · `read_text` · `capture_screenshot` · `audio_tail` · `audio_transcribe` · `subscribe` · `subscribe_cancel` · `set_capture_target` · `set_perception_mode` |
 | **Delta-first reality** | `reality_baseline` · `observe_delta` · `reality_audit` |
-| **Action** | `act_click` · `act_type` · `act_press` · `act_keymap` · `act_combo` · `act_stroke` · `act_scroll` · `act_set_value` · `act_clipboard` · `act_pad` · `act_launch` · `act_focus_window` · `release_all` |
+| **Action** | `act_click` · `act_type` · `act_press` · `act_keymap` · `act_combo` · `act_stroke` · `act_scroll` · `act_set_value` · `act_clipboard` · `act_launch` · `act_focus_window` · `release_all` |
 | **Durable shell jobs** | `act_run_shell` · `act_run_shell_start` · `act_run_shell_status` · `act_run_shell_cancel` |
 | **Browser (CDP)** | `cdp_open_tab` · `cdp_navigate_tab` · `cdp_close_tab` |
 | **Multi-agent** | `act_spawn_agent` · `agent_send` · `agent_inbox` · `agent_wait` · `workspace_put` · `workspace_get` · `workspace_list` · `workspace_subscribe` |
@@ -609,15 +599,16 @@ At a glance:
 | Protocol | **MCP** via `rmcp` — stdio + streamable HTTP/SSE, one shared daemon, per-session state |
 | Perception | Windows UI Automation, Windows Graphics Capture / DXGI duplication, WinRT OCR |
 | Browser | **Chrome DevTools Protocol** — DOM/AX-tree perception, background tabs, page input; bundled extension bridge for normal profiles |
-| Action | Win32 `SendInput` (`enigo`), UIA control patterns, CDP input, **ViGEmBus** virtual controllers |
+| Action | Win32 `SendInput` (`enigo`), UIA control patterns, CDP input |
 | Multi-agent | Per-session targets & clipboards, target-claim ownership, input leases, RocksDB mailboxes + workspace blackboard |
 | Audio | WASAPI loopback + Whisper-tiny STT |
 | Storage | **RocksDB** (11 column families, LZ4 + ZSTD), durable audit trail |
 | Models | ONNX Runtime (`ort`) for optional detection |
 
-Two live input backends: **`software`** (keyboard + mouse via `SendInput`) and
-**`vigem`** (virtual Xbox/DualShock via ViGEmBus). Reflexes, storage GC, and
-disk-pressure handling all run as background tasks inside the server.
+The active documented input backend is **`software`**: keyboard and mouse via
+`SendInput`, plus semantic UIA/CDP paths where the target supports them.
+Reflexes, storage GC, and disk-pressure handling all run as background tasks
+inside the server.
 
 ---
 
