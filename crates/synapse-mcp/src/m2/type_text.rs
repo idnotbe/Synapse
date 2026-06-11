@@ -8,7 +8,9 @@ use serde_json::json;
 use synapse_action::{
     ActionBackend, ActionError, ActionHandle, EmitState, RecordedInput, RecordingBackend,
 };
-use synapse_core::{Action, Backend, ElementId, KeystrokeDynamics, KeystrokeNaturalParams};
+use synapse_core::{
+    Action, Backend, ElementId, KeystrokeDynamics, KeystrokeNaturalParams, UiaPattern, error_codes,
+};
 
 use crate::m1::mcp_error;
 use crate::m2::postcondition::{
@@ -31,6 +33,9 @@ const TEXT_INTEGRITY_NATIVE_TEXT_MESSAGE: &str = "win32_text_message_readback";
 const TEXT_INTEGRITY_NATIVE_PASSWORD_LENGTH: &str = "win32_text_message_password_length_readback";
 const TEXT_INTEGRITY_UIA_VALUE_PATTERN_DISPATCH_ONLY: &str =
     "uia_value_pattern_dispatch_only_requires_target_readback";
+const TEXT_INTEGRITY_CHROMIUM_UIA_VALUE_PATTERN_REFUSED: &str =
+    "chromium_uia_value_pattern_refused_requires_cdp_or_foreground_typing";
+const REASON_CHROMIUM_UIA_VALUE_PATTERN_REFUSED: &str = "chromium_uia_value_pattern_refused";
 const SOURCE_UIA_VALUE: &str = "uia_value_pattern.value";
 const SOURCE_UIA_PASSWORD_LENGTH: &str = "uia_value_pattern.password_length";
 const SOURCE_NATIVE_TEXT: &str = "win32_window_text";
@@ -317,6 +322,7 @@ pub async fn act_type_with_handle(
             )
             .await;
         }
+        ensure_value_pattern_target_safe_for_act_type(element_id)?;
         let readback = if params.verify_delta {
             verified_set_element_value(element_id, &emitted, params.verify_timeout_ms).await?
         } else {
@@ -517,6 +523,100 @@ async fn verified_set_element_value(
             ))
         }
     }
+}
+
+#[cfg(windows)]
+fn ensure_value_pattern_target_safe_for_act_type(element_id: &ElementId) -> Result<(), ErrorData> {
+    let hwnd = element_id
+        .parts()
+        .map_err(|err| {
+            mcp_error(
+                error_codes::ACTION_ELEMENT_NOT_RESOLVED,
+                format!("act_type into_element id is malformed: {err}"),
+            )
+        })?
+        .hwnd;
+    let context = synapse_a11y::foreground_context(hwnd).map_err(a11y_error_to_mcp)?;
+    if !synapse_a11y::is_chromium_family(&context.process_name) {
+        return Ok(());
+    }
+    let metadata = synapse_a11y::element_metadata(element_id).map_err(a11y_error_to_mcp)?;
+    if chromium_uia_value_pattern_should_be_refused(&context.process_name, &metadata) {
+        return Err(chromium_uia_value_pattern_refused_error(
+            element_id,
+            &context.process_name,
+            &metadata,
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn ensure_value_pattern_target_safe_for_act_type(_element_id: &ElementId) -> Result<(), ErrorData> {
+    Ok(())
+}
+
+fn chromium_uia_value_pattern_should_be_refused(
+    process_name: &str,
+    metadata: &synapse_a11y::ElementMetadataReadback,
+) -> bool {
+    if !synapse_a11y::is_chromium_family(process_name) || !metadata.enabled {
+        return false;
+    }
+    if !metadata
+        .patterns
+        .iter()
+        .any(|pattern| *pattern == UiaPattern::Value)
+    {
+        return false;
+    }
+    let role = metadata.role.to_ascii_lowercase();
+    let editable_role = role.contains("edit") || role.contains("document") || role.contains("text");
+    let exposes_text_pattern = metadata
+        .patterns
+        .iter()
+        .any(|pattern| *pattern == UiaPattern::Text);
+
+    metadata.keyboard_focusable && (editable_role || exposes_text_pattern)
+}
+
+fn chromium_uia_value_pattern_refused_error(
+    element_id: &ElementId,
+    process_name: &str,
+    metadata: &synapse_a11y::ElementMetadataReadback,
+) -> ErrorData {
+    let value_len = metadata.value.as_ref().map(|value| value.chars().count());
+    tracing::warn!(
+        code = "M2_ACT_TYPE_CHROMIUM_UIA_VALUE_PATTERN_REFUSED",
+        element_id = %element_id,
+        process_name,
+        role = %metadata.role,
+        enabled = metadata.enabled,
+        keyboard_focusable = metadata.keyboard_focusable,
+        ?value_len,
+        "act_type refused Chromium UIA ValuePattern.SetValue before mutation"
+    );
+    ErrorData::new(
+        ErrorCode(-32099),
+        "act_type refused UIA ValuePattern.SetValue for a Chromium editable UIA target before mutation; use a CDP-backed web element or the leased foreground typing route",
+        Some(json!({
+            "code": error_codes::ACTION_ELEMENT_PATTERN_UNSUPPORTED,
+            "reason": REASON_CHROMIUM_UIA_VALUE_PATTERN_REFUSED,
+            "element_id": element_id.to_string(),
+            "process_name": process_name,
+            "role": metadata.role,
+            "enabled": metadata.enabled,
+            "keyboard_focusable": metadata.keyboard_focusable,
+            "patterns": metadata.patterns,
+            "automation_id_present": metadata.automation_id.is_some(),
+            "name_len": metadata.name.chars().count(),
+            "value_len": value_len,
+            "unsafe_backend_tier_refused": TYPE_TIER_UIA,
+            "required_foreground": true,
+            "target_text_integrity": TEXT_INTEGRITY_CHROMIUM_UIA_VALUE_PATTERN_REFUSED,
+            "target_readback_required": true,
+        })),
+    )
 }
 
 fn set_readback_from_separate_reads(
@@ -1088,7 +1188,7 @@ mod tests {
     use std::sync::Arc;
 
     use synapse_action::{ActionEmitter, RecordedInput, sample_typing_schedule};
-    use synapse_core::{ElementId, KeystrokeNaturalParams};
+    use synapse_core::{ElementId, KeystrokeNaturalParams, Rect, UiaPattern};
 
     use super::{
         ActTypeParams, METHOD_NATIVE_TEXT_MESSAGE, MIN_SAFE_LINEAR_MS_PER_CHAR,
@@ -1096,12 +1196,100 @@ mod tests {
         SOURCE_UIA_VALUE, TEXT_INTEGRITY_DISPATCH_ONLY, TEXT_INTEGRITY_NATIVE_PASSWORD_LENGTH,
         TEXT_INTEGRITY_NATIVE_TEXT_MESSAGE, TYPE_TIER_FOREGROUND, TYPE_TIER_WIN32_MESSAGE,
         TypeBackend, TypeDynamics, act_type_with_handle, action_from_type_params,
+        chromium_uia_value_pattern_refused_error, chromium_uia_value_pattern_should_be_refused,
         default_linear_ms_per_char, default_press_enter_after, default_type_backend,
         default_type_dynamics, default_use_scancodes, default_verify_delta,
         default_verify_timeout_ms, recorded_ikis, set_backend_tier,
         set_readback_from_separate_reads, set_source_of_truth, set_text_integrity,
         uia_readback_matches_emitted, validate_type_params, verify_uia_type_delta,
     };
+
+    fn metadata(role: &str, patterns: Vec<UiaPattern>) -> synapse_a11y::ElementMetadataReadback {
+        synapse_a11y::ElementMetadataReadback {
+            name: "synthetic".to_owned(),
+            role: role.to_owned(),
+            automation_id: None,
+            bbox: Rect {
+                x: 1,
+                y: 2,
+                w: 300,
+                h: 40,
+            },
+            enabled: true,
+            keyboard_focusable: true,
+            patterns,
+            value: Some("before".to_owned()),
+        }
+    }
+
+    #[test]
+    fn chromium_edit_value_pattern_is_refused_before_mutation() {
+        let metadata = metadata("edit", vec![UiaPattern::Value]);
+
+        assert!(chromium_uia_value_pattern_should_be_refused(
+            "chrome.exe",
+            &metadata
+        ));
+    }
+
+    #[test]
+    fn chromium_document_text_pattern_is_refused_before_mutation() {
+        let metadata = metadata("document", vec![UiaPattern::Value, UiaPattern::Text]);
+
+        assert!(chromium_uia_value_pattern_should_be_refused(
+            "msedge.exe",
+            &metadata
+        ));
+    }
+
+    #[test]
+    fn non_chromium_edit_value_pattern_remains_allowed() {
+        let metadata = metadata("edit", vec![UiaPattern::Value]);
+
+        assert!(!chromium_uia_value_pattern_should_be_refused(
+            "notepad.exe",
+            &metadata
+        ));
+    }
+
+    #[test]
+    fn chromium_non_edit_value_pattern_remains_allowed() {
+        let metadata = metadata("button", vec![UiaPattern::Value]);
+
+        assert!(!chromium_uia_value_pattern_should_be_refused(
+            "chrome.exe",
+            &metadata
+        ));
+    }
+
+    #[test]
+    fn chromium_text_role_without_value_pattern_remains_allowed() {
+        let metadata = metadata("edit", vec![UiaPattern::Text]);
+
+        assert!(!chromium_uia_value_pattern_should_be_refused(
+            "chrome.exe",
+            &metadata
+        ));
+    }
+
+    #[test]
+    fn chromium_refusal_error_is_structured_and_redacts_text() {
+        let element_id = ElementId::parse("0x2a:0102").expect("synthetic element id should parse");
+        let metadata = metadata("edit", vec![UiaPattern::Value]);
+
+        let error = chromium_uia_value_pattern_refused_error(&element_id, "chrome.exe", &metadata);
+        let data = error
+            .data
+            .expect("chromium refusal should include structured data");
+
+        assert_eq!(
+            data["code"],
+            synapse_core::error_codes::ACTION_ELEMENT_PATTERN_UNSUPPORTED
+        );
+        assert_eq!(data["reason"], "chromium_uia_value_pattern_refused");
+        assert_eq!(data["value_len"], 6);
+        assert!(data.get("value").is_none());
+    }
 
     #[tokio::test]
     async fn recording_backend_readback_uses_natural_fast_ikis() {
