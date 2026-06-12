@@ -539,6 +539,44 @@ pub struct ActRunShellStatusResponse {
     pub stderr_tail: String,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ActRunShellJobDiagnostics {
+    pub checked_at: String,
+    pub running: bool,
+    pub elapsed_ms: Option<u64>,
+    pub stdout_len_bytes: u64,
+    pub stderr_len_bytes: u64,
+    pub output_state: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub process_tree: Vec<ActRunShellProcessDiagnostic>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transfer: Option<ActRunShellTransferDiagnostics>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub actionable_hints: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ActRunShellProcessDiagnostic {
+    pub pid: u32,
+    pub parent_pid: Option<u32>,
+    pub name: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ActRunShellTransferDiagnostics {
+    pub family: String,
+    pub client: String,
+    pub protocol_hint: String,
+    pub remote_identity: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub detection_evidence: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub suggested_next_steps: Vec<String>,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ActRunShellCancelResponse {
@@ -653,6 +691,8 @@ pub struct ActRunShellJobStatus {
     #[serde(default)]
     #[schemars(!default)]
     pub remote_process_scope: ActRunShellRemoteProcessScope,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diagnostics: Option<ActRunShellJobDiagnostics>,
 }
 
 #[derive(Clone, Debug)]
@@ -1647,6 +1687,10 @@ pub fn shell_job_status(
         usize::try_from(params.tail_bytes).unwrap_or(SHELL_JOB_TAIL_MAX_BYTES as usize);
     let stdout_len_bytes = file_len(&paths.stdout_path, &params.job_id, "stdout")?;
     let stderr_len_bytes = file_len(&paths.stderr_path, &params.job_id, "stderr")?;
+    let diagnostics =
+        shell_job_status_diagnostics(&job, running, stdout_len_bytes, stderr_len_bytes);
+    job.diagnostics = Some(diagnostics);
+    write_shell_job_status(&paths.status_path, &job)?;
     let stdout_tail = tail_file_lossy(&paths.stdout_path, tail_bytes)?;
     let stderr_tail = tail_file_lossy(&paths.stderr_path, tail_bytes)?;
     tracing::info!(
@@ -1657,6 +1701,12 @@ pub fn shell_job_status(
         running,
         stdout_len_bytes,
         stderr_len_bytes,
+        output_state = ?job.diagnostics.as_ref().map(|diagnostics| diagnostics.output_state.as_str()),
+        transfer_protocol_hint = ?job
+            .diagnostics
+            .as_ref()
+            .and_then(|diagnostics| diagnostics.transfer.as_ref())
+            .map(|transfer| transfer.protocol_hint.as_str()),
         "readback=act_run_shell_status after=status_file_and_process_table"
     );
     Ok(ActRunShellStatusResponse {
@@ -1674,6 +1724,231 @@ fn shell_job_process_still_running(job: &ActRunShellJobStatus) -> bool {
         && job
             .pid
             .is_some_and(|pid| shell_job_live_process_ids(&[pid]).contains(&pid))
+}
+
+fn shell_job_status_diagnostics(
+    job: &ActRunShellJobStatus,
+    running: bool,
+    stdout_len_bytes: u64,
+    stderr_len_bytes: u64,
+) -> ActRunShellJobDiagnostics {
+    let process_tree = shell_job_process_diagnostics(job.pid.filter(|_| running));
+    let output_state = shell_job_output_state(running, stdout_len_bytes, stderr_len_bytes);
+    let transfer = shell_job_transfer_diagnostics(job, &process_tree);
+    let mut actionable_hints = Vec::new();
+    if running && stdout_len_bytes == 0 && stderr_len_bytes == 0 {
+        actionable_hints.push(
+            "child_process_running_no_stdout_or_stderr_yet_check_process_tree_and_protocol"
+                .to_owned(),
+        );
+    }
+    if let Some(transfer) = &transfer {
+        actionable_hints.extend(transfer.suggested_next_steps.iter().cloned());
+    }
+    actionable_hints.sort();
+    actionable_hints.dedup();
+    ActRunShellJobDiagnostics {
+        checked_at: chrono::Utc::now().to_rfc3339(),
+        running,
+        elapsed_ms: elapsed_ms_since_rfc3339(&job.started_at),
+        stdout_len_bytes,
+        stderr_len_bytes,
+        output_state: output_state.to_owned(),
+        process_tree,
+        transfer,
+        actionable_hints,
+    }
+}
+
+fn shell_job_output_state(
+    running: bool,
+    stdout_len_bytes: u64,
+    stderr_len_bytes: u64,
+) -> &'static str {
+    match (running, stdout_len_bytes > 0, stderr_len_bytes > 0) {
+        (true, false, false) => "running_no_output",
+        (true, true, false) => "running_stdout_only",
+        (true, false, true) => "running_stderr_only",
+        (true, true, true) => "running_stdout_stderr",
+        (false, false, false) => "terminal_no_output",
+        (false, true, false) => "terminal_stdout_only",
+        (false, false, true) => "terminal_stderr_only",
+        (false, true, true) => "terminal_stdout_stderr",
+    }
+}
+
+fn shell_job_process_diagnostics(root_pid: Option<u32>) -> Vec<ActRunShellProcessDiagnostic> {
+    use sysinfo::{Pid, ProcessesToUpdate, System};
+
+    let Some(root_pid) = root_pid else {
+        return Vec::new();
+    };
+    let process_ids = shell_job_process_tree_ids(root_pid);
+    let pids = process_ids
+        .iter()
+        .copied()
+        .map(Pid::from_u32)
+        .collect::<Vec<_>>();
+    let mut system = System::new();
+    system.refresh_processes(ProcessesToUpdate::Some(&pids), true);
+    process_ids
+        .into_iter()
+        .filter_map(|pid| {
+            let process = system.process(Pid::from_u32(pid))?;
+            Some(ActRunShellProcessDiagnostic {
+                pid,
+                parent_pid: process.parent().map(|parent| parent.as_u32()),
+                name: process.name().to_string_lossy().into_owned(),
+            })
+        })
+        .collect()
+}
+
+fn shell_job_transfer_diagnostics(
+    job: &ActRunShellJobStatus,
+    process_tree: &[ActRunShellProcessDiagnostic],
+) -> Option<ActRunShellTransferDiagnostics> {
+    let (client, evidence) = shell_job_transfer_client(job, process_tree)?;
+    let protocol_hint = shell_transfer_protocol_hint(client, &job.args).to_owned();
+    let suggested_next_steps = shell_transfer_suggested_next_steps(client, &protocol_hint);
+    Some(ActRunShellTransferDiagnostics {
+        family: "ssh_file_transfer".to_owned(),
+        client: client.to_owned(),
+        protocol_hint,
+        remote_identity: shell_transfer_remote_identity(client, &job.args)
+            .or_else(|| job.remote_process_scope.remote_identity.clone()),
+        detection_evidence: evidence,
+        suggested_next_steps,
+    })
+}
+
+fn shell_job_transfer_client(
+    job: &ActRunShellJobStatus,
+    process_tree: &[ActRunShellProcessDiagnostic],
+) -> Option<(&'static str, Vec<String>)> {
+    if let Some(client) = ssh_family_client_for_executable(&job.command) {
+        return Some((
+            client,
+            vec![format!(
+                "direct_command_ssh_family:{client}:{}",
+                executable_leaf(&job.command)
+            )],
+        ));
+    }
+    for process in process_tree {
+        if let Some(client) = ssh_family_client_for_executable(&process.name) {
+            return Some((
+                client,
+                vec![format!(
+                    "process_tree_ssh_family:{client}:{}:{}",
+                    process.pid, process.name
+                )],
+            ));
+        }
+    }
+    None
+}
+
+fn shell_transfer_protocol_hint(client: &str, args: &[String]) -> &'static str {
+    match client {
+        "scp" if scp_legacy_protocol_forced(args) => "scp_legacy_protocol_forced_by_-O",
+        "scp" => "scp_default_sftp_protocol",
+        "sftp" => "sftp_protocol",
+        "ssh" => "ssh_remote_command_or_transport",
+        _ => "unknown_ssh_family_transport",
+    }
+}
+
+fn shell_transfer_suggested_next_steps(client: &str, protocol_hint: &str) -> Vec<String> {
+    let mut steps = Vec::new();
+    match client {
+        "scp" => {
+            if protocol_hint == "scp_default_sftp_protocol" {
+                steps.push("if_server_lacks_sftp_retry_scp_with_-O_legacy_protocol".to_owned());
+            }
+            steps.push(
+                "rerun_with_-v_to_surface_ssh_auth_subsystem_and_protocol_progress".to_owned(),
+            );
+            steps.push("check_remote_sftp_subsystem_auth_and_path_expansion".to_owned());
+        }
+        "sftp" => {
+            steps.push("rerun_with_-v_to_surface_sftp_subsystem_progress".to_owned());
+            steps.push("check_remote_sftp_subsystem_auth_and_path_permissions".to_owned());
+        }
+        "ssh" => {
+            steps.push("rerun_with_-v_or_batchmode_to_surface_ssh_auth_progress".to_owned());
+            steps.push("check_remote_command_tty_stdin_and_auth_prompts".to_owned());
+        }
+        _ => {}
+    }
+    steps
+}
+
+fn shell_transfer_remote_identity(client: &str, args: &[String]) -> Option<String> {
+    match client {
+        "ssh" | "sftp" => ssh_remote_identity(args),
+        "scp" => scp_remote_identity(args),
+        _ => None,
+    }
+}
+
+fn scp_legacy_protocol_forced(args: &[String]) -> bool {
+    args.iter().any(|arg| trim_arg_quotes(arg) == "-O")
+}
+
+fn scp_remote_identity(args: &[String]) -> Option<String> {
+    let mut index = 0;
+    let mut options_done = false;
+    while index < args.len() {
+        let arg = trim_arg_quotes(&args[index]);
+        if arg.is_empty() {
+            index += 1;
+            continue;
+        }
+        if !options_done && arg == "--" {
+            options_done = true;
+            index += 1;
+            continue;
+        }
+        if !options_done && arg.starts_with('-') && arg != "-" {
+            index += if scp_option_consumes_next(arg, args.get(index + 1)) {
+                2
+            } else {
+                1
+            };
+            continue;
+        }
+        if let Some(remote) = scp_remote_endpoint(arg) {
+            return Some(remote);
+        }
+        index += 1;
+    }
+    None
+}
+
+fn scp_option_consumes_next(arg: &str, next: Option<&String>) -> bool {
+    if arg.contains('=') || next.is_none() {
+        return false;
+    }
+    matches!(
+        arg,
+        "-c" | "-D" | "-F" | "-i" | "-J" | "-l" | "-o" | "-P" | "-S" | "-X"
+    )
+}
+
+fn scp_remote_endpoint(arg: &str) -> Option<String> {
+    if let Some(uri) = arg.strip_prefix("scp://") {
+        return uri
+            .split('/')
+            .next()
+            .filter(|endpoint| !endpoint.is_empty())
+            .map(ToOwned::to_owned);
+    }
+    let colon = arg.find(':')?;
+    if colon == 1 && arg.as_bytes().first().is_some_and(u8::is_ascii_alphabetic) {
+        return None;
+    }
+    (colon > 0).then(|| arg[..colon].to_owned())
 }
 
 pub fn cancel_shell_job(
@@ -5230,17 +5505,26 @@ fn normalize_shell_job_remote_process_scope(job: &mut ActRunShellJobStatus) {
     if job.remote_process_scope.transport != SHELL_REMOTE_TRANSPORT_LOCAL {
         return;
     }
-    if is_ssh_executable(&job.command) {
-        job.remote_process_scope =
-            ssh_remote_process_scope(&job.command, &job.args, "direct_command_ssh");
+    if let Some(client) = ssh_family_client_for_executable(&job.command) {
+        let evidence = if client == "ssh" {
+            "direct_command_ssh".to_owned()
+        } else {
+            format!("direct_command_ssh_family:{client}")
+        };
+        job.remote_process_scope = ssh_remote_process_scope(&job.command, &job.args, evidence);
     }
 }
 
 fn shell_job_remote_process_scope_from_start_params(
     params: &ActRunShellStartParams,
 ) -> ActRunShellRemoteProcessScope {
-    if is_ssh_executable(&params.command) {
-        ssh_remote_process_scope(&params.command, &params.args, "direct_command_ssh")
+    if let Some(client) = ssh_family_client_for_executable(&params.command) {
+        let evidence = if client == "ssh" {
+            "direct_command_ssh".to_owned()
+        } else {
+            format!("direct_command_ssh_family:{client}")
+        };
+        ssh_remote_process_scope(&params.command, &params.args, evidence)
     } else {
         ActRunShellRemoteProcessScope::default()
     }
@@ -5251,13 +5535,14 @@ fn ssh_remote_process_scope(
     args: &[String],
     evidence: impl Into<String>,
 ) -> ActRunShellRemoteProcessScope {
+    let client = ssh_family_client_for_executable(command).unwrap_or("ssh");
     ActRunShellRemoteProcessScope {
         transport: SHELL_REMOTE_TRANSPORT_SSH.to_owned(),
         local_process_scope: "local_ssh_client_process_tree".to_owned(),
         remote_cleanup_required: true,
         remote_cleanup_verified: false,
         remote_cleanup_status: SHELL_REMOTE_CLEANUP_NOT_TRACKED.to_owned(),
-        remote_identity: ssh_remote_identity(args),
+        remote_identity: shell_transfer_remote_identity(client, args),
         remote_process_id: None,
         remote_process_group_id: None,
         remote_cleanup_error_code: None,
@@ -5266,9 +5551,14 @@ fn ssh_remote_process_scope(
     }
 }
 
-fn is_ssh_executable(command: &str) -> bool {
+fn ssh_family_client_for_executable(command: &str) -> Option<&'static str> {
     let leaf = executable_leaf(command).to_ascii_lowercase();
-    leaf == "ssh" || leaf == "ssh.exe"
+    match leaf.as_str() {
+        "ssh" | "ssh.exe" => Some("ssh"),
+        "scp" | "scp.exe" => Some("scp"),
+        "sftp" | "sftp.exe" => Some("sftp"),
+        _ => None,
+    }
 }
 
 fn executable_leaf(command: &str) -> &str {
@@ -5377,7 +5667,8 @@ fn shell_job_ssh_process_evidence(process_ids: &[u32]) -> Vec<String> {
         .filter_map(|pid| {
             let process = system.process(Pid::from_u32(pid))?;
             let name = process.name().to_string_lossy();
-            is_ssh_executable(&name).then(|| format!("process_tree_ssh:{pid}:{name}"))
+            let client = ssh_family_client_for_executable(&name)?;
+            Some(format!("process_tree_ssh_family:{client}:{pid}:{name}"))
         })
         .collect()
 }
@@ -5463,7 +5754,7 @@ fn shell_job_status_record(
     context: Option<&ShellExecutionContext>,
 ) -> ActRunShellJobStatus {
     let status = ActRunShellJobStatus {
-        schema_version: 3,
+        schema_version: 4,
         job_id: job_id.to_owned(),
         session_id: context.map(|context| context.session_id().to_owned()),
         status: status.to_owned(),
@@ -5499,6 +5790,7 @@ fn shell_job_status_record(
         request_sha256: request_sha256.to_owned(),
         matched_pattern: authorization.matched_pattern.clone(),
         remote_process_scope: shell_job_remote_process_scope_from_start_params(params),
+        diagnostics: None,
     };
     shell_job_status_with_safe_command_metadata(&status)
 }
@@ -7966,6 +8258,90 @@ mod tests {
         );
         assert_eq!(background_identity.as_deref(), Some("aiwonder"));
         assert_eq!(config_identity.as_deref(), Some("aiwonder"));
+    }
+
+    #[test]
+    fn shell_status_diagnostics_classifies_scp_default_sftp_no_output() {
+        let temp = tempfile::TempDir::new()
+            .unwrap_or_else(|error| panic!("create temp shell status dir: {error}"));
+        let paths = ShellJobPaths {
+            job_dir: temp.path().to_path_buf(),
+            stdout_path: temp.path().join("stdout.log"),
+            stderr_path: temp.path().join("stderr.log"),
+            status_path: temp.path().join("status.json"),
+            request_path: temp.path().join("request.json"),
+        };
+        let params = ActRunShellStartParams {
+            command: "scp.exe".to_owned(),
+            args: vec![
+                "local.txt".to_owned(),
+                "aiwonder:/tmp/synapse885-local.txt".to_owned(),
+            ],
+            working_dir: None,
+            env: BTreeMap::new(),
+            timeout_ms: None,
+            job_id: Some("issue885-scp-diagnostics".to_owned()),
+        };
+        let authorization = RunShellAuthorization {
+            command_line: "scp.exe local.txt aiwonder:/tmp/synapse885-local.txt".to_owned(),
+            matched_pattern: "^scp".to_owned(),
+        };
+        let status = shell_job_status_record(
+            "issue885-scp-diagnostics",
+            "running",
+            &params,
+            &paths,
+            "request-sha",
+            &authorization,
+            "2026-06-12T00:00:00Z".to_owned(),
+            Some(1234),
+            None,
+        );
+
+        let diagnostics = shell_job_status_diagnostics(&status, true, 0, 0);
+        let transfer = diagnostics
+            .transfer
+            .as_ref()
+            .expect("scp diagnostics should identify transfer family");
+
+        println!(
+            "readback=act_run_shell_status edge=scp_default_sftp_no_output before=stdout:0,stderr:0,args:{:?} after={diagnostics:?}",
+            params.args
+        );
+        assert_eq!(diagnostics.output_state, "running_no_output");
+        assert_eq!(transfer.client, "scp");
+        assert_eq!(transfer.protocol_hint, "scp_default_sftp_protocol");
+        assert_eq!(transfer.remote_identity.as_deref(), Some("aiwonder"));
+        assert!(
+            diagnostics
+                .actionable_hints
+                .iter()
+                .any(|hint| hint.contains("retry_scp_with_-O"))
+        );
+        assert!(
+            diagnostics
+                .actionable_hints
+                .iter()
+                .any(|hint| hint.contains("rerun_with_-v"))
+        );
+    }
+
+    #[test]
+    fn shell_status_diagnostics_classifies_scp_legacy_o_flag() {
+        let args = vec![
+            "-O".to_owned(),
+            "local.txt".to_owned(),
+            "aiwonder:/tmp/synapse885-local.txt".to_owned(),
+        ];
+
+        let protocol_hint = shell_transfer_protocol_hint("scp", &args);
+        let remote_identity = scp_remote_identity(&args);
+
+        println!(
+            "readback=act_run_shell_status edge=scp_legacy_flag before=args:{args:?} after=protocol:{protocol_hint} remote:{remote_identity:?}"
+        );
+        assert_eq!(protocol_hint, "scp_legacy_protocol_forced_by_-O");
+        assert_eq!(remote_identity.as_deref(), Some("aiwonder"));
     }
 
     #[test]

@@ -169,7 +169,7 @@ impl SynapseService {
     }
 
     #[tool(
-        description = "Read durable background shell job status and tails of persisted stdout/stderr logs by job id. This is a separate source-of-truth readback and does not wait for the process to finish."
+        description = "Read durable background shell job status, no-output/stall diagnostics, process-tree summary, SSH/SCP/SFTP transfer hints, and tails of persisted stdout/stderr logs by job id. This is a separate source-of-truth readback and does not wait for the process to finish."
     )]
     pub async fn act_run_shell_status(
         &self,
