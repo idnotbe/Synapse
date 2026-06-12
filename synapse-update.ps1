@@ -32,6 +32,14 @@
       and puts it on PATH for the build. libclang is a BUILD-TIME-ONLY
       dependency; the running daemon never needs it.
     * It adds the `git pull` that the installer intentionally does not do.
+    * It sizes the build to the FULL machine. Cargo normally uses all logical
+      CPUs, but a user-level ~/.cargo/config.toml `[build] jobs = N` cap
+      silently serializes the build on any machine that has one (a jobs=1 cap
+      once turned the ~3-minute parallel RocksDB C++ compile into 15-20
+      minutes). This script sets CARGO_BUILD_JOBS — which outranks every
+      config file — to the host's logical CPU count, RAM-guarded so low-memory
+      machines don't swap. Cargo forwards the value to build scripts as
+      NUM_JOBS, which the `cc` crate uses to parallelize RocksDB's C++ build.
 
   PORTABILITY: nothing here is machine-specific. The repo location is the
   script's own folder, Visual Studio is located via the standard `vswhere`,
@@ -171,7 +179,35 @@ if (-not $NoPersistEnv) {
 }
 
 # ---------------------------------------------------------------------------
-# 3. BUILD + RECONNECT — hand off to the installer (build, install, restart the
+# 3. BUILD PARALLELISM — size the build to the full machine, on any machine.
+#    CARGO_BUILD_JOBS (env) outranks any `[build] jobs = N` cap in a user or
+#    repo config.toml, so this guarantees full-core builds regardless of local
+#    cargo configuration. The value also reaches build scripts as NUM_JOBS,
+#    parallelizing the RocksDB C++ compile. An explicit CARGO_BUILD_JOBS set
+#    by the caller for this session is honored untouched.
+# ---------------------------------------------------------------------------
+Step "Sizing build parallelism"
+if ($env:CARGO_BUILD_JOBS) {
+    Info "CARGO_BUILD_JOBS=$($env:CARGO_BUILD_JOBS) already set for this session; honoring it."
+} else {
+    $logicalCpus = [Environment]::ProcessorCount
+    $ramGb = [math]::Floor((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory / 1GB)
+    # Heavy rustc/cl.exe jobs peak around 1.5 GB each. On low-RAM machines cap
+    # the job count so the build doesn't swap — swapping costs far more time
+    # than running fewer jobs. On well-provisioned machines this never binds
+    # and every logical CPU gets a job.
+    $ramCappedJobs = [int][math]::Max(1, [math]::Floor($ramGb / 1.5))
+    $jobs = [int][math]::Min($logicalCpus, $ramCappedJobs)
+    $env:CARGO_BUILD_JOBS = "$jobs"
+    Info "build jobs: $jobs (logical CPUs: $logicalCpus, RAM: $ramGb GB)"
+}
+# cmake-driven -sys crates parallelize from this; harmless where unused.
+if (-not $env:CMAKE_BUILD_PARALLEL_LEVEL) {
+    $env:CMAKE_BUILD_PARALLEL_LEVEL = $env:CARGO_BUILD_JOBS
+}
+
+# ---------------------------------------------------------------------------
+# 4. BUILD + RECONNECT — hand off to the installer (build, install, restart the
 #    auto-start daemon, re-wire MCP clients, verify health).
 # ---------------------------------------------------------------------------
 Step "Rebuilding and reconnecting (scripts\synapse-setup.ps1)"

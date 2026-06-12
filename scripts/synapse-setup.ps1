@@ -2167,6 +2167,18 @@ if (-not $SkipBuild) {
     Step "Building synapse-mcp (release) from $SourceDir"
     New-Item -ItemType Directory -Force -Path $CargoTarget, $LogDir | Out-Null
     $env:CARGO_TARGET_DIR = $CargoTarget
+    if (-not $env:CARGO_BUILD_JOBS) {
+        # Full-machine parallelism even when setup runs directly (not via
+        # synapse-update.ps1). The env var outranks any `[build] jobs = N` cap
+        # in a user/repo cargo config.toml that would otherwise silently
+        # serialize the build; cargo forwards it to build scripts as NUM_JOBS,
+        # which parallelizes the RocksDB C++ compile. RAM-guarded (~1.5 GB per
+        # heavy rustc/cl.exe job) so low-memory machines don't swap.
+        $logicalCpus = [Environment]::ProcessorCount
+        $ramGb = [math]::Floor((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory / 1GB)
+        $env:CARGO_BUILD_JOBS = [string][int][math]::Min($logicalCpus, [math]::Max(1, [math]::Floor($ramGb / 1.5)))
+    }
+    Info "Build parallelism: CARGO_BUILD_JOBS=$($env:CARGO_BUILD_JOBS) (logical CPUs: $([Environment]::ProcessorCount))"
     $buildLog = Join-Path $LogDir 'setup-build.log'
     Info "Build process tree is job-owned; log: $buildLog"
     $buildExit = Invoke-SynapseProcessInKillOnCloseJob `
