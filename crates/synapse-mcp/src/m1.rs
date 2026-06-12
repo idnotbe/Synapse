@@ -34,8 +34,9 @@ pub use ocr::{
 };
 use search::{element_match, entity_match};
 pub use sources::{
-    FsRecentTracker, hidden_desktop_input_from_worker_snapshot, populate_clipboard_summary,
-    populate_fs_recent,
+    ClipboardTimelineSample, FsRecentTracker, FsTimelineEvent,
+    hidden_desktop_input_from_worker_snapshot, populate_clipboard_summary, populate_fs_recent,
+    timeline_clipboard_enabled, timeline_file_activity_enabled,
 };
 use sources::{
     element_input_from_id, platform_input, synthetic_notepad_input, window_input_from_hwnd,

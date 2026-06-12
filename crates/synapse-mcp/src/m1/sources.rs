@@ -6,7 +6,7 @@ use std::{
     time::Instant,
 };
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use rmcp::ErrorData;
 use sha2::{Digest as _, Sha256};
@@ -18,8 +18,12 @@ use synapse_core::{
 };
 use synapse_perception::ObservationInput;
 
+pub const TIMELINE_CLIPBOARD_ENV: &str = "SYNAPSE_TIMELINE_CLIPBOARD";
+pub const TIMELINE_FILE_ACTIVITY_ENV: &str = "SYNAPSE_TIMELINE_FILE_ACTIVITY";
 const FS_WATCH_ROOT_ENV: &str = "SYNAPSE_FS_WATCH_ROOT";
-const MAX_FS_RECENT_EVENTS: usize = 5;
+const FS_WATCH_ROOTS_ENV: &str = "SYNAPSE_FS_WATCH_ROOTS";
+const MAX_CLIPBOARD_SNIPPET_CHARS: usize = 256;
+const MAX_FS_RECENT_EVENTS: usize = 32;
 #[cfg(windows)]
 const CHROMIUM_RENDERER_UIA_SUPPLEMENT_MAX_NODES: usize = 160;
 #[cfg(windows)]
@@ -120,22 +124,52 @@ pub fn synthetic_notepad_input() -> ObservationInput {
     }
 }
 
-pub fn populate_clipboard_summary(input: &mut ObservationInput) {
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ClipboardTimelineSample {
+    pub formats: Vec<String>,
+    pub text_len: u32,
+    pub snippet: String,
+    pub text_sha256: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FsTimelineEvent {
+    pub at: DateTime<Utc>,
+    pub path: String,
+    pub kind: FsEventKind,
+    pub size_bytes: Option<u64>,
+}
+
+pub fn timeline_clipboard_enabled() -> bool {
+    env_bool_default_true(TIMELINE_CLIPBOARD_ENV)
+}
+
+pub fn timeline_file_activity_enabled() -> bool {
+    env_bool_default_true(TIMELINE_FILE_ACTIVITY_ENV)
+}
+
+pub fn populate_clipboard_summary(input: &mut ObservationInput) -> Option<ClipboardTimelineSample> {
     let started = Instant::now();
-    let summary = match read_clipboard_text(ClipboardFormat::Unicode) {
-        Ok(text) => clipboard_summary_from_text(&text),
+    let (summary, sample) = match read_clipboard_text(ClipboardFormat::Unicode) {
+        Ok(text) => (
+            clipboard_summary_from_text(&text),
+            clipboard_timeline_sample_from_text(&text),
+        ),
         Err(error) => {
             tracing::debug!(
                 code = "OBSERVE_CLIPBOARD_READ_FAILED",
                 error = %error,
                 "clipboard summary read failed"
             );
-            ClipboardSummary {
-                formats: Vec::new(),
-                text_len: None,
-                text_excerpt: None,
-                redacted: true,
-            }
+            (
+                ClipboardSummary {
+                    formats: Vec::new(),
+                    text_len: None,
+                    text_excerpt: None,
+                    redacted: true,
+                },
+                None,
+            )
         }
     };
     input.sensor_latency_ms.insert(
@@ -143,6 +177,7 @@ pub fn populate_clipboard_summary(input: &mut ObservationInput) {
         started.elapsed().as_secs_f32() * 1000.0,
     );
     input.clipboard_summary = Some(summary);
+    sample
 }
 
 fn clipboard_summary_from_text(text: &str) -> ClipboardSummary {
@@ -159,6 +194,40 @@ fn clipboard_summary_from_text(text: &str) -> ClipboardSummary {
         text_len: Some(len_to_u32(text.chars().count())),
         text_excerpt: Some(sha256_hex(text.as_bytes())),
         redacted: true,
+    }
+}
+
+fn clipboard_timeline_sample_from_text(text: &str) -> Option<ClipboardTimelineSample> {
+    if !timeline_clipboard_enabled() || text.is_empty() {
+        return None;
+    }
+    let text_len = len_to_u32(text.chars().count());
+    let snippet: String = text.chars().take(MAX_CLIPBOARD_SNIPPET_CHARS).collect();
+    Some(ClipboardTimelineSample {
+        formats: vec!["text/plain".to_owned(), "text/unicode".to_owned()],
+        text_len,
+        snippet,
+        text_sha256: sha256_hex(text.as_bytes()),
+    })
+}
+
+fn env_bool_default_true(name: &str) -> bool {
+    let Some(value) = std::env::var_os(name) else {
+        return true;
+    };
+    let value = value.to_string_lossy();
+    match value.trim().to_ascii_lowercase().as_str() {
+        "" | "1" | "true" | "yes" | "on" => true,
+        "0" | "false" | "no" | "off" => false,
+        other => {
+            tracing::warn!(
+                code = "TIMELINE_CONFIG_INVALID_BOOL",
+                env = name,
+                value = other,
+                "timeline enrichment env flag is invalid; disabling that feed"
+            );
+            false
+        }
     }
 }
 
@@ -211,6 +280,15 @@ mod tests {
     }
 
     #[test]
+    fn clipboard_timeline_sample_keeps_plaintext_snippet() {
+        let sample = clipboard_timeline_sample_from_text("issue839-known-clipboard").unwrap();
+
+        assert_eq!(sample.snippet, "issue839-known-clipboard");
+        assert_eq!(sample.text_len, 24);
+        assert!(sample.text_sha256.starts_with("sha256:"));
+    }
+
+    #[test]
     fn fs_path_token_hashes_without_raw_path() {
         let root = PathBuf::from(r"C:\synapse-fsv");
         let path = root.join("nested").join("known.txt");
@@ -220,6 +298,16 @@ mod tests {
         assert!(token.starts_with("sha256:"));
         assert!(!token.contains("known.txt"));
         assert!(!token.contains("synapse-fsv"));
+    }
+
+    #[test]
+    fn fs_timeline_path_text_strips_windows_verbatim_prefix() {
+        let path = PathBuf::from(r"\\?\C:\Users\hotra\Documents\issue839.txt");
+
+        assert_eq!(
+            fs_timeline_path_text(&path),
+            r"C:\Users\hotra\Documents\issue839.txt"
+        );
     }
 
     #[test]
@@ -414,7 +502,7 @@ mod tests {
 }
 
 pub struct FsRecentTracker {
-    root: Option<PathBuf>,
+    roots: Vec<PathBuf>,
     rx: Option<mpsc::Receiver<notify::Result<notify::Event>>>,
     _watcher: Option<RecommendedWatcher>,
     disabled_reason: Option<String>,
@@ -423,7 +511,7 @@ pub struct FsRecentTracker {
 impl fmt::Debug for FsRecentTracker {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("FsRecentTracker")
-            .field("root", &self.root)
+            .field("roots", &self.roots)
             .field("enabled", &self.rx.is_some())
             .field("disabled_reason", &self.disabled_reason)
             .finish_non_exhaustive()
@@ -433,14 +521,14 @@ impl fmt::Debug for FsRecentTracker {
 impl FsRecentTracker {
     #[must_use]
     pub fn from_env() -> Self {
-        let Some(root) = std::env::var_os(FS_WATCH_ROOT_ENV) else {
-            return Self::disabled(None);
-        };
-        let raw_root = PathBuf::from(root);
-        if raw_root.as_os_str().is_empty() {
+        if !timeline_file_activity_enabled() {
             return Self::disabled(None);
         }
-        match Self::watch(&raw_root) {
+        let roots = fs_watch_roots_from_env();
+        if roots.is_empty() {
+            return Self::disabled(None);
+        }
+        match Self::watch(&roots) {
             Ok(tracker) => tracker,
             Err(error) => {
                 tracing::debug!(
@@ -453,18 +541,36 @@ impl FsRecentTracker {
         }
     }
 
-    fn watch(root: &Path) -> anyhow::Result<Self> {
-        let root = fs::canonicalize(root)?;
-        if !root.is_dir() {
-            anyhow::bail!("{} is not a directory", root.display());
+    fn watch(raw_roots: &[PathBuf]) -> anyhow::Result<Self> {
+        let mut roots = Vec::new();
+        for raw_root in raw_roots {
+            match fs::canonicalize(raw_root) {
+                Ok(root) if root.is_dir() && !roots.contains(&root) => roots.push(root),
+                Ok(root) => tracing::debug!(
+                    code = "OBSERVE_FS_WATCH_ROOT_SKIPPED",
+                    root = %root.display(),
+                    "filesystem summary root is not a directory or is duplicate"
+                ),
+                Err(error) => tracing::debug!(
+                    code = "OBSERVE_FS_WATCH_ROOT_UNAVAILABLE",
+                    root = %raw_root.display(),
+                    error = %error,
+                    "filesystem summary root is unavailable"
+                ),
+            }
+        }
+        if roots.is_empty() {
+            anyhow::bail!("no configured filesystem summary roots are available");
         }
         let (tx, rx) = mpsc::channel();
         let mut watcher = notify::recommended_watcher(move |event| {
             let _ = tx.send(event);
         })?;
-        watcher.watch(&root, RecursiveMode::NonRecursive)?;
+        for root in &roots {
+            watcher.watch(root, RecursiveMode::Recursive)?;
+        }
         Ok(Self {
-            root: Some(root),
+            roots,
             rx: Some(rx),
             _watcher: Some(watcher),
             disabled_reason: None,
@@ -477,30 +583,34 @@ impl FsRecentTracker {
     )]
     fn disabled(reason: Option<String>) -> Self {
         Self {
-            root: None,
+            roots: Vec::new(),
             rx: None,
             _watcher: None,
             disabled_reason: reason,
         }
     }
 
-    pub fn populate(&self, input: &mut ObservationInput) {
+    pub fn populate(&self, input: &mut ObservationInput) -> Vec<FsTimelineEvent> {
         let started = Instant::now();
         let events = self.drain_events();
         input
             .sensor_latency_ms
             .insert("fs".to_owned(), started.elapsed().as_secs_f32() * 1000.0);
-        input.fs_recent = events;
+        input.fs_recent = events
+            .iter()
+            .map(|event| event.observation.clone())
+            .collect();
+        events.into_iter().map(|event| event.timeline).collect()
     }
 
-    fn drain_events(&self) -> Vec<FsEvent> {
-        let (Some(root), Some(rx)) = (self.root.as_deref(), self.rx.as_ref()) else {
+    fn drain_events(&self) -> Vec<FsObservedEvent> {
+        let Some(rx) = self.rx.as_ref() else {
             return Vec::new();
         };
         let mut events = Vec::new();
         while let Ok(result) = rx.try_recv() {
             match result {
-                Ok(event) => events.extend(fs_events_from_notify(root, &event)),
+                Ok(event) => events.extend(fs_events_from_notify(&self.roots, &event)),
                 Err(error) => tracing::debug!(
                     code = "OBSERVE_FS_WATCH_EVENT_FAILED",
                     error = %error,
@@ -508,7 +618,7 @@ impl FsRecentTracker {
                 ),
             }
         }
-        let mut events = coalesce_fs_events(events);
+        let mut events = coalesce_fs_observed_events(events);
         if events.len() > MAX_FS_RECENT_EVENTS {
             events.drain(0..events.len() - MAX_FS_RECENT_EVENTS);
         }
@@ -516,11 +626,20 @@ impl FsRecentTracker {
     }
 }
 
-pub fn populate_fs_recent(input: &mut ObservationInput, tracker: &FsRecentTracker) {
-    tracker.populate(input);
+pub fn populate_fs_recent(
+    input: &mut ObservationInput,
+    tracker: &FsRecentTracker,
+) -> Vec<FsTimelineEvent> {
+    tracker.populate(input)
 }
 
-fn fs_events_from_notify(root: &Path, event: &notify::Event) -> Vec<FsEvent> {
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct FsObservedEvent {
+    observation: FsEvent,
+    timeline: FsTimelineEvent,
+}
+
+fn fs_events_from_notify(roots: &[PathBuf], event: &notify::Event) -> Vec<FsObservedEvent> {
     let Some(kind) = fs_event_kind(event.kind) else {
         return Vec::new();
     };
@@ -528,16 +647,30 @@ fn fs_events_from_notify(root: &Path, event: &notify::Event) -> Vec<FsEvent> {
     event
         .paths
         .iter()
-        .filter(|path| path_stays_under_root(root, path))
-        .map(|path| FsEvent {
-            at,
-            path: redacted_fs_path_token(root, path),
-            kind,
-            size_bytes: fs_event_size(path, kind),
+        .filter_map(|path| {
+            let root = event_root_for_path(roots, path)?;
+            let full_path = fs_event_full_path(path);
+            let full_path_text = fs_timeline_path_text(&full_path);
+            let size_bytes = fs_event_size(&full_path, kind);
+            Some(FsObservedEvent {
+                observation: FsEvent {
+                    at,
+                    path: redacted_fs_path_token(root, &full_path),
+                    kind,
+                    size_bytes,
+                },
+                timeline: FsTimelineEvent {
+                    at,
+                    path: full_path_text,
+                    kind,
+                    size_bytes,
+                },
+            })
         })
         .collect()
 }
 
+#[cfg(test)]
 fn coalesce_fs_events(events: Vec<FsEvent>) -> Vec<FsEvent> {
     let mut by_path = BTreeMap::<String, FsEvent>::new();
     for event in events {
@@ -548,6 +681,27 @@ fn coalesce_fs_events(events: Vec<FsEvent>) -> Vec<FsEvent> {
                 existing.kind = coalesced_fs_kind(existing.kind, event.kind);
                 if event.size_bytes.is_some() || existing.kind == FsEventKind::Deleted {
                     existing.size_bytes = event.size_bytes;
+                }
+            })
+            .or_insert(event);
+    }
+    by_path.into_values().collect()
+}
+
+fn coalesce_fs_observed_events(events: Vec<FsObservedEvent>) -> Vec<FsObservedEvent> {
+    let mut by_path = BTreeMap::<String, FsObservedEvent>::new();
+    for event in events {
+        by_path
+            .entry(event.timeline.path.clone())
+            .and_modify(|existing| {
+                existing.observation.at = event.observation.at;
+                existing.timeline.at = event.timeline.at;
+                let kind = coalesced_fs_kind(existing.timeline.kind, event.timeline.kind);
+                existing.observation.kind = kind;
+                existing.timeline.kind = kind;
+                if event.timeline.size_bytes.is_some() || kind == FsEventKind::Deleted {
+                    existing.observation.size_bytes = event.observation.size_bytes;
+                    existing.timeline.size_bytes = event.timeline.size_bytes;
                 }
             })
             .or_insert(event);
@@ -575,14 +729,27 @@ const fn fs_event_kind(kind: notify::EventKind) -> Option<FsEventKind> {
     }
 }
 
-fn path_stays_under_root(root: &Path, path: &Path) -> bool {
-    path.starts_with(root)
+fn event_root_for_path<'a>(roots: &'a [PathBuf], path: &Path) -> Option<&'a Path> {
+    roots
+        .iter()
+        .map(PathBuf::as_path)
+        .find(|root| path.starts_with(root))
 }
 
 fn redacted_fs_path_token(root: &Path, path: &Path) -> String {
     let relative = path.strip_prefix(root).unwrap_or(path);
     let normalized = relative.to_string_lossy().replace('\\', "/");
     sha256_hex(normalized.as_bytes())
+}
+
+fn fs_event_full_path(path: &Path) -> PathBuf {
+    path.canonicalize()
+        .unwrap_or_else(|_error| path.to_path_buf())
+}
+
+fn fs_timeline_path_text(path: &Path) -> String {
+    let text = path.to_string_lossy();
+    text.strip_prefix(r"\\?\").unwrap_or(&text).to_owned()
 }
 
 fn fs_event_size(path: &Path, kind: FsEventKind) -> Option<u64> {
@@ -593,6 +760,41 @@ fn fs_event_size(path: &Path, kind: FsEventKind) -> Option<u64> {
         .ok()
         .filter(std::fs::Metadata::is_file)
         .map(|metadata| metadata.len())
+}
+
+fn fs_watch_roots_from_env() -> Vec<PathBuf> {
+    if let Some(raw_roots) = std::env::var_os(FS_WATCH_ROOTS_ENV) {
+        return split_root_list(&raw_roots.to_string_lossy());
+    }
+    if let Some(raw_root) = std::env::var_os(FS_WATCH_ROOT_ENV) {
+        let raw = raw_root.to_string_lossy().trim().to_owned();
+        if raw.is_empty() {
+            return Vec::new();
+        }
+        return vec![PathBuf::from(raw)];
+    }
+    default_user_document_roots()
+}
+
+fn split_root_list(raw_roots: &str) -> Vec<PathBuf> {
+    raw_roots
+        .split(';')
+        .map(str::trim)
+        .map(|entry| entry.trim_matches('"'))
+        .filter(|entry| !entry.is_empty())
+        .map(PathBuf::from)
+        .collect()
+}
+
+fn default_user_document_roots() -> Vec<PathBuf> {
+    let Some(user_profile) = std::env::var_os("USERPROFILE") else {
+        return Vec::new();
+    };
+    let user_profile = PathBuf::from(user_profile);
+    ["Desktop", "Documents", "Downloads"]
+        .into_iter()
+        .map(|name| user_profile.join(name))
+        .collect()
 }
 
 fn node(sequence: u32, depth: u32, name: &str, role: &str, focused: bool) -> AccessibleNode {

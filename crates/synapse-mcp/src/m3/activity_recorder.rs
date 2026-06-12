@@ -39,7 +39,9 @@ use anyhow::{Context, Result, bail};
 use chrono::Utc;
 use serde_json::json;
 use synapse_a11y::{AccessibleEvent, AccessibleEventKind};
-use synapse_core::types::{TIMELINE_RECORD_VERSION, TimelineActor, TimelineKind, TimelineRecord};
+use synapse_core::types::{
+    FsEventKind, Observation, TIMELINE_RECORD_VERSION, TimelineActor, TimelineKind, TimelineRecord,
+};
 use synapse_storage::{Db, cf, timeline::timeline_key};
 use tokio::{
     sync::{mpsc, oneshot},
@@ -47,6 +49,10 @@ use tokio::{
 };
 
 use super::timeline_control::{RecorderControl, SuppressReason};
+use crate::m1::{
+    ClipboardTimelineSample, FsTimelineEvent, timeline_clipboard_enabled,
+    timeline_file_activity_enabled,
+};
 
 /// Idle threshold override, in milliseconds. Default mirrors ActivityWatch.
 pub const IDLE_TIMEOUT_ENV: &str = "SYNAPSE_TIMELINE_IDLE_TIMEOUT_MS";
@@ -752,6 +758,7 @@ pub struct ActivityRecorder {
     sender: mpsc::UnboundedSender<RecorderMessage>,
     writer: TimelineWriter,
     config: RecorderConfig,
+    last_clipboard_sha256: Mutex<Option<String>>,
     shutdown_requested: AtomicBool,
     sink_closed_logged: AtomicBool,
     worker: Mutex<Option<JoinHandle<()>>>,
@@ -864,6 +871,7 @@ impl ActivityRecorder {
             sender,
             writer,
             config,
+            last_clipboard_sha256: Mutex::new(None),
             shutdown_requested: AtomicBool::new(false),
             sink_closed_logged: AtomicBool::new(false),
             worker: Mutex::new(Some(worker)),
@@ -890,6 +898,29 @@ impl ActivityRecorder {
                 code = "TIMELINE_RECORDER_DOWN",
                 "activity recorder worker is gone; foreground timeline rows are no longer recorded"
             );
+        }
+    }
+
+    /// Records observation-derived enrichment feeds (#839): plaintext
+    /// clipboard snippets and full file-activity paths in `CF_TIMELINE`.
+    ///
+    /// Observation/audit CFs stay redacted; this method writes only the
+    /// operator-decided plaintext timeline rows.
+    pub fn record_observation_enrichment(
+        &self,
+        observation: &Observation,
+        clipboard: Option<&ClipboardTimelineSample>,
+        fs_events: &[FsTimelineEvent],
+    ) {
+        let mut wrote_any = false;
+        if let Some(sample) = clipboard {
+            wrote_any |= self.record_clipboard_sample(observation, sample);
+        }
+        for event in fs_events {
+            wrote_any |= self.record_file_activity(observation, event);
+        }
+        if wrote_any {
+            self.writer.flush_logged();
         }
     }
 
@@ -932,6 +963,105 @@ impl ActivityRecorder {
                     worker.abort();
                 }
                 self.write_session_end_direct("shutdown_timeout");
+            }
+        }
+    }
+
+    fn record_clipboard_sample(
+        &self,
+        observation: &Observation,
+        sample: &ClipboardTimelineSample,
+    ) -> bool {
+        if !timeline_clipboard_enabled() {
+            return false;
+        }
+        if self.writer.suppressed(
+            TimelineKind::Clipboard,
+            Some(&observation.foreground.process_name),
+        ) {
+            return false;
+        }
+        let mut last = match self.last_clipboard_sha256.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if last.as_deref() == Some(sample.text_sha256.as_str()) {
+            return false;
+        }
+        let payload = json!({
+            "snippet": sample.snippet.as_str(),
+            "text_len": sample.text_len,
+            "text_sha256": sample.text_sha256.as_str(),
+            "formats": &sample.formats,
+            "source_app": observation.foreground.process_name.as_str(),
+            "source_process_path": observation.foreground.process_path.as_str(),
+            "source_pid": observation.foreground.pid,
+            "source_hwnd": observation.foreground.hwnd,
+            "source_window_title": observation.foreground.window_title.as_str(),
+            "observation_seq": observation.seq,
+        });
+        match self.writer.try_write(
+            now_ts_ns(),
+            TimelineKind::Clipboard,
+            current_actor(),
+            Some(observation.foreground.process_name.clone()),
+            payload,
+        ) {
+            Ok(()) => {
+                *last = Some(sample.text_sha256.clone());
+                true
+            }
+            Err(error) => {
+                self.writer.write_failures.fetch_add(1, Ordering::Relaxed);
+                tracing::error!(
+                    code = "TIMELINE_CLIPBOARD_WRITE_FAILED",
+                    detail = %format!("{error:#}"),
+                    "failed to persist clipboard timeline row"
+                );
+                false
+            }
+        }
+    }
+
+    fn record_file_activity(&self, observation: &Observation, event: &FsTimelineEvent) -> bool {
+        if !timeline_file_activity_enabled() {
+            return false;
+        }
+        if self.writer.suppressed(
+            TimelineKind::FileActivity,
+            Some(&observation.foreground.process_name),
+        ) {
+            return false;
+        }
+        let payload = json!({
+            "path": event.path.as_str(),
+            "event_kind": fs_event_kind_name(event.kind),
+            "size_bytes": event.size_bytes,
+            "observed_at": event.at.to_rfc3339(),
+            "source_app": observation.foreground.process_name.as_str(),
+            "source_process_path": observation.foreground.process_path.as_str(),
+            "source_pid": observation.foreground.pid,
+            "source_hwnd": observation.foreground.hwnd,
+            "source_window_title": observation.foreground.window_title.as_str(),
+            "observation_seq": observation.seq,
+        });
+        match self.writer.try_write(
+            now_ts_ns(),
+            TimelineKind::FileActivity,
+            current_actor(),
+            Some(observation.foreground.process_name.clone()),
+            payload,
+        ) {
+            Ok(()) => true,
+            Err(error) => {
+                self.writer.write_failures.fetch_add(1, Ordering::Relaxed);
+                tracing::error!(
+                    code = "TIMELINE_FILE_ACTIVITY_WRITE_FAILED",
+                    detail = %format!("{error:#}"),
+                    path = %event.path,
+                    "failed to persist file-activity timeline row"
+                );
+                false
             }
         }
     }
@@ -1007,6 +1137,15 @@ impl ActivityRecorder {
     }
 }
 
+const fn fs_event_kind_name(kind: FsEventKind) -> &'static str {
+    match kind {
+        FsEventKind::Created => "created",
+        FsEventKind::Modified => "modified",
+        FsEventKind::Deleted => "deleted",
+        FsEventKind::Renamed => "renamed",
+    }
+}
+
 impl Drop for ActivityRecorder {
     fn drop(&mut self) {
         if let Some(probe) = self.take_task(&self.idle_probe) {
@@ -1026,6 +1165,7 @@ impl Drop for ActivityRecorder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use synapse_core::types::Rect;
 
     fn snapshot(hwnd: i64, pid: u32, title: &str) -> ForegroundSnapshot {
         ForegroundSnapshot {
@@ -1034,6 +1174,126 @@ mod tests {
             process_name: "test.exe".to_owned(),
             process_path: r"C:\test.exe".to_owned(),
             title: title.to_owned(),
+        }
+    }
+
+    fn foreground(
+        hwnd: i64,
+        pid: u32,
+        process_name: &str,
+        title: &str,
+    ) -> synapse_core::ForegroundContext {
+        synapse_core::ForegroundContext {
+            hwnd,
+            pid,
+            process_name: process_name.to_owned(),
+            process_path: format!(r"C:\Program Files\{process_name}"),
+            window_title: title.to_owned(),
+            window_bounds: Rect {
+                x: 10,
+                y: 20,
+                w: 800,
+                h: 600,
+            },
+            monitor_index: 0,
+            dpi_scale: 1.0,
+            profile_id: None,
+            steam_appid: None,
+            is_fullscreen: false,
+            is_dwm_composed: true,
+        }
+    }
+
+    fn temp_writer() -> (tempfile::TempDir, TimelineWriter) {
+        let dir = tempfile::tempdir().unwrap_or_else(|error| panic!("tempdir: {error}"));
+        let db = Arc::new(
+            Db::open(dir.path(), synapse_core::SCHEMA_VERSION)
+                .unwrap_or_else(|error| panic!("open temp db: {error}")),
+        );
+        let control = Arc::new(
+            RecorderControl::hydrate(&db).unwrap_or_else(|error| panic!("hydrate: {error:#}")),
+        );
+        let writer = TimelineWriter {
+            db,
+            control,
+            seq: Arc::new(AtomicU32::new(0)),
+            rows_written: Arc::new(AtomicU64::new(0)),
+            write_failures: Arc::new(AtomicU64::new(0)),
+            rows_suppressed_paused: Arc::new(AtomicU64::new(0)),
+            rows_suppressed_excluded: Arc::new(AtomicU64::new(0)),
+        };
+        (dir, writer)
+    }
+
+    fn timeline_records(writer: &TimelineWriter) -> Vec<TimelineRecord> {
+        writer
+            .db
+            .flush()
+            .unwrap_or_else(|error| panic!("flush: {error}"));
+        writer
+            .db
+            .scan_cf(cf::CF_TIMELINE)
+            .unwrap_or_else(|error| panic!("scan: {error}"))
+            .into_iter()
+            .map(|(_key, value)| {
+                serde_json::from_slice(&value).unwrap_or_else(|error| panic!("decode: {error}"))
+            })
+            .collect()
+    }
+
+    fn recorder_for_writer(writer: TimelineWriter) -> ActivityRecorder {
+        let (sender, _receiver) = mpsc::unbounded_channel();
+        ActivityRecorder {
+            sender,
+            writer,
+            config: RecorderConfig {
+                idle_timeout_ms: DEFAULT_IDLE_TIMEOUT_MS,
+                idle_poll_interval_ms: MAX_IDLE_POLL_INTERVAL_MS,
+            },
+            last_clipboard_sha256: Mutex::new(None),
+            shutdown_requested: AtomicBool::new(true),
+            sink_closed_logged: AtomicBool::new(false),
+            worker: Mutex::new(None),
+            idle_probe: Mutex::new(None),
+        }
+    }
+
+    fn observation(context: synapse_core::ForegroundContext) -> Observation {
+        Observation {
+            seq: 839,
+            at: Utc::now(),
+            mode: synapse_core::PerceptionMode::A11yOnly,
+            foreground: context,
+            focused: None,
+            elements: Vec::new(),
+            entities: Vec::new(),
+            hud: synapse_core::HudReadings::default(),
+            audio: synapse_core::AudioContext::default(),
+            recent_events: Vec::new(),
+            clipboard_summary: None,
+            fs_recent: Vec::new(),
+            diagnostics: synapse_core::ObservationDiagnostics {
+                assembled_in_ms: 0.0,
+                sensor_latency_ms: std::collections::BTreeMap::new(),
+                a11y_enabled: false,
+                pixel_enabled: false,
+                audio_enabled: false,
+                a11y_status: synapse_core::SensorStatus::Healthy,
+                capture_status: synapse_core::SensorStatus::Disabled,
+                detection_status: synapse_core::SensorStatus::Disabled,
+                audio_status: synapse_core::SensorStatus::Disabled,
+                is_minimized: false,
+                capture_config: None,
+                capture_runtime: None,
+                input_backends: None,
+                cdp: None,
+                web_path: None,
+                elements_truncated: false,
+                elements_page: None,
+                entities_truncated: false,
+                size_bytes: 0,
+                size_estimate_tokens: 0,
+            },
         }
     }
 
@@ -1096,6 +1356,69 @@ mod tests {
             ForegroundTransition::Switched,
             "hwnd reuse by a different pid is a switch"
         );
+    }
+
+    #[test]
+    fn clipboard_enrichment_writes_plaintext_snippet_and_dedupes() {
+        let (_dir, writer) = temp_writer();
+        let recorder = recorder_for_writer(writer.clone());
+        let observation = observation(foreground(
+            83901,
+            839,
+            "notepad.exe",
+            "issue839 clipboard source - Notepad",
+        ));
+        let sample = ClipboardTimelineSample {
+            formats: vec!["text/plain".to_owned(), "text/unicode".to_owned()],
+            text_len: 28,
+            snippet: "issue839-plain-clipboard-row".to_owned(),
+            text_sha256: "sha256:issue839clipboard".to_owned(),
+        };
+
+        recorder.record_observation_enrichment(&observation, Some(&sample), &[]);
+        recorder.record_observation_enrichment(&observation, Some(&sample), &[]);
+        let records = timeline_records(&writer);
+        println!("readback=timeline_enrichment edge=clipboard after={records:?}");
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].kind, TimelineKind::Clipboard);
+        assert_eq!(records[0].app.as_deref(), Some("notepad.exe"));
+        assert_eq!(
+            records[0].payload["snippet"],
+            "issue839-plain-clipboard-row"
+        );
+        assert_eq!(records[0].payload["source_app"], "notepad.exe");
+        assert_eq!(records[0].payload["observation_seq"], 839);
+    }
+
+    #[test]
+    fn file_activity_enrichment_writes_full_path() {
+        let (_dir, writer) = temp_writer();
+        let recorder = recorder_for_writer(writer.clone());
+        let observation = observation(foreground(
+            83902,
+            840,
+            "notepad.exe",
+            "issue839 file source - Notepad",
+        ));
+        let path = r"C:\Users\hotra\Documents\issue839-known-save.txt";
+        let event = FsTimelineEvent {
+            at: Utc::now(),
+            path: path.to_owned(),
+            kind: FsEventKind::Modified,
+            size_bytes: Some(42),
+        };
+
+        recorder.record_observation_enrichment(&observation, None, &[event]);
+        let records = timeline_records(&writer);
+        println!("readback=timeline_enrichment edge=file_activity after={records:?}");
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].kind, TimelineKind::FileActivity);
+        assert_eq!(records[0].app.as_deref(), Some("notepad.exe"));
+        assert_eq!(records[0].payload["path"], path);
+        assert_eq!(records[0].payload["event_kind"], "modified");
+        assert_eq!(records[0].payload["size_bytes"], 42);
     }
 
     #[cfg(windows)]

@@ -12,7 +12,10 @@ use super::{
     set_capture_target_in_state, set_perception_mode_in_state, set_target_input_schema, tool,
     tool_router,
 };
-use crate::m1::{effective_ocr_backend, hidden_desktop_input_from_worker_snapshot};
+use crate::m1::{
+    ClipboardTimelineSample, FsTimelineEvent, effective_ocr_backend,
+    hidden_desktop_input_from_worker_snapshot,
+};
 use rmcp::{RoleServer, service::RequestContext};
 
 use std::{
@@ -117,6 +120,7 @@ impl SynapseService {
         } else {
             target_cdp_id(&target)
         };
+        let mut fs_timeline_events = Vec::new();
         // Scope the (non-Send) state guard so it is released before any await.
         let mut input = {
             let state = self.m1_state()?;
@@ -140,7 +144,7 @@ impl SynapseService {
                 Err(error) => return Err(error),
             };
             if include.fs && input.fs_recent.is_empty() {
-                populate_fs_recent(&mut input, &state.fs_recent_tracker);
+                fs_timeline_events = populate_fs_recent(&mut input, &state.fs_recent_tracker);
             }
             input
         };
@@ -177,9 +181,11 @@ impl SynapseService {
         if include.diagnostics {
             self.populate_input_backend_diagnostics(&mut input);
         }
-        if include.clipboard && input.clipboard_summary.is_none() {
-            populate_clipboard_summary(&mut input);
-        }
+        let clipboard_timeline_sample = if include.clipboard && input.clipboard_summary.is_none() {
+            populate_clipboard_summary(&mut input)
+        } else {
+            None
+        };
         self.resolve_input_profile_and_hud(&mut input, include.hud);
         if include.events {
             self.populate_everquest_log_events(&mut input);
@@ -196,7 +202,38 @@ impl SynapseService {
         state.last_observed_foreground = Some(observation.foreground.clone());
         drop(state);
         self.persist_observation_for_mcp_session(&observation, "observe", mcp_session_id)?;
+        self.record_timeline_enrichments(
+            &observation,
+            clipboard_timeline_sample.as_ref(),
+            &fs_timeline_events,
+        )?;
         Ok(Json(observation))
+    }
+
+    fn record_timeline_enrichments(
+        &self,
+        observation: &synapse_core::Observation,
+        clipboard: Option<&ClipboardTimelineSample>,
+        fs_events: &[FsTimelineEvent],
+    ) -> Result<(), ErrorData> {
+        if clipboard.is_none() && fs_events.is_empty() {
+            return Ok(());
+        }
+        let recorder = self
+            .m3_state
+            .lock()
+            .map_err(|_error| {
+                mcp_error(
+                    error_codes::TOOL_INTERNAL_ERROR,
+                    "M3 service state lock poisoned while recording timeline enrichment",
+                )
+            })?
+            .activity_recorder
+            .clone();
+        if let Some(recorder) = recorder {
+            recorder.record_observation_enrichment(observation, clipboard, fs_events);
+        }
+        Ok(())
     }
 
     #[tool(description = "Search visible accessibility nodes and detected entities")]

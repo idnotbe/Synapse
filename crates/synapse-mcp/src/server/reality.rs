@@ -953,7 +953,7 @@ impl SynapseService {
         let state = self.m1_state()?;
         let mut input = current_input(&state, depth)?;
         if include.fs && input.fs_recent.is_empty() {
-            populate_fs_recent(&mut input, &state.fs_recent_tracker);
+            let _ = populate_fs_recent(&mut input, &state.fs_recent_tracker);
         }
         drop(state);
 
@@ -961,7 +961,7 @@ impl SynapseService {
             populate_audio_summary(&self.m3_state, &mut input);
         }
         if include.clipboard && input.clipboard_summary.is_none() {
-            populate_clipboard_summary(&mut input);
+            let _ = populate_clipboard_summary(&mut input);
         }
         self.resolve_input_profile_and_hud(&mut input, include.hud);
         if include.events {
