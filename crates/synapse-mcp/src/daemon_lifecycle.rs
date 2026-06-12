@@ -619,6 +619,16 @@ fn state_slot() -> &'static Mutex<Option<DaemonLifecycleState>> {
     STATE.get_or_init(|| Mutex::new(None))
 }
 
+#[cfg(test)]
+pub(crate) fn reset_for_test() {
+    if let Some(slot) = STATE.get() {
+        let mut guard = slot
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *guard = None;
+    }
+}
+
 fn health_detail_for_state(state: &DaemonLifecycleState) -> String {
     let last_error = state
         .last_error
@@ -707,6 +717,7 @@ mod tests {
 
     #[test]
     fn records_tool_start_and_finish_to_physical_files() {
+        let _serial = crate::test_support::daemon_lifecycle_serial();
         let temp = tempfile::tempdir().unwrap();
         let paths = configure(DaemonLifecycleConfig {
             mode: "http",
@@ -743,6 +754,7 @@ mod tests {
 
     #[test]
     fn records_context_event_to_physical_files() {
+        let _serial = crate::test_support::daemon_lifecycle_serial();
         let temp = tempfile::tempdir().unwrap();
         let paths = configure(DaemonLifecycleConfig {
             mode: "http",
@@ -793,6 +805,7 @@ mod tests {
 
     #[test]
     fn next_start_records_previous_unclean_run() {
+        let _serial = crate::test_support::daemon_lifecycle_serial();
         let temp = tempfile::tempdir().unwrap();
         let paths = configure(DaemonLifecycleConfig {
             mode: "http",

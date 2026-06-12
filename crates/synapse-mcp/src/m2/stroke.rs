@@ -158,6 +158,16 @@ impl ActStrokePlan {
     pub(crate) const fn requires_input_lease(&self) -> bool {
         !matches!(self.input_kind, ActStrokeInputKind::CdpElementAim)
     }
+
+    pub(crate) const fn can_try_cdp_target_stroke(&self) -> bool {
+        matches!(self.input_kind, ActStrokeInputKind::Path)
+            && self.path.is_some()
+            && self.plan.is_some()
+    }
+
+    pub(crate) const fn is_cdp_element_aim(&self) -> bool {
+        matches!(self.input_kind, ActStrokeInputKind::CdpElementAim)
+    }
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -218,6 +228,91 @@ pub async fn act_stroke_with_handle(
     }
 
     Ok(response(&params, &path, &stroke_plan, started, backend))
+}
+
+pub(crate) async fn act_stroke_cdp_target(
+    endpoint: &str,
+    cdp_target_id: &str,
+    params: ActStrokeParams,
+    plan: ActStrokePlan,
+) -> Result<ActStrokeResponse, ErrorData> {
+    #[cfg(windows)]
+    {
+        let started = Instant::now();
+        if params.requests_hardware_backend() {
+            return Err(params_invalid_detail(
+                STROKE_DETAIL_TARGET_UNRESOLVED,
+                "act_stroke CDP background route is unavailable when backend=hardware requests the real cursor backend",
+            ));
+        }
+        if !params.modifiers.is_empty() {
+            return Err(params_invalid_detail(
+                STROKE_DETAIL_TARGET_UNRESOLVED,
+                "act_stroke CDP background route does not support stroke modifiers; refusing to ignore them",
+            ));
+        }
+        if params.verify_delta {
+            return Err(params_invalid_detail(
+                STROKE_DETAIL_TARGET_UNRESOLVED,
+                "act_stroke verify_delta is not available for CDP mouse strokes because the expected DOM/canvas delta is app-specific; read the target DOM SoT separately after the tool call",
+            ));
+        }
+        let path = plan.path.clone().ok_or_else(|| {
+            params_invalid_detail(
+                STROKE_DETAIL_TARGET_UNRESOLVED,
+                "act_stroke CDP background route requires an explicit path",
+            )
+        })?;
+        let stroke_plan = plan.plan.clone().ok_or_else(|| {
+            params_invalid_detail(
+                STROKE_DETAIL_TARGET_UNRESOLVED,
+                "act_stroke CDP background route requires a sampled path plan",
+            )
+        })?;
+        let points = stroke_plan
+            .samples
+            .iter()
+            .map(|sample| synapse_a11y::CdpMouseStrokePoint {
+                x: sample.point.x,
+                y: sample.point.y,
+                elapsed_ms: sample.elapsed_ms,
+            })
+            .collect::<Vec<_>>();
+        let button = cdp_mouse_button(params.button)?;
+        let dispatch =
+            synapse_a11y::cdp_mouse_stroke_target(endpoint, cdp_target_id, points, button)
+                .await
+                .map_err(|error| {
+                    mcp_error(
+                        error.code(),
+                        format!(
+                            "act_stroke CDP Input.dispatchMouseEvent failed for target {cdp_target_id:?}: {error}"
+                        ),
+                    )
+                })?;
+        tracing::info!(
+            code = "M2_ACT_STROKE_CDP_TARGET_DISPATCHED",
+            cdp_target_id = %dispatch.target_id,
+            point_stream_count = dispatch.point_count,
+            start_x = dispatch.start.x,
+            start_y = dispatch.start.y,
+            end_x = dispatch.end.x,
+            end_y = dispatch.end.y,
+            duration_ms = dispatch.duration_ms,
+            button = ?params.button,
+            "readback=cdp_dispatch tool=act_stroke method=Input.dispatchMouseEvent"
+        );
+        Ok(cdp_target_response(&params, &path, &stroke_plan, started))
+    }
+
+    #[cfg(not(windows))]
+    {
+        let _ = (endpoint, cdp_target_id, params, plan);
+        Err(action_error_to_mcp(&ActionError::BackendUnavailable {
+            detail: "act_stroke CDP background route requires Windows CDP action support"
+                .to_owned(),
+        }))
+    }
 }
 
 pub fn validate_act_stroke_params(params: &ActStrokeParams) -> Result<ActStrokePlan, ErrorData> {
@@ -318,6 +413,12 @@ impl StrokeBackend {
             Self::Hardware => Backend::Hardware,
             Self::Auto => Backend::Auto,
         }
+    }
+}
+
+impl ActStrokeParams {
+    pub(crate) const fn requests_hardware_backend(&self) -> bool {
+        matches!(self.backend, StrokeBackend::Hardware)
     }
 }
 
@@ -993,6 +1094,49 @@ fn cdp_aim_response(params: &ActStrokeParams, started: Instant) -> ActStrokeResp
         required_foreground: false,
         elapsed_ms: u32::try_from(started.elapsed().as_millis()).unwrap_or(u32::MAX),
         postcondition: postcondition_not_requested("act_stroke", "cdp_pointer_or_foreground_ui"),
+    }
+}
+
+fn cdp_target_response(
+    params: &ActStrokeParams,
+    path: &PathSpec,
+    stroke_plan: &StrokePlan,
+    started: Instant,
+) -> ActStrokeResponse {
+    ActStrokeResponse {
+        ok: true,
+        path_kind: path_kind(path).to_owned(),
+        control_point_count: u32::try_from(control_point_count(path)).unwrap_or(u32::MAX),
+        button_used: params.button,
+        velocity_profile_used: params.velocity_profile,
+        duration_or_speed_used: params.duration_or_speed.clone(),
+        motion_model_used: params.motion_model,
+        humanized: params.humanize.is_some(),
+        point_stream_count: u32::try_from(stroke_plan.samples.len()).unwrap_or(u32::MAX),
+        path_length_px: stroke_plan.path_length_px,
+        duration_ms: stroke_plan.duration_ms,
+        modifiers_used: params.modifiers.clone(),
+        backend_used: "cdp".to_owned(),
+        backend_tier_used: "cdp".to_owned(),
+        required_foreground: false,
+        elapsed_ms: u32::try_from(started.elapsed().as_millis()).unwrap_or(u32::MAX),
+        postcondition: postcondition_not_requested("act_stroke", "cdp_target_mouse_events"),
+    }
+}
+
+#[cfg(windows)]
+fn cdp_mouse_button(
+    button: Option<MouseButton>,
+) -> Result<Option<synapse_a11y::CdpMouseButton>, ErrorData> {
+    match button {
+        None => Ok(None),
+        Some(MouseButton::Left) => Ok(Some(synapse_a11y::CdpMouseButton::Left)),
+        Some(MouseButton::Right) => Ok(Some(synapse_a11y::CdpMouseButton::Right)),
+        Some(MouseButton::Middle) => Ok(Some(synapse_a11y::CdpMouseButton::Middle)),
+        Some(other) => Err(params_invalid_detail(
+            STROKE_DETAIL_TARGET_UNRESOLVED,
+            format!("act_stroke CDP mouse stroke does not support button {other:?}"),
+        )),
     }
 }
 

@@ -40,6 +40,24 @@ pub struct CdpActionPoint {
     pub y: f64,
 }
 
+/// One point in a CDP mouse stroke, in viewport CSS coordinates.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct CdpMouseStrokePoint {
+    pub x: f64,
+    pub y: f64,
+    pub elapsed_ms: f64,
+}
+
+/// Dispatch summary for a CDP mouse stroke.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CdpMouseStrokeResult {
+    pub target_id: String,
+    pub point_count: usize,
+    pub start: CdpActionPoint,
+    pub end: CdpActionPoint,
+    pub duration_ms: f64,
+}
+
 /// One CDP wheel event in viewport CSS pixels.
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub struct CdpWheelDelta {
@@ -346,6 +364,40 @@ pub async fn cdp_press_key_sequence(
                 .map_err(|err| dispatch_err(&err))?;
         }
         Ok(())
+    })
+    .await
+}
+
+/// Dispatches a viewport-CSS mouse move/drag path to one CDP page target
+/// without moving the OS cursor or activating the browser window.
+///
+/// # Errors
+///
+/// `A11Y_CDP_ATTACH_FAILED` if the endpoint/target cannot be reached;
+/// `A11Y_CDP_AXTREE_FAILED` if the stroke is invalid or CDP dispatch fails.
+pub async fn cdp_mouse_stroke_target(
+    endpoint: &str,
+    target_id: &str,
+    points: Vec<CdpMouseStrokePoint>,
+    button: Option<CdpMouseButton>,
+) -> A11yResult<CdpMouseStrokeResult> {
+    validate_cdp_mouse_stroke_points(&points)?;
+    let start = cdp_stroke_action_point(points[0]);
+    let end = cdp_stroke_action_point(*points.last().expect("validated non-empty points"));
+    let duration_ms = points.last().map_or(0.0, |point| point.elapsed_ms.max(0.0));
+    let button = button
+        .map(CdpMouseButton::to_cdp)
+        .unwrap_or(MouseButton::None);
+    with_target_page(endpoint, target_id, |page| async move {
+        let dispatched_target_id = page.target_id().inner().clone();
+        dispatch_cdp_mouse_stroke(&page, &points, button).await?;
+        Ok(CdpMouseStrokeResult {
+            target_id: dispatched_target_id,
+            point_count: points.len(),
+            start,
+            end,
+            duration_ms,
+        })
     })
     .await
 }
@@ -858,6 +910,131 @@ pub async fn cdp_aim_node(
     .await
 }
 
+fn validate_cdp_mouse_stroke_points(points: &[CdpMouseStrokePoint]) -> A11yResult<()> {
+    if points.is_empty() {
+        return Err(A11yError::CdpAxtreeFailed {
+            detail: "cdp_mouse_stroke_target requires at least one point".to_owned(),
+        });
+    }
+    let mut previous_elapsed_ms = 0.0;
+    for (index, point) in points.iter().enumerate() {
+        if !point.x.is_finite() || !point.y.is_finite() || !point.elapsed_ms.is_finite() {
+            return Err(A11yError::CdpAxtreeFailed {
+                detail: format!(
+                    "cdp mouse stroke point {index} must contain finite x/y/elapsed_ms values"
+                ),
+            });
+        }
+        if point.elapsed_ms < 0.0 {
+            return Err(A11yError::CdpAxtreeFailed {
+                detail: format!(
+                    "cdp mouse stroke point {index} elapsed_ms must be >= 0, got {}",
+                    point.elapsed_ms
+                ),
+            });
+        }
+        if index > 0 && point.elapsed_ms < previous_elapsed_ms {
+            return Err(A11yError::CdpAxtreeFailed {
+                detail: format!(
+                    "cdp mouse stroke point {index} elapsed_ms {} is before prior sample {}",
+                    point.elapsed_ms, previous_elapsed_ms
+                ),
+            });
+        }
+        previous_elapsed_ms = point.elapsed_ms;
+    }
+    Ok(())
+}
+
+async fn dispatch_cdp_mouse_stroke(
+    page: &chromiumoxide::Page,
+    points: &[CdpMouseStrokePoint],
+    button: MouseButton,
+) -> A11yResult<()> {
+    let first = points[0];
+    let first_point = cdp_stroke_action_point(first);
+    if button == MouseButton::None {
+        let mut previous_elapsed_ms = first.elapsed_ms;
+        page.execute(mouse_event(
+            DispatchMouseEventType::MouseMoved,
+            first_point,
+            MouseButton::None,
+            0,
+        ))
+        .await
+        .map_err(|err| dispatch_err(&err))?;
+        for point in points.iter().skip(1) {
+            sleep_until_sample(previous_elapsed_ms, point.elapsed_ms).await;
+            previous_elapsed_ms = point.elapsed_ms;
+            page.execute(mouse_event(
+                DispatchMouseEventType::MouseMoved,
+                cdp_stroke_action_point(*point),
+                MouseButton::None,
+                0,
+            ))
+            .await
+            .map_err(|err| dispatch_err(&err))?;
+        }
+        return Ok(());
+    }
+
+    page.execute(mouse_event(
+        DispatchMouseEventType::MouseMoved,
+        first_point,
+        MouseButton::None,
+        0,
+    ))
+    .await
+    .map_err(|err| dispatch_err(&err))?;
+    page.execute(mouse_event(
+        DispatchMouseEventType::MousePressed,
+        first_point,
+        button.clone(),
+        1,
+    ))
+    .await
+    .map_err(|err| dispatch_err(&err))?;
+
+    let held_buttons = mouse_button_bit(&button);
+    let mut previous_elapsed_ms = first.elapsed_ms;
+    for point in points.iter().skip(1) {
+        sleep_until_sample(previous_elapsed_ms, point.elapsed_ms).await;
+        previous_elapsed_ms = point.elapsed_ms;
+        page.execute(mouse_event_with_buttons(
+            DispatchMouseEventType::MouseMoved,
+            cdp_stroke_action_point(*point),
+            button.clone(),
+            0,
+            Some(held_buttons),
+        ))
+        .await
+        .map_err(|err| dispatch_err(&err))?;
+    }
+    page.execute(mouse_event(
+        DispatchMouseEventType::MouseReleased,
+        cdp_stroke_action_point(*points.last().expect("validated non-empty points")),
+        button,
+        1,
+    ))
+    .await
+    .map_err(|err| dispatch_err(&err))?;
+    Ok(())
+}
+
+async fn sleep_until_sample(previous_elapsed_ms: f64, next_elapsed_ms: f64) {
+    let delta_ms = (next_elapsed_ms - previous_elapsed_ms).max(0.0);
+    if delta_ms > 0.0 {
+        tokio::time::sleep(std::time::Duration::from_secs_f64(delta_ms / 1000.0)).await;
+    }
+}
+
+fn cdp_stroke_action_point(point: CdpMouseStrokePoint) -> CdpActionPoint {
+    CdpActionPoint {
+        x: point.x,
+        y: point.y,
+    }
+}
+
 /// A decoded, top-down BGRA8 bitmap captured from a web node via CDP (#703).
 ///
 /// `bgra` is 4 bytes per pixel with no row padding, sized `width * height * 4`,
@@ -947,22 +1124,36 @@ fn mouse_event(
     button: MouseButton,
     click_count: i64,
 ) -> DispatchMouseEventParams {
+    mouse_event_with_buttons(kind, point, button, click_count, None)
+}
+
+fn mouse_event_with_buttons(
+    kind: DispatchMouseEventType,
+    point: CdpActionPoint,
+    button: MouseButton,
+    click_count: i64,
+    buttons_override: Option<i64>,
+) -> DispatchMouseEventParams {
     // `buttons` is the bitmask of buttons CURRENTLY held: the button's bit while
     // pressed, 0 once moved or released. Getting this wrong (e.g. leaving the
     // bit set on release) makes Chrome think the button is still down and it
     // never synthesises a `click` event.
     let is_pressed = matches!(kind, DispatchMouseEventType::MousePressed);
-    let bit = match button {
+    let bit = mouse_button_bit(&button);
+    let mut params = DispatchMouseEventParams::new(kind, point.x, point.y);
+    params.click_count = Some(click_count);
+    params.buttons = Some(buttons_override.unwrap_or(if is_pressed { bit } else { 0 }));
+    params.button = Some(button);
+    params
+}
+
+fn mouse_button_bit(button: &MouseButton) -> i64 {
+    match button {
         MouseButton::Left => 1,
         MouseButton::Right => 2,
         MouseButton::Middle => 4,
         _ => 0,
-    };
-    let mut params = DispatchMouseEventParams::new(kind, point.x, point.y);
-    params.click_count = Some(click_count);
-    params.buttons = Some(if is_pressed { bit } else { 0 });
-    params.button = Some(button);
-    params
+    }
 }
 
 fn dispatch_err(err: &chromiumoxide::error::CdpError) -> A11yError {
@@ -1543,5 +1734,23 @@ mod tests {
         assert_eq!(CdpMouseButton::Left.to_cdp(), MouseButton::Left);
         assert_eq!(CdpMouseButton::Right.to_cdp(), MouseButton::Right);
         assert_eq!(CdpMouseButton::Middle.to_cdp(), MouseButton::Middle);
+    }
+
+    #[test]
+    fn mouse_event_drag_move_can_hold_button_bit() {
+        let point = CdpActionPoint { x: 10.0, y: 20.0 };
+        let drag_move = mouse_event_with_buttons(
+            DispatchMouseEventType::MouseMoved,
+            point,
+            MouseButton::Left,
+            0,
+            Some(mouse_button_bit(&MouseButton::Left)),
+        );
+        println!(
+            "readback=mouse_event drag_move buttons:{:?} button:{:?}",
+            drag_move.buttons, drag_move.button
+        );
+        assert_eq!(drag_move.buttons, Some(1));
+        assert_eq!(drag_move.button, Some(MouseButton::Left));
     }
 }

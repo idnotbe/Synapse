@@ -19,14 +19,15 @@ use crate::m2::postcondition::{
     postcondition_observed_delta,
 };
 use crate::m2::{
-    ActClickPostcondition, ActClickTierAttempt, CLICK_REASON_NO_OBSERVED_DELTA,
+    ActClickPostcondition, ActClickTierAttempt, ActStrokePlan, CLICK_REASON_NO_OBSERVED_DELTA,
     CLICK_TIER_FOREGROUND, CLICK_TIER_POSTMESSAGE, ForegroundClickPolicy, HwndKeyboardTargetState,
     PressBackend, ResolvedKeymapPress, act_click_postmessage_with_params,
     act_keymap_response_from_press, act_press_cdp_target, act_press_normalized_labels,
-    act_press_postmessage_target, act_stroke_error_details, act_stroke_request_details,
-    action_from_press_params, action_from_type_params, attach_click_tier_attempts,
-    click_params_can_route_background_first, click_target_root_hwnd, click_tier_delivered,
-    click_tier_failed, emitted_text, hwnd_keyboard_target_state, resolve_keymap_press,
+    act_press_postmessage_target, act_stroke_cdp_target, act_stroke_error_details,
+    act_stroke_request_details, action_from_press_params, action_from_type_params,
+    attach_click_tier_attempts, click_params_can_route_background_first, click_target_root_hwnd,
+    click_tier_delivered, click_tier_failed, emitted_text, hwnd_keyboard_target_state,
+    resolve_keymap_press,
 };
 use rmcp::{RoleServer, model::ErrorCode, service::RequestContext};
 use schemars::JsonSchema;
@@ -829,6 +830,44 @@ impl SynapseService {
         {
             return audit_target_claim_denial(self, "act_stroke", error, &request_context);
         }
+        let verify_timeout_ms = params.verify_timeout_ms;
+        let (handle, recording, _connection_closed_cancel) =
+            self.m2_action_context_for_request(&request_context)?;
+        match self
+            .try_act_stroke_cdp_background_target(
+                &params,
+                &plan,
+                recording.is_some(),
+                &request_context,
+            )
+            .await
+        {
+            Ok(Some(response)) => {
+                self.audit_action_ok_with_details_for_request(
+                    "act_stroke",
+                    &json!({
+                        "response": response,
+                        "stroke": stroke_details,
+                        "preflight": preflight,
+                    }),
+                    &request_context,
+                )?;
+                return Ok(Json(response));
+            }
+            Ok(None) => {}
+            Err(error) => {
+                let failure_details =
+                    act_stroke_failure_audit_details(&stroke_details, &preflight, &error);
+                log_act_stroke_failure(&failure_details, &error);
+                self.audit_action_error_with_details_for_request(
+                    "act_stroke",
+                    &error,
+                    &failure_details,
+                    &request_context,
+                )?;
+                return Err(error);
+            }
+        }
         let before_delta_signature = if params.verify_delta {
             match self
                 .capture_action_delta_signature(160, None, true, None)
@@ -848,10 +887,10 @@ impl SynapseService {
         } else {
             None
         };
-        let verify_timeout_ms = params.verify_timeout_ms;
-        let (handle, recording, _connection_closed_cancel) =
-            self.m2_action_context_for_request(&request_context)?;
-        let _lease_guard = if plan.requires_input_lease() {
+        let _lease_guard = if should_acquire_act_stroke_input_lease(
+            recording.is_some(),
+            plan.requires_input_lease(),
+        ) {
             match acquire_tool_foreground_input_lease(self, "act_stroke", &request_context) {
                 Ok(guard) => Some(guard),
                 Err(error) => {
@@ -870,9 +909,9 @@ impl SynapseService {
         } else {
             None
         };
-        let foreground_monitor = recording
-            .is_none()
-            .then(|| self.start_act_stroke_foreground_monitor(&preflight));
+        let foreground_monitor =
+            should_monitor_act_stroke_foreground(recording.is_some(), plan.requires_input_lease())
+                .then(|| self.start_act_stroke_foreground_monitor(&preflight));
         let result = act_stroke_with_handle(handle, recording, params.clone(), plan.clone()).await;
         let foreground_error = await_act_stroke_foreground_monitor(foreground_monitor).await;
         let result = match foreground_error {
@@ -2605,6 +2644,53 @@ impl SynapseService {
         )
         .await
         .map(|response| response.map(|response| act_keymap_response_from_press(resolved, response)))
+    }
+
+    async fn try_act_stroke_cdp_background_target(
+        &self,
+        params: &ActStrokeParams,
+        plan: &ActStrokePlan,
+        recording_active: bool,
+        request_context: &RequestContext<RoleServer>,
+    ) -> Result<Option<ActStrokeResponse>, ErrorData> {
+        if recording_active || params.requests_hardware_backend() {
+            return Ok(None);
+        }
+        let Some(session_id) =
+            super::context::mcp_session_id_from_request_context(request_context)?
+        else {
+            return Ok(None);
+        };
+        let Some(target) = self.session_target(Some(&session_id))? else {
+            return Ok(None);
+        };
+        let SessionTarget::Cdp {
+            window_hwnd,
+            cdp_target_id,
+        } = target
+        else {
+            return Ok(None);
+        };
+        if plan.is_cdp_element_aim() {
+            return Ok(None);
+        }
+        if !plan.can_try_cdp_target_stroke() {
+            return Err(mcp_error(
+                error_codes::TOOL_PARAMS_INVALID,
+                "act_stroke active CDP targets require an explicit path for background mouse strokes; refusing to fall back to the real cursor for a browser target",
+            ));
+        }
+        let endpoint = synapse_a11y::endpoint_for_window(window_hwnd).ok_or_else(|| {
+            mcp_error(
+                error_codes::A11Y_CDP_UNREACHABLE,
+                format!(
+                    "act_stroke background CDP target requires a reachable raw CDP endpoint for window_hwnd {window_hwnd:#x}; the normal chrome.tabs bridge cannot dispatch Input.dispatchMouseEvent"
+                ),
+            )
+        })?;
+        act_stroke_cdp_target(&endpoint, &cdp_target_id, params.clone(), plan.clone())
+            .await
+            .map(Some)
     }
 
     async fn act_press_cdp_background_target(
@@ -4913,6 +4999,20 @@ async fn await_act_stroke_foreground_monitor(
     }
 }
 
+const fn should_monitor_act_stroke_foreground(
+    recording_active: bool,
+    requires_input_lease: bool,
+) -> bool {
+    !recording_active && requires_input_lease
+}
+
+const fn should_acquire_act_stroke_input_lease(
+    recording_active: bool,
+    requires_input_lease: bool,
+) -> bool {
+    !recording_active && requires_input_lease
+}
+
 async fn monitor_act_stroke_foreground(
     service: SynapseService,
     expected: ForegroundProof,
@@ -5394,6 +5494,42 @@ mod tests {
     }
 
     #[test]
+    fn act_stroke_foreground_monitor_only_runs_for_live_leased_strokes() {
+        assert!(
+            should_monitor_act_stroke_foreground(false, true),
+            "live real-cursor strokes require foreground-loss monitoring"
+        );
+        assert!(
+            should_acquire_act_stroke_input_lease(false, true),
+            "live real-cursor strokes require the foreground input lease"
+        );
+        assert!(
+            !should_monitor_act_stroke_foreground(false, false),
+            "background CDP strokes must not be aborted by the global foreground monitor"
+        );
+        assert!(
+            !should_acquire_act_stroke_input_lease(false, false),
+            "background CDP strokes must not acquire the foreground input lease"
+        );
+        assert!(
+            !should_monitor_act_stroke_foreground(true, true),
+            "recording strokes do not touch live foreground input"
+        );
+        assert!(
+            !should_acquire_act_stroke_input_lease(true, true),
+            "recording strokes do not need the foreground input lease"
+        );
+        assert!(
+            !should_monitor_act_stroke_foreground(true, false),
+            "recording background strokes also skip live foreground monitoring"
+        );
+        assert!(
+            !should_acquire_act_stroke_input_lease(true, false),
+            "recording background strokes also skip foreground lease acquisition"
+        );
+    }
+
+    #[test]
     fn act_set_value_background_guard_rejects_target_activation() {
         let before = foreground_context(100, 10, "chrome.exe", "before");
         let after = foreground_context(200, 20, "wpf-test.exe", "after");
@@ -5467,177 +5603,6 @@ mod tests {
         assert_eq!(
             data.get("action_source_of_truth").and_then(Value::as_str),
             Some("uia_scroll_pattern.scroll_state")
-        );
-    }
-
-    #[test]
-    fn act_type_chromium_fallback_requires_foreground_route_for_refused_target() {
-        let mut params = act_type_params(true, None);
-        params.into_element = Some(
-            ElementId::parse("0x1000:0000002a00000001")
-                .expect("synthetic element id must be valid"),
-        );
-        let target = act_type_foreground_fallback_target(
-            0x1000,
-            "edit",
-            Rect {
-                x: 100,
-                y: 200,
-                w: 300,
-                h: 40,
-            },
-        );
-
-        println!(
-            "readback=act_type_foreground_fallback_route before=into_element after=requires_foreground:{}",
-            act_type_requires_foreground_route(&params, Some(&target))
-        );
-
-        assert!(act_type_requires_foreground_route(&params, Some(&target)));
-        assert!(
-            !act_type_requires_foreground_route(&params, None),
-            "ordinary into_element routes stay background-only unless the Chromium fallback target is detected"
-        );
-        params.into_element = None;
-        assert!(act_type_requires_foreground_route(&params, None));
-    }
-
-    #[test]
-    fn chromium_foreground_fallback_eligibility_matches_unsafe_value_pattern_shape() {
-        let metadata = act_type_element_metadata("edit", true, true, vec![UiaPattern::Value]);
-
-        assert!(
-            chromium_editable_value_pattern_requires_foreground_fallback("chrome.exe", &metadata)
-        );
-        assert!(
-            !chromium_editable_value_pattern_requires_foreground_fallback("notepad.exe", &metadata)
-        );
-        assert!(
-            !chromium_editable_value_pattern_requires_foreground_fallback(
-                "chrome.exe",
-                &act_type_element_metadata("button", true, true, vec![UiaPattern::Value])
-            )
-        );
-        assert!(
-            !chromium_editable_value_pattern_requires_foreground_fallback(
-                "chrome.exe",
-                &act_type_element_metadata("edit", true, false, vec![UiaPattern::Value])
-            )
-        );
-        assert!(
-            !chromium_editable_value_pattern_requires_foreground_fallback(
-                "chrome.exe",
-                &act_type_element_metadata("edit", true, true, vec![UiaPattern::Text])
-            )
-        );
-    }
-
-    #[test]
-    fn act_type_foreground_fallback_focus_accepts_matching_edit_bbox() {
-        let target = act_type_foreground_fallback_target(
-            0x1000,
-            "edit",
-            Rect {
-                x: 100,
-                y: 200,
-                w: 300,
-                h: 40,
-            },
-        );
-        let readback = act_type_signature_for_fallback(
-            0x1000,
-            Some("edit"),
-            Some(Rect {
-                x: 120,
-                y: 205,
-                w: 120,
-                h: 30,
-            }),
-        );
-
-        act_type_foreground_fallback_focus_matches_target(&target, &readback)
-            .expect("intersecting focused edit bbox should identify the clicked target");
-    }
-
-    #[test]
-    fn act_type_foreground_fallback_focus_rejects_wrong_target() {
-        let target = act_type_foreground_fallback_target(
-            0x1000,
-            "edit",
-            Rect {
-                x: 100,
-                y: 200,
-                w: 300,
-                h: 40,
-            },
-        );
-        let wrong_role = act_type_signature_for_fallback(
-            0x1000,
-            Some("button"),
-            Some(Rect {
-                x: 120,
-                y: 205,
-                w: 120,
-                h: 30,
-            }),
-        );
-        let wrong_bbox = act_type_signature_for_fallback(
-            0x1000,
-            Some("edit"),
-            Some(Rect {
-                x: 800,
-                y: 900,
-                w: 120,
-                h: 30,
-            }),
-        );
-
-        let role_error = act_type_foreground_fallback_focus_matches_target(&target, &wrong_role)
-            .expect_err("non-edit focused role must fail closed before typing");
-        let bbox_error = act_type_foreground_fallback_focus_matches_target(&target, &wrong_bbox)
-            .expect_err("focused edit outside target bbox must fail closed before typing");
-
-        assert_eq!(
-            role_error
-                .data
-                .as_ref()
-                .and_then(|data| data.get("reason"))
-                .and_then(Value::as_str),
-            Some("focused_role_is_not_text_editable")
-        );
-        assert_eq!(
-            bbox_error
-                .data
-                .as_ref()
-                .and_then(|data| data.get("reason"))
-                .and_then(Value::as_str),
-            Some("focused_element_did_not_match_target_or_bbox")
-        );
-    }
-
-    #[test]
-    fn act_type_foreground_fallback_rejects_empty_target_bbox() {
-        let target = act_type_foreground_fallback_target(
-            0x1000,
-            "edit",
-            Rect {
-                x: 100,
-                y: 200,
-                w: 0,
-                h: 40,
-            },
-        );
-
-        let error = act_type_target_center_point(&target)
-            .expect_err("empty target bbox must fail closed before foreground input");
-
-        assert_eq!(
-            error
-                .data
-                .as_ref()
-                .and_then(|data| data.get("code"))
-                .and_then(Value::as_str),
-            Some(error_codes::ACTION_TARGET_INVALID)
         );
     }
 
@@ -6046,6 +6011,177 @@ mod tests {
         assert!(
             !act_type_should_capture_text_signature(&params),
             "into_element routes own background readback and must not use foreground text signatures"
+        );
+    }
+
+    #[test]
+    fn act_type_chromium_fallback_requires_foreground_route_for_refused_target() {
+        let mut params = act_type_params(true, None);
+        params.into_element = Some(
+            ElementId::parse("0x1000:0000002a00000001")
+                .expect("synthetic element id must be valid"),
+        );
+        let target = act_type_foreground_fallback_target(
+            0x1000,
+            "edit",
+            Rect {
+                x: 100,
+                y: 200,
+                w: 300,
+                h: 40,
+            },
+        );
+
+        println!(
+            "readback=act_type_foreground_fallback_route before=into_element after=requires_foreground:{}",
+            act_type_requires_foreground_route(&params, Some(&target))
+        );
+
+        assert!(act_type_requires_foreground_route(&params, Some(&target)));
+        assert!(
+            !act_type_requires_foreground_route(&params, None),
+            "ordinary into_element routes stay background-only unless the Chromium fallback target is detected"
+        );
+        params.into_element = None;
+        assert!(act_type_requires_foreground_route(&params, None));
+    }
+
+    #[test]
+    fn chromium_foreground_fallback_eligibility_matches_unsafe_value_pattern_shape() {
+        let metadata = act_type_element_metadata("edit", true, true, vec![UiaPattern::Value]);
+
+        assert!(
+            chromium_editable_value_pattern_requires_foreground_fallback("chrome.exe", &metadata)
+        );
+        assert!(
+            !chromium_editable_value_pattern_requires_foreground_fallback("notepad.exe", &metadata)
+        );
+        assert!(
+            !chromium_editable_value_pattern_requires_foreground_fallback(
+                "chrome.exe",
+                &act_type_element_metadata("button", true, true, vec![UiaPattern::Value])
+            )
+        );
+        assert!(
+            !chromium_editable_value_pattern_requires_foreground_fallback(
+                "chrome.exe",
+                &act_type_element_metadata("edit", true, false, vec![UiaPattern::Value])
+            )
+        );
+        assert!(
+            !chromium_editable_value_pattern_requires_foreground_fallback(
+                "chrome.exe",
+                &act_type_element_metadata("edit", true, true, vec![UiaPattern::Text])
+            )
+        );
+    }
+
+    #[test]
+    fn act_type_foreground_fallback_focus_accepts_matching_edit_bbox() {
+        let target = act_type_foreground_fallback_target(
+            0x1000,
+            "edit",
+            Rect {
+                x: 100,
+                y: 200,
+                w: 300,
+                h: 40,
+            },
+        );
+        let readback = act_type_signature_for_fallback(
+            0x1000,
+            Some("edit"),
+            Some(Rect {
+                x: 120,
+                y: 205,
+                w: 120,
+                h: 30,
+            }),
+        );
+
+        act_type_foreground_fallback_focus_matches_target(&target, &readback)
+            .expect("intersecting focused edit bbox should identify the clicked target");
+    }
+
+    #[test]
+    fn act_type_foreground_fallback_focus_rejects_wrong_target() {
+        let target = act_type_foreground_fallback_target(
+            0x1000,
+            "edit",
+            Rect {
+                x: 100,
+                y: 200,
+                w: 300,
+                h: 40,
+            },
+        );
+        let wrong_role = act_type_signature_for_fallback(
+            0x1000,
+            Some("button"),
+            Some(Rect {
+                x: 120,
+                y: 205,
+                w: 120,
+                h: 30,
+            }),
+        );
+        let wrong_bbox = act_type_signature_for_fallback(
+            0x1000,
+            Some("edit"),
+            Some(Rect {
+                x: 800,
+                y: 900,
+                w: 120,
+                h: 30,
+            }),
+        );
+
+        let role_error = act_type_foreground_fallback_focus_matches_target(&target, &wrong_role)
+            .expect_err("non-edit focused role must fail closed before typing");
+        let bbox_error = act_type_foreground_fallback_focus_matches_target(&target, &wrong_bbox)
+            .expect_err("focused edit outside target bbox must fail closed before typing");
+
+        assert_eq!(
+            role_error
+                .data
+                .as_ref()
+                .and_then(|data| data.get("reason"))
+                .and_then(Value::as_str),
+            Some("focused_role_is_not_text_editable")
+        );
+        assert_eq!(
+            bbox_error
+                .data
+                .as_ref()
+                .and_then(|data| data.get("reason"))
+                .and_then(Value::as_str),
+            Some("focused_element_did_not_match_target_or_bbox")
+        );
+    }
+
+    #[test]
+    fn act_type_foreground_fallback_rejects_empty_target_bbox() {
+        let target = act_type_foreground_fallback_target(
+            0x1000,
+            "edit",
+            Rect {
+                x: 100,
+                y: 200,
+                w: 0,
+                h: 40,
+            },
+        );
+
+        let error = act_type_target_center_point(&target)
+            .expect_err("empty target bbox must fail closed before foreground input");
+
+        assert_eq!(
+            error
+                .data
+                .as_ref()
+                .and_then(|data| data.get("code"))
+                .and_then(Value::as_str),
+            Some(error_codes::ACTION_TARGET_INVALID)
         );
     }
 

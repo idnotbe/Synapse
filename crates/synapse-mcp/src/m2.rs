@@ -74,6 +74,7 @@ pub use stroke::{
     ActStrokeParams, ActStrokeResponse, act_stroke_error_details, act_stroke_request_details,
     act_stroke_validation_failure_details, act_stroke_with_handle, validate_act_stroke_params,
 };
+pub(crate) use stroke::{ActStrokePlan, act_stroke_cdp_target};
 pub use type_text::action_from_type_params;
 pub(crate) use type_text::emitted_text;
 pub use type_text::{ActTypeParams, ActTypeResponse, act_type_with_handle};
@@ -572,6 +573,22 @@ fn record_foreground_restore_context_event(
     foreground_read_error: Option<Value>,
     detail: Value,
 ) {
+    // The daemon lifecycle ledger is a process-global singleton. In this crate's
+    // own unit-test binary, tests run in parallel and this production side-effect
+    // would write into whichever ledger the `daemon_lifecycle` tests momentarily
+    // have configured — corrupting their assertions and poisoning `last_error`
+    // (which flips `health_payload().ok` false for any concurrent health-reading
+    // test). The recording itself is covered directly by
+    // `daemon_lifecycle::tests::records_context_event_to_physical_files`, and the
+    // real daemon (integration tests, production) is built without `cfg(test)` and
+    // records normally. So suppress only this unasserted side-effect under test.
+    #[cfg(test)]
+    {
+        let _ = (tool, session_id, status, code, reason_code, foreground, foreground_read_error, detail);
+        return;
+    }
+    #[cfg(not(test))]
+    {
     let detail = json!({
         "code": code,
         "reason_code": reason_code,
@@ -604,6 +621,7 @@ fn record_foreground_restore_context_event(
             detail = %error,
             "foreground input context restore event write failed"
         ),
+    }
     }
 }
 

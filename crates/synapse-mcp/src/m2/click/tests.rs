@@ -17,6 +17,7 @@ use super::{
 
 #[tokio::test]
 async fn coordinate_click_leaves_actor_held_state_empty() {
+    let _serial = crate::test_support::lease_serial("act_click_coordinate_test_reset");
     let cancel = CancellationToken::new();
     let backend: Arc<dyn ActionBackend> = Arc::new(RecordingBackend::new());
     let (handle, snapshot_handle, join) =
