@@ -79,6 +79,13 @@ async fn health_and_action_tools_appear_in_tools_list_with_schema() -> anyhow::R
             .as_str()
             .is_some_and(|description| description.contains("coordinate_fallback_on_unsupported"))
     );
+    assert!(
+        click_tool["description"]
+            .as_str()
+            .is_some_and(|description| {
+                description.contains("edit/document/text or Value/Text targets bypass PostMessage")
+            })
+    );
 
     let set_target_tool = tools
         .iter()

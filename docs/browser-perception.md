@@ -293,8 +293,12 @@ observe(include=["focused","elements","diagnostics"], max_elements=200)
 
 For UIA-only browser content, `act_click` element targets prefer semantic UIA
 patterns (`InvokePattern`, then `TogglePattern`) before coordinate fallback.
-Only set `use_invoke_pattern = false` when the operator explicitly wants a raw
-coordinate click and the post-click foreground/readback will be verified.
+When the fallback target is an enabled keyboard-focusable edit/document/text
+surface or exposes `ValuePattern`/`TextPattern`, Synapse bypasses HWND
+PostMessage and uses a leased foreground bbox-center click so the real caret
+and focus state are placed for later text entry. Only set
+`use_invoke_pattern = false` when the operator explicitly wants a raw coordinate
+click and the post-click foreground/readback will be verified.
 
 The final `observe` is not the verdict by itself. Full State Verification still
 requires a separate read of the real outcome produced by the web action.

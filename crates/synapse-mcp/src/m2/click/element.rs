@@ -453,6 +453,45 @@ async fn execute_coordinate_element_click(
             "coordinate element click recorded through the foreground input tier",
         ));
         backend_used_name(params.backend).to_owned()
+    } else if let Some(requirement) = coordinate_click_foreground_requirement(&element.element_id)?
+    {
+        tracing::info!(
+            code = "M2_ACT_CLICK_FOREGROUND_CARET_ROUTE",
+            kind = "act_click",
+            element_id = %element.element_id,
+            role = %requirement.role,
+            automation_id = requirement.automation_id.as_deref(),
+            patterns = ?requirement.patterns,
+            reason = requirement.reason,
+            "act_click coordinate element target requires real foreground input for caret placement; skipping HWND PostMessage"
+        );
+        let _lease_guard = acquire_click_foreground_lease(
+            &foreground_click_policy,
+            params.hold_ms,
+            &mut tier_attempts,
+        )?;
+        match record::execute_actor_actions(handle, actions, timing).await {
+            Ok(()) => {
+                tier_attempts.push(click_tier_delivered(
+                    CLICK_TIER_FOREGROUND,
+                    true,
+                    "coordinate element click delivered through the foreground input tier; HWND PostMessage skipped because edit/document/text or Value/Text targets require real caret placement",
+                ));
+                backend_used_name(params.backend).to_owned()
+            }
+            Err(error) => {
+                let error_code = click_error_code(&error);
+                let reason_code = click_reason_for_error_code(&error_code);
+                tier_attempts.push(click_tier_failed(
+                    CLICK_TIER_FOREGROUND,
+                    reason_code,
+                    error_code,
+                    true,
+                    error.message.to_string(),
+                ));
+                return Err(attach_click_tier_attempts(error, tier_attempts));
+            }
+        }
     } else {
         match post_element_window_message_click(params, element, screen_point, timing).await {
             Ok(backend_used) => {
@@ -541,6 +580,38 @@ fn coordinate_fallback_allowed_for_metadata(
         && metadata.bbox.w > 0
         && metadata.bbox.h > 0
         && (editable_role(&metadata.role) || exposes_text_value_pattern(&metadata.patterns))
+}
+
+#[derive(Clone, Debug)]
+struct CoordinateClickForegroundRequirement {
+    reason: &'static str,
+    role: String,
+    automation_id: Option<String>,
+    patterns: Vec<UiaPattern>,
+}
+
+fn coordinate_click_foreground_requirement(
+    element_id: &synapse_core::ElementId,
+) -> Result<Option<CoordinateClickForegroundRequirement>, ErrorData> {
+    if element_is_coordinate_only(element_id) {
+        return Ok(None);
+    }
+    let metadata = element_coordinate_fallback_metadata(element_id)?;
+    if coordinate_fallback_requires_foreground_caret_placement(&metadata) {
+        return Ok(Some(CoordinateClickForegroundRequirement {
+            reason: "caret_placement_requires_real_foreground_click",
+            role: metadata.role,
+            automation_id: metadata.automation_id,
+            patterns: metadata.patterns,
+        }));
+    }
+    Ok(None)
+}
+
+fn coordinate_fallback_requires_foreground_caret_placement(
+    metadata: &synapse_a11y::ElementMetadataReadback,
+) -> bool {
+    coordinate_fallback_allowed_for_metadata(metadata)
 }
 
 fn coordinate_fallback_allowed_after_selection_readback_failure(
@@ -1193,11 +1264,14 @@ mod tests {
         };
 
         let allowed = coordinate_fallback_allowed_for_metadata(&metadata);
+        let requires_foreground =
+            coordinate_fallback_requires_foreground_caret_placement(&metadata);
 
         println!(
-            "readback=act_click_coordinate_fallback edge=enabled_edit metadata={metadata:?} allowed={allowed}"
+            "readback=act_click_coordinate_fallback edge=enabled_edit metadata={metadata:?} allowed={allowed} requires_foreground={requires_foreground}"
         );
         assert!(allowed);
+        assert!(requires_foreground);
     }
 
     #[test]
@@ -1219,11 +1293,14 @@ mod tests {
         };
 
         let allowed = coordinate_fallback_allowed_for_metadata(&metadata);
+        let requires_foreground =
+            coordinate_fallback_requires_foreground_caret_placement(&metadata);
 
         println!(
-            "readback=act_click_coordinate_fallback edge=non_text_button metadata={metadata:?} allowed={allowed}"
+            "readback=act_click_coordinate_fallback edge=non_text_button metadata={metadata:?} allowed={allowed} requires_foreground={requires_foreground}"
         );
         assert!(!allowed);
+        assert!(!requires_foreground);
     }
 
     #[test]
@@ -1343,11 +1420,14 @@ mod tests {
         };
 
         let required = coordinate_fallback_required_for_selection_only_list_item(&metadata);
+        let requires_foreground =
+            coordinate_fallback_requires_foreground_caret_placement(&metadata);
 
         println!(
-            "readback=act_click_coordinate_fallback edge=list_item_selection_only metadata={metadata:?} required={required}"
+            "readback=act_click_coordinate_fallback edge=list_item_selection_only metadata={metadata:?} required={required} requires_foreground={requires_foreground}"
         );
         assert!(required);
+        assert!(!requires_foreground);
     }
 
     #[test]
