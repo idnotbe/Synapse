@@ -172,6 +172,7 @@ pub(crate) mod agent_state;
 pub(crate) mod agent_transcripts;
 mod audit_context;
 mod context;
+pub(crate) use context::AgentTranscriptSnapshotRow;
 pub(crate) mod drain;
 mod everquest_autocombat;
 mod everquest_contextgraph;

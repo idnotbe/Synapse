@@ -12,7 +12,7 @@ use axum::{
     Json, Router,
     body::Body,
     extract::{DefaultBodyLimit, Query, State},
-    http::{HeaderMap, Request, StatusCode, header},
+    http::{HeaderMap, HeaderName, HeaderValue, Request, StatusCode, header},
     middleware,
     response::{Html, IntoResponse, Response},
     routing::{get, post},
@@ -469,6 +469,8 @@ fn router(
         ));
     let dashboard_routes = Router::new()
         .route("/dashboard", get(dashboard_index))
+        .route("/dashboard/assets/dashboard.css", get(dashboard_css))
+        .route("/dashboard/assets/dashboard.js", get(dashboard_js))
         .route("/dashboard/state.json", get(dashboard_state))
         .route("/approval/activate", get(approval_activate));
     let app = Router::new()
@@ -1267,6 +1269,8 @@ struct DashboardStateResponse {
     approvals: DashboardPanel,
     suggestions: DashboardPanel,
     armed_runs: DashboardPanel,
+    agent_transcripts: DashboardPanel,
+    hygiene: DashboardPanel,
     local_models: DashboardPanel,
 }
 
@@ -1349,16 +1353,46 @@ struct DashboardLocalModelSurface {
     rows: Vec<crate::m3::local_models::LocalModelRegistryRow>,
 }
 
+#[derive(Serialize)]
+struct DashboardTranscriptSurface {
+    source_of_truth: &'static str,
+    row_count: usize,
+    rows: Vec<crate::server::AgentTranscriptSnapshotRow>,
+}
+
+#[derive(Serialize)]
+struct DashboardHygieneSurface {
+    tool: &'static str,
+    available: bool,
+    scanned_rows: u64,
+    next_cursor: Option<String>,
+    rows: Vec<crate::m3::hygiene::HygieneStoredFlag>,
+}
+
 async fn dashboard_index(State(state): State<HttpState>, headers: HeaderMap) -> Response {
     if let Err(response) = dashboard_local_only(&state, &headers) {
-        return response;
+        return with_dashboard_security_headers(response);
     }
-    Html(DASHBOARD_HTML).into_response()
+    with_dashboard_security_headers(Html(DASHBOARD_HTML).into_response())
+}
+
+async fn dashboard_css(State(state): State<HttpState>, headers: HeaderMap) -> Response {
+    if let Err(response) = dashboard_local_only(&state, &headers) {
+        return with_dashboard_security_headers(response);
+    }
+    dashboard_asset_response("text/css; charset=utf-8", DASHBOARD_CSS)
+}
+
+async fn dashboard_js(State(state): State<HttpState>, headers: HeaderMap) -> Response {
+    if let Err(response) = dashboard_local_only(&state, &headers) {
+        return with_dashboard_security_headers(response);
+    }
+    dashboard_asset_response("application/javascript; charset=utf-8", DASHBOARD_JS)
 }
 
 async fn dashboard_state(State(state): State<HttpState>, headers: HeaderMap) -> Response {
     if let Err(response) = dashboard_local_only(&state, &headers) {
-        return response;
+        return with_dashboard_security_headers(response);
     }
     let active_sessions = state.session_manager.sessions.read().await.len();
     let health = state
@@ -1408,9 +1442,11 @@ async fn dashboard_state(State(state): State<HttpState>, headers: HeaderMap) -> 
             &tool_names,
             Some(crate::m3::approvals::ApprovalKind::ArmedRunReview),
         ),
+        agent_transcripts: agent_transcript_panel(&state),
+        hygiene: hygiene_panel(&state, &tool_names),
         local_models: local_model_panel(&state, &tool_names),
     };
-    Json(response).into_response()
+    with_dashboard_security_headers(Json(response).into_response())
 }
 
 async fn approval_activate(
@@ -1419,21 +1455,27 @@ async fn approval_activate(
     Query(params): Query<crate::m3::approvals::ApprovalActivationParams>,
 ) -> Response {
     if let Err(response) = dashboard_local_only(&state, &headers) {
-        return response;
+        return with_dashboard_security_headers(response);
     }
     if params.bind != state.bind_addr.to_string() {
-        return (StatusCode::BAD_REQUEST, "APPROVAL_ACTIVATION_BIND_MISMATCH").into_response();
+        return with_dashboard_security_headers(
+            (StatusCode::BAD_REQUEST, "APPROVAL_ACTIVATION_BIND_MISMATCH").into_response(),
+        );
     }
     match state
         .health_service
         .approval_decide_from_activation(&params, "approval_protocol")
     {
-        Ok(response) => Html(approval_activation_html(&response)).into_response(),
-        Err(error) => (
-            StatusCode::BAD_REQUEST,
-            format!("APPROVAL_ACTIVATION_FAILED: {}", error.message),
-        )
-            .into_response(),
+        Ok(response) => with_dashboard_security_headers(
+            Html(approval_activation_html(&response)).into_response(),
+        ),
+        Err(error) => with_dashboard_security_headers(
+            (
+                StatusCode::BAD_REQUEST,
+                format!("APPROVAL_ACTIVATION_FAILED: {}", error.message),
+            )
+                .into_response(),
+        ),
     }
 }
 
@@ -1445,7 +1487,7 @@ fn approval_activation_html(
         concat!(
             "<!doctype html><html><head><meta charset=\"utf-8\">",
             "<title>Synapse Approval</title>",
-            "<style>body{{font-family:system-ui,sans-serif;margin:2rem;}}</style>",
+            "<link rel=\"stylesheet\" href=\"/dashboard/assets/dashboard.css\">",
             "</head><body><h1>Synapse Approval</h1>",
             "<p>Approval <strong>{approval_id}</strong> is now <strong>{status}</strong>.</p>",
             "<p>Activation <code>{activation_id}</code> consumed.</p>",
@@ -1470,6 +1512,55 @@ fn escape_html(value: &str) -> String {
         }
     }
     escaped
+}
+
+fn dashboard_asset_response(content_type: &'static str, body: &'static str) -> Response {
+    with_dashboard_security_headers(([(header::CONTENT_TYPE, content_type)], body).into_response())
+}
+
+fn with_dashboard_security_headers(mut response: Response) -> Response {
+    const DASHBOARD_CSP: &str = concat!(
+        "default-src 'none'; ",
+        "base-uri 'none'; ",
+        "object-src 'none'; ",
+        "frame-ancestors 'none'; ",
+        "form-action 'none'; ",
+        "script-src 'self'; ",
+        "style-src 'self'; ",
+        "connect-src 'self'; ",
+        "img-src 'self' data:; ",
+        "font-src 'self'"
+    );
+    let headers = response.headers_mut();
+    headers.insert(
+        header::CONTENT_SECURITY_POLICY,
+        HeaderValue::from_static(DASHBOARD_CSP),
+    );
+    headers.insert(
+        HeaderName::from_static("x-content-type-options"),
+        HeaderValue::from_static("nosniff"),
+    );
+    headers.insert(
+        HeaderName::from_static("referrer-policy"),
+        HeaderValue::from_static("no-referrer"),
+    );
+    headers.insert(
+        HeaderName::from_static("permissions-policy"),
+        HeaderValue::from_static(
+            "camera=(), microphone=(), geolocation=(), payment=(), usb=(), serial=(), clipboard-read=(), clipboard-write=()",
+        ),
+    );
+    headers.insert(
+        HeaderName::from_static("cross-origin-opener-policy"),
+        HeaderValue::from_static("same-origin"),
+    );
+    headers.insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("no-store, max-age=0"),
+    );
+    headers.insert(header::PRAGMA, HeaderValue::from_static("no-cache"));
+    headers.insert(header::EXPIRES, HeaderValue::from_static("0"));
+    response
 }
 
 fn approval_panel(
@@ -1516,6 +1607,39 @@ fn local_model_panel(state: &HttpState, tool_names: &BTreeSet<&str>) -> Dashboar
             )
         }
         Err(error) => DashboardPanel::error("local_model_list", format!("{error:?}")),
+    }
+}
+
+fn agent_transcript_panel(state: &HttpState) -> DashboardPanel {
+    match state.health_service.agent_transcript_snapshot(50) {
+        Ok(rows) => DashboardPanel::ok(
+            "CF_AGENT_TRANSCRIPTS",
+            DashboardTranscriptSurface {
+                source_of_truth: "CF_AGENT_TRANSCRIPTS",
+                row_count: rows.len(),
+                rows,
+            },
+        ),
+        Err(error) => DashboardPanel::error("CF_AGENT_TRANSCRIPTS", format!("{error:?}")),
+    }
+}
+
+fn hygiene_panel(state: &HttpState, tool_names: &BTreeSet<&str>) -> DashboardPanel {
+    if !tool_names.contains("hygiene_flags") {
+        return deferred_panel("hygiene_flags", tool_names);
+    }
+    match state.health_service.hygiene_flags_snapshot(100) {
+        Ok(response) => DashboardPanel::ok(
+            "hygiene_flags",
+            DashboardHygieneSurface {
+                tool: "hygiene_flags",
+                available: true,
+                scanned_rows: response.scanned_rows,
+                next_cursor: response.next_cursor,
+                rows: response.flags,
+            },
+        ),
+        Err(error) => DashboardPanel::error("hygiene_flags", format!("{error:?}")),
     }
 }
 
@@ -1569,130 +1693,34 @@ fn dashboard_unix_time_ms() -> u64 {
         .unwrap_or(u64::MAX)
 }
 
-const DASHBOARD_HTML: &str = r#"<!doctype html>
+const DASHBOARD_HTML: &str = r##"<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Synapse Dashboard</title>
-  <style>
-    :root {
-      color-scheme: light dark;
-      --bg: #f7f8fa;
-      --fg: #15181d;
-      --muted: #657080;
-      --line: #d9dee7;
-      --panel: #ffffff;
-      --accent: #0b6bcb;
-      --warn: #9c5a00;
-      --ok: #17633a;
-    }
-    @media (prefers-color-scheme: dark) {
-      :root {
-        --bg: #111418;
-        --fg: #ecf1f7;
-        --muted: #a7b0be;
-        --line: #2d3542;
-        --panel: #171c22;
-        --accent: #6bb2ff;
-        --warn: #ffbe5c;
-        --ok: #71d49c;
-      }
-    }
-    * { box-sizing: border-box; }
-    body {
-      margin: 0;
-      font: 14px/1.45 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      color: var(--fg);
-      background: var(--bg);
-    }
-    header {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 16px;
-      padding: 18px 24px;
-      border-bottom: 1px solid var(--line);
-      background: var(--panel);
-    }
-    h1, h2 {
-      margin: 0;
-      font-weight: 650;
-      letter-spacing: 0;
-    }
-    h1 { font-size: 20px; }
-    h2 { font-size: 15px; }
-    main {
-      display: grid;
-      grid-template-columns: repeat(12, minmax(0, 1fr));
-      gap: 16px;
-      padding: 16px 24px 28px;
-    }
-    section {
-      min-width: 0;
-      border: 1px solid var(--line);
-      background: var(--panel);
-      border-radius: 6px;
-    }
-    section > header {
-      padding: 12px 14px;
-      border-bottom: 1px solid var(--line);
-      background: transparent;
-    }
-    .wide { grid-column: span 12; }
-    .half { grid-column: span 6; }
-    .third { grid-column: span 4; }
-    .body { padding: 12px 14px; overflow: auto; }
-    .statgrid {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
-      gap: 10px;
-    }
-    .stat {
-      border-left: 3px solid var(--accent);
-      padding: 2px 0 2px 10px;
-      min-width: 0;
-    }
-    .label { color: var(--muted); font-size: 12px; }
-    .value { font-size: 17px; font-weight: 650; overflow-wrap: anywhere; }
-    table {
-      width: 100%;
-      border-collapse: collapse;
-      table-layout: fixed;
-    }
-    th, td {
-      padding: 7px 8px;
-      border-bottom: 1px solid var(--line);
-      text-align: left;
-      vertical-align: top;
-      overflow-wrap: anywhere;
-    }
-    th {
-      color: var(--muted);
-      font-size: 12px;
-      font-weight: 650;
-    }
-    .ok { color: var(--ok); }
-    .warn { color: var(--warn); }
-    .muted { color: var(--muted); }
-    @media (max-width: 900px) {
-      header { align-items: flex-start; flex-direction: column; }
-      main { padding: 12px; }
-      .half, .third { grid-column: span 12; }
-    }
-  </style>
+  <link rel="stylesheet" href="/dashboard/assets/dashboard.css">
+  <script src="/dashboard/assets/dashboard.js" defer></script>
 </head>
 <body>
-  <header>
+  <header class="page-header">
     <h1>Synapse Dashboard</h1>
-    <div id="updated" class="muted"></div>
+    <div id="updated" class="muted" aria-live="polite"></div>
   </header>
+  <nav class="section-nav" aria-label="Dashboard sections">
+    <a href="#daemonPanel">Daemon</a>
+    <a href="#sessionsPanel">Sessions</a>
+    <a href="#storagePanel">Storage</a>
+    <a href="#transcriptsPanel">Transcripts</a>
+    <a href="#hygienePanel">Hygiene</a>
+    <a href="#localModelsPanel">Models</a>
+  </nav>
   <main>
-    <section class="wide">
+    <section class="wide" id="daemonPanel">
       <header><h2>Daemon</h2></header>
       <div class="body statgrid" id="daemon"></div>
     </section>
-    <section class="wide">
+    <section class="wide" id="sessionsPanel">
       <header><h2>Sessions</h2></header>
       <div class="body" id="sessions"></div>
     </section>
@@ -1700,7 +1728,7 @@ const DASHBOARD_HTML: &str = r#"<!doctype html>
       <header><h2>Lease</h2></header>
       <div class="body statgrid" id="lease"></div>
     </section>
-    <section class="half">
+    <section class="half" id="storagePanel">
       <header><h2>Storage</h2></header>
       <div class="body" id="storage"></div>
     </section>
@@ -1716,125 +1744,493 @@ const DASHBOARD_HTML: &str = r#"<!doctype html>
       <header><h2>Armed Runs</h2></header>
       <div class="body" id="armedRuns"></div>
     </section>
+    <section class="wide" id="transcriptsPanel">
+      <header><h2>Agent Transcripts</h2></header>
+      <div class="body" id="agentTranscripts"></div>
+    </section>
+    <section class="half" id="hygienePanel">
+      <header><h2>Hygiene Flags</h2></header>
+      <div class="body" id="hygiene"></div>
+    </section>
+    <section class="half" id="localModelsPanel">
+      <header><h2>Local Models</h2></header>
+      <div class="body" id="localModels"></div>
+    </section>
   </main>
-  <script>
-    const text = (value) => value === null || value === undefined ? "" : String(value);
-    const byId = (id) => document.getElementById(id);
-    function clear(node) { while (node.firstChild) node.removeChild(node.firstChild); }
-    function stat(label, value, tone) {
-      const wrap = document.createElement("div");
-      wrap.className = "stat";
-      const l = document.createElement("div");
-      l.className = "label";
-      l.textContent = label;
-      const v = document.createElement("div");
-      v.className = "value" + (tone ? " " + tone : "");
-      v.textContent = text(value);
-      wrap.append(l, v);
-      return wrap;
-    }
-    function table(headers, rows) {
-      const t = document.createElement("table");
-      const thead = document.createElement("thead");
-      const tr = document.createElement("tr");
-      headers.forEach((h) => {
-        const th = document.createElement("th");
-        th.textContent = h;
-        tr.appendChild(th);
-      });
-      thead.appendChild(tr);
-      const tbody = document.createElement("tbody");
-      rows.forEach((row) => {
-        const r = document.createElement("tr");
-        row.forEach((cell) => {
-          const td = document.createElement("td");
-          td.textContent = text(cell);
-          r.appendChild(td);
-        });
-        tbody.appendChild(r);
-      });
-      t.append(thead, tbody);
-      return t;
-    }
-    function render(data) {
-      byId("updated").textContent = new Date(data.generated_at_unix_ms).toLocaleTimeString();
-      const daemon = byId("daemon"); clear(daemon);
-      const health = data.daemon.data || {};
-      daemon.append(
-        stat("PID", health.pid),
-        stat("Build", health.build),
-        stat("Tools", health.tool_count),
-        stat("Bind", data.bind_addr),
-        stat("Storage", health.subsystems?.storage?.status || ""),
-        stat("Recorder", health.subsystems?.perception?.capture_runtime?.status || health.subsystems?.perception?.status || "")
-      );
-      const sessions = byId("sessions"); clear(sessions);
-      const sessionRows = (data.sessions.data?.sessions || []).map((s) => [
-        s.session_id,
-        s.agent_kind,
-        s.lifecycle,
-        s.transport,
-        s.last_seen_ms_ago,
-        s.last_action || "",
-        s.active_target ? JSON.stringify(s.active_target) : ""
-      ]);
-      sessions.appendChild(table(["Session", "Agent", "Life", "Transport", "Last Seen", "Last Action", "Target"], sessionRows));
-      const lease = byId("lease"); clear(lease);
-      const leaseData = data.lease.data || {};
-      lease.append(
-        stat("Held", leaseData.held, leaseData.held ? "warn" : "ok"),
-        stat("Owner", leaseData.owner_session_id || "none"),
-        stat("TTL ms", leaseData.ttl_ms || ""),
-        stat("Expires ms", leaseData.expires_in_ms || "")
-      );
-      const storage = byId("storage"); clear(storage);
-      const counts = data.storage.data?.cf_row_counts || {};
-      storage.appendChild(table(["Column Family", "Rows"], Object.entries(counts).map(([k, v]) => [k, v])));
-      renderQueue("approvals", data.approvals);
-      renderQueue("suggestions", data.suggestions);
-      renderQueue("armedRuns", data.armed_runs);
-    }
-    function renderQueue(id, panel) {
-      const node = byId(id); clear(node);
-      const data = panel.data || {};
-      if (panel.status !== "ok") {
-        node.append(
-          stat("Status", panel.status, "warn"),
-          stat("Tool", data.tool || panel.source),
-          stat("Available", data.available === true)
-        );
-        return;
-      }
-      const rows = data.rows || [];
-      node.append(
-        stat("Status", panel.status, "ok"),
-        stat("Tool", data.tool || panel.source),
-        stat("Rows", rows.length)
-      );
-      node.appendChild(table(["Status", "Kind", "Title", "Updated", "Timeout"], rows.map((row) => {
-        const item = row.item || {};
-        return [
-          item.status,
-          item.kind,
-          item.title,
-          item.updated_at_unix_ms ? new Date(item.updated_at_unix_ms).toLocaleTimeString() : "",
-          item.expires_at_unix_ms ? new Date(item.expires_at_unix_ms).toLocaleTimeString() : ""
-        ];
-      })));
-    }
-    async function refresh() {
-      try {
-        const response = await fetch("/dashboard/state.json", { cache: "no-store" });
-        render(await response.json());
-      } catch (error) {
-        byId("updated").textContent = text(error);
-      }
-    }
-    refresh();
-    setInterval(refresh, 3000);
-  </script>
 </body>
-</html>"#;
+</html>"##;
+
+const DASHBOARD_CSS: &str = r#":root {
+  color-scheme: light dark;
+  --bg: #f7f8fa;
+  --fg: #15181d;
+  --muted: #657080;
+  --line: #d9dee7;
+  --panel: #ffffff;
+  --accent: #0b6bcb;
+  --warn: #9c5a00;
+  --danger: #b42318;
+  --ok: #17633a;
+  --chip-bg: #eef2f7;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #111418;
+    --fg: #ecf1f7;
+    --muted: #a7b0be;
+    --line: #2d3542;
+    --panel: #171c22;
+    --accent: #6bb2ff;
+    --warn: #ffbe5c;
+    --danger: #ff8a7d;
+    --ok: #71d49c;
+    --chip-bg: #222a35;
+  }
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  font: 14px/1.45 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  color: var(--fg);
+  background: var(--bg);
+}
+.page-header,
+section > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel);
+}
+.page-header { padding: 18px 24px; }
+.section-nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 0 24px 16px;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel);
+}
+.section-nav a {
+  color: var(--accent);
+  text-decoration: none;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 4px 9px;
+  background: var(--chip-bg);
+}
+h1, h2 {
+  margin: 0;
+  font-weight: 650;
+  letter-spacing: 0;
+}
+h1 { font-size: 20px; }
+h2 { font-size: 15px; }
+main {
+  display: grid;
+  grid-template-columns: repeat(12, minmax(0, 1fr));
+  gap: 16px;
+  padding: 16px 24px 28px;
+}
+section {
+  min-width: 0;
+  border: 1px solid var(--line);
+  background: var(--panel);
+  border-radius: 6px;
+  scroll-margin-top: 16px;
+}
+section > header {
+  padding: 12px 14px;
+  background: transparent;
+}
+.wide { grid-column: span 12; }
+.half { grid-column: span 6; }
+.third { grid-column: span 4; }
+.body { padding: 12px 14px; overflow: auto; }
+.statgrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 10px;
+}
+.stat {
+  border-left: 3px solid var(--accent);
+  padding: 2px 0 2px 10px;
+  min-width: 0;
+}
+.label { color: var(--muted); font-size: 12px; }
+.value { font-size: 17px; font-weight: 650; overflow-wrap: anywhere; }
+table {
+  width: 100%;
+  border-collapse: collapse;
+  table-layout: fixed;
+}
+th, td {
+  padding: 7px 8px;
+  border-bottom: 1px solid var(--line);
+  text-align: left;
+  vertical-align: top;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+th {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 650;
+  white-space: normal;
+}
+.ok { color: var(--ok); }
+.warn { color: var(--warn); }
+.danger { color: var(--danger); }
+.muted { color: var(--muted); }
+.chip {
+  display: inline-block;
+  margin: 3px 4px 0 0;
+  padding: 1px 6px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--chip-bg);
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.4;
+  vertical-align: baseline;
+}
+.chip.warn { color: var(--warn); }
+.chip.danger { color: var(--danger); }
+.chip a { color: inherit; }
+.cell-text { overflow-wrap: anywhere; white-space: pre-wrap; }
+@media (max-width: 900px) {
+  .page-header { align-items: flex-start; flex-direction: column; }
+  main { padding: 12px; }
+  .half, .third { grid-column: span 12; }
+}
+"#;
+
+const DASHBOARD_JS: &str = r##""use strict";
+
+const MAX_TEXT_CHARS = 4096;
+const MAX_TOOL_CELL_CHARS = 4096;
+const byId = (id) => document.getElementById(id);
+
+function clear(node) {
+  while (node.firstChild) node.removeChild(node.firstChild);
+}
+
+function rawText(value) {
+  if (value === null || value === undefined) return "";
+  if (typeof value === "string") return value;
+  if (typeof value === "number" || typeof value === "boolean" || typeof value === "bigint") {
+    return String(value);
+  }
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch (error) {
+    return String(value);
+  }
+}
+
+function stripTerminalSequences(value) {
+  let text = String(value);
+  const before = text;
+  text = text.replace(/\x1b\][\s\S]*?(?:\x07|\x1b\\)/g, "");
+  text = text.replace(/\x9d[\s\S]*?(?:\x07|\x9c)/g, "");
+  text = text.replace(/\x1b[P^_][\s\S]*?\x1b\\/g, "");
+  text = text.replace(/[\x90\x9e\x9f][\s\S]*?\x9c/g, "");
+  text = text.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "");
+  text = text.replace(/\x9b[0-?]*[ -/]*[@-~]/g, "");
+  text = text.replace(/\x1b[ -/]*[@-~]/g, "");
+  text = text.replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]/g, "");
+  return { text, removed: text !== before };
+}
+
+function suspiciousText(value) {
+  return /<\s*script|javascript\s*:|onerror\s*=|onload\s*=|ignore\s+(all\s+)?(previous|prior)\s+instructions|reveal\s+(your|the)\s+instructions/i.test(value);
+}
+
+function normalizeForDisplay(value, maxChars) {
+  const stripped = stripTerminalSequences(rawText(value));
+  let text = stripped.text;
+  const flags = [];
+  if (stripped.removed) flags.push({ label: "control-stripped", tone: "warn" });
+  if (suspiciousText(text)) flags.push({ label: "hygiene", tone: "danger", link: "#hygienePanel" });
+  if (text.length > maxChars) {
+    text = text.slice(0, maxChars);
+    flags.push({ label: "truncated", tone: "warn" });
+  }
+  return { text, flags };
+}
+
+function appendChip(node, flag) {
+  const chip = document.createElement("span");
+  chip.className = "chip" + (flag.tone ? " " + flag.tone : "");
+  if (flag.link) {
+    const link = document.createElement("a");
+    link.href = flag.link;
+    link.textContent = flag.label;
+    chip.appendChild(link);
+  } else {
+    chip.textContent = flag.label;
+  }
+  node.appendChild(chip);
+}
+
+function appendDisplay(node, value, options = {}) {
+  const normalized = normalizeForDisplay(value, options.maxChars || MAX_TEXT_CHARS);
+  const textNode = document.createElement("span");
+  textNode.className = "cell-text";
+  textNode.textContent = normalized.text;
+  node.appendChild(textNode);
+  const seen = new Set();
+  for (const flag of normalized.flags) {
+    seen.add(flag.label);
+    appendChip(node, flag);
+  }
+  if (options.forceTruncated && !seen.has("truncated")) {
+    appendChip(node, { label: "truncated", tone: "warn" });
+  }
+  if (options.forceHygiene && !seen.has("hygiene")) {
+    appendChip(node, { label: "hygiene", tone: "danger", link: "#hygienePanel" });
+  }
+}
+
+function stat(label, value, tone) {
+  const wrap = document.createElement("div");
+  wrap.className = "stat";
+  const l = document.createElement("div");
+  l.className = "label";
+  l.textContent = label;
+  const v = document.createElement("div");
+  v.className = "value" + (tone ? " " + tone : "");
+  appendDisplay(v, value, { maxChars: 512 });
+  wrap.append(l, v);
+  return wrap;
+}
+
+function table(headers, rows) {
+  const t = document.createElement("table");
+  const thead = document.createElement("thead");
+  const tr = document.createElement("tr");
+  headers.forEach((h) => {
+    const th = document.createElement("th");
+    th.textContent = h;
+    tr.appendChild(th);
+  });
+  thead.appendChild(tr);
+  const tbody = document.createElement("tbody");
+  rows.forEach((row) => {
+    const r = document.createElement("tr");
+    row.forEach((cell) => {
+      const td = document.createElement("td");
+      if (cell && typeof cell === "object" && Object.prototype.hasOwnProperty.call(cell, "value")) {
+        appendDisplay(td, cell.value, cell);
+      } else {
+        appendDisplay(td, cell);
+      }
+      r.appendChild(td);
+    });
+    tbody.appendChild(r);
+  });
+  t.append(thead, tbody);
+  return t;
+}
+
+function renderUnavailable(node, panel) {
+  const data = panel?.data || {};
+  node.append(
+    stat("Status", panel?.status || "missing", "warn"),
+    stat("Tool", data.tool || panel?.source || ""),
+    stat("Available", data.available === true)
+  );
+}
+
+function render(data) {
+  byId("updated").textContent = new Date(data.generated_at_unix_ms).toLocaleTimeString();
+  const daemon = byId("daemon"); clear(daemon);
+  const health = data.daemon.data || {};
+  daemon.append(
+    stat("PID", health.pid),
+    stat("Build", health.build),
+    stat("Tools", health.tool_count),
+    stat("Bind", data.bind_addr),
+    stat("Storage", health.subsystems?.storage?.status || ""),
+    stat("Recorder", health.subsystems?.perception?.capture_runtime?.status || health.subsystems?.perception?.status || "")
+  );
+
+  const sessions = byId("sessions"); clear(sessions);
+  const sessionRows = (data.sessions.data?.sessions || []).map((s) => [
+    s.session_id,
+    s.agent_kind,
+    s.lifecycle,
+    s.transport,
+    s.last_seen_ms_ago,
+    s.last_action || "",
+    s.active_target ? rawText(s.active_target) : ""
+  ]);
+  sessions.appendChild(table(["Session", "Agent", "Life", "Transport", "Last Seen", "Last Action", "Target"], sessionRows));
+
+  const lease = byId("lease"); clear(lease);
+  const leaseData = data.lease.data || {};
+  lease.append(
+    stat("Held", leaseData.held, leaseData.held ? "warn" : "ok"),
+    stat("Owner", leaseData.owner_session_id || "none"),
+    stat("TTL ms", leaseData.ttl_ms || ""),
+    stat("Expires ms", leaseData.expires_in_ms || "")
+  );
+
+  const storage = byId("storage"); clear(storage);
+  const counts = data.storage.data?.cf_row_counts || {};
+  storage.appendChild(table(["Column Family", "Rows"], Object.entries(counts).map(([k, v]) => [k, v])));
+
+  renderQueue("approvals", data.approvals);
+  renderQueue("suggestions", data.suggestions);
+  renderQueue("armedRuns", data.armed_runs);
+  renderTranscripts(data.agent_transcripts);
+  renderHygiene(data.hygiene);
+  renderLocalModels(data.local_models);
+}
+
+function renderQueue(id, panel) {
+  const node = byId(id); clear(node);
+  if (!panel || panel.status !== "ok") {
+    renderUnavailable(node, panel);
+    return;
+  }
+  const data = panel.data || {};
+  const rows = data.rows || [];
+  node.append(
+    stat("Status", panel.status, "ok"),
+    stat("Tool", data.tool || panel.source),
+    stat("Rows", rows.length)
+  );
+  node.appendChild(table(["Status", "Kind", "Title", "Body", "Updated", "Timeout"], rows.map((row) => {
+    const item = row.item || {};
+    return [
+      item.status,
+      item.kind,
+      { value: item.title, maxChars: 1024 },
+      { value: item.body, maxChars: 1024 },
+      item.updated_at_unix_ms ? new Date(item.updated_at_unix_ms).toLocaleTimeString() : "",
+      item.expires_at_unix_ms ? new Date(item.expires_at_unix_ms).toLocaleTimeString() : ""
+    ];
+  })));
+}
+
+function summarizeToolCalls(calls) {
+  let out = "";
+  let truncated = false;
+  for (const call of calls || []) {
+    const line = [
+      call.tool_name || "",
+      call.arguments ? "args=" + call.arguments : "",
+      call.result_summary ? "result=" + call.result_summary : "",
+      call.status ? "status=" + call.status : ""
+    ].filter(Boolean).join(" ");
+    const next = out ? out + "\n" + line : line;
+    if (next.length > MAX_TOOL_CELL_CHARS) {
+      out = next.slice(0, MAX_TOOL_CELL_CHARS);
+      truncated = true;
+      break;
+    }
+    out = next;
+  }
+  return { value: out, maxChars: MAX_TOOL_CELL_CHARS, forceTruncated: truncated };
+}
+
+function renderTranscripts(panel) {
+  const node = byId("agentTranscripts"); clear(node);
+  if (!panel || panel.status !== "ok") {
+    renderUnavailable(node, panel);
+    return;
+  }
+  const data = panel.data || {};
+  const rows = data.rows || [];
+  node.append(
+    stat("SoT", data.source_of_truth || panel.source),
+    stat("Rows", data.row_count || rows.length)
+  );
+  node.appendChild(table(["Spawn", "Line", "Role", "Event", "Model", "Content", "Tool Calls"], rows.map((row) => {
+    const record = row.record || {};
+    return [
+      row.spawn_id,
+      row.line_no,
+      record.role || "",
+      record.event_kind || "",
+      record.model || "",
+      { value: record.content_summary || record.source_error || record.parse_error || "", maxChars: MAX_TEXT_CHARS, forceTruncated: record.content_truncated },
+      summarizeToolCalls(record.tool_calls || [])
+    ];
+  })));
+}
+
+function renderHygiene(panel) {
+  const node = byId("hygiene"); clear(node);
+  if (!panel || panel.status !== "ok") {
+    renderUnavailable(node, panel);
+    return;
+  }
+  const data = panel.data || {};
+  const rows = data.rows || [];
+  node.append(
+    stat("Tool", data.tool || panel.source),
+    stat("Flags", rows.length),
+    stat("Scanned", data.scanned_rows || 0),
+    stat("Cursor", data.next_cursor || "")
+  );
+  node.appendChild(table(["Score", "Source", "Field", "Span", "Evidence", "KV Key"], rows.map((row) => {
+    const record = row.record || {};
+    return [
+      record.score,
+      record.source_cf + " " + record.source_key_hex,
+      record.source_field,
+      { value: record.span_text, maxChars: 1024, forceHygiene: true },
+      (record.heuristics || []).concat(record.evidence || []).join("\n"),
+      row.kv_key_hex
+    ];
+  })));
+}
+
+function renderLocalModels(panel) {
+  const node = byId("localModels"); clear(node);
+  if (!panel || panel.status !== "ok") {
+    renderUnavailable(node, panel);
+    return;
+  }
+  const data = panel.data || {};
+  const rows = data.rows || [];
+  node.append(
+    stat("Tool", data.tool || panel.source),
+    stat("Enabled", data.enabled_count || 0),
+    stat("Unhealthy", data.unhealthy_count || 0, data.unhealthy_count ? "warn" : "ok"),
+    stat("Rows", rows.length)
+  );
+  node.appendChild(table(["Name", "Model", "Base URL", "Enabled", "Probe", "Notes"], rows.map((row) => {
+    const probe = row.last_probe || {};
+    return [
+      row.name,
+      row.model_id,
+      row.base_url,
+      row.enabled,
+      probe.checked_at ? (probe.healthy ? "healthy" : "unhealthy") + " " + probe.checked_at : "",
+      { value: row.notes || probe.raw_response_excerpt || "", maxChars: 1024 }
+    ];
+  })));
+}
+
+async function refresh() {
+  try {
+    const response = await fetch("/dashboard/state.json", { cache: "no-store" });
+    if (!response.ok) {
+      throw new Error("dashboard state failed: " + response.status);
+    }
+    render(await response.json());
+  } catch (error) {
+    byId("updated").textContent = rawText(error);
+  }
+}
+
+refresh();
+setInterval(refresh, 3000);
+"##;
 
 async fn health(State(state): State<HttpState>) -> Json<Health> {
     tracing::info!(
@@ -2114,6 +2510,61 @@ mod tests {
         assert!(!DASHBOARD_HTML.contains("Authorization"));
         assert!(!DASHBOARD_HTML.contains("Bearer"));
         assert!(!DASHBOARD_HTML.contains("SYNAPSE_BEARER_TOKEN"));
+        assert!(!DASHBOARD_CSS.contains("Authorization"));
+        assert!(!DASHBOARD_CSS.contains("Bearer"));
+        assert!(!DASHBOARD_CSS.contains("SYNAPSE_BEARER_TOKEN"));
+        assert!(!DASHBOARD_JS.contains("Authorization"));
+        assert!(!DASHBOARD_JS.contains("Bearer"));
+        assert!(!DASHBOARD_JS.contains("SYNAPSE_BEARER_TOKEN"));
+    }
+
+    #[test]
+    fn dashboard_html_uses_external_assets_without_inline_blocks() {
+        assert!(DASHBOARD_HTML.contains("/dashboard/assets/dashboard.css"));
+        assert!(DASHBOARD_HTML.contains("/dashboard/assets/dashboard.js"));
+        assert!(DASHBOARD_HTML.contains("section-nav"));
+        assert!(!DASHBOARD_HTML.contains("<style"));
+        assert!(!DASHBOARD_HTML.contains("<script>"));
+    }
+
+    #[test]
+    fn dashboard_security_headers_disallow_inline_script_and_eval() {
+        let response = with_dashboard_security_headers(Html("").into_response());
+        let csp = response
+            .headers()
+            .get(header::CONTENT_SECURITY_POLICY)
+            .and_then(|value| value.to_str().ok())
+            .expect("CSP header present");
+        assert!(csp.contains("default-src 'none'"));
+        assert!(csp.contains("script-src 'self'"));
+        assert!(csp.contains("style-src 'self'"));
+        assert!(!csp.contains("'unsafe-inline'"));
+        assert!(!csp.contains("'unsafe-eval'"));
+        assert_eq!(
+            response
+                .headers()
+                .get(HeaderName::from_static("x-content-type-options"))
+                .and_then(|value| value.to_str().ok()),
+            Some("nosniff")
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get(header::CACHE_CONTROL)
+                .and_then(|value| value.to_str().ok()),
+            Some("no-store, max-age=0")
+        );
+    }
+
+    #[test]
+    fn dashboard_js_uses_safe_sinks_and_escape_guards() {
+        assert!(DASHBOARD_JS.contains("textContent"));
+        assert!(DASHBOARD_JS.contains("stripTerminalSequences"));
+        assert!(DASHBOARD_JS.contains("MAX_TEXT_CHARS"));
+        assert!(!DASHBOARD_JS.contains("innerHTML"));
+        assert!(!DASHBOARD_JS.contains("insertAdjacentHTML"));
+        assert!(!DASHBOARD_JS.contains("new Function"));
+        assert!(!DASHBOARD_JS.contains("eval("));
     }
 
     fn test_session_state(name: &str) -> SessionState {

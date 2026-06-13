@@ -12,10 +12,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use chrono::Utc;
 use rmcp::{RoleServer, model::ErrorCode, service::RequestContext};
+use serde::Serialize;
 use serde_json::json;
 use synapse_core::{
-    AccessibleNode, Action, ElementId, Event, EventSource, FocusedElement, ForegroundContext,
-    Profile, ProfileUseScope, ReflexId,
+    AccessibleNode, Action, AgentTranscriptRecord, ElementId, Event, EventSource, FocusedElement,
+    ForegroundContext, Profile, ProfileUseScope, ReflexId,
 };
 use synapse_profiles::ForegroundProfileTransition;
 use synapse_reflex::{
@@ -41,6 +42,14 @@ const MCP_SESSION_ID_HEADER: &str = "Mcp-Session-Id";
 // can be resolved on scheduler ticks without requiring a deep UIA walk.
 const AIM_TRACK_TARGET_SOURCE_DEPTH: u32 = 2;
 static NEXT_PROFILE_EVENT_SEQ: AtomicU64 = AtomicU64::new(1);
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct AgentTranscriptSnapshotRow {
+    pub key_hex: String,
+    pub spawn_id: String,
+    pub line_no: u64,
+    pub record: AgentTranscriptRecord,
+}
 
 impl SynapseService {
     pub(super) fn m1_state(&self) -> Result<MutexGuard<'_, M1State>, ErrorData> {
@@ -351,6 +360,57 @@ impl SynapseService {
         crate::m3::local_models::local_model_snapshot(&db)
     }
 
+    pub(crate) fn agent_transcript_snapshot(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<AgentTranscriptSnapshotRow>, ErrorData> {
+        let db = self.m3_storage()?;
+        let rows = db
+            .scan_cf(synapse_storage::cf::CF_AGENT_TRANSCRIPTS)
+            .map_err(|error| mcp_error(error.code(), error.to_string()))?;
+        let mut decoded = Vec::new();
+        for (key, value) in rows {
+            let (spawn_id, line_no) =
+                synapse_storage::agent_transcripts::decode_agent_transcript_key(&key)
+                    .map_err(|error| mcp_error(error.code(), error.to_string()))?;
+            let record = synapse_storage::decode_json::<AgentTranscriptRecord>(&value)
+                .map_err(|error| mcp_error(error.code(), error.to_string()))?;
+            decoded.push(AgentTranscriptSnapshotRow {
+                key_hex: hex_encode(&key),
+                spawn_id,
+                line_no,
+                record,
+            });
+        }
+        decoded.sort_by(|left, right| {
+            right
+                .record
+                .ts_ns
+                .cmp(&left.record.ts_ns)
+                .then_with(|| right.spawn_id.cmp(&left.spawn_id))
+                .then_with(|| right.line_no.cmp(&left.line_no))
+        });
+        decoded.truncate(limit);
+        Ok(decoded)
+    }
+
+    pub(crate) fn hygiene_flags_snapshot(
+        &self,
+        limit: u32,
+    ) -> Result<crate::m3::hygiene::HygieneFlagsResponse, ErrorData> {
+        let runtime = self.reflex_runtime()?;
+        crate::m3::hygiene::query_flags(
+            &runtime,
+            &crate::m3::hygiene::HygieneFlagsParams {
+                source_cf: None,
+                source_key_hex: None,
+                min_score: Some(0),
+                limit: Some(limit),
+                cursor: None,
+            },
+        )
+    }
+
     pub(crate) fn approval_decide_from_activation(
         &self,
         params: &crate::m3::approvals::ApprovalActivationParams,
@@ -549,6 +609,16 @@ impl SynapseService {
             recording,
         ))
     }
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push(HEX[(byte >> 4) as usize] as char);
+        out.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    out
 }
 
 fn act_type_foreground_lost_error(
