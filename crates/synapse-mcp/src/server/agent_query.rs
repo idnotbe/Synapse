@@ -311,8 +311,7 @@ impl SynapseService {
             kind = "agent_query",
             "tool.invocation kind=agent_query"
         );
-        let caller_session =
-            super::context::mcp_session_id_from_request_context(&request_context)?;
+        let caller_session = super::context::mcp_session_id_from_request_context(&request_context)?;
         self.agent_query_impl(params.0, caller_session.as_deref())
             .await
             .map(Json)
@@ -381,7 +380,8 @@ impl SynapseService {
         }
 
         // ---- Tool-call reconstruction + compact recent events. ----
-        let (current_tool_call, last_tool_call) = reconstruct_tool_calls(&scan.matched, now_unix_ms);
+        let (current_tool_call, last_tool_call) =
+            reconstruct_tool_calls(&scan.matched, now_unix_ms);
         let recent_events = compact_recent_events(&scan.matched, params.max_events);
 
         let anchor = lifecycle
@@ -574,8 +574,7 @@ impl SynapseService {
                         == Some(request_message_id.as_str())
             }) {
                 // Consume exactly the correlated reply row.
-                if let Err(error) =
-                    db.delete_batch(cf::CF_KV, [reply.row_key.as_bytes().to_vec()])
+                if let Err(error) = db.delete_batch(cf::CF_KV, [reply.row_key.as_bytes().to_vec()])
                 {
                     tracing::warn!(
                         code = "AGENT_QUERY_DEEP_REPLY_CLEANUP_FAILED",
@@ -801,9 +800,16 @@ fn reconstruct_tool_calls(
                     .payload
                     .get("duration_ms")
                     .and_then(Value::as_u64)
-                    .or_else(|| snap.started_at_unix_ms.map(|start| ts_ms.saturating_sub(start)));
+                    .or_else(|| {
+                        snap.started_at_unix_ms
+                            .map(|start| ts_ms.saturating_sub(start))
+                    });
                 if record.attributes.tool_name.is_some() && snap.tool_name == "unknown" {
-                    snap.tool_name = record.attributes.tool_name.clone().unwrap_or(snap.tool_name);
+                    snap.tool_name = record
+                        .attributes
+                        .tool_name
+                        .clone()
+                        .unwrap_or(snap.tool_name);
                 }
                 last_finished = Some(snap);
             }
@@ -868,7 +874,10 @@ fn read_transcript_snapshot(
     spawn_id: &str,
 ) -> Result<(Option<TurnSnapshot>, Option<u64>, Option<String>, usize), ErrorData> {
     let rows = db
-        .scan_cf_prefix(cf::CF_AGENT_TRANSCRIPTS, &agent_transcript_spawn_prefix(spawn_id))
+        .scan_cf_prefix(
+            cf::CF_AGENT_TRANSCRIPTS,
+            &agent_transcript_spawn_prefix(spawn_id),
+        )
         .map_err(|error| mcp_error(error.code(), error.to_string()))?;
     let rows_scanned = rows.len();
 
@@ -991,7 +1000,8 @@ fn validate_params(params: &AgentQueryParams) -> Result<(), ErrorData> {
             ),
         ));
     }
-    if params.deep && (params.deep_timeout_ms == 0 || params.deep_timeout_ms > MAX_DEEP_TIMEOUT_MS) {
+    if params.deep && (params.deep_timeout_ms == 0 || params.deep_timeout_ms > MAX_DEEP_TIMEOUT_MS)
+    {
         return Err(mcp_error(
             error_codes::TOOL_PARAMS_INVALID,
             format!(
@@ -1062,14 +1072,11 @@ fn sources_map() -> BTreeMap<String, String> {
     for field in ["current_tool_call", "last_tool_call", "recent_events"] {
         map.insert(
             field.to_owned(),
-            "CF_AGENT_EVENTS journal rows (tool_call_started/finished); keys (ts_ns,seq)".to_owned(),
+            "CF_AGENT_EVENTS journal rows (tool_call_started/finished); keys (ts_ns,seq)"
+                .to_owned(),
         );
     }
-    for field in [
-        "turn",
-        "context_window_estimate_tokens",
-        "activity_summary",
-    ] {
+    for field in ["turn", "context_window_estimate_tokens", "activity_summary"] {
         map.insert(
             field.to_owned(),
             "CF_AGENT_TRANSCRIPTS rows (#900); keys (spawn_id,line_no)".to_owned(),

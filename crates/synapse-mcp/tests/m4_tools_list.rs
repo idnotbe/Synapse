@@ -37,7 +37,10 @@ async fn m4_tools_list_snapshot_defaults_and_closed_schemas() -> anyhow::Result<
     // Structural invariants only — the exact names/count are pinned by the insta
     // snapshot below (the single source of truth), so a drift fails loudly there
     // and is fixed with `cargo insta review`, not by editing a magic array (#953).
-    ensure!(!names.is_empty(), "tools/list returned an empty tool surface");
+    ensure!(
+        !names.is_empty(),
+        "tools/list returned an empty tool surface"
+    );
     assert_no_duplicate_names(&names)?;
 
     assert_schema_roots_closed(tools)?;

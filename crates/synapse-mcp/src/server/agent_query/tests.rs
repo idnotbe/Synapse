@@ -71,7 +71,9 @@ fn write_event(
     record.spawn_id = spawn_id.map(ToOwned::to_owned);
     record.session_id = session_id.map(ToOwned::to_owned);
     decorate(&mut record);
-    record.validate().expect("synthetic journal row must be valid");
+    record
+        .validate()
+        .expect("synthetic journal row must be valid");
     let value = serde_json::to_vec(&record).expect("serialize journal row");
     db.put_batch_pressure_bypass(cf::CF_AGENT_EVENTS, [(agent_event_key(ts_ns, seq), value)])
         .expect("write journal row");
@@ -90,8 +92,14 @@ fn write_transcript(
     content_summary: Option<&str>,
     usage: Option<TranscriptUsage>,
 ) {
-    let mut record =
-        AgentTranscriptRecord::new(ts_ns, spawn_id.to_owned(), line_no, TranscriptSource::ClaudeStreamJson, 16, "a".repeat(64));
+    let mut record = AgentTranscriptRecord::new(
+        ts_ns,
+        spawn_id.to_owned(),
+        line_no,
+        TranscriptSource::ClaudeStreamJson,
+        16,
+        "a".repeat(64),
+    );
     record.status = TranscriptParseStatus::Parsed;
     record.role = Some(role);
     record.event_kind = Some(event_kind.to_owned());
@@ -99,7 +107,9 @@ fn write_transcript(
     record.turn_index = turn_index;
     record.content_summary = content_summary.map(ToOwned::to_owned);
     record.usage = usage;
-    record.validate().expect("synthetic transcript row must be valid");
+    record
+        .validate()
+        .expect("synthetic transcript row must be valid");
     let value = serde_json::to_vec(&record).expect("serialize transcript row");
     db.put_batch_pressure_bypass(
         cf::CF_AGENT_TRANSCRIPTS,
@@ -154,9 +164,33 @@ async fn working_agent_snapshot_reconstructs_state_tool_events_and_tokens() {
 
     // Base ns; one full turn with two tools, the second still in flight.
     let base = recent_base_ns();
-    write_event(&db, base + 1, 0, AgentEventKind::SpawnRequested, Some(SPAWN), None, |_| {});
-    write_event(&db, base + 2, 0, AgentEventKind::SpawnReady, Some(SPAWN), Some(SESSION), |_| {});
-    write_event(&db, base + 3, 0, AgentEventKind::TurnStarted, Some(SPAWN), Some(SESSION), |_| {});
+    write_event(
+        &db,
+        base + 1,
+        0,
+        AgentEventKind::SpawnRequested,
+        Some(SPAWN),
+        None,
+        |_| {},
+    );
+    write_event(
+        &db,
+        base + 2,
+        0,
+        AgentEventKind::SpawnReady,
+        Some(SPAWN),
+        Some(SESSION),
+        |_| {},
+    );
+    write_event(
+        &db,
+        base + 3,
+        0,
+        AgentEventKind::TurnStarted,
+        Some(SPAWN),
+        Some(SESSION),
+        |_| {},
+    );
     write_event(
         &db,
         base + 4,
@@ -237,7 +271,10 @@ async fn working_agent_snapshot_reconstructs_state_tool_events_and_tokens() {
 
     // Recent events compact form covers the planted sequence.
     assert_eq!(response.recent_events.len(), 6);
-    assert_eq!(response.recent_events[0].kind, AgentEventKind::SpawnRequested);
+    assert_eq!(
+        response.recent_events[0].kind,
+        AgentEventKind::SpawnRequested
+    );
     assert_eq!(
         response.recent_events.last().expect("last event").kind,
         AgentEventKind::ToolCallStarted
@@ -252,7 +289,10 @@ async fn working_agent_snapshot_reconstructs_state_tool_events_and_tokens() {
     assert_eq!(turn.total_tokens, 1000 + 200 + 5000 + 300);
     assert_eq!(turn.turn_index, Some(1));
     assert_eq!(turn.source_line_no, 1);
-    assert_eq!(response.context_window_estimate_tokens, Some(1000 + 5000 + 300 + 200));
+    assert_eq!(
+        response.context_window_estimate_tokens,
+        Some(1000 + 5000 + 300 + 200)
+    );
 
     // Activity summary collapses the multi-line assistant text to one line.
     assert_eq!(
@@ -262,7 +302,13 @@ async fn working_agent_snapshot_reconstructs_state_tool_events_and_tokens() {
 
     // task is null (not fabricated) and its source documents #910.
     assert!(response.task.is_none());
-    assert!(response.sources.get("task").expect("task source").contains("#910"));
+    assert!(
+        response
+            .sources
+            .get("task")
+            .expect("task source")
+            .contains("#910")
+    );
     assert!(response.cooperative.is_none());
     assert_eq!(response.scan.events_matched, 6);
 }
@@ -274,7 +320,15 @@ async fn blocked_agent_surfaces_needs_input_and_waiting_for() {
     let db = db_of(&service);
 
     let base = recent_base_ns();
-    write_event(&db, base + 1, 0, AgentEventKind::SpawnReady, Some(SPAWN), Some(SESSION), |_| {});
+    write_event(
+        &db,
+        base + 1,
+        0,
+        AgentEventKind::SpawnReady,
+        Some(SPAWN),
+        Some(SESSION),
+        |_| {},
+    );
     // A sender-pushed state_changed row (no machine origin) -> reducer path.
     write_event(
         &db,
@@ -327,7 +381,15 @@ async fn deep_times_out_to_not_answered_without_a_cooperating_agent() {
     register_session(&service, SESSION);
 
     let base = recent_base_ns();
-    write_event(&db, base + 1, 0, AgentEventKind::SpawnReady, Some(SPAWN), Some(SESSION), |_| {});
+    write_event(
+        &db,
+        base + 1,
+        0,
+        AgentEventKind::SpawnReady,
+        Some(SPAWN),
+        Some(SESSION),
+        |_| {},
+    );
 
     let mut p = params(SESSION);
     p.deep = true;
@@ -337,14 +399,20 @@ async fn deep_times_out_to_not_answered_without_a_cooperating_agent() {
         .await
         .expect("agent_query succeeds");
 
-    let cooperative = response.cooperative.expect("deep mode returns a cooperative result");
+    let cooperative = response
+        .cooperative
+        .expect("deep mode returns a cooperative result");
     assert_eq!(cooperative.status, "not_answered");
     assert!(cooperative.request_message_id.is_some());
     assert!(cooperative.answer.is_none());
     // The request really was delivered: a status_request sits in the target's box.
     let inbox = service
         .agent_inbox_impl(
-            crate::server::agent_mailbox::AgentInboxParams { drain: false, max_messages: 10, kinds: Vec::new() },
+            crate::server::agent_mailbox::AgentInboxParams {
+                drain: false,
+                max_messages: 10,
+                kinds: Vec::new(),
+            },
             SESSION,
         )
         .expect("read target inbox");
@@ -359,7 +427,15 @@ async fn deep_without_caller_session_is_channel_unavailable() {
     let db = db_of(&service);
 
     let base = recent_base_ns();
-    write_event(&db, base + 1, 0, AgentEventKind::SpawnReady, Some(SPAWN), Some(SESSION), |_| {});
+    write_event(
+        &db,
+        base + 1,
+        0,
+        AgentEventKind::SpawnReady,
+        Some(SPAWN),
+        Some(SESSION),
+        |_| {},
+    );
 
     let mut p = params(SESSION);
     p.deep = true;
@@ -368,7 +444,9 @@ async fn deep_without_caller_session_is_channel_unavailable() {
         .await
         .expect("agent_query succeeds");
 
-    let cooperative = response.cooperative.expect("deep mode returns a cooperative result");
+    let cooperative = response
+        .cooperative
+        .expect("deep mode returns a cooperative result");
     assert_eq!(cooperative.status, "channel_unavailable");
     assert!(cooperative.detail.expect("detail").contains("HTTP mode"));
 }
@@ -384,7 +462,15 @@ async fn deep_answered_when_agent_replies_cooperatively() {
     register_session(&service, SESSION);
 
     let base = recent_base_ns();
-    write_event(&db, base + 1, 0, AgentEventKind::SpawnReady, Some(SPAWN), Some(SESSION), |_| {});
+    write_event(
+        &db,
+        base + 1,
+        0,
+        AgentEventKind::SpawnReady,
+        Some(SPAWN),
+        Some(SESSION),
+        |_| {},
+    );
 
     // Responder: poll the target inbox; when the status_request lands, reply to
     // the caller echoing the request message_id, exactly as a cooperating agent
@@ -394,7 +480,11 @@ async fn deep_answered_when_agent_replies_cooperatively() {
         for _ in 0..200 {
             let inbox = responder_service
                 .agent_inbox_impl(
-                    crate::server::agent_mailbox::AgentInboxParams { drain: true, max_messages: 10, kinds: Vec::new() },
+                    crate::server::agent_mailbox::AgentInboxParams {
+                        drain: true,
+                        max_messages: 10,
+                        kinds: Vec::new(),
+                    },
                     SESSION,
                 )
                 .expect("responder reads inbox");
@@ -436,17 +526,31 @@ async fn deep_answered_when_agent_replies_cooperatively() {
     responder.await.expect("responder task");
 
     let cooperative = response.cooperative.expect("deep cooperative result");
-    assert_eq!(cooperative.status, "answered", "detail: {:?}", cooperative.detail);
+    assert_eq!(
+        cooperative.status, "answered",
+        "detail: {:?}",
+        cooperative.detail
+    );
     let answer = cooperative.answer.expect("answer payload");
-    assert_eq!(answer.get("summary").and_then(Value::as_str), Some("compiling the kernel module"));
+    assert_eq!(
+        answer.get("summary").and_then(Value::as_str),
+        Some("compiling the kernel module")
+    );
     // The consumed reply was deleted from the caller's box (peek shows empty).
     let inbox = service
         .agent_inbox_impl(
-            crate::server::agent_mailbox::AgentInboxParams { drain: false, max_messages: 10, kinds: Vec::new() },
+            crate::server::agent_mailbox::AgentInboxParams {
+                drain: false,
+                max_messages: 10,
+                kinds: Vec::new(),
+            },
             "caller",
         )
         .expect("read caller inbox");
-    assert!(inbox.messages.is_empty(), "correlated reply must be consumed");
+    assert!(
+        inbox.messages.is_empty(),
+        "correlated reply must be consumed"
+    );
 }
 
 #[tokio::test]
@@ -456,7 +560,15 @@ async fn lookup_by_spawn_id_resolves_the_same_agent() {
     let db = db_of(&service);
 
     let base = recent_base_ns();
-    write_event(&db, base + 1, 0, AgentEventKind::SpawnReady, Some(SPAWN), Some(SESSION), |_| {});
+    write_event(
+        &db,
+        base + 1,
+        0,
+        AgentEventKind::SpawnReady,
+        Some(SPAWN),
+        Some(SESSION),
+        |_| {},
+    );
 
     let response = service
         .agent_query_impl(params(SPAWN), None)

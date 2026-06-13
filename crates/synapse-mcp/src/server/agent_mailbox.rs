@@ -925,7 +925,10 @@ impl SynapseService {
             let encoded = encode_mailbox_message(&message)?;
             db.put_batch_pressure_bypass(cf::CF_KV, [(row_key.as_bytes().to_vec(), encoded)])
                 .map_err(|error| {
-                    mcp_error(error.code(), format!("write broadcast row {row_key}: {error}"))
+                    mcp_error(
+                        error.code(),
+                        format!("write broadcast row {row_key}: {error}"),
+                    )
                 })?;
             let storage_readback = readback_exact_mailbox_row(&db, &row_key)?;
             delivered_count += 1;
@@ -987,12 +990,13 @@ impl SynapseService {
         let (mut receipts, expired_keys, scanned_rows) =
             scan_receipts(&db, session_id, now_unix_ms)?;
         if !expired_keys.is_empty() {
-            db.delete_batch(cf::CF_KV, expired_keys.clone()).map_err(|error| {
-                mcp_error(
-                    error.code(),
-                    format!("delete expired receipt rows for {session_id}: {error}"),
-                )
-            })?;
+            db.delete_batch(cf::CF_KV, expired_keys.clone())
+                .map_err(|error| {
+                    mcp_error(
+                        error.code(),
+                        format!("delete expired receipt rows for {session_id}: {error}"),
+                    )
+                })?;
         }
         if receipts.len() > params.max_receipts {
             receipts.truncate(params.max_receipts);
@@ -1006,12 +1010,13 @@ impl SynapseService {
             Vec::new()
         };
         if !delete_keys.is_empty() {
-            db.delete_batch(cf::CF_KV, delete_keys.clone()).map_err(|error| {
-                mcp_error(
-                    error.code(),
-                    format!("delete drained receipt rows for {session_id}: {error}"),
-                )
-            })?;
+            db.delete_batch(cf::CF_KV, delete_keys.clone())
+                .map_err(|error| {
+                    mcp_error(
+                        error.code(),
+                        format!("delete drained receipt rows for {session_id}: {error}"),
+                    )
+                })?;
         }
         Ok(AgentReceiptsResponse {
             ok: true,
@@ -1283,8 +1288,9 @@ fn validate_kind_filter(kinds: &[String]) -> Result<(), ErrorData> {
 }
 
 fn validate_broadcast_target(target: &BroadcastTarget) -> Result<(), ErrorData> {
-    let selectors =
-        u8::from(target.all) + u8::from(!target.agent_kinds.is_empty()) + u8::from(!target.sessions.is_empty());
+    let selectors = u8::from(target.all)
+        + u8::from(!target.agent_kinds.is_empty())
+        + u8::from(!target.sessions.is_empty());
     if selectors == 0 {
         return Err(params_error(
             "agent_send_broadcast `to` must set exactly one selector: all=true, a non-empty \
@@ -1299,7 +1305,9 @@ fn validate_broadcast_target(target: &BroadcastTarget) -> Result<(), ErrorData> 
     }
     for kind in &target.agent_kinds {
         if kind.trim().is_empty() {
-            return Err(params_error("agent_send_broadcast agent_kinds entries must not be empty"));
+            return Err(params_error(
+                "agent_send_broadcast agent_kinds entries must not be empty",
+            ));
         }
     }
     for session in &target.sessions {
@@ -1323,7 +1331,11 @@ fn write_read_receipts(
         .filter(|row| row.message.request_receipt)
         .map(|row| {
             let from_session = row.message.from_session.clone();
-            let receipt_id = format!("receipt-{}-{}", from_session_tag(&from_session), row.message.message_id);
+            let receipt_id = format!(
+                "receipt-{}-{}",
+                from_session_tag(&from_session),
+                row.message.message_id
+            );
             let row_key = receipt_row_key(&from_session, &row.message.message_id);
             let receipt = MailboxReceipt {
                 schema_version: RECEIPT_SCHEMA_VERSION,
@@ -1954,7 +1966,11 @@ mod tests {
         }
     }
 
-    fn broadcast_params(to: BroadcastTarget, kind: &str, request_receipt: bool) -> AgentSendBroadcastParams {
+    fn broadcast_params(
+        to: BroadcastTarget,
+        kind: &str,
+        request_receipt: bool,
+    ) -> AgentSendBroadcastParams {
         AgentSendBroadcastParams {
             to,
             kind: kind.to_owned(),
@@ -1976,7 +1992,11 @@ mod tests {
 
         let response = service.agent_send_broadcast_impl_at(
             broadcast_params(
-                BroadcastTarget { all: true, agent_kinds: Vec::new(), sessions: Vec::new() },
+                BroadcastTarget {
+                    all: true,
+                    agent_kinds: Vec::new(),
+                    sessions: Vec::new(),
+                },
                 "finding",
                 false,
             ),
@@ -1994,8 +2014,12 @@ mod tests {
             assert_eq!(inbox.messages[0].from_session, "sender");
             assert_eq!(inbox.messages[0].kind, "finding");
         }
-        let sender_inbox = service.agent_inbox_impl_at(inbox_params(false, &[]), "sender", now + 1)?;
-        assert_eq!(sender_inbox.returned_count, 0, "sender must not receive its own broadcast");
+        let sender_inbox =
+            service.agent_inbox_impl_at(inbox_params(false, &[]), "sender", now + 1)?;
+        assert_eq!(
+            sender_inbox.returned_count, 0,
+            "sender must not receive its own broadcast"
+        );
         Ok(())
     }
 
@@ -2011,7 +2035,11 @@ mod tests {
         // record_seen yields agent_kind "unknown"; ["unknown"] matches both.
         let matched = service.agent_send_broadcast_impl_at(
             broadcast_params(
-                BroadcastTarget { all: false, agent_kinds: vec!["unknown".to_owned()], sessions: Vec::new() },
+                BroadcastTarget {
+                    all: false,
+                    agent_kinds: vec!["unknown".to_owned()],
+                    sessions: Vec::new(),
+                },
                 "steer",
                 false,
             ),
@@ -2023,7 +2051,11 @@ mod tests {
         // A kind no live session has matches nobody — honest zero.
         let none = service.agent_send_broadcast_impl_at(
             broadcast_params(
-                BroadcastTarget { all: false, agent_kinds: vec!["codex".to_owned()], sessions: Vec::new() },
+                BroadcastTarget {
+                    all: false,
+                    agent_kinds: vec!["codex".to_owned()],
+                    sessions: Vec::new(),
+                },
                 "steer",
                 false,
             ),
@@ -2102,7 +2134,8 @@ mod tests {
         }
 
         // Drain only steer -> exactly the 2 steer messages, finding untouched.
-        let steer = service.agent_inbox_impl_at(inbox_params(true, &["steer"]), "recipient", now + 10)?;
+        let steer =
+            service.agent_inbox_impl_at(inbox_params(true, &["steer"]), "recipient", now + 10)?;
         assert_eq!(steer.returned_count, 2);
         assert!(steer.messages.iter().all(|m| m.kind == "steer"));
         assert_eq!(steer.deleted_count, 2);
@@ -2138,22 +2171,34 @@ mod tests {
 
         // Before the recipient reads it, there is no receipt.
         let before = service.agent_receipts_impl_at(
-            AgentReceiptsParams { drain: false, max_receipts: 10 },
+            AgentReceiptsParams {
+                drain: false,
+                max_receipts: 10,
+            },
             "sender",
             now + 1,
         )?;
-        assert_eq!(before.returned_count, 0, "no receipt before the message is read");
+        assert_eq!(
+            before.returned_count, 0,
+            "no receipt before the message is read"
+        );
 
         // Recipient drains -> a read receipt lands in the sender's receipt box.
         let drained = service.agent_inbox_impl_at(inbox_params(true, &[]), "recipient", now + 2)?;
         assert_eq!(drained.returned_count, 1);
 
         let after = service.agent_receipts_impl_at(
-            AgentReceiptsParams { drain: true, max_receipts: 10 },
+            AgentReceiptsParams {
+                drain: true,
+                max_receipts: 10,
+            },
             "sender",
             now + 3,
         )?;
-        assert_eq!(after.returned_count, 1, "sender sees exactly one read receipt");
+        assert_eq!(
+            after.returned_count, 1,
+            "sender sees exactly one read receipt"
+        );
         let receipt = &after.receipts[0];
         assert_eq!(receipt.recipient_session, "recipient");
         assert_eq!(receipt.message_id, sent.message_id);
@@ -2163,7 +2208,10 @@ mod tests {
 
         // Drained: the receipt box is now empty.
         let empty = service.agent_receipts_impl_at(
-            AgentReceiptsParams { drain: false, max_receipts: 10 },
+            AgentReceiptsParams {
+                drain: false,
+                max_receipts: 10,
+            },
             "sender",
             now + 4,
         )?;
@@ -2192,11 +2240,17 @@ mod tests {
         )?;
         service.agent_inbox_impl_at(inbox_params(true, &[]), "recipient", now + 1)?;
         let receipts = service.agent_receipts_impl_at(
-            AgentReceiptsParams { drain: false, max_receipts: 10 },
+            AgentReceiptsParams {
+                drain: false,
+                max_receipts: 10,
+            },
             "sender",
             now + 2,
         )?;
-        assert_eq!(receipts.returned_count, 0, "no receipt without request_receipt");
+        assert_eq!(
+            receipts.returned_count, 0,
+            "no receipt without request_receipt"
+        );
         Ok(())
     }
 }
