@@ -160,6 +160,7 @@ mod action_preflight;
 pub(crate) mod agent_event_ingress;
 pub(crate) mod agent_events;
 mod agent_mailbox;
+pub(crate) mod agent_state;
 mod audit_context;
 mod context;
 pub(crate) mod drain;

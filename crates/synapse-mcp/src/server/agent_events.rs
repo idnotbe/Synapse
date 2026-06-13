@@ -88,11 +88,27 @@ pub(crate) fn record_agent_event(
 /// batch. All-or-nothing: any invalid record refuses the whole batch before
 /// anything is written.
 ///
+/// This is also the projection choke point for the #898 agent state machine:
+/// after the rows commit, they feed [`super::agent_state`], so every journal
+/// writer drives lifecycle states and none can bypass them.
+///
 /// # Errors
 ///
 /// Returns [`StorageError::WriteFailed`] under the same conditions as
 /// [`record_agent_event`].
 pub(crate) fn record_agent_events(
+    db: &Db,
+    records: &[AgentEventRecord],
+) -> StorageResult<Vec<AgentEventWriteReadback>> {
+    let readbacks = record_agent_events_unobserved(db, records)?;
+    super::agent_state::observe_recorded_events(db, records);
+    Ok(readbacks)
+}
+
+/// The raw journal write path, without the state-machine projection. Only
+/// the state machine itself uses this directly (its own transition rows must
+/// not re-enter the reducer).
+pub(crate) fn record_agent_events_unobserved(
     db: &Db,
     records: &[AgentEventRecord],
 ) -> StorageResult<Vec<AgentEventWriteReadback>> {

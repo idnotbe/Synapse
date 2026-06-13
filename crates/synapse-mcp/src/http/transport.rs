@@ -380,6 +380,18 @@ fn router(
         .context("initialize HTTP MCP session state")?;
     let agent_events_db =
         session_store_db(&health_service).context("open storage for agent-event ingress")?;
+    // #898: install the live-event sink, rebuild agent states from the
+    // journal, and start the heartbeat/process-probe liveness sweep.
+    crate::server::agent_state::install_event_bus(sse_state.event_bus());
+    let liveness_config = crate::server::agent_state::load_liveness_config()
+        .map_err(|detail| anyhow::anyhow!("agent liveness configuration invalid: {detail}"))?;
+    crate::server::agent_state::rebuild_from_journal(&agent_events_db)
+        .context("rebuild agent state tracker from CF_AGENT_EVENTS")?;
+    let _agent_liveness_task = spawn_agent_liveness_sweep(
+        Arc::clone(&agent_events_db),
+        liveness_config,
+        shutdown_cancel.child_token(),
+    );
     let session_request = session::SessionCleanupState::request_state(
         Arc::clone(&session_registry),
         terminated_sessions,
@@ -510,6 +522,66 @@ fn spawn_stale_session_input_cleanup(
                         &session_lifecycle,
                         &session_manager,
                     ).await;
+                }
+            }
+        }
+    })
+}
+
+/// #898 liveness sweep: periodically cross-checks heartbeat silence with the
+/// process table so stuck and dead agents surface within one sweep interval.
+fn spawn_agent_liveness_sweep(
+    agent_events_db: Arc<Db>,
+    config: crate::server::agent_state::LivenessConfig,
+    shutdown_cancel: CancellationToken,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut interval = time::interval(Duration::from_millis(config.sweep_interval_ms));
+        interval.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
+        tracing::info!(
+            code = "AGENT_LIVENESS_SWEEP_STARTED",
+            sweep_interval_ms = config.sweep_interval_ms,
+            stuck_after_ms = config.stuck_after_ms,
+            runaway_identical_calls = config.runaway_identical_calls,
+            "agent liveness sweep running"
+        );
+        loop {
+            tokio::select! {
+                _ = shutdown_cancel.cancelled() => {
+                    tracing::debug!(
+                        code = "AGENT_LIVENESS_SWEEP_STOPPED",
+                        "stopping agent liveness sweep"
+                    );
+                    break;
+                }
+                _ = interval.tick() => {
+                    let db = Arc::clone(&agent_events_db);
+                    // Process probes are blocking Win32 calls; keep them off
+                    // the async reactor.
+                    let sweep = tokio::task::spawn_blocking(move || {
+                        crate::server::agent_state::liveness_sweep_once(
+                            &db,
+                            crate::server::session_registry::unix_time_ms_now(),
+                        )
+                    })
+                    .await;
+                    match sweep {
+                        Ok(transition_count) if transition_count > 0 => {
+                            tracing::info!(
+                                code = "AGENT_LIVENESS_SWEEP_TRANSITIONS",
+                                transition_count,
+                                "liveness sweep emitted state transitions"
+                            );
+                        }
+                        Ok(_quiet) => {}
+                        Err(join_error) => {
+                            tracing::error!(
+                                code = "AGENT_LIVENESS_SWEEP_FAILED",
+                                detail = %join_error,
+                                "liveness sweep task panicked"
+                            );
+                        }
+                    }
                 }
             }
         }

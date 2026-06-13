@@ -14,9 +14,9 @@ use synapse_action::lease;
 use synapse_core::error_codes;
 
 use super::{
-    ErrorData, Json, Parameters, SessionTarget, SynapseService, TargetWire, mcp_error,
-    session_registry::SessionRegistryRead, session_registry::unix_time_ms_now,
-    target_claims::TargetClaimRead, tool, tool_router,
+    ErrorData, Json, Parameters, SessionTarget, SynapseService, TargetWire,
+    agent_state::AgentStateRead, mcp_error, session_registry::SessionRegistryRead,
+    session_registry::unix_time_ms_now, target_claims::TargetClaimRead, tool, tool_router,
 };
 
 #[derive(Clone, Debug, Deserialize, JsonSchema)]
@@ -73,6 +73,10 @@ pub struct SessionSummary {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub target_claims: Vec<TargetClaimRead>,
     pub lease: SessionLeaseReadback,
+    /// #898 lifecycle state machine read for this session's agent: state,
+    /// reason code, heartbeat, waiting_for detail, runaway flag.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_state: Option<AgentStateRead>,
 }
 
 #[derive(Clone, Debug, Serialize, JsonSchema)]
@@ -87,6 +91,11 @@ pub struct SessionListResponse {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input_lease_owner_session_id: Option<String>,
     pub sessions: Vec<SessionSummary>,
+    /// #898: agents tracked by the state machine that have no MCP session
+    /// (in-flight spawns and spawns that died before registering). Reported
+    /// rather than hidden so the fleet view never loses an agent.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unbound_agent_states: Vec<AgentStateRead>,
 }
 
 #[derive(Clone, Debug, Serialize, JsonSchema)]
@@ -239,6 +248,7 @@ impl SynapseService {
             input_lease_held: lease_status.held,
             input_lease_owner_session_id: lease_status.owner_session_id.clone(),
             sessions,
+            unbound_agent_states: super::agent_state::unbound_reads(now_unix_ms),
         })
     }
 
@@ -340,6 +350,7 @@ fn build_session_summary(
             ttl_ms: lease_status.ttl_ms,
             expires_in_ms: lease_status.expires_in_ms,
         },
+        agent_state: super::agent_state::read_for_session(session_id, now_unix_ms),
     })
 }
 
