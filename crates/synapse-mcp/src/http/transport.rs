@@ -11,7 +11,7 @@ use anyhow::Context;
 use axum::{
     Json, Router,
     body::Body,
-    extract::{DefaultBodyLimit, Query, State},
+    extract::{DefaultBodyLimit, Path, Query, State},
     http::{HeaderMap, HeaderName, HeaderValue, Request, StatusCode, header},
     middleware,
     response::{Html, IntoResponse, Response},
@@ -470,8 +470,7 @@ fn router(
         ));
     let dashboard_routes = Router::new()
         .route("/dashboard", get(dashboard_index))
-        .route("/dashboard/assets/dashboard.css", get(dashboard_css))
-        .route("/dashboard/assets/dashboard.js", get(dashboard_js))
+        .route("/dashboard/assets/{asset}", get(dashboard_asset))
         .route("/dashboard/state.json", get(dashboard_state))
         .route(
             "/dashboard/local-model-spawn",
@@ -1405,18 +1404,23 @@ async fn dashboard_index(State(state): State<HttpState>, headers: HeaderMap) -> 
     with_dashboard_security_headers(Html(DASHBOARD_HTML).into_response())
 }
 
-async fn dashboard_css(State(state): State<HttpState>, headers: HeaderMap) -> Response {
+async fn dashboard_asset(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    Path(asset): Path<String>,
+) -> Response {
     if let Err(response) = dashboard_local_only(&state, &headers) {
         return with_dashboard_security_headers(response);
     }
-    dashboard_asset_response("text/css; charset=utf-8", DASHBOARD_CSS)
-}
-
-async fn dashboard_js(State(state): State<HttpState>, headers: HeaderMap) -> Response {
-    if let Err(response) = dashboard_local_only(&state, &headers) {
-        return with_dashboard_security_headers(response);
+    match asset.as_str() {
+        DASHBOARD_CSS_FILE => dashboard_asset_response("text/css; charset=utf-8", DASHBOARD_CSS),
+        DASHBOARD_JS_FILE => {
+            dashboard_asset_response("application/javascript; charset=utf-8", DASHBOARD_JS)
+        }
+        _ => with_dashboard_security_headers(
+            (StatusCode::NOT_FOUND, "DASHBOARD_ASSET_NOT_FOUND").into_response(),
+        ),
     }
-    dashboard_asset_response("application/javascript; charset=utf-8", DASHBOARD_JS)
 }
 
 async fn dashboard_state(State(state): State<HttpState>, headers: HeaderMap) -> Response {
@@ -1627,12 +1631,13 @@ fn approval_activation_html(
         concat!(
             "<!doctype html><html><head><meta charset=\"utf-8\">",
             "<title>Synapse Approval</title>",
-            "<link rel=\"stylesheet\" href=\"/dashboard/assets/dashboard.css\">",
+            "<link rel=\"stylesheet\" href=\"/dashboard/assets/{css_file}\">",
             "</head><body><h1>Synapse Approval</h1>",
             "<p>Approval <strong>{approval_id}</strong> is now <strong>{status}</strong>.</p>",
             "<p>Activation <code>{activation_id}</code> consumed.</p>",
             "</body></html>"
         ),
+        css_file = DASHBOARD_CSS_FILE,
         approval_id = escape_html(&response.decision.approval_id),
         status = escape_html(status),
         activation_id = escape_html(&response.activation_id),
@@ -1840,900 +1845,25 @@ fn dashboard_unix_time_ms() -> u64 {
         .unwrap_or(u64::MAX)
 }
 
-const DASHBOARD_HTML: &str = r##"<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Synapse Dashboard</title>
-  <link rel="stylesheet" href="/dashboard/assets/dashboard.css">
-  <script src="/dashboard/assets/dashboard.js" defer></script>
-</head>
-<body>
-  <header class="page-header">
-    <h1>Synapse Dashboard</h1>
-    <div id="updated" class="muted" aria-live="polite"></div>
-  </header>
-  <nav class="section-nav" aria-label="Dashboard sections">
-    <a href="#daemonPanel">Daemon</a>
-    <a href="#sessionsPanel">Sessions</a>
-    <a href="#storagePanel">Storage</a>
-    <a href="#commandAuditPanel">Actions</a>
-    <a href="#transcriptsPanel">Transcripts</a>
-    <a href="#hygienePanel">Hygiene</a>
-    <a href="#localModelsPanel">Models</a>
-  </nav>
-  <main>
-    <section class="wide" id="daemonPanel">
-      <header><h2>Daemon</h2></header>
-      <div class="body statgrid" id="daemon"></div>
-    </section>
-    <section class="wide" id="sessionsPanel">
-      <header><h2>Sessions</h2></header>
-      <div class="body" id="sessions"></div>
-    </section>
-    <section class="half">
-      <header><h2>Lease</h2></header>
-      <div class="body statgrid" id="lease"></div>
-    </section>
-    <section class="half" id="storagePanel">
-      <header><h2>Storage</h2></header>
-      <div class="body" id="storage"></div>
-    </section>
-    <section class="wide" id="commandAuditPanel">
-      <header><h2>Actions Taken</h2></header>
-      <div class="body" id="commandAudit"></div>
-    </section>
-    <section class="third">
-      <header><h2>Approvals</h2></header>
-      <div class="body" id="approvals"></div>
-    </section>
-    <section class="third">
-      <header><h2>Suggestions</h2></header>
-      <div class="body" id="suggestions"></div>
-    </section>
-    <section class="third">
-      <header><h2>Armed Runs</h2></header>
-      <div class="body" id="armedRuns"></div>
-    </section>
-    <section class="wide" id="transcriptsPanel">
-      <header><h2>Agent Transcripts</h2></header>
-      <div class="body" id="agentTranscripts"></div>
-    </section>
-    <section class="wide" id="localModelsPanel">
-      <header><h2>Local Models</h2></header>
-      <div class="body" id="localModels">
-        <div id="localModelSummary" class="statgrid"></div>
-        <div id="localModelSpawnMount">
-          <form id="localModelSpawnForm" class="spawn-control">
-            <div class="spawn-fields">
-              <label><span>Model</span><select id="localModelSpawnSelect"></select></label>
-              <label><span>Task</span><textarea id="localModelSpawnPrompt" maxlength="131072"></textarea></label>
-              <button id="localModelSpawnButton" type="submit" disabled>Spawn</button>
-            </div>
-            <div id="localModelSpawnStatus" class="spawn-status muted"></div>
-          </form>
-        </div>
-        <div id="localModelTableMount"></div>
-      </div>
-    </section>
-    <section class="wide" id="hygienePanel">
-      <header><h2>Hygiene Flags</h2></header>
-      <div class="body" id="hygiene"></div>
-    </section>
-  </main>
-</body>
-</html>"##;
-
-const DASHBOARD_CSS: &str = r#":root {
-  color-scheme: light dark;
-  --bg: #f7f8fa;
-  --fg: #15181d;
-  --muted: #657080;
-  --line: #d9dee7;
-  --panel: #ffffff;
-  --accent: #0b6bcb;
-  --warn: #9c5a00;
-  --danger: #b42318;
-  --ok: #17633a;
-  --chip-bg: #eef2f7;
-}
-@media (prefers-color-scheme: dark) {
-  :root {
-    --bg: #111418;
-    --fg: #ecf1f7;
-    --muted: #a7b0be;
-    --line: #2d3542;
-    --panel: #171c22;
-    --accent: #6bb2ff;
-    --warn: #ffbe5c;
-    --danger: #ff8a7d;
-    --ok: #71d49c;
-    --chip-bg: #222a35;
-  }
-}
-* { box-sizing: border-box; }
-body {
-  margin: 0;
-  font: 14px/1.45 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  color: var(--fg);
-  background: var(--bg);
-}
-.page-header,
-section > header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-  border-bottom: 1px solid var(--line);
-  background: var(--panel);
-}
-.page-header { padding: 18px 24px; }
-.section-nav {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  padding: 0 24px 16px;
-  border-bottom: 1px solid var(--line);
-  background: var(--panel);
-}
-.section-nav a {
-  color: var(--accent);
-  text-decoration: none;
-  border: 1px solid var(--line);
-  border-radius: 999px;
-  padding: 4px 9px;
-  background: var(--chip-bg);
-}
-h1, h2 {
-  margin: 0;
-  font-weight: 650;
-  letter-spacing: 0;
-}
-h1 { font-size: 20px; }
-h2 { font-size: 15px; }
-main {
-  display: grid;
-  grid-template-columns: repeat(12, minmax(0, 1fr));
-  gap: 16px;
-  padding: 16px 24px 28px;
-}
-section {
-  min-width: 0;
-  border: 1px solid var(--line);
-  background: var(--panel);
-  border-radius: 6px;
-  scroll-margin-top: 16px;
-}
-section > header {
-  padding: 12px 14px;
-  background: transparent;
-}
-.wide { grid-column: span 12; }
-.half { grid-column: span 6; }
-.third { grid-column: span 4; }
-.body { padding: 12px 14px; overflow: auto; }
-.statgrid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
-  gap: 10px;
-}
-.stat {
-  border-left: 3px solid var(--accent);
-  padding: 2px 0 2px 10px;
-  min-width: 0;
-}
-.label { color: var(--muted); font-size: 12px; }
-.value { font-size: 17px; font-weight: 650; overflow-wrap: anywhere; }
-table {
-  width: 100%;
-  border-collapse: collapse;
-  table-layout: fixed;
-}
-th, td {
-  padding: 7px 8px;
-  border-bottom: 1px solid var(--line);
-  text-align: left;
-  vertical-align: top;
-  overflow-wrap: anywhere;
-  white-space: pre-wrap;
-}
-th {
-  color: var(--muted);
-  font-size: 12px;
-  font-weight: 650;
-  white-space: normal;
-}
-.ok { color: var(--ok); }
-.warn { color: var(--warn); }
-.danger { color: var(--danger); }
-.muted { color: var(--muted); }
-.chip {
-  display: inline-block;
-  margin: 3px 4px 0 0;
-  padding: 1px 6px;
-  border: 1px solid var(--line);
-  border-radius: 999px;
-  background: var(--chip-bg);
-  color: var(--muted);
-  font-size: 11px;
-  line-height: 1.4;
-  vertical-align: baseline;
-}
-.chip.warn { color: var(--warn); }
-.chip.danger { color: var(--danger); }
-.chip a { color: inherit; }
-.cell-text { overflow-wrap: anywhere; white-space: pre-wrap; }
-.filters {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px 12px;
-  margin: 8px 0 12px;
-}
-.filter {
-  display: grid;
-  gap: 4px;
-  min-width: 160px;
-  color: var(--muted);
-  font-size: 12px;
-}
-.filter input {
-  width: 100%;
-  min-height: 30px;
-  border: 1px solid var(--line);
-  border-radius: 4px;
-  padding: 4px 7px;
-  color: var(--fg);
-  background: var(--bg);
-}
-.spawn-control {
-  display: grid;
-  gap: 10px;
-  margin: 12px 0 14px;
-  padding: 10px;
-  border: 1px solid var(--line);
-  border-radius: 6px;
-}
-.spawn-fields {
-  display: grid;
-  grid-template-columns: minmax(180px, 260px) minmax(240px, 1fr) auto;
-  gap: 10px;
-  align-items: end;
-}
-.spawn-fields label {
-  display: grid;
-  gap: 4px;
-  color: var(--muted);
-  font-size: 12px;
-}
-.spawn-fields select,
-.spawn-fields textarea,
-.spawn-fields button {
-  width: 100%;
-  border: 1px solid var(--line);
-  border-radius: 4px;
-  color: var(--fg);
-  background: var(--bg);
-}
-.spawn-fields select,
-.spawn-fields button {
-  min-height: 34px;
-}
-.spawn-fields textarea {
-  min-height: 68px;
-  resize: vertical;
-  padding: 6px 8px;
-  font: inherit;
-}
-.spawn-fields button {
-  min-width: 96px;
-  padding: 0 12px;
-  color: white;
-  background: var(--accent);
-  cursor: pointer;
-}
-.spawn-fields button:disabled {
-  cursor: not-allowed;
-  opacity: 0.65;
-}
-.spawn-status {
-  min-height: 20px;
-  overflow-wrap: anywhere;
-}
-@media (max-width: 900px) {
-  .page-header { align-items: flex-start; flex-direction: column; }
-  main { padding: 12px; }
-  .half, .third { grid-column: span 12; }
-  .spawn-fields { grid-template-columns: 1fr; }
-}
-"#;
-
-const DASHBOARD_JS: &str = r##""use strict";
-
-const MAX_TEXT_CHARS = 4096;
-const MAX_TOOL_CELL_CHARS = 4096;
-const byId = (id) => document.getElementById(id);
-const commandAuditFilters = { actor: "", verb: "", agent: "" };
-const localModelSpawnState = { model_ref: "", prompt: "", busy: false, result: "" };
-const LOCAL_MODEL_SPAWN_FORM_ID = "localModelSpawnForm";
-const LOCAL_MODEL_SPAWN_SELECT_ID = "localModelSpawnSelect";
-const LOCAL_MODEL_SPAWN_PROMPT_ID = "localModelSpawnPrompt";
-const LOCAL_MODEL_SPAWN_BUTTON_ID = "localModelSpawnButton";
-const LOCAL_MODEL_SPAWN_STATUS_ID = "localModelSpawnStatus";
-
-function clear(node) {
-  while (node.firstChild) node.removeChild(node.firstChild);
-}
-
-function rawText(value) {
-  if (value === null || value === undefined) return "";
-  if (typeof value === "string") return value;
-  if (typeof value === "number" || typeof value === "boolean" || typeof value === "bigint") {
-    return String(value);
-  }
-  try {
-    return JSON.stringify(value, null, 2);
-  } catch (error) {
-    return String(value);
-  }
-}
-
-function stripTerminalSequences(value) {
-  let text = String(value);
-  const before = text;
-  text = text.replace(/\x1b\][\s\S]*?(?:\x07|\x1b\\)/g, "");
-  text = text.replace(/\x9d[\s\S]*?(?:\x07|\x9c)/g, "");
-  text = text.replace(/\x1b[P^_][\s\S]*?\x1b\\/g, "");
-  text = text.replace(/[\x90\x9e\x9f][\s\S]*?\x9c/g, "");
-  text = text.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "");
-  text = text.replace(/\x9b[0-?]*[ -/]*[@-~]/g, "");
-  text = text.replace(/\x1b[ -/]*[@-~]/g, "");
-  text = text.replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]/g, "");
-  return { text, removed: text !== before };
-}
-
-function suspiciousText(value) {
-  return /<\s*script|javascript\s*:|onerror\s*=|onload\s*=|ignore\s+(all\s+)?(previous|prior)\s+instructions|reveal\s+(your|the)\s+instructions/i.test(value);
-}
-
-function normalizeForDisplay(value, maxChars) {
-  const stripped = stripTerminalSequences(rawText(value));
-  let text = stripped.text;
-  const flags = [];
-  if (stripped.removed) flags.push({ label: "control-stripped", tone: "warn" });
-  if (suspiciousText(text)) flags.push({ label: "hygiene", tone: "danger", link: "#hygienePanel" });
-  if (text.length > maxChars) {
-    text = text.slice(0, maxChars);
-    flags.push({ label: "truncated", tone: "warn" });
-  }
-  return { text, flags };
-}
-
-function appendChip(node, flag) {
-  const chip = document.createElement("span");
-  chip.className = "chip" + (flag.tone ? " " + flag.tone : "");
-  if (flag.link) {
-    const link = document.createElement("a");
-    link.href = flag.link;
-    link.textContent = flag.label;
-    chip.appendChild(link);
-  } else {
-    chip.textContent = flag.label;
-  }
-  node.appendChild(chip);
-}
-
-function appendDisplay(node, value, options = {}) {
-  const normalized = normalizeForDisplay(value, options.maxChars || MAX_TEXT_CHARS);
-  const textNode = document.createElement("span");
-  textNode.className = "cell-text";
-  textNode.textContent = normalized.text;
-  node.appendChild(textNode);
-  const seen = new Set();
-  for (const flag of normalized.flags) {
-    seen.add(flag.label);
-    appendChip(node, flag);
-  }
-  if (options.forceTruncated && !seen.has("truncated")) {
-    appendChip(node, { label: "truncated", tone: "warn" });
-  }
-  if (options.forceHygiene && !seen.has("hygiene")) {
-    appendChip(node, { label: "hygiene", tone: "danger", link: "#hygienePanel" });
-  }
-}
-
-function stat(label, value, tone) {
-  const wrap = document.createElement("div");
-  wrap.className = "stat";
-  const l = document.createElement("div");
-  l.className = "label";
-  l.textContent = label;
-  const v = document.createElement("div");
-  v.className = "value" + (tone ? " " + tone : "");
-  appendDisplay(v, value, { maxChars: 512 });
-  wrap.append(l, v);
-  return wrap;
-}
-
-function table(headers, rows) {
-  const t = document.createElement("table");
-  const thead = document.createElement("thead");
-  const tr = document.createElement("tr");
-  headers.forEach((h) => {
-    const th = document.createElement("th");
-    th.textContent = h;
-    tr.appendChild(th);
-  });
-  thead.appendChild(tr);
-  const tbody = document.createElement("tbody");
-  rows.forEach((row) => {
-    const r = document.createElement("tr");
-    row.forEach((cell) => {
-      const td = document.createElement("td");
-      if (cell && typeof cell === "object" && Object.prototype.hasOwnProperty.call(cell, "value")) {
-        appendDisplay(td, cell.value, cell);
-      } else {
-        appendDisplay(td, cell);
-      }
-      r.appendChild(td);
-    });
-    tbody.appendChild(r);
-  });
-  t.append(thead, tbody);
-  return t;
-}
-
-function renderUnavailable(node, panel) {
-  const data = panel?.data || {};
-  node.append(
-    stat("Status", panel?.status || "missing", "warn"),
-    stat("Tool", data.tool || panel?.source || ""),
-    stat("Available", data.available === true)
-  );
-}
-
-function render(data) {
-  byId("updated").textContent = new Date(data.generated_at_unix_ms).toLocaleTimeString();
-  const daemon = byId("daemon"); clear(daemon);
-  const health = data.daemon.data || {};
-  daemon.append(
-    stat("PID", health.pid),
-    stat("Build", health.build),
-    stat("Tools", health.tool_count),
-    stat("Bind", data.bind_addr),
-    stat("Storage", health.subsystems?.storage?.status || ""),
-    stat("Recorder", health.subsystems?.perception?.capture_runtime?.status || health.subsystems?.perception?.status || "")
-  );
-
-  const sessions = byId("sessions"); clear(sessions);
-  const sessionRows = (data.sessions.data?.sessions || []).map((s) => [
-    s.session_id,
-    s.agent_kind,
-    s.lifecycle,
-    s.transport,
-    s.last_seen_ms_ago,
-    s.last_action || "",
-    s.active_target ? rawText(s.active_target) : ""
-  ]);
-  sessions.appendChild(table(["Session", "Agent", "Life", "Transport", "Last Seen", "Last Action", "Target"], sessionRows));
-
-  const lease = byId("lease"); clear(lease);
-  const leaseData = data.lease.data || {};
-  lease.append(
-    stat("Held", leaseData.held, leaseData.held ? "warn" : "ok"),
-    stat("Owner", leaseData.owner_session_id || "none"),
-    stat("TTL ms", leaseData.ttl_ms || ""),
-    stat("Expires ms", leaseData.expires_in_ms || "")
-  );
-
-  const storage = byId("storage"); clear(storage);
-  const counts = data.storage.data?.cf_row_counts || {};
-  storage.appendChild(table(["Column Family", "Rows"], Object.entries(counts).map(([k, v]) => [k, v])));
-
-  renderQueue("approvals", data.approvals);
-  renderQueue("suggestions", data.suggestions);
-  renderQueue("armedRuns", data.armed_runs);
-  renderCommandAudit(data.command_audit);
-  renderTranscripts(data.agent_transcripts);
-  renderHygiene(data.hygiene);
-  renderLocalModels(data.local_models);
-}
-
-function renderQueue(id, panel) {
-  const node = byId(id); clear(node);
-  if (!panel || panel.status !== "ok") {
-    renderUnavailable(node, panel);
-    return;
-  }
-  const data = panel.data || {};
-  const rows = data.rows || [];
-  node.append(
-    stat("Status", panel.status, "ok"),
-    stat("Tool", data.tool || panel.source),
-    stat("Rows", rows.length)
-  );
-  node.appendChild(table(["Status", "Kind", "Title", "Body", "Updated", "Timeout"], rows.map((row) => {
-    const item = row.item || {};
-    return [
-      item.status,
-      item.kind,
-      { value: item.title, maxChars: 1024 },
-      { value: item.body, maxChars: 1024 },
-      item.updated_at_unix_ms ? new Date(item.updated_at_unix_ms).toLocaleTimeString() : "",
-      item.expires_at_unix_ms ? new Date(item.expires_at_unix_ms).toLocaleTimeString() : ""
-    ];
-  })));
-}
-
-function summarizeToolCalls(calls) {
-  let out = "";
-  let truncated = false;
-  for (const call of calls || []) {
-    const line = [
-      call.tool_name || "",
-      call.arguments ? "args=" + call.arguments : "",
-      call.result_summary ? "result=" + call.result_summary : "",
-      call.status ? "status=" + call.status : ""
-    ].filter(Boolean).join(" ");
-    const next = out ? out + "\n" + line : line;
-    if (next.length > MAX_TOOL_CELL_CHARS) {
-      out = next.slice(0, MAX_TOOL_CELL_CHARS);
-      truncated = true;
-      break;
-    }
-    out = next;
-  }
-  return { value: out, maxChars: MAX_TOOL_CELL_CHARS, forceTruncated: truncated };
-}
-
-function renderTranscripts(panel) {
-  const node = byId("agentTranscripts"); clear(node);
-  if (!panel || panel.status !== "ok") {
-    renderUnavailable(node, panel);
-    return;
-  }
-  const data = panel.data || {};
-  const rows = data.rows || [];
-  node.append(
-    stat("SoT", data.source_of_truth || panel.source),
-    stat("Rows", data.row_count || rows.length)
-  );
-  node.appendChild(table(["Spawn", "Line", "Role", "Event", "Model", "Content", "Tool Calls"], rows.map((row) => {
-    const record = row.record || {};
-    return [
-      row.spawn_id,
-      row.line_no,
-      record.role || "",
-      record.event_kind || "",
-      record.model || "",
-      { value: record.content_summary || record.source_error || record.parse_error || "", maxChars: MAX_TEXT_CHARS, forceTruncated: record.content_truncated },
-      summarizeToolCalls(record.tool_calls || [])
-    ];
-  })));
-}
-
-function commandAuditTime(row) {
-  const ns = Number(row.ts_ns || 0);
-  if (!Number.isFinite(ns) || ns <= 0) return "";
-  return new Date(Math.floor(ns / 1000000)).toLocaleTimeString();
-}
-
-function commandAuditMatches(row) {
-  const actor = rawText(row.actor_session_id).toLowerCase();
-  const verb = [row.verb, row.tool].map(rawText).join(" ").toLowerCase();
-  const agent = rawText(row.target_session_id).toLowerCase();
-  return (!commandAuditFilters.actor || actor.includes(commandAuditFilters.actor))
-    && (!commandAuditFilters.verb || verb.includes(commandAuditFilters.verb))
-    && (!commandAuditFilters.agent || agent.includes(commandAuditFilters.agent));
-}
-
-function commandAuditFilter(label, key, redraw) {
-  const wrap = document.createElement("label");
-  wrap.className = "filter";
-  const text = document.createElement("span");
-  text.textContent = label;
-  const input = document.createElement("input");
-  input.type = "search";
-  input.value = commandAuditFilters[key];
-  input.addEventListener("input", () => {
-    commandAuditFilters[key] = input.value.toLowerCase();
-    redraw();
-  });
-  wrap.append(text, input);
-  return wrap;
-}
-
-function renderCommandAuditRows(container, rows) {
-  clear(container);
-  const filtered = rows.filter(commandAuditMatches);
-  container.appendChild(table(["Time", "Actor", "Verb", "Tool", "Channel", "Target", "Phase", "Outcome", "Payload", "Key"], filtered.map((row) => [
-    commandAuditTime(row),
-    row.actor_session_id || "",
-    row.verb || "",
-    row.tool || "",
-    row.channel || "",
-    row.target_session_id || "",
-    row.phase || "",
-    row.error_code ? (row.outcome || "error") + " " + row.error_code : row.outcome || "",
-    row.payload_sha256 || "",
-    row.key_hex || ""
-  ])));
-}
-
-function renderCommandAudit(panel) {
-  const node = byId("commandAudit"); clear(node);
-  if (!panel || panel.status !== "ok") {
-    renderUnavailable(node, panel);
-    return;
-  }
-  const data = panel.data || {};
-  const rows = data.rows || [];
-  node.append(
-    stat("SoT", data.source_of_truth || panel.source),
-    stat("Rows", data.row_count || rows.length),
-    stat("Scanned", data.scanned_rows || 0)
-  );
-  const filters = document.createElement("div");
-  filters.className = "filters";
-  const tableWrap = document.createElement("div");
-  const redraw = () => renderCommandAuditRows(tableWrap, rows);
-  filters.append(
-    commandAuditFilter("Actor", "actor", redraw),
-    commandAuditFilter("Verb", "verb", redraw),
-    commandAuditFilter("Agent", "agent", redraw)
-  );
-  node.append(filters, tableWrap);
-  redraw();
-}
-
-function renderHygiene(panel) {
-  const node = byId("hygiene"); clear(node);
-  if (!panel || panel.status !== "ok") {
-    renderUnavailable(node, panel);
-    return;
-  }
-  const data = panel.data || {};
-  const rows = data.rows || [];
-  node.append(
-    stat("Tool", data.tool || panel.source),
-    stat("Flags", rows.length),
-    stat("Scanned", data.scanned_rows || 0),
-    stat("Cursor", data.next_cursor || "")
-  );
-  node.appendChild(table(["Score", "Source", "Field", "Span", "Evidence", "KV Key"], rows.map((row) => {
-    const record = row.record || {};
-    return [
-      record.score,
-      record.source_cf + " " + record.source_key_hex,
-      record.source_field,
-      { value: record.span_text, maxChars: 1024, forceHygiene: true },
-      (record.heuristics || []).concat(record.evidence || []).join("\n"),
-      row.kv_key_hex
-    ];
-  })));
-}
-
-function healthyLocalModelRows(rows) {
-  return (rows || []).filter((row) => row.enabled && row.last_probe && row.last_probe.healthy);
-}
-
-function ensurePanelMount(parent, id) {
-  let node = byId(id);
-  if (!node || node.parentElement !== parent) {
-    node = document.createElement("div");
-    node.id = id;
-    parent.appendChild(node);
-  }
-  return node;
-}
-
-function syncLocalModelSpawnStateFromControls() {
-  const select = byId(LOCAL_MODEL_SPAWN_SELECT_ID);
-  if (select && select.value !== localModelSpawnState.model_ref) {
-    localModelSpawnState.model_ref = select.value;
-  }
-  const textarea = byId(LOCAL_MODEL_SPAWN_PROMPT_ID);
-  if (textarea && textarea.value !== localModelSpawnState.prompt) {
-    localModelSpawnState.prompt = textarea.value;
-  }
-}
-
-function bindLocalModelSpawnControlEvents(select, textarea) {
-  if (select && select.dataset.localModelSpawnBound !== "true") {
-    select.addEventListener("change", () => {
-      localModelSpawnState.model_ref = select.value;
-    });
-    select.dataset.localModelSpawnBound = "true";
-  }
-  if (textarea && textarea.dataset.localModelSpawnBound !== "true") {
-    textarea.addEventListener("input", () => {
-      localModelSpawnState.prompt = textarea.value;
-    });
-    textarea.dataset.localModelSpawnBound = "true";
-  }
-}
-
-async function spawnLocalModel(event) {
-  event.preventDefault();
-  syncLocalModelSpawnStateFromControls();
-  if (localModelSpawnState.busy) return;
-  const modelRef = localModelSpawnState.model_ref.trim();
-  const prompt = localModelSpawnState.prompt;
-  if (!modelRef || !prompt.trim()) {
-    localModelSpawnState.result = modelRef ? "enter a task" : "select a healthy model";
-    refresh();
-    return;
-  }
-  localModelSpawnState.busy = true;
-  localModelSpawnState.result = "spawn pending";
-  try {
-    const response = await fetch("/dashboard/local-model-spawn", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        model_ref: modelRef,
-        prompt
-      })
-    });
-    const body = await response.json().catch(() => ({}));
-    if (!response.ok || body.ok === false) {
-      throw new Error([body.code, body.message || response.status].filter(Boolean).join(" "));
-    }
-    const spawn = body.spawn || {};
-    localModelSpawnState.result = [
-      "spawned",
-      spawn.spawn_id || "",
-      spawn.session_id || ""
-    ].filter(Boolean).join(" ");
-    await refresh();
-  } catch (error) {
-    localModelSpawnState.result = rawText(error.message || error);
-  } finally {
-    localModelSpawnState.busy = false;
-    refresh();
-  }
-}
-
-function renderLocalModelSpawnControl(rows) {
-  const healthy = healthyLocalModelRows(rows);
-  if (!localModelSpawnState.model_ref && healthy.length) {
-    localModelSpawnState.model_ref = healthy[0].name || "";
-  }
-  if (!healthy.some((row) => row.name === localModelSpawnState.model_ref)) {
-    localModelSpawnState.model_ref = healthy[0]?.name || "";
-  }
-  let form = byId(LOCAL_MODEL_SPAWN_FORM_ID);
-  if (form && (!byId(LOCAL_MODEL_SPAWN_SELECT_ID) || !byId(LOCAL_MODEL_SPAWN_PROMPT_ID) || !byId(LOCAL_MODEL_SPAWN_BUTTON_ID) || !byId(LOCAL_MODEL_SPAWN_STATUS_ID))) {
-    form.remove();
-    form = null;
-  }
-  if (!form) {
-    form = document.createElement("form");
-    form.id = LOCAL_MODEL_SPAWN_FORM_ID;
-    form.className = "spawn-control";
-
-    const fields = document.createElement("div");
-    fields.className = "spawn-fields";
-    const modelLabel = document.createElement("label");
-    const modelText = document.createElement("span");
-    modelText.textContent = "Model";
-    const select = document.createElement("select");
-    select.id = LOCAL_MODEL_SPAWN_SELECT_ID;
-    modelLabel.append(modelText, select);
-
-    const promptLabel = document.createElement("label");
-    const promptText = document.createElement("span");
-    promptText.textContent = "Task";
-    const textarea = document.createElement("textarea");
-    textarea.id = LOCAL_MODEL_SPAWN_PROMPT_ID;
-    textarea.maxLength = 131072;
-    promptLabel.append(promptText, textarea);
-
-    const button = document.createElement("button");
-    button.id = LOCAL_MODEL_SPAWN_BUTTON_ID;
-    button.type = "submit";
-    fields.append(modelLabel, promptLabel, button);
-
-    const status = document.createElement("div");
-    status.id = LOCAL_MODEL_SPAWN_STATUS_ID;
-    status.className = "spawn-status muted";
-    form.append(fields, status);
-  }
-  if (form.dataset.localModelSpawnBound !== "true") {
-    form.addEventListener("submit", spawnLocalModel);
-    form.dataset.localModelSpawnBound = "true";
-  }
-
-  const select = form.querySelector("#" + LOCAL_MODEL_SPAWN_SELECT_ID);
-  const textarea = form.querySelector("#" + LOCAL_MODEL_SPAWN_PROMPT_ID);
-  const button = form.querySelector("#" + LOCAL_MODEL_SPAWN_BUTTON_ID);
-  const status = form.querySelector("#" + LOCAL_MODEL_SPAWN_STATUS_ID);
-  if (!select || !textarea || !button || !status) {
-    return form;
-  }
-  bindLocalModelSpawnControlEvents(select, textarea);
-  if (textarea && textarea.value !== localModelSpawnState.prompt) {
-    localModelSpawnState.prompt = textarea.value;
-  }
-  clear(select);
-  select.disabled = localModelSpawnState.busy || healthy.length === 0;
-  for (const row of healthy) {
-    const option = document.createElement("option");
-    option.value = row.name || "";
-    option.textContent = [row.name, row.model_id].filter(Boolean).join(" / ");
-    select.appendChild(option);
-  }
-  select.value = localModelSpawnState.model_ref;
-  syncLocalModelSpawnStateFromControls();
-
-  if (document.activeElement !== textarea && textarea.value !== localModelSpawnState.prompt) {
-    textarea.value = localModelSpawnState.prompt;
-  }
-  syncLocalModelSpawnStateFromControls();
-  textarea.disabled = localModelSpawnState.busy;
-
-  button.disabled = localModelSpawnState.busy || !localModelSpawnState.model_ref || !localModelSpawnState.prompt.trim();
-  button.textContent = localModelSpawnState.busy ? "Spawning" : "Spawn";
-
-  clear(status);
-  appendDisplay(status, healthy.length ? localModelSpawnState.result : "no healthy enabled model", { maxChars: 2048 });
-  return form;
-}
-
-function renderLocalModels(panel) {
-  const node = byId("localModels");
-  if (!panel || panel.status !== "ok") {
-    clear(node);
-    renderUnavailable(node, panel);
-    return;
-  }
-  const data = panel.data || {};
-  const rows = data.rows || [];
-  const summary = ensurePanelMount(node, "localModelSummary");
-  const spawnMount = ensurePanelMount(node, "localModelSpawnMount");
-  const tableMount = ensurePanelMount(node, "localModelTableMount");
-  clear(summary);
-  summary.append(
-    stat("Tool", data.tool || panel.source),
-    stat("Enabled", data.enabled_count || 0),
-    stat("Unhealthy", data.unhealthy_count || 0, data.unhealthy_count ? "warn" : "ok"),
-    stat("Rows", rows.length)
-  );
-  const form = renderLocalModelSpawnControl(rows);
-  if (form.parentElement !== spawnMount) {
-    clear(spawnMount);
-    spawnMount.appendChild(form);
-  }
-  clear(tableMount);
-  tableMount.appendChild(table(["Name", "Model", "Base URL", "Enabled", "Probe", "Notes"], rows.map((row) => {
-    const probe = row.last_probe || {};
-    return [
-      row.name,
-      row.model_id,
-      row.base_url,
-      row.enabled,
-      probe.checked_at ? (probe.healthy ? "healthy" : "unhealthy") + " " + probe.checked_at : "",
-      { value: row.notes || probe.raw_response_excerpt || "", maxChars: 1024 }
-    ];
-  })));
-}
-
-async function refresh() {
-  try {
-    const response = await fetch("/dashboard/state.json", { cache: "no-store" });
-    if (!response.ok) {
-      throw new Error("dashboard state failed: " + response.status);
-    }
-    render(await response.json());
-  } catch (error) {
-    byId("updated").textContent = rawText(error);
-  }
-}
-
-refresh();
-setInterval(refresh, 3000);
-"##;
-
+const DASHBOARD_CSS_FILE: &str = "dashboard-CcQpaB_L.css";
+const DASHBOARD_JS_FILE: &str = "dashboard-BLlvdBzS.js";
+const DASHBOARD_HTML: &str = include_str!("../../../../dashboard/dist/index.html");
+const DASHBOARD_CSS: &str =
+    include_str!("../../../../dashboard/dist/assets/dashboard-CcQpaB_L.css");
+const DASHBOARD_JS: &str = include_str!("../../../../dashboard/dist/assets/dashboard-BLlvdBzS.js");
+#[cfg(test)]
+const DASHBOARD_APP_SOURCE: &str = include_str!("../../../../dashboard/src/app.tsx");
+#[cfg(test)]
+const DASHBOARD_STATE_SOURCE: &str =
+    include_str!("../../../../dashboard/src/lib/dashboard-state.ts");
+#[cfg(test)]
+const DASHBOARD_UTILS_SOURCE: &str = include_str!("../../../../dashboard/src/lib/utils.ts");
+#[cfg(test)]
+const DASHBOARD_PRIMITIVES_SOURCE: &str =
+    include_str!("../../../../dashboard/src/primitives/index.tsx");
+#[cfg(test)]
+const DASHBOARD_CHARTER_CHECK_SOURCE: &str =
+    include_str!("../../../../dashboard/scripts/check-dashboard-charter.ts");
 async fn health(State(state): State<HttpState>) -> Json<Health> {
     tracing::info!(
         code = "MCP_HTTP_HEALTH",
@@ -3008,7 +2138,7 @@ mod tests {
 
     #[test]
     fn dashboard_html_does_not_embed_bearer_material() {
-        assert!(DASHBOARD_HTML.contains("Synapse Dashboard"));
+        assert!(DASHBOARD_HTML.contains("Synapse Command Center"));
         assert!(!DASHBOARD_HTML.contains("Authorization"));
         assert!(!DASHBOARD_HTML.contains("Bearer"));
         assert!(!DASHBOARD_HTML.contains("SYNAPSE_BEARER_TOKEN"));
@@ -3022,11 +2152,15 @@ mod tests {
 
     #[test]
     fn dashboard_html_uses_external_assets_without_inline_blocks() {
-        assert!(DASHBOARD_HTML.contains("/dashboard/assets/dashboard.css"));
-        assert!(DASHBOARD_HTML.contains("/dashboard/assets/dashboard.js"));
-        assert!(DASHBOARD_HTML.contains("section-nav"));
-        assert!(DASHBOARD_HTML.contains("commandAuditPanel"));
+        assert!(DASHBOARD_HTML.contains(&format!("/dashboard/assets/{DASHBOARD_CSS_FILE}")));
+        assert!(DASHBOARD_HTML.contains(&format!("/dashboard/assets/{DASHBOARD_JS_FILE}")));
+        assert!(DASHBOARD_HTML.contains("id=\"root\""));
+        assert!(DASHBOARD_HTML.contains("<script type=\"module\""));
         assert!(!DASHBOARD_HTML.contains("<style"));
+        assert!(!DASHBOARD_HTML.contains("src=\"http://"));
+        assert!(!DASHBOARD_HTML.contains("src=\"https://"));
+        assert!(!DASHBOARD_HTML.contains("href=\"http://"));
+        assert!(!DASHBOARD_HTML.contains("href=\"https://"));
         assert!(!DASHBOARD_HTML.contains("<script>"));
     }
 
@@ -3060,17 +2194,32 @@ mod tests {
     }
 
     #[test]
-    fn dashboard_js_uses_safe_sinks_and_escape_guards() {
-        assert!(DASHBOARD_JS.contains("textContent"));
-        assert!(DASHBOARD_JS.contains("stripTerminalSequences"));
-        assert!(DASHBOARD_JS.contains("renderCommandAudit"));
-        assert!(DASHBOARD_JS.contains("/dashboard/local-model-spawn"));
-        assert!(DASHBOARD_JS.contains("spawnLocalModel"));
-        assert!(DASHBOARD_JS.contains("MAX_TEXT_CHARS"));
-        assert!(!DASHBOARD_JS.contains("innerHTML"));
-        assert!(!DASHBOARD_JS.contains("insertAdjacentHTML"));
-        assert!(!DASHBOARD_JS.contains("new Function"));
-        assert!(!DASHBOARD_JS.contains("eval("));
+    fn dashboard_source_uses_charter_guardrails() {
+        let source = [
+            DASHBOARD_APP_SOURCE,
+            DASHBOARD_STATE_SOURCE,
+            DASHBOARD_UTILS_SOURCE,
+            DASHBOARD_PRIMITIVES_SOURCE,
+        ]
+        .join("\n");
+        assert!(source.contains("stripTerminalSequences"));
+        assert!(source.contains("ReactMarkdown"));
+        assert!(source.contains("rehypeSanitize"));
+        assert!(source.contains("RawValue"));
+        assert!(source.contains("Section"));
+        assert!(source.contains("/dashboard/state.json"));
+        assert!(source.contains("cache: \"no-store\""));
+        assert!(DASHBOARD_CHARTER_CHECK_SOURCE.contains("dangerouslySetInnerHTML"));
+        assert!(DASHBOARD_CHARTER_CHECK_SOURCE.contains("insertAdjacentHTML"));
+        assert!(DASHBOARD_CHARTER_CHECK_SOURCE.contains("every Section must declare questions"));
+        assert!(
+            DASHBOARD_CHARTER_CHECK_SOURCE.contains("RawValue disclosure must not default open")
+        );
+        assert!(!source.contains("dangerouslySetInnerHTML"));
+        assert!(!source.contains(".innerHTML"));
+        assert!(!source.contains("insertAdjacentHTML"));
+        assert!(!source.contains("new Function"));
+        assert!(!source.contains("eval("));
     }
 
     #[test]

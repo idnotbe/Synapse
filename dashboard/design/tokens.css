@@ -82,8 +82,8 @@
   --text-md-size:    16px;  --text-md-weight:    500;
   --text-lg-size:    18px;  --text-lg-weight:    600;
   --text-xl-size:    20px;  --text-xl-weight:    600;
-  --text-2xl-size:   24px;  --text-2xl-weight:   600; --text-2xl-tracking: -0.01em;
-  --text-display-size: 30px;--text-display-weight:600; --text-display-tracking: -0.02em;
+  --text-2xl-size:   24px;  --text-2xl-weight:   600; --text-2xl-tracking: 0;
+  --text-display-size: 30px;--text-display-weight:600; --text-display-tracking: 0;
   --text-metric-size: 32px; --text-metric-weight: 600; /* tabular; 28–36 responsive */
 
   /* ---- Spacing — 4px base unit, 8px dominant rhythm ----------------------- */

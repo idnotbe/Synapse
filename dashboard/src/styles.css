@@ -1,0 +1,45 @@
+@import "tailwindcss";
+@import "../design/tokens.css";
+@import "../design/theme.css";
+
+@layer base {
+  :root {
+    background: var(--canvas);
+    color: var(--text-primary);
+    font-family: var(--font-ui);
+    font-variant-numeric: tabular-nums;
+  }
+
+  * {
+    box-sizing: border-box;
+  }
+
+  body {
+    margin: 0;
+    min-width: 320px;
+    min-height: 100vh;
+    background: var(--canvas);
+  }
+
+  button,
+  input,
+  select,
+  textarea {
+    font: inherit;
+  }
+
+  a {
+    color: inherit;
+  }
+
+  ::selection {
+    background: var(--accent);
+    color: var(--accent-fg);
+  }
+}
+
+@layer utilities {
+  .tracking-normal {
+    letter-spacing: 0;
+  }
+}

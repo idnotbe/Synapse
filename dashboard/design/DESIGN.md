@@ -69,8 +69,8 @@ Two pairs deliberately share a hue (Ready/Done = `--success`; Needs-input/Awaiti
 | `text-md` | 16 | 500 | card titles |
 | `text-lg` | 18 | 600 | section headers |
 | `text-xl` | 20 | 600 | page subtitle |
-| `text-2xl` | 24 | 600, -0.01em | page title |
-| `text-display` | 30 | 600, -0.02em | rare hero |
+| `text-2xl` | 24 | 600, 0 tracking | page title |
+| `text-display` | 30 | 600, 0 tracking | rare hero |
 | `text-metric` | 28–36 | 600, tabular | big stat-card numbers (≥1.6× their label) |
 
 ## Spacing — 4px base unit

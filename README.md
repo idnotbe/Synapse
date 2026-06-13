@@ -428,6 +428,19 @@ cargo build --release --workspace
 cargo install --path crates/synapse-mcp --force   # -> %USERPROFILE%\.cargo\bin\synapse-mcp.exe
 ```
 
+### Build the dashboard bundle
+
+```bash
+cd dashboard
+bun install --frozen-lockfile
+bun run build
+```
+
+The dashboard build is local-only. It writes hashed static assets to
+`dashboard/dist/`; the daemon embeds those files and serves them from loopback
+under `/dashboard`. Run `bun run check` as a supporting charter check before
+manual Synapse verification.
+
 ### Wire it up manually
 
 <details>
