@@ -102,6 +102,8 @@ const PROCESS_BASE_ENV_KEYS: [&str; 20] = [
 #[cfg(windows)]
 const WINDOWS_DEFAULT_PATHEXT: &str =
     ".COM;.EXE;.BAT;.CMD;.VBS;.VBE;.JS;.JSE;.WSF;.WSH;.MSC;.PY;.PYW";
+#[cfg(windows)]
+const WINDOWS_GIT_SSH_RELATIVE_DIR: &str = r"Git\usr\bin";
 const LAUNCH_WINDOW_POLL_INTERVAL_MS: u64 = 20;
 const RUN_SHELL_IDEMPOTENCY_PREFIX: &str = "m4/act_run_shell/idempotency/v1/";
 const SHELL_JOB_FINALIZING_GRACE_MS: u64 = 30_000;
@@ -4767,6 +4769,83 @@ fn ensure_windows_path_entries(env: &mut BTreeMap<String, (String, String)>, sys
             "merged required Windows system directories into child process PATH"
         );
     }
+    prefer_windows_git_ssh_directory_on_path(env, system_root);
+}
+
+#[cfg(windows)]
+fn prefer_windows_git_ssh_directory_on_path(
+    env: &mut BTreeMap<String, (String, String)>,
+    system_root: &str,
+) {
+    let Some(git_ssh_dir) = windows_git_ssh_directory() else {
+        return;
+    };
+    let git_ssh_dir = git_ssh_dir.to_string_lossy().into_owned();
+    let openssh_dir = Path::new(system_root)
+        .join("System32")
+        .join("OpenSSH")
+        .to_string_lossy()
+        .into_owned();
+    let before = env_value(env, "PATH").map(ToOwned::to_owned);
+    let after = reorder_semicolon_path_entry_before_targets(
+        before.as_deref().unwrap_or_default(),
+        &git_ssh_dir,
+        &[openssh_dir],
+    );
+    if before.as_deref() != Some(after.as_str()) {
+        set_env_value(env, "PATH", after);
+        tracing::info!(
+            code = "M4_CHILD_ENV_GIT_SSH_PATH_PREFERRED",
+            git_ssh_dir,
+            "preferred Git-bundled SSH client directory before Windows OpenSSH in child PATH"
+        );
+    }
+}
+
+#[cfg(windows)]
+fn reorder_semicolon_path_entry_before_targets(
+    current: &str,
+    preferred: &str,
+    targets: &[String],
+) -> String {
+    let preferred = preferred.trim();
+    if preferred.is_empty() {
+        return current.to_owned();
+    }
+    let preferred_norm = normalize_semicolon_path_part(preferred);
+    let target_norms = targets
+        .iter()
+        .map(|target| normalize_semicolon_path_part(target))
+        .collect::<HashSet<_>>();
+    let mut seen = HashSet::new();
+    let mut parts = Vec::new();
+    for part in current
+        .split(';')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+    {
+        let normalized = normalize_semicolon_path_part(part);
+        if normalized == preferred_norm {
+            continue;
+        }
+        if seen.insert(normalized) {
+            parts.push(part.to_owned());
+        }
+    }
+    let insert_at = parts
+        .iter()
+        .position(|part| target_norms.contains(&normalize_semicolon_path_part(part)))
+        .unwrap_or(parts.len());
+    parts.insert(insert_at, preferred.to_owned());
+    parts.join(";")
+}
+
+#[cfg(windows)]
+fn normalize_semicolon_path_part(part: &str) -> String {
+    part.trim()
+        .trim_matches('"')
+        .trim_end_matches(['\\', '/'])
+        .to_ascii_uppercase()
 }
 
 #[cfg(windows)]
@@ -5794,6 +5873,94 @@ fn ssh_family_client_for_executable(command: &str) -> Option<&'static str> {
     }
 }
 
+fn shell_spawn_command<'a>(command: &'a str) -> Cow<'a, str> {
+    #[cfg(windows)]
+    if let Some(resolved) = resolve_windows_ssh_family_spawn_command(command) {
+        tracing::info!(
+            code = "M4_ACT_RUN_SHELL_SSH_CLIENT_RESOLVED",
+            requested_command = command,
+            resolved_command = %resolved,
+            "resolved bare Windows SSH-family command to Git-bundled executable"
+        );
+        return Cow::Owned(resolved);
+    }
+    Cow::Borrowed(command)
+}
+
+#[cfg(windows)]
+fn resolve_windows_ssh_family_spawn_command(command: &str) -> Option<String> {
+    resolve_windows_ssh_family_spawn_command_with_dirs(command, &windows_git_ssh_dir_candidates())
+}
+
+#[cfg(windows)]
+fn resolve_windows_ssh_family_spawn_command_with_dirs(
+    command: &str,
+    candidate_dirs: &[PathBuf],
+) -> Option<String> {
+    if !is_bare_windows_executable_name(command) {
+        return None;
+    }
+    let client = ssh_family_client_for_executable(command)?;
+    for dir in candidate_dirs {
+        if !is_known_good_git_ssh_directory(dir) {
+            continue;
+        }
+        let candidate = dir.join(windows_ssh_family_executable_leaf(command, client));
+        if candidate.is_file() {
+            return Some(candidate.to_string_lossy().into_owned());
+        }
+    }
+    None
+}
+
+#[cfg(windows)]
+fn is_bare_windows_executable_name(command: &str) -> bool {
+    let command = trim_arg_quotes(command).trim();
+    !command.is_empty()
+        && !command.contains(['\\', '/'])
+        && command.as_bytes().get(1).is_none_or(|value| *value != b':')
+        && !Path::new(command).is_absolute()
+}
+
+#[cfg(windows)]
+fn windows_ssh_family_executable_leaf(command: &str, client: &str) -> String {
+    let leaf = executable_leaf(command);
+    if Path::new(leaf).extension().is_some() {
+        leaf.to_owned()
+    } else {
+        format!("{client}.exe")
+    }
+}
+
+#[cfg(windows)]
+fn windows_git_ssh_directory() -> Option<PathBuf> {
+    windows_git_ssh_dir_candidates()
+        .into_iter()
+        .find(|dir| is_known_good_git_ssh_directory(dir))
+}
+
+#[cfg(windows)]
+fn windows_git_ssh_dir_candidates() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    for key in ["ProgramFiles", "ProgramW6432", "ProgramFiles(x86)"] {
+        if let Some(value) = std::env::var_os(key) {
+            dirs.push(Path::new(&value).join(WINDOWS_GIT_SSH_RELATIVE_DIR));
+        }
+    }
+    dirs.push(PathBuf::from(r"C:\Program Files\Git\usr\bin"));
+    dirs.push(PathBuf::from(r"C:\Program Files (x86)\Git\usr\bin"));
+
+    let mut seen = HashSet::new();
+    dirs.into_iter()
+        .filter(|dir| seen.insert(normalize_semicolon_path_part(&dir.to_string_lossy())))
+        .collect()
+}
+
+#[cfg(windows)]
+fn is_known_good_git_ssh_directory(dir: &Path) -> bool {
+    dir.join("ssh.exe").is_file() && dir.join("scp.exe").is_file()
+}
+
 fn executable_leaf(command: &str) -> &str {
     trim_arg_quotes(command)
         .rsplit(['\\', '/'])
@@ -6578,7 +6745,8 @@ fn spawn_shell_job_child(
     stderr_file: fs::File,
     context: Option<&ShellExecutionContext>,
 ) -> Result<SpawnedShellChild, ErrorData> {
-    let mut command = TokioCommand::new(&params.command);
+    let spawn_command = shell_spawn_command(&params.command);
+    let mut command = TokioCommand::new(spawn_command.as_ref());
     let spawn_args = shell_job_spawn_args(params, job_id);
     command.args(&spawn_args);
     if let Some(working_dir) = &params.working_dir {
@@ -6608,6 +6776,8 @@ fn spawn_shell_job_child(
             json!({
                 "code": error_codes::ACTION_TARGET_INVALID,
                 "command": params.command,
+                "spawn_command": spawn_command.as_ref(),
+                "spawn_command_resolved": spawn_command.as_ref() != params.command.as_str(),
                 "command_metadata_policy": SHELL_COMMAND_METADATA_POLICY,
                 "args": command_metadata.args,
                 "args_redacted": command_metadata.args_redacted,
@@ -7507,7 +7677,8 @@ fn spawn_shell_child(
     params: &ActRunShellParams,
     context: Option<&ShellExecutionContext>,
 ) -> Result<SpawnedShellChild, ErrorData> {
-    let mut command = TokioCommand::new(&params.command);
+    let spawn_command = shell_spawn_command(&params.command);
+    let mut command = TokioCommand::new(spawn_command.as_ref());
     command.args(&params.args);
     if let Some(working_dir) = &params.working_dir {
         command.current_dir(working_dir);
@@ -7535,6 +7706,8 @@ fn spawn_shell_child(
             json!({
                 "code": error_codes::ACTION_TARGET_INVALID,
                 "command": params.command,
+                "spawn_command": spawn_command.as_ref(),
+                "spawn_command_resolved": spawn_command.as_ref() != params.command.as_str(),
                 "command_metadata_policy": SHELL_COMMAND_METADATA_POLICY,
                 "args": command_metadata.args,
                 "args_redacted": command_metadata.args_redacted,
@@ -8362,6 +8535,99 @@ mod tests {
             "readback=child_env edge=slim_daemon after_appdata={} after_localappdata={} after_programdata={}",
             env["APPDATA"].1, env["LOCALAPPDATA"].1, env["PROGRAMDATA"].1
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn shell_spawn_command_prefers_git_ssh_for_bare_windows_ssh_family() {
+        let dir = tempfile::TempDir::new()
+            .unwrap_or_else(|error| panic!("create temp git ssh dir: {error}"));
+        for leaf in ["ssh.exe", "scp.exe", "sftp.exe"] {
+            std::fs::write(dir.path().join(leaf), b"synthetic git ssh binary")
+                .unwrap_or_else(|error| panic!("write {leaf}: {error}"));
+        }
+        let dirs = vec![dir.path().to_path_buf()];
+
+        let ssh = resolve_windows_ssh_family_spawn_command_with_dirs("ssh", &dirs)
+            .unwrap_or_else(|| panic!("bare ssh should resolve"));
+        let scp = resolve_windows_ssh_family_spawn_command_with_dirs("scp.exe", &dirs)
+            .unwrap_or_else(|| panic!("bare scp.exe should resolve"));
+        let sftp = resolve_windows_ssh_family_spawn_command_with_dirs("sftp", &dirs)
+            .unwrap_or_else(|| panic!("bare sftp should resolve"));
+
+        println!(
+            "readback=act_run_shell_spawn_resolution edge=bare_ssh before=ssh/scp/sftp after_ssh={ssh} after_scp={scp} after_sftp={sftp}"
+        );
+        assert_eq!(ssh, dir.path().join("ssh.exe").to_string_lossy());
+        assert_eq!(scp, dir.path().join("scp.exe").to_string_lossy());
+        assert_eq!(sftp, dir.path().join("sftp.exe").to_string_lossy());
+
+        assert_eq!(
+            resolve_windows_ssh_family_spawn_command_with_dirs(
+                r"C:\Windows\System32\OpenSSH\ssh.exe",
+                &dirs
+            ),
+            None
+        );
+        assert_eq!(
+            resolve_windows_ssh_family_spawn_command_with_dirs(r".\ssh.exe", &dirs),
+            None
+        );
+        assert_eq!(
+            resolve_windows_ssh_family_spawn_command_with_dirs("powershell.exe", &dirs),
+            None
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn shell_spawn_command_does_not_use_incomplete_git_ssh_directory() {
+        let dir = tempfile::TempDir::new()
+            .unwrap_or_else(|error| panic!("create incomplete git ssh dir: {error}"));
+        std::fs::write(dir.path().join("ssh.exe"), b"synthetic git ssh binary")
+            .unwrap_or_else(|error| panic!("write ssh.exe: {error}"));
+        let dirs = vec![dir.path().to_path_buf()];
+
+        let resolved = resolve_windows_ssh_family_spawn_command_with_dirs("ssh", &dirs);
+
+        println!(
+            "readback=act_run_shell_spawn_resolution edge=incomplete_git_dir before=ssh_only after={resolved:?}"
+        );
+        assert_eq!(resolved, None);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn child_path_prefers_git_ssh_before_windows_openssh() {
+        let git_dir = r"C:\Program Files\Git\usr\bin";
+        let openssh_dir = r"C:\Windows\System32\OpenSSH";
+        let before = r"C:\Windows\System32;C:\Windows\System32\OpenSSH;C:\Program Files\Git\usr\bin;C:\Tools;C:\Windows\System32\OpenSSH";
+
+        let after =
+            reorder_semicolon_path_entry_before_targets(before, git_dir, &[openssh_dir.to_owned()]);
+        let parts = after.split(';').collect::<Vec<_>>();
+        let git_index = parts
+            .iter()
+            .position(|part| {
+                normalize_semicolon_path_part(part) == normalize_semicolon_path_part(git_dir)
+            })
+            .unwrap_or_else(|| panic!("git ssh dir should be present"));
+        let openssh_index = parts
+            .iter()
+            .position(|part| {
+                normalize_semicolon_path_part(part) == normalize_semicolon_path_part(openssh_dir)
+            })
+            .unwrap_or_else(|| panic!("windows openssh dir should be present"));
+        let git_count = parts
+            .iter()
+            .filter(|part| {
+                normalize_semicolon_path_part(part) == normalize_semicolon_path_part(git_dir)
+            })
+            .count();
+
+        println!("readback=child_env_path edge=git_before_openssh before={before} after={after}");
+        assert!(git_index < openssh_index);
+        assert_eq!(git_count, 1);
     }
 
     #[cfg(windows)]
