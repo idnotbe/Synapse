@@ -994,7 +994,7 @@ fi
 function Get-SynapseMcpProcessSnapshot {
     @(Get-CimInstance Win32_Process -Filter "Name='synapse-mcp.exe'" -ErrorAction SilentlyContinue |
         Sort-Object ProcessId |
-        Select-Object ProcessId, ParentProcessId, Name, CommandLine)
+        Select-Object ProcessId, ParentProcessId, Name, ExecutablePath, CommandLine)
 }
 
 function Format-SynapseMcpProcessSnapshot {
@@ -1003,8 +1003,99 @@ function Format-SynapseMcpProcessSnapshot {
         return '<none>'
     }
     return (($Snapshot | ForEach-Object {
-        "pid=$($_.ProcessId) ppid=$($_.ParentProcessId) cmd=$($_.CommandLine)"
+        $matchRules = if ($_.PSObject.Properties.Name -contains 'DeployTargetRules') { $_.DeployTargetRules } else { '<unclassified>' }
+        $bindArg = if ($_.PSObject.Properties.Name -contains 'DeployTargetBindArg') { $_.DeployTargetBindArg } else { '<unclassified>' }
+        $dbArg = if ($_.PSObject.Properties.Name -contains 'DeployTargetDbArg') { $_.DeployTargetDbArg } else { '<unclassified>' }
+        "pid=$($_.ProcessId) ppid=$($_.ParentProcessId) path=$($_.ExecutablePath) target_match=$matchRules bind_arg=$bindArg db_arg=$dbArg cmd=$($_.CommandLine)"
     }) -join "`n")
+}
+
+function Normalize-SynapseSetupPathForCompare {
+    param([string]$Path)
+    if ([string]::IsNullOrWhiteSpace($Path)) { return '' }
+    try {
+        $full = [System.IO.Path]::GetFullPath($Path)
+    } catch {
+        $full = $Path.Trim()
+    }
+    return $full.TrimEnd([char[]]@([char]92, [char]47))
+}
+
+function Get-SynapseCommandLineArgumentValue {
+    param(
+        [string]$CommandLine,
+        [Parameter(Mandatory=$true)][string]$Name
+    )
+    if ([string]::IsNullOrWhiteSpace($CommandLine)) { return $null }
+    $escapedName = [regex]::Escape($Name)
+    $pattern = "(?i)(?:^|\s)$escapedName(?:\s+|=)(?:""(?<quoted>[^""]*)""|(?<bare>\S+))"
+    $match = [regex]::Match($CommandLine, $pattern)
+    if (-not $match.Success) { return $null }
+    if ($match.Groups['quoted'].Success) { return $match.Groups['quoted'].Value }
+    return $match.Groups['bare'].Value
+}
+
+function Get-SynapseMcpDeployTargetMatch {
+    param(
+        [Parameter(Mandatory=$true)]$Process,
+        [Parameter(Mandatory=$true)][string]$Bind,
+        [Parameter(Mandatory=$true)][string]$DbPath
+    )
+
+    $rules = @()
+    $bindArg = Get-SynapseCommandLineArgumentValue -CommandLine $Process.CommandLine -Name '--bind'
+    if (-not [string]::IsNullOrWhiteSpace($bindArg) -and $bindArg.Trim() -ieq $Bind) {
+        $rules += "bind=$Bind"
+    }
+
+    $expectedDb = Normalize-SynapseSetupPathForCompare -Path $DbPath
+    $dbArg = Get-SynapseCommandLineArgumentValue -CommandLine $Process.CommandLine -Name '--db'
+    $actualDb = Normalize-SynapseSetupPathForCompare -Path $dbArg
+    if (-not [string]::IsNullOrWhiteSpace($actualDb) -and $actualDb -ieq $expectedDb) {
+        $rules += "db=$expectedDb"
+    }
+
+    [pscustomobject]@{
+        IsMatch = ($rules.Count -gt 0)
+        Rules = $rules
+        BindArg = if ($null -eq $bindArg) { '<missing>' } else { $bindArg }
+        DbArg = if ($null -eq $dbArg) { '<missing>' } else { $dbArg }
+        ExpectedDb = $expectedDb
+    }
+}
+
+function Add-SynapseMcpDeployTargetMetadata {
+    param(
+        [Parameter(Mandatory=$true)]$Process,
+        [Parameter(Mandatory=$true)][string]$Bind,
+        [Parameter(Mandatory=$true)][string]$DbPath
+    )
+
+    $match = Get-SynapseMcpDeployTargetMatch -Process $Process -Bind $Bind -DbPath $DbPath
+    $rules = if ($match.Rules.Count -gt 0) { $match.Rules -join ',' } else { '<none>' }
+    $Process | Add-Member -NotePropertyName DeployTargetMatched -NotePropertyValue $match.IsMatch -Force
+    $Process | Add-Member -NotePropertyName DeployTargetRules -NotePropertyValue $rules -Force
+    $Process | Add-Member -NotePropertyName DeployTargetBindArg -NotePropertyValue $match.BindArg -Force
+    $Process | Add-Member -NotePropertyName DeployTargetDbArg -NotePropertyValue $match.DbArg -Force
+    return $Process
+}
+
+function Select-SynapseMcpDeployTargetProcesses {
+    param(
+        [object[]]$Snapshot,
+        [Parameter(Mandatory=$true)][string]$Bind,
+        [Parameter(Mandatory=$true)][string]$DbPath,
+        [switch]$Invert
+    )
+
+    @($Snapshot | ForEach-Object {
+        $process = Add-SynapseMcpDeployTargetMetadata -Process $_ -Bind $Bind -DbPath $DbPath
+        if ($Invert) {
+            if (-not $process.DeployTargetMatched) { $process }
+        } else {
+            if ($process.DeployTargetMatched) { $process }
+        }
+    })
 }
 
 function Get-SynapseBindEndpoint {
@@ -1708,14 +1799,23 @@ function Assert-SynapseRestartAllowed {
     param(
         [Parameter(Mandatory=$true)][string]$Reason,
         [Parameter(Mandatory=$true)][string]$Bind,
+        [Parameter(Mandatory=$true)][string]$DbPath,
         [Parameter(Mandatory=$true)][string]$TokenPath,
         [switch]$ForceRestart,
         [switch]$AllowActiveClientDrain
     )
 
-    $processes = @(Get-SynapseMcpProcessSnapshot)
+    $allProcesses = @(Get-SynapseMcpProcessSnapshot)
+    $processes = @(Select-SynapseMcpDeployTargetProcesses -Snapshot $allProcesses -Bind $Bind -DbPath $DbPath)
+    $ignoredProcesses = @(Select-SynapseMcpDeployTargetProcesses -Snapshot $allProcesses -Bind $Bind -DbPath $DbPath -Invert)
+    if ($ignoredProcesses.Count -gt 0) {
+        Info ("Synapse restart guard reason={0} ignored_non_target_process_count={1}`nignored:`n{2}" -f `
+            $Reason,
+            $ignoredProcesses.Count,
+            (Format-SynapseMcpProcessSnapshot -Snapshot $ignoredProcesses))
+    }
     if ($processes.Count -eq 0) {
-        Info "Synapse restart guard reason=$Reason existing_process_count=0 verdict=clear"
+        Info "Synapse restart guard reason=$Reason target_process_count=0 ignored_non_target_process_count=$($ignoredProcesses.Count) verdict=clear"
         return
     }
 
@@ -1826,7 +1926,11 @@ function Assert-SynapseRestartAllowed {
 }
 
 function Assert-SynapseProcessStopTarget {
-    param([Parameter(Mandatory=$true)]$SnapshotProcess)
+    param(
+        [Parameter(Mandatory=$true)]$SnapshotProcess,
+        [Parameter(Mandatory=$true)][string]$Bind,
+        [Parameter(Mandatory=$true)][string]$DbPath
+    )
 
     $pidValue = [int]$SnapshotProcess.ProcessId
     $current = Get-CimInstance Win32_Process -Filter "ProcessId=$pidValue" -ErrorAction SilentlyContinue
@@ -1868,6 +1972,23 @@ function Assert-SynapseProcessStopTarget {
             $current.CommandLine)
     }
 
+    $targetMatch = Get-SynapseMcpDeployTargetMatch -Process $current -Bind $Bind -DbPath $DbPath
+    if (-not $targetMatch.IsMatch) {
+        Die ("SYNAPSE_PROCESS_STOP_TARGET_SCOPE_MISMATCH pid={0} bind={1} db={2} actual_bind_arg={3} actual_db_arg={4} command_line={5} remediation=setup only stops synapse-mcp.exe processes whose command line targets the deployed --bind or --db; refusing collateral stop" -f `
+            $pidValue,
+            $Bind,
+            $targetMatch.ExpectedDb,
+            $targetMatch.BindArg,
+            $targetMatch.DbArg,
+            $current.CommandLine)
+    }
+    $rules = $targetMatch.Rules -join ','
+    $current | Add-Member -NotePropertyName DeployTargetMatched -NotePropertyValue $true -Force
+    $current | Add-Member -NotePropertyName DeployTargetRules -NotePropertyValue $rules -Force
+    $current | Add-Member -NotePropertyName DeployTargetBindArg -NotePropertyValue $targetMatch.BindArg -Force
+    $current | Add-Member -NotePropertyName DeployTargetDbArg -NotePropertyValue $targetMatch.DbArg -Force
+    Info "Synapse process stop target verified pid=$pidValue match_rules=$rules path=$($current.ExecutablePath) cmd=$($current.CommandLine)"
+
     return $current
 }
 
@@ -1875,21 +1996,27 @@ function Stop-SynapseMcpProcesses {
     param(
         [Parameter(Mandatory=$true)][string]$Reason,
         [Parameter(Mandatory=$true)][string]$Bind,
+        [Parameter(Mandatory=$true)][string]$DbPath,
         [Parameter(Mandatory=$true)][string]$TokenPath,
         [switch]$ForceRestart,
         [int]$TimeoutSeconds = 15
     )
 
-    $before = @(Get-SynapseMcpProcessSnapshot)
-    Info "Synapse process stop requested reason=$Reason before_count=$($before.Count)"
-    Info ("Synapse process stop before:`n{0}" -f (Format-SynapseMcpProcessSnapshot -Snapshot $before))
+    $allBefore = @(Get-SynapseMcpProcessSnapshot)
+    $before = @(Select-SynapseMcpDeployTargetProcesses -Snapshot $allBefore -Bind $Bind -DbPath $DbPath)
+    $ignoredBefore = @(Select-SynapseMcpDeployTargetProcesses -Snapshot $allBefore -Bind $Bind -DbPath $DbPath -Invert)
+    Info "Synapse process stop requested reason=$Reason before_all_count=$($allBefore.Count) target_count=$($before.Count) ignored_non_target_count=$($ignoredBefore.Count) bind=$Bind db=$DbPath"
+    Info ("Synapse process stop target candidates:`n{0}" -f (Format-SynapseMcpProcessSnapshot -Snapshot $before))
+    if ($ignoredBefore.Count -gt 0) {
+        Info ("Synapse process stop ignored non-target processes:`n{0}" -f (Format-SynapseMcpProcessSnapshot -Snapshot $ignoredBefore))
+    }
     if ($before.Count -eq 0) {
         Wait-SynapseBindReleased -Reason $Reason -Bind $Bind -TimeoutSeconds $TimeoutSeconds
         return
     }
 
     foreach ($proc in $before) {
-        $null = Assert-SynapseProcessStopTarget -SnapshotProcess $proc
+        $null = Assert-SynapseProcessStopTarget -SnapshotProcess $proc -Bind $Bind -DbPath $DbPath
     }
 
     $httpProcesses = @($before | Where-Object { $_.CommandLine -match '(?i)--mode\s+http' })
@@ -1973,10 +2100,11 @@ function Stop-SynapseMcpProcesses {
         }
     }
 
-    $remaining = @(Get-SynapseMcpProcessSnapshot)
+    $remaining = @(Select-SynapseMcpDeployTargetProcesses -Snapshot @(Get-SynapseMcpProcessSnapshot) -Bind $Bind -DbPath $DbPath)
     if ($remaining.Count -eq 0) {
         Wait-SynapseBindReleased -Reason $Reason -Bind $Bind -TimeoutSeconds $TimeoutSeconds
-        Info "Synapse process stop verified reason=$Reason after_count=0"
+        $ignoredAfter = @(Select-SynapseMcpDeployTargetProcesses -Snapshot @(Get-SynapseMcpProcessSnapshot) -Bind $Bind -DbPath $DbPath -Invert)
+        Info "Synapse process stop verified reason=$Reason target_after_count=0 ignored_non_target_after_count=$($ignoredAfter.Count)"
         return
     }
 
@@ -1992,12 +2120,12 @@ function Stop-SynapseMcpProcesses {
         $remaining.Count,
         (Format-SynapseMcpProcessSnapshot -Snapshot $remaining))
     foreach ($proc in $remaining) {
-        $verified = Assert-SynapseProcessStopTarget -SnapshotProcess $proc
+        $verified = Assert-SynapseProcessStopTarget -SnapshotProcess $proc -Bind $Bind -DbPath $DbPath
         if (-not $verified) { continue }
         $pidValue = [int]$verified.ProcessId
         try {
             Stop-Process -Id $pidValue -Force -ErrorAction Stop
-            Info "Synapse process exact-PID force stop issued pid=$pidValue reason=$Reason"
+            Info "Synapse process exact-PID force stop issued pid=$pidValue reason=$Reason match_rules=$($verified.DeployTargetRules) path=$($verified.ExecutablePath) cmd=$($verified.CommandLine)"
         } catch {
             Die ("SYNAPSE_PROCESS_STOP_FAILED pid={0} reason={1} error={2} remediation=setup only stops verified synapse-mcp.exe PIDs; inspect process ownership and retry after the daemon exits" -f `
                 $pidValue,
@@ -2009,15 +2137,16 @@ function Stop-SynapseMcpProcesses {
     $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
     do {
         Start-Sleep -Milliseconds 250
-        $after = @(Get-SynapseMcpProcessSnapshot)
+        $after = @(Select-SynapseMcpDeployTargetProcesses -Snapshot @(Get-SynapseMcpProcessSnapshot) -Bind $Bind -DbPath $DbPath)
         if ($after.Count -eq 0) {
             Wait-SynapseBindReleased -Reason $Reason -Bind $Bind -TimeoutSeconds $TimeoutSeconds
-            Info "Synapse process stop verified reason=$Reason after_count=0"
+            $ignoredAfter = @(Select-SynapseMcpDeployTargetProcesses -Snapshot @(Get-SynapseMcpProcessSnapshot) -Bind $Bind -DbPath $DbPath -Invert)
+            Info "Synapse process stop verified reason=$Reason target_after_count=0 ignored_non_target_after_count=$($ignoredAfter.Count)"
             return
         }
     } while ((Get-Date) -lt $deadline)
 
-    $remaining = @(Get-SynapseMcpProcessSnapshot)
+    $remaining = @(Select-SynapseMcpDeployTargetProcesses -Snapshot @(Get-SynapseMcpProcessSnapshot) -Bind $Bind -DbPath $DbPath)
     Die ("SYNAPSE_PROCESS_STOP_FAILED reason={0} timeout_s={1} remaining_count={2} remaining=`n{3}" -f `
         $Reason, $TimeoutSeconds, $remaining.Count, (Format-SynapseMcpProcessSnapshot -Snapshot $remaining))
 }
@@ -2124,13 +2253,13 @@ Acquire-SynapseSetupMaintenanceLock -Path $MaintenanceLockPath -Reason $maintena
 
 if ($Remove) {
     Step "Removing scheduled task '$TaskName'"
-    Assert-SynapseRestartAllowed -Reason 'remove' -Bind $Bind -TokenPath $TokenPath -ForceRestart:$ForceRestart
+    Assert-SynapseRestartAllowed -Reason 'remove' -Bind $Bind -DbPath $DbPath -TokenPath $TokenPath -ForceRestart:$ForceRestart
     if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) {
         Stop-ScheduledTask  -TaskName $TaskName -ErrorAction SilentlyContinue
         Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
         Info "Unregistered '$TaskName'."
     } else { Info "Task '$TaskName' not present." }
-    Stop-SynapseMcpProcesses -Reason 'remove' -Bind $Bind -TokenPath $TokenPath -ForceRestart:$ForceRestart
+    Stop-SynapseMcpProcesses -Reason 'remove' -Bind $Bind -DbPath $DbPath -TokenPath $TokenPath -ForceRestart:$ForceRestart
     if ($Purge) {
         foreach ($p in @($DbPath, $ProfilesDir, (Split-Path -Parent $TokenPath))) {
             if (Test-Path $p) { Remove-Item -Recurse -Force $p; Info "Deleted $p" }
@@ -2303,11 +2432,11 @@ Info ("Chrome direct bridge preflight accepted transport={0} extension_id={1} na
 # 5. Drain the running daemon, then install the proven binary
 # ---------------------------------------------------------------------------
 Step "Draining live daemon and installing verified binary -> $ExePath"
-Assert-SynapseRestartAllowed -Reason 'install_binary' -Bind $Bind -TokenPath $TokenPath -ForceRestart:$ForceRestart -AllowActiveClientDrain
+Assert-SynapseRestartAllowed -Reason 'install_binary' -Bind $Bind -DbPath $DbPath -TokenPath $TokenPath -ForceRestart:$ForceRestart -AllowActiveClientDrain
 if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) {
     Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
 }
-Stop-SynapseMcpProcesses -Reason 'install_binary' -Bind $Bind -TokenPath $TokenPath -ForceRestart:$ForceRestart
+Stop-SynapseMcpProcesses -Reason 'install_binary' -Bind $Bind -DbPath $DbPath -TokenPath $TokenPath -ForceRestart:$ForceRestart
 New-Item -ItemType Directory -Force -Path (Split-Path -Parent $ExePath) | Out-Null
 $backupPath = $null
 $oldInstalledHash = $null
@@ -2436,7 +2565,7 @@ if (-not $ok) {
         if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) {
             Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
         }
-        Stop-SynapseMcpProcesses -Reason 'install_health_failed_rollback' -Bind $Bind -TokenPath $TokenPath -ForceRestart -TimeoutSeconds 10
+        Stop-SynapseMcpProcesses -Reason 'install_health_failed_rollback' -Bind $Bind -DbPath $DbPath -TokenPath $TokenPath -ForceRestart -TimeoutSeconds 10
         Copy-Item -LiteralPath $backupPath -Destination $ExePath -Force
         $rollbackHash = Get-SynapseFileSha256 -Path $ExePath
         if ($rollbackHash -ne $oldInstalledHash) {
