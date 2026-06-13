@@ -234,6 +234,7 @@ expression: snapshot
     "agent_cost_price_list",
     "agent_cost_price_put",
     "agent_inbox",
+    "agent_query",
     "agent_send",
     "agent_stats",
     "agent_wait",
