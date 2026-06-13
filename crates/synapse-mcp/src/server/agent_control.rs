@@ -72,6 +72,11 @@ const INTERRUPT_MAILBOX_KIND: &str = "interrupt";
 
 const TOOL_AGENT_INTERRUPT: &str = "agent_interrupt";
 const TOOL_AGENT_KILL: &str = "agent_kill";
+const TOOL_FLEET_STOP: &str = "fleet_stop";
+
+/// Destructive-action confirmation token for `fleet_stop`, matching the
+/// action-diagnostic confirm pattern. A typo or empty value is refused.
+const FLEET_STOP_CONFIRM: &str = "STOP-FLEET";
 
 // ----------------------------------------------------------------------------
 // Params
@@ -107,6 +112,25 @@ const fn default_kill_grace_ms() -> u64 {
 }
 const fn default_true() -> bool {
     true
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct FleetStopParams {
+    /// `kill` force-terminates every live agent's process tree; `interrupt`
+    /// delivers a graceful interrupt to each.
+    pub mode: String,
+    /// Destructive-action confirmation token; must equal `STOP-FLEET`.
+    pub confirm: String,
+    /// Optional registry `agent_kind` filter (e.g. `["codex"]`). Empty = every
+    /// live spawned agent.
+    #[serde(default)]
+    #[schemars(default)]
+    pub agent_kinds: Vec<String>,
+    /// Graceful window (ms) per agent for `mode=kill` before force-termination.
+    #[serde(default = "default_kill_grace_ms")]
+    #[schemars(default = "default_kill_grace_ms", range(min = 0, max = 120_000))]
+    pub grace_ms: u64,
 }
 
 // ----------------------------------------------------------------------------
@@ -211,6 +235,37 @@ pub struct AgentKillResponse {
     pub teardown_error: Option<String>,
 }
 
+/// One agent's outcome in a `fleet_stop` sweep.
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct FleetStopAgentOutcome {
+    pub session_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub spawn_id: Option<String>,
+    pub agent_kind: String,
+    /// True when the agent was stopped as requested (killed with zero orphans,
+    /// or interrupt delivered).
+    pub ok: bool,
+    /// Outcome detail: how it was stopped, or exactly why it could not be.
+    pub reason: String,
+    /// Live pids still standing for this agent (non-empty only on a failed kill).
+    pub surviving_process_ids: Vec<u32>,
+}
+
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct FleetStopResponse {
+    pub mode: String,
+    /// Live spawned agents that matched the filter at sweep time.
+    pub matched: usize,
+    pub succeeded: usize,
+    pub failed: usize,
+    /// True iff every matched agent was stopped (vacuously true for an empty
+    /// fleet).
+    pub all_stopped: bool,
+    pub agents: Vec<FleetStopAgentOutcome>,
+}
+
 // ----------------------------------------------------------------------------
 // Resolved-target model
 // ----------------------------------------------------------------------------
@@ -265,6 +320,25 @@ impl SynapseService {
         );
         let caller = super::context::mcp_session_id_from_request_context(&request_context)?;
         self.agent_kill_impl(params.0, caller.as_deref())
+            .await
+            .map(Json)
+    }
+
+    #[tool(
+        description = "Fleet kill switch (#907): interrupt or kill EVERY live spawned agent (optionally filtered by agent_kind) in one call. Requires confirm=\"STOP-FLEET\" (destructive-action token). mode=kill force-terminates each agent's process tree and releases its leases/claims/desktops; mode=interrupt delivers a graceful interrupt to each. Returns a per-agent outcome table; any agent that could not be stopped is listed loudly with its reason and surviving pids (never summarized away). Empty fleet is an honest no-op. Writes a single fleet_stop command-audit pair."
+    )]
+    pub async fn fleet_stop(
+        &self,
+        params: Parameters<FleetStopParams>,
+        request_context: RequestContext<RoleServer>,
+    ) -> Result<Json<FleetStopResponse>, ErrorData> {
+        tracing::info!(
+            code = "MCP_TOOL_INVOCATION",
+            kind = "fleet_stop",
+            "tool.invocation kind=fleet_stop"
+        );
+        let caller = super::context::mcp_session_id_from_request_context(&request_context)?;
+        self.fleet_stop_impl(params.0, caller.as_deref())
             .await
             .map(Json)
     }
@@ -661,6 +735,197 @@ impl SynapseService {
             ));
         }
         Ok(response)
+    }
+
+    // ------------------------------------------------------------------
+    // fleet_stop
+    // ------------------------------------------------------------------
+
+    async fn fleet_stop_impl(
+        &self,
+        params: FleetStopParams,
+        caller_session: Option<&str>,
+    ) -> Result<FleetStopResponse, ErrorData> {
+        let mode = params.mode.trim().to_ascii_lowercase();
+        if mode != "kill" && mode != "interrupt" {
+            return Err(mcp_error(
+                error_codes::TOOL_PARAMS_INVALID,
+                format!("FLEET_STOP_MODE_INVALID: mode must be \"kill\" or \"interrupt\", got {:?}", params.mode),
+            ));
+        }
+        if params.confirm != FLEET_STOP_CONFIRM {
+            return Err(mcp_error(
+                error_codes::TOOL_PARAMS_INVALID,
+                format!(
+                    "FLEET_STOP_CONFIRM_REQUIRED: fleet_stop is destructive and requires confirm=\"{FLEET_STOP_CONFIRM}\""
+                ),
+            ));
+        }
+        if params.grace_ms > MAX_KILL_GRACE_MS {
+            return Err(mcp_error(
+                error_codes::TOOL_PARAMS_INVALID,
+                format!("FLEET_STOP_GRACE_INVALID: grace_ms must be 0..={MAX_KILL_GRACE_MS}, got {}", params.grace_ms),
+            ));
+        }
+
+        // Snapshot the matched live agents, then drop the registry lock BEFORE
+        // stopping any (the stop path re-locks the registry to resolve).
+        let matched_sessions = self.live_spawned_agent_sessions(&params.agent_kinds)?;
+
+        let payload = json!({
+            "mode": mode,
+            "agent_kinds": params.agent_kinds,
+            "grace_ms": params.grace_ms,
+            "from": caller_session,
+        });
+        let before = json!({ "matched_sessions": matched_sessions, "matched": matched_sessions.len() });
+        let verb = if mode == "kill" { "fleet_kill" } else { "fleet_interrupt" };
+        self.command_audit_intent(CommandAuditInput::mcp(
+            TOOL_FLEET_STOP,
+            verb,
+            caller_session.map(ToOwned::to_owned),
+            None,
+            payload.clone(),
+            before.clone(),
+            Value::Null,
+            "pending",
+        ))?;
+
+        let mut agents: Vec<FleetStopAgentOutcome> = Vec::with_capacity(matched_sessions.len());
+        for session_id in &matched_sessions {
+            agents.push(self.fleet_stop_one(&mode, session_id, params.grace_ms, caller_session).await);
+        }
+
+        let succeeded = agents.iter().filter(|outcome| outcome.ok).count();
+        let failed = agents.len() - succeeded;
+        let response = FleetStopResponse {
+            mode: mode.clone(),
+            matched: agents.len(),
+            succeeded,
+            failed,
+            all_stopped: failed == 0,
+            agents,
+        };
+
+        let after = json!({
+            "matched": response.matched,
+            "succeeded": response.succeeded,
+            "failed": response.failed,
+            "all_stopped": response.all_stopped,
+            "agents": response.agents,
+        });
+        self.command_audit_final(CommandAuditInput::mcp(
+            TOOL_FLEET_STOP,
+            verb,
+            caller_session.map(ToOwned::to_owned),
+            None,
+            payload,
+            before,
+            after,
+            if response.all_stopped { "ok" } else { "error" },
+        ))?;
+
+        Ok(response)
+    }
+
+    /// Stops one agent for a fleet sweep, mapping any error to a loud per-agent
+    /// outcome rather than aborting the whole sweep.
+    async fn fleet_stop_one(
+        &self,
+        mode: &str,
+        session_id: &str,
+        grace_ms: u64,
+        caller_session: Option<&str>,
+    ) -> FleetStopAgentOutcome {
+        if mode == "kill" {
+            match self
+                .agent_kill_impl(
+                    AgentKillParams {
+                        session_id: session_id.to_owned(),
+                        grace_ms,
+                        interrupt_first: true,
+                    },
+                    caller_session,
+                )
+                .await
+            {
+                Ok(kill) => FleetStopAgentOutcome {
+                    session_id: kill.session_id,
+                    spawn_id: kill.spawn_id,
+                    agent_kind: kill.agent_kind,
+                    ok: kill.killed,
+                    reason: if kill.already_dead {
+                        "already_dead".to_owned()
+                    } else if kill.natural_exit {
+                        "exited_during_grace".to_owned()
+                    } else {
+                        "force_killed".to_owned()
+                    },
+                    surviving_process_ids: kill.orphan_process_ids,
+                },
+                Err(error) => FleetStopAgentOutcome {
+                    session_id: session_id.to_owned(),
+                    spawn_id: None,
+                    agent_kind: "unknown".to_owned(),
+                    ok: false,
+                    reason: error.message.to_string(),
+                    surviving_process_ids: Vec::new(),
+                },
+            }
+        } else {
+            match self.agent_interrupt_impl(
+                AgentInterruptParams {
+                    session_id: session_id.to_owned(),
+                },
+                caller_session,
+            ) {
+                Ok(interrupt) => FleetStopAgentOutcome {
+                    session_id: interrupt.session_id,
+                    spawn_id: interrupt.spawn_id,
+                    agent_kind: interrupt.agent_kind,
+                    ok: interrupt.delivered,
+                    reason: interrupt
+                        .delivered_via
+                        .unwrap_or_else(|| "no_channel_delivered".to_owned()),
+                    surviving_process_ids: Vec::new(),
+                },
+                Err(error) => FleetStopAgentOutcome {
+                    session_id: session_id.to_owned(),
+                    spawn_id: None,
+                    agent_kind: "unknown".to_owned(),
+                    ok: false,
+                    reason: error.message.to_string(),
+                    surviving_process_ids: Vec::new(),
+                },
+            }
+        }
+    }
+
+    /// Snapshots the session ids of every live spawned agent (optionally
+    /// filtered by registry `agent_kind`). The registry lock is released before
+    /// the caller stops anyone.
+    fn live_spawned_agent_sessions(
+        &self,
+        agent_kinds: &[String],
+    ) -> Result<Vec<String>, ErrorData> {
+        let now = unix_time_ms_now();
+        let registry = self.session_registry.lock().map_err(|_error| {
+            mcp_error(
+                error_codes::TOOL_INTERNAL_ERROR,
+                "session registry lock poisoned while enumerating the live fleet",
+            )
+        })?;
+        let mut sessions = Vec::new();
+        for read in registry.reads(now) {
+            if read.spawned_agent.is_none() || read.lifecycle == "closed" {
+                continue;
+            }
+            if !agent_kinds.is_empty() && !agent_kinds.iter().any(|kind| kind == &read.agent_kind) {
+                continue;
+            }
+            sessions.push(read.session_id.clone());
+        }
+        Ok(sessions)
     }
 
     // ------------------------------------------------------------------

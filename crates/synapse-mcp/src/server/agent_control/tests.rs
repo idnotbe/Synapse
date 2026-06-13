@@ -153,7 +153,13 @@ fn spawn_victim() -> u32 {
 
 /// Registers a spawned agent (registry row + owned process resource) exactly the
 /// way act_spawn_agent does, keyed by the agent's own session id.
-fn register_spawned_victim(service: &SynapseService, session_id: &str, spawn_id: &str, pid: u32) {
+fn register_spawned_victim(
+    service: &SynapseService,
+    session_id: &str,
+    spawn_id: &str,
+    pid: u32,
+    kind: &str,
+) {
     let now = unix_time_ms_now();
     {
         let mut registry = service
@@ -165,7 +171,7 @@ fn register_spawned_victim(service: &SynapseService, session_id: &str, spawn_id:
             session_id,
             SpawnedAgentRead {
                 spawn_id: spawn_id.to_owned(),
-                cli: "local-model".to_owned(),
+                cli: kind.to_owned(),
                 launcher_process_id: pid,
                 agent_process_id: Some(pid),
                 started_by_session_id: Some("operator-fsv".to_owned()),
@@ -190,7 +196,7 @@ fn register_spawned_victim(service: &SynapseService, session_id: &str, spawn_id:
                 "powershell.exe".to_owned(),
                 job,
             )
-            .with_agent_cli("local-model"),
+            .with_agent_cli(kind),
         )
         .expect("register session process resource");
 }
@@ -212,7 +218,7 @@ async fn agent_kill_terminates_real_process_tree_and_journals_killed() {
     let session = "session-fsv-kill-1";
     let spawn = "agent-spawn-fsv-kill-1";
     let pid = spawn_victim();
-    register_spawned_victim(&service, session, spawn, pid);
+    register_spawned_victim(&service, session, spawn, pid, "local-model");
 
     // BEFORE: the process is alive in the OS process table (source of truth).
     assert!(
@@ -283,7 +289,7 @@ async fn agent_kill_is_idempotent_double_kill_reports_already_dead() {
     let session = "session-fsv-kill-2";
     let spawn = "agent-spawn-fsv-kill-2";
     let pid = spawn_victim();
-    register_spawned_victim(&service, session, spawn, pid);
+    register_spawned_victim(&service, session, spawn, pid, "local-model");
 
     let first = service
         .agent_kill_impl(
@@ -349,7 +355,7 @@ async fn agent_interrupt_delivers_cooperative_mailbox_and_journals_interrupted()
     let session = "session-fsv-interrupt-1";
     let spawn = "agent-spawn-fsv-interrupt-1";
     let pid = spawn_victim();
-    register_spawned_victim(&service, session, spawn, pid);
+    register_spawned_victim(&service, session, spawn, pid, "local-model");
 
     let response = service
         .agent_interrupt_impl(
@@ -418,4 +424,153 @@ async fn agent_interrupt_delivers_cooperative_mailbox_and_journals_interrupted()
         .await
         .expect("cleanup kill");
     assert!(!crate::m4::process_exists(pid));
+}
+
+// ---------------------------------------------------------------------------
+// fleet_stop (#907) — multi-agent real-process FSV
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn fleet_stop_kill_terminates_every_live_agent() {
+    let temp = TempDir::new().expect("temp dir");
+    let service = fsv_service(temp.path());
+    // Three real spawned agents.
+    let agents = [
+        ("session-fleet-a", "agent-spawn-fleet-a", spawn_victim()),
+        ("session-fleet-b", "agent-spawn-fleet-b", spawn_victim()),
+        ("session-fleet-c", "agent-spawn-fleet-c", spawn_victim()),
+    ];
+    for (session, spawn, pid) in &agents {
+        register_spawned_victim(&service, session, spawn, *pid, "local-model");
+        assert!(crate::m4::process_exists(*pid), "precondition: {pid} alive");
+    }
+
+    let response = service
+        .fleet_stop_impl(
+            FleetStopParams {
+                mode: "kill".to_owned(),
+                confirm: "STOP-FLEET".to_owned(),
+                agent_kinds: Vec::new(),
+                grace_ms: 0,
+            },
+            Some("operator-fsv"),
+        )
+        .await
+        .expect("fleet_stop kill must succeed");
+
+    // FSV: the report claims all three stopped with zero survivors.
+    assert_eq!(response.matched, 3, "all three live agents matched");
+    assert_eq!(response.succeeded, 3);
+    assert_eq!(response.failed, 0);
+    assert!(response.all_stopped);
+    for outcome in &response.agents {
+        assert!(outcome.ok, "{} not stopped: {}", outcome.session_id, outcome.reason);
+        assert!(outcome.surviving_process_ids.is_empty());
+    }
+
+    // FSV: the OS process table, read back independently, confirms every pid is
+    // gone — the authoritative proof.
+    for (_session, _spawn, pid) in &agents {
+        assert!(
+            !crate::m4::process_exists(*pid),
+            "fleet pid {pid} must be gone after fleet_stop kill"
+        );
+    }
+
+    // FSV: a single fleet_stop audit pair plus the per-agent kill rows exist.
+    let audit = service.command_audit_snapshot().expect("audit snapshot");
+    let fleet_rows = audit.rows.iter().filter(|r| r.tool == "fleet_stop").count();
+    assert!(fleet_rows >= 2, "expected intent+final fleet_stop rows, got {fleet_rows}");
+}
+
+#[tokio::test]
+async fn fleet_stop_requires_confirm_token() {
+    let temp = TempDir::new().expect("temp dir");
+    let service = fsv_service(temp.path());
+    let error = service
+        .fleet_stop_impl(
+            FleetStopParams {
+                mode: "kill".to_owned(),
+                confirm: "nope".to_owned(),
+                agent_kinds: Vec::new(),
+                grace_ms: 0,
+            },
+            Some("operator-fsv"),
+        )
+        .await
+        .expect_err("wrong confirm token must be refused");
+    assert!(
+        error.message.contains("FLEET_STOP_CONFIRM_REQUIRED"),
+        "unexpected error: {}",
+        error.message
+    );
+}
+
+#[tokio::test]
+async fn fleet_stop_empty_fleet_is_honest_noop() {
+    let temp = TempDir::new().expect("temp dir");
+    let service = fsv_service(temp.path());
+    let response = service
+        .fleet_stop_impl(
+            FleetStopParams {
+                mode: "kill".to_owned(),
+                confirm: "STOP-FLEET".to_owned(),
+                agent_kinds: Vec::new(),
+                grace_ms: 0,
+            },
+            Some("operator-fsv"),
+        )
+        .await
+        .expect("empty fleet is a no-op, not an error");
+    assert_eq!(response.matched, 0);
+    assert_eq!(response.succeeded, 0);
+    assert_eq!(response.failed, 0);
+    assert!(response.all_stopped, "vacuously all stopped on empty fleet");
+}
+
+#[tokio::test]
+async fn fleet_stop_filters_by_agent_kind() {
+    let temp = TempDir::new().expect("temp dir");
+    let service = fsv_service(temp.path());
+    let codex_pid = spawn_victim();
+    let claude_pid = spawn_victim();
+    register_spawned_victim(&service, "session-codex", "agent-spawn-codex", codex_pid, "codex");
+    register_spawned_victim(&service, "session-claude", "agent-spawn-claude", claude_pid, "claude");
+
+    // Kill only the codex-kind agent.
+    let response = service
+        .fleet_stop_impl(
+            FleetStopParams {
+                mode: "kill".to_owned(),
+                confirm: "STOP-FLEET".to_owned(),
+                agent_kinds: vec!["codex".to_owned()],
+                grace_ms: 0,
+            },
+            Some("operator-fsv"),
+        )
+        .await
+        .expect("filtered fleet_stop succeeds");
+
+    assert_eq!(response.matched, 1, "only the codex agent matched the filter");
+    assert_eq!(response.agents[0].agent_kind, "codex");
+    assert!(!crate::m4::process_exists(codex_pid), "codex agent must be killed");
+    assert!(
+        crate::m4::process_exists(claude_pid),
+        "the filtered-out claude agent must still be alive"
+    );
+
+    // Clean up the survivor deterministically.
+    let _ = service
+        .fleet_stop_impl(
+            FleetStopParams {
+                mode: "kill".to_owned(),
+                confirm: "STOP-FLEET".to_owned(),
+                agent_kinds: Vec::new(),
+                grace_ms: 0,
+            },
+            Some("operator-fsv"),
+        )
+        .await
+        .expect("cleanup fleet_stop");
+    assert!(!crate::m4::process_exists(claude_pid));
 }
