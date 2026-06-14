@@ -115,7 +115,7 @@ fn assert_act_run_shell_semantics_described(tools: &[Value]) -> anyhow::Result<(
         tool_description.contains("executable path/name only")
             && tool_description.contains("explicit shell executable")
             && tool_description.contains("execution_mode controls routing")
-            && tool_description.contains("inline never backgrounds")
+            && tool_description.contains("MCP client-call budget")
             && tool_description
                 .contains("durable_timeout_ms is an explicit durable job lifetime cap"),
         "act_run_shell description must explain executable-plus-args semantics: {tool_description}"
@@ -145,6 +145,7 @@ fn assert_act_run_shell_semantics_described(tools: &[Value]) -> anyhow::Result<(
     ensure!(
         timeout_description.contains("Caller-requested inline wait budget")
             && timeout_description.contains("execution_mode=inline")
+            && timeout_description.contains("MCP client-call budget")
             && timeout_description.contains("execution_mode=auto"),
         "act_run_shell timeout_ms schema must separate inline and durable timeout semantics: {timeout_description}"
     );
@@ -155,7 +156,7 @@ fn assert_act_run_shell_semantics_described(tools: &[Value]) -> anyhow::Result<(
             .context("act_run_shell execution_mode description missing")?;
     ensure!(
         execution_mode_description.contains("auto preserves compatibility")
-            && execution_mode_description.contains("inline never backgrounds")
+            && execution_mode_description.contains("MCP client-call budget")
             && execution_mode_description.contains("durable immediately returns"),
         "act_run_shell execution_mode schema must describe routing choices: {execution_mode_description}"
     );

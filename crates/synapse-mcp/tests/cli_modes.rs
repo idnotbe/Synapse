@@ -213,6 +213,10 @@ async fn http_health_reads_m4_policy_counts_from_repeated_cli_flags() -> anyhow:
         "{response}"
     );
     assert!(
+        response.contains("\"run_shell_inline_client_call_budget_ms\":110000"),
+        "{response}"
+    );
+    assert!(
         response.contains("\"run_shell_durable_default_timeout_ms\":null"),
         "{response}"
     );

@@ -160,6 +160,10 @@ async fn health_and_action_tools_appear_in_tools_list_with_schema() -> anyhow::R
         health["subsystems"]["action"]["run_shell_inline_await_limit_ms"],
         Value::from(90_000)
     );
+    assert_eq!(
+        health["subsystems"]["action"]["run_shell_inline_client_call_budget_ms"],
+        Value::from(110_000)
+    );
     let action_health = health["subsystems"]["action"]
         .as_object()
         .context("action health object missing")?;

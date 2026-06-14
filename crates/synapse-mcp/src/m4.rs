@@ -34,6 +34,7 @@ use crate::{
 const MAX_COMBO_STEPS: usize = 256;
 const DEFAULT_SHELL_TIMEOUT_MS: u64 = 30_000;
 pub const DEFAULT_RUN_SHELL_INLINE_AWAIT_LIMIT_MS: u64 = 90_000;
+pub const DEFAULT_RUN_SHELL_INLINE_CLIENT_CALL_BUDGET_MS: u64 = 110_000;
 const DEFAULT_LAUNCH_TIMEOUT_MS: u64 = 10_000;
 #[cfg(windows)]
 const SW_HIDE: u16 = 0;
@@ -278,6 +279,11 @@ impl M4ServiceConfig {
     }
 
     #[must_use]
+    pub const fn run_shell_inline_client_call_budget_ms(&self) -> u64 {
+        DEFAULT_RUN_SHELL_INLINE_CLIENT_CALL_BUDGET_MS
+    }
+
+    #[must_use]
     pub const fn run_shell_durable_default_timeout_ms(&self) -> Option<u64> {
         None
     }
@@ -417,13 +423,13 @@ pub struct ActRunShellParams {
     #[schemars(
         default = "default_shell_timeout_ms",
         range(min = 1),
-        description = "Caller-requested inline wait budget in milliseconds. In execution_mode=inline this is honored directly, even above the daemon inline await limit. In execution_mode=auto, values above the inline await limit return a durable job handle."
+        description = "Caller-requested inline wait budget in milliseconds. In execution_mode=inline this is honored directly when it fits inside the MCP client-call budget; larger values return a durable job handle before the client-side tools/call cap can hide completion status. In execution_mode=auto, values above the inline await limit return a durable job handle."
     )]
     pub timeout_ms: u64,
     #[serde(default = "default_run_shell_execution_mode")]
     #[schemars(
         default = "default_run_shell_execution_mode",
-        description = "Shell execution route: auto preserves compatibility and backgrounds only when timeout_ms exceeds the inline await limit; inline never backgrounds and waits up to timeout_ms; durable immediately returns a durable job handle."
+        description = "Shell execution route: auto preserves compatibility and backgrounds when timeout_ms exceeds the inline await limit; inline waits up to timeout_ms only while that budget fits inside the MCP client-call budget and otherwise returns a durable job handle; durable immediately returns a durable job handle."
     )]
     pub execution_mode: ActRunShellExecutionMode,
     #[serde(default)]
@@ -479,6 +485,8 @@ pub struct ActRunShellResponse {
     pub background_reason: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inline_await_limit_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inline_client_call_budget_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub requested_execution_mode: Option<ActRunShellExecutionMode>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1595,6 +1603,16 @@ fn direct_shell_background_reason(
         ActRunShellExecutionMode::Auto if params.timeout_ms > inline_await_limit_ms => {
             Some("timeout_exceeds_inline_await_budget")
         }
+        ActRunShellExecutionMode::Auto
+            if params.timeout_ms > DEFAULT_RUN_SHELL_INLINE_CLIENT_CALL_BUDGET_MS =>
+        {
+            Some("timeout_exceeds_mcp_client_call_budget")
+        }
+        ActRunShellExecutionMode::Inline
+            if params.timeout_ms > DEFAULT_RUN_SHELL_INLINE_CLIENT_CALL_BUDGET_MS =>
+        {
+            Some("inline_timeout_exceeds_mcp_client_call_budget")
+        }
         ActRunShellExecutionMode::Durable => Some("execution_mode_durable"),
         ActRunShellExecutionMode::Auto | ActRunShellExecutionMode::Inline => None,
     }
@@ -1616,6 +1634,7 @@ pub fn validate_run_shell_execution_plan(
                 "execution_mode": params.execution_mode.as_str(),
                 "timeout_ms": params.timeout_ms,
                 "inline_await_limit_ms": inline_await_limit_ms,
+                "inline_client_call_budget_ms": DEFAULT_RUN_SHELL_INLINE_CLIENT_CALL_BUDGET_MS,
                 "durable_timeout_ms": params.durable_timeout_ms,
             }),
         ));
@@ -1657,6 +1676,7 @@ fn act_run_shell_background_response(
         backgrounded: true,
         background_reason: Some(reason.to_owned()),
         inline_await_limit_ms: Some(inline_await_limit_ms),
+        inline_client_call_budget_ms: Some(DEFAULT_RUN_SHELL_INLINE_CLIENT_CALL_BUDGET_MS),
         requested_execution_mode: Some(requested_execution_mode),
         effective_execution_mode: Some(ActRunShellExecutionMode::Durable),
         durable_timeout_ms,
@@ -1694,6 +1714,7 @@ pub fn run_shell_request_details(
         "timeout_ms": params.timeout_ms,
         "execution_mode": params.execution_mode.as_str(),
         "inline_await_limit_ms": inline_await_limit_ms,
+        "inline_client_call_budget_ms": DEFAULT_RUN_SHELL_INLINE_CLIENT_CALL_BUDGET_MS,
         "background_reason": background_reason,
         "will_background": will_background,
         "durable_timeout_ms": params.durable_timeout_ms,
@@ -7737,6 +7758,7 @@ async fn run_allowlisted_shell(
         backgrounded: false,
         background_reason: None,
         inline_await_limit_ms: None,
+        inline_client_call_budget_ms: None,
         requested_execution_mode: Some(requested_execution_mode),
         effective_execution_mode: Some(ActRunShellExecutionMode::Inline),
         durable_timeout_ms: None,
@@ -7759,23 +7781,27 @@ fn shell_budget_error(
     // (Google AIP-193 / "Fail Fast with Actionable Errors"): how to get more time in a single call.
     let remediation = match execution_mode {
         ActRunShellExecutionMode::Inline => {
-            "execution_mode=\"inline\" honors any timeout_ms with no daemon cap, so raise timeout_ms \
-             to allow more time, or switch to execution_mode=\"durable\" (or act_run_shell_start) for \
-             an unbounded background job polled with act_run_shell_status"
+            "raise timeout_ms only when the total wait still fits inside the MCP client-call budget, \
+             or switch to execution_mode=\"durable\" (or act_run_shell_start) for an unbounded \
+             background job polled with act_run_shell_status"
                 .to_owned()
         }
         // Durable execution backgrounds before reaching the inline path, so this arm is defensive.
         ActRunShellExecutionMode::Auto | ActRunShellExecutionMode::Durable => format!(
             "raise timeout_ms above the {inline_await_limit_ms} ms inline await limit to auto-background \
-             into a durable job polled with act_run_shell_status, or set execution_mode=\"inline\" to \
-             wait for any timeout_ms inline with no daemon cap"
+             into a durable job polled with act_run_shell_status, set execution_mode=\"durable\", \
+             or set execution_mode=\"inline\" only for a single-call wait that fits inside the MCP \
+             client-call budget"
         ),
     };
     (
         Some(error_codes::ACTION_BUDGET_EXPIRED.to_owned()),
         Some(format!(
             "caller timeout_ms budget expired after {timeout_ms} ms; the process tree was terminated. \
-             To allow more time in a single call: {remediation}."
+             Inline MCP calls are guarded by a {} ms client-call budget so long-running commands keep \
+             a durable status handle instead of disappearing behind a client timeout. To allow more \
+             time: {remediation}.",
+            DEFAULT_RUN_SHELL_INLINE_CLIENT_CALL_BUDGET_MS
         )),
     )
 }
@@ -10984,8 +11010,9 @@ mod tests {
     #[tokio::test]
     async fn shell_inline_mode_waits_past_inline_await_limit() {
         // Regression for #954: a command that runs LONGER than the daemon inline await limit must
-        // still complete inline (no hard cap) when execution_mode="inline". The inline await limit
-        // only governs the auto→durable background decision, never inline execution itself.
+        // still complete inline when execution_mode="inline" and the requested wait fits inside
+        // the MCP client-call budget. The inline await limit only governs the auto→durable
+        // background decision.
         let inline_await_limit_ms = 200;
         let mut params = shell_params(
             "powershell.exe",
@@ -11028,9 +11055,49 @@ mod tests {
 
     #[cfg(windows)]
     #[tokio::test]
+    async fn shell_inline_timeout_above_client_budget_returns_durable_job_handle() {
+        let mut params = shell_params(
+            "cmd.exe",
+            vec!["/c", "echo inline-client-budget-handoff-ok"],
+            DEFAULT_RUN_SHELL_INLINE_CLIENT_CALL_BUDGET_MS + 1,
+        );
+        params.execution_mode = ActRunShellExecutionMode::Inline;
+        let config = shell_config_for(&params);
+
+        let response = match run_shell(&config, params).await {
+            Ok(response) => response,
+            Err(error) => panic!("oversized inline request should return durable handle: {error}"),
+        };
+
+        println!(
+            "readback=act_run_shell edge=inline_client_budget_handoff after=response:{response:?}"
+        );
+        assert!(response.backgrounded, "{response:?}");
+        assert_eq!(
+            response.background_reason.as_deref(),
+            Some("inline_timeout_exceeds_mcp_client_call_budget")
+        );
+        assert_eq!(
+            response.inline_client_call_budget_ms,
+            Some(DEFAULT_RUN_SHELL_INLINE_CLIENT_CALL_BUDGET_MS)
+        );
+        assert_eq!(
+            response.requested_execution_mode,
+            Some(ActRunShellExecutionMode::Inline)
+        );
+        assert_eq!(
+            response.effective_execution_mode,
+            Some(ActRunShellExecutionMode::Durable)
+        );
+        let job_id = response.job_id.clone().expect("job id should be returned");
+        assert_durable_job_finishes_ok(&job_id, "inline-client-budget-handoff-ok").await;
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
     async fn shell_budget_expiry_message_is_actionable() {
         // When the caller's own timeout_ms budget expires, the error must point at the concrete
-        // escape hatch (execution_mode="inline" / the inline await limit) instead of dead-ending.
+        // escape hatch (durable execution / the inline await limit) instead of dead-ending.
         let mut params = shell_params(
             "powershell.exe",
             vec!["-NoProfile", "-Command", "Start-Sleep -Milliseconds 5000"],
@@ -11062,12 +11129,16 @@ mod tests {
             "names the expired budget: {message}"
         );
         assert!(
-            message.contains("execution_mode=\"inline\""),
-            "names the inline escape hatch: {message}"
+            message.contains("execution_mode=\"durable\""),
+            "names the durable escape hatch: {message}"
         );
         assert!(
             message.contains("inline await limit"),
             "names the configurable inline await limit: {message}"
+        );
+        assert!(
+            message.contains("MCP client-call budget"),
+            "names the client-call guard: {message}"
         );
     }
 
@@ -11534,6 +11605,7 @@ mod tests {
             backgrounded: false,
             background_reason: None,
             inline_await_limit_ms: None,
+            inline_client_call_budget_ms: None,
             requested_execution_mode: Some(ActRunShellExecutionMode::Auto),
             effective_execution_mode: Some(ActRunShellExecutionMode::Inline),
             durable_timeout_ms: None,
@@ -11576,6 +11648,7 @@ mod tests {
             backgrounded: false,
             background_reason: None,
             inline_await_limit_ms: None,
+            inline_client_call_budget_ms: None,
             requested_execution_mode: Some(ActRunShellExecutionMode::Auto),
             effective_execution_mode: Some(ActRunShellExecutionMode::Inline),
             durable_timeout_ms: None,
