@@ -42,6 +42,27 @@ pub(crate) type SharedSessionProcessResources =
     Arc<Mutex<BTreeMap<String, BTreeMap<u32, SessionProcessResource>>>>;
 pub(crate) type SharedTerminatedSessions = Arc<Mutex<BTreeSet<String>>>;
 
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct SessionTeardownOptions {
+    agent_spawn_completion_grace: Duration,
+}
+
+impl SessionTeardownOptions {
+    pub(crate) const fn explicit_kill() -> Self {
+        Self {
+            agent_spawn_completion_grace: Duration::ZERO,
+        }
+    }
+}
+
+impl Default for SessionTeardownOptions {
+    fn default() -> Self {
+        Self {
+            agent_spawn_completion_grace: AGENT_SPAWN_COMPLETION_GRACE,
+        }
+    }
+}
+
 pub(crate) fn mcp_session_store_key(session_id: &str) -> Vec<u8> {
     format!("{MCP_SESSION_STORE_PREFIX}{session_id}").into_bytes()
 }
@@ -738,6 +759,16 @@ impl SessionLifecycleState {
         session_id: &str,
         reason: &str,
     ) -> Result<SessionTeardownReport, ErrorData> {
+        self.teardown_session_with_options(session_id, reason, SessionTeardownOptions::default())
+            .await
+    }
+
+    pub(crate) async fn teardown_session_with_options(
+        &self,
+        session_id: &str,
+        reason: &str,
+        options: SessionTeardownOptions,
+    ) -> Result<SessionTeardownReport, ErrorData> {
         validate_lifecycle_session_id(session_id)?;
         let mut report = SessionTeardownReport::new(session_id, reason);
         self.mark_terminated_session(&mut report);
@@ -749,7 +780,7 @@ impl SessionLifecycleState {
         report.cdp = cleanup_session_cdp_targets(&self.cdp_target_owners, session_id).await;
         report.target_claims = self.cleanup_target_claims(session_id);
         report.shell = cleanup_shell_jobs(session_id, reason);
-        report.processes = self.cleanup_owned_processes(session_id);
+        report.processes = self.cleanup_owned_processes(session_id, options);
         report.subscriptions = self.cleanup_subscriptions(session_id);
         report.session_store = self.delete_session_store_row(session_id);
         report.registry = self.record_registry_closed(session_id, reason);
@@ -1131,7 +1162,11 @@ impl SessionLifecycleState {
         }
     }
 
-    fn cleanup_owned_processes(&self, session_id: &str) -> SessionProcessCleanupReport {
+    fn cleanup_owned_processes(
+        &self,
+        session_id: &str,
+        options: SessionTeardownOptions,
+    ) -> SessionProcessCleanupReport {
         let resources = match self.session_processes.lock() {
             Ok(mut processes) => processes.remove(session_id).unwrap_or_default(),
             Err(_error) => {
@@ -1163,10 +1198,13 @@ impl SessionLifecycleState {
                 .as_ref()
                 .map(|desktop| desktop.name().to_owned());
 
-            if agent_spawn_cleanup.is_some() && !remaining.is_empty() {
+            if agent_spawn_cleanup.is_some()
+                && !remaining.is_empty()
+                && !options.agent_spawn_completion_grace.is_zero()
+            {
                 let (after_natural_wait, waited_ms) = m4::wait_for_owned_process_tree_exit(
                     &process_ids,
-                    AGENT_SPAWN_COMPLETION_GRACE,
+                    options.agent_spawn_completion_grace,
                 );
                 natural_exit_wait_ms = waited_ms;
                 remaining_after_natural_wait = after_natural_wait;

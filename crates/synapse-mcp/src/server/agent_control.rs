@@ -4,7 +4,7 @@
 //! Until this module, the only way to stop a spawned agent was the
 //! coarse-grained `session_end` teardown of the *caller's* whole session. These
 //! two verbs target **one** agent by its own MCP session id (or `agent-spawn-*`
-//! id) and stop it with Full-State-Verification baked into the response: the
+//! id) and stop it with source-of-truth readback in the response: the
 //! actual OS process table is read back before and after, the registry/journal
 //! state transition is recorded, and every channel reports its real outcome.
 //!
@@ -52,9 +52,10 @@ use rmcp::{RoleServer, service::RequestContext};
 
 use super::agent_events::{record_agent_event_durable, unix_time_ns_now};
 use super::command_audit::CommandAuditInput;
-use super::session_lifecycle::SessionTeardownReport;
+use super::session_lifecycle::{SessionTeardownOptions, SessionTeardownReport};
 use super::session_registry::{SpawnedAgentControlRead, unix_time_ms_now};
 use super::{ErrorData, Json, Parameters, SynapseService, mcp_error, tool, tool_router};
+use futures_util::future::join_all;
 
 // ----------------------------------------------------------------------------
 // Tunables
@@ -313,7 +314,7 @@ impl SynapseService {
     }
 
     #[tool(
-        description = "Force-stop one spawned agent (#904): attempt a graceful interrupt, wait grace_ms, then terminate the recorded process tree (Windows job-close → force kill) by reusing per-session teardown, releasing the agent's leases/claims/desktops and journaling a durable killed event. Full-State-Verification is in the response: the OS process table is read back before and after, and killed is true only when zero orphan processes remain. Double-kill is idempotent (reports already_dead); unknown/non-spawned sessions error."
+        description = "Force-stop one spawned agent (#904): attempt a graceful interrupt, wait grace_ms, then terminate the recorded process tree (Windows job-close → force kill) by reusing per-session teardown, releasing the agent's leases/claims/desktops and journaling a durable killed event. Source-of-truth readback is in the response: the OS process table is read back before and after, and killed is true only when zero orphan processes remain. Double-kill is idempotent (reports already_dead); unknown/non-spawned sessions error."
     )]
     pub async fn agent_kill(
         &self,
@@ -821,7 +822,11 @@ impl SynapseService {
         // close. Keyed by the agent's OWN session id, which owns all of it.
         let lifecycle = self.session_lifecycle_state()?;
         let (teardown, teardown_error) = match lifecycle
-            .teardown_session(&target.session_id, "agent_kill")
+            .teardown_session_with_options(
+                &target.session_id,
+                "agent_kill",
+                SessionTeardownOptions::explicit_kill(),
+            )
             .await
         {
             Ok(report) => (Some(report), None),
@@ -957,13 +962,11 @@ impl SynapseService {
             "pending",
         ))?;
 
-        let mut agents: Vec<FleetStopAgentOutcome> = Vec::with_capacity(matched_sessions.len());
-        for session_id in &matched_sessions {
-            agents.push(
+        let agents: Vec<FleetStopAgentOutcome> =
+            join_all(matched_sessions.iter().map(|session_id| {
                 self.fleet_stop_one(&mode, session_id, params.grace_ms, caller_session)
-                    .await,
-            );
-        }
+            }))
+            .await;
 
         let succeeded = agents.iter().filter(|outcome| outcome.ok).count();
         let failed = agents.len() - succeeded;

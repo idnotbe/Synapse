@@ -13,6 +13,7 @@ use super::*;
 use std::num::NonZeroUsize;
 use std::path::Path;
 use std::process::Command as StdCommand;
+use std::time::Instant;
 
 use synapse_storage::{Db, cf};
 use tempfile::TempDir;
@@ -107,10 +108,10 @@ async fn wait_for_tree_exit_reports_survivors_after_grace() {
 }
 
 // ---------------------------------------------------------------------------
-// Real-process Full-State-Verification (#904 acceptance)
+// Real-process supporting regression coverage (#904)
 // ---------------------------------------------------------------------------
 
-fn fsv_service(path: &Path) -> SynapseService {
+fn regression_service(path: &Path) -> SynapseService {
     SynapseService::try_with_m2_shutdown_reason_and_m3_config(
         CancellationToken::new(),
         "test",
@@ -177,10 +178,10 @@ fn register_spawned_victim(
                 cli: kind.to_owned(),
                 launcher_process_id: pid,
                 agent_process_id: Some(pid),
-                started_by_session_id: Some("operator-fsv".to_owned()),
+                started_by_session_id: Some("operator-regression".to_owned()),
                 launched_at_unix_ms: now,
                 launch_target: "powershell.exe".to_owned(),
-                log_dir: "C:\\temp\\fsv".to_owned(),
+                log_dir: "C:\\temp\\regression".to_owned(),
                 template_id: None,
                 template_version: None,
                 control: None,
@@ -218,9 +219,9 @@ fn journal_count_kind(db: &Db, session_id: &str, kind: AgentEventKind) -> usize 
 #[tokio::test]
 async fn agent_kill_terminates_real_process_tree_and_journals_killed() {
     let temp = TempDir::new().expect("temp dir");
-    let service = fsv_service(temp.path());
-    let session = "session-fsv-kill-1";
-    let spawn = "agent-spawn-fsv-kill-1";
+    let service = regression_service(temp.path());
+    let session = "session-regression-kill-1";
+    let spawn = "agent-spawn-regression-kill-1";
     let pid = spawn_victim();
     register_spawned_victim(&service, session, spawn, pid, "local-model");
 
@@ -237,12 +238,12 @@ async fn agent_kill_terminates_real_process_tree_and_journals_killed() {
                 grace_ms: 0,
                 interrupt_first: false,
             },
-            Some("operator-fsv"),
+            Some("operator-regression"),
         )
         .await
         .expect("agent_kill must succeed");
 
-    // FSV 1: the tool reports the kill with zero orphans.
+    // Readback 1: the tool reports the kill with zero orphans.
     assert!(response.killed, "agent_kill must report killed=true");
     assert!(
         response.orphan_process_ids.is_empty(),
@@ -252,15 +253,24 @@ async fn agent_kill_terminates_real_process_tree_and_journals_killed() {
     assert!(!response.already_dead, "the victim was alive when killed");
     assert_eq!(response.session_id, session);
     assert_eq!(response.spawn_id.as_deref(), Some(spawn));
+    let teardown_item = response
+        .teardown
+        .as_ref()
+        .and_then(|report| report.processes.items.first())
+        .expect("agent_kill must include process cleanup readback");
+    assert_eq!(
+        teardown_item.natural_exit_wait_ms, 0,
+        "explicit kill must not spend the fixed act_spawn_agent completion grace"
+    );
 
-    // FSV 2: AFTER — the OS process table, read back independently, confirms the
+    // Readback 2: AFTER — the OS process table, read back independently, confirms the
     // pid is gone. This is the authoritative proof, not the return value.
     assert!(
         !crate::m4::process_exists(pid),
         "victim pid {pid} must be gone from the OS process table after the kill"
     );
 
-    // FSV 3: the durable killed event is physically present in CF_AGENT_EVENTS.
+    // Readback 3: the durable killed event is physically present in CF_AGENT_EVENTS.
     let db = service.agent_control_db().expect("open storage");
     assert_eq!(
         journal_count_kind(&db, session, AgentEventKind::Killed),
@@ -272,7 +282,7 @@ async fn agent_kill_terminates_real_process_tree_and_journals_killed() {
         "the response must carry the killed journal readback"
     );
 
-    // FSV 4: command audit rows for agent_kill are physically present in
+    // Readback 4: command audit rows for agent_kill are physically present in
     // CF_ACTION_LOG (intent + final).
     let audit = service.command_audit_snapshot().expect("audit snapshot");
     let kill_rows = audit
@@ -289,9 +299,9 @@ async fn agent_kill_terminates_real_process_tree_and_journals_killed() {
 #[tokio::test]
 async fn agent_kill_is_idempotent_double_kill_reports_already_dead() {
     let temp = TempDir::new().expect("temp dir");
-    let service = fsv_service(temp.path());
-    let session = "session-fsv-kill-2";
-    let spawn = "agent-spawn-fsv-kill-2";
+    let service = regression_service(temp.path());
+    let session = "session-regression-kill-2";
+    let spawn = "agent-spawn-regression-kill-2";
     let pid = spawn_victim();
     register_spawned_victim(&service, session, spawn, pid, "local-model");
 
@@ -302,7 +312,7 @@ async fn agent_kill_is_idempotent_double_kill_reports_already_dead() {
                 grace_ms: 0,
                 interrupt_first: false,
             },
-            Some("operator-fsv"),
+            Some("operator-regression"),
         )
         .await
         .expect("first kill succeeds");
@@ -318,7 +328,7 @@ async fn agent_kill_is_idempotent_double_kill_reports_already_dead() {
                 grace_ms: 0,
                 interrupt_first: false,
             },
-            Some("operator-fsv"),
+            Some("operator-regression"),
         )
         .await
         .expect("second kill is idempotent, not an error");
@@ -333,7 +343,7 @@ async fn agent_kill_is_idempotent_double_kill_reports_already_dead() {
 #[tokio::test]
 async fn agent_kill_unknown_session_errors_structurally() {
     let temp = TempDir::new().expect("temp dir");
-    let service = fsv_service(temp.path());
+    let service = regression_service(temp.path());
     let error = service
         .agent_kill_impl(
             AgentKillParams {
@@ -341,7 +351,7 @@ async fn agent_kill_unknown_session_errors_structurally() {
                 grace_ms: 0,
                 interrupt_first: false,
             },
-            Some("operator-fsv"),
+            Some("operator-regression"),
         )
         .await
         .expect_err("unknown session must error");
@@ -355,9 +365,9 @@ async fn agent_kill_unknown_session_errors_structurally() {
 #[tokio::test]
 async fn agent_interrupt_delivers_cooperative_mailbox_and_journals_interrupted() {
     let temp = TempDir::new().expect("temp dir");
-    let service = fsv_service(temp.path());
-    let session = "session-fsv-interrupt-1";
-    let spawn = "agent-spawn-fsv-interrupt-1";
+    let service = regression_service(temp.path());
+    let session = "session-regression-interrupt-1";
+    let spawn = "agent-spawn-regression-interrupt-1";
     let pid = spawn_victim();
     register_spawned_victim(&service, session, spawn, pid, "local-model");
 
@@ -366,11 +376,11 @@ async fn agent_interrupt_delivers_cooperative_mailbox_and_journals_interrupted()
             AgentInterruptParams {
                 session_id: session.to_owned(),
             },
-            Some("operator-fsv"),
+            Some("operator-regression"),
         )
         .expect("interrupt must deliver via the mailbox channel");
 
-    // FSV 1: delivery is via the one wired channel; the other three are honestly
+    // Readback 1: delivery is via the one wired channel; the other three are honestly
     // reported unavailable — never faked.
     assert!(response.delivered, "interrupt must be delivered");
     assert_eq!(response.delivered_via.as_deref(), Some("mailbox_interrupt"));
@@ -393,7 +403,7 @@ async fn agent_interrupt_delivers_cooperative_mailbox_and_journals_interrupted()
         .count();
     assert_eq!(unavailable, 3, "codex/claude/pty channels are unavailable");
 
-    // FSV 2: the durable interrupt mailbox row is physically present in CF_KV.
+    // Readback 2: the durable interrupt mailbox row is physically present in CF_KV.
     let db = service.agent_control_db().expect("open storage");
     let mailbox_channel = response
         .channels
@@ -412,7 +422,7 @@ async fn agent_interrupt_delivers_cooperative_mailbox_and_journals_interrupted()
         "the durable interrupt mailbox row must exist at {row_key}"
     );
 
-    // FSV 3: the durable Interrupted journal row exists.
+    // Readback 3: the durable Interrupted journal row exists.
     assert_eq!(
         journal_count_kind(&db, session, AgentEventKind::Interrupted),
         1,
@@ -427,7 +437,7 @@ async fn agent_interrupt_delivers_cooperative_mailbox_and_journals_interrupted()
                 grace_ms: 0,
                 interrupt_first: false,
             },
-            Some("operator-fsv"),
+            Some("operator-regression"),
         )
         .await
         .expect("cleanup kill");
@@ -435,13 +445,13 @@ async fn agent_interrupt_delivers_cooperative_mailbox_and_journals_interrupted()
 }
 
 // ---------------------------------------------------------------------------
-// fleet_stop (#907) — multi-agent real-process FSV
+// fleet_stop (#907) — multi-agent real-process regression coverage
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn fleet_stop_kill_terminates_every_live_agent() {
     let temp = TempDir::new().expect("temp dir");
-    let service = fsv_service(temp.path());
+    let service = regression_service(temp.path());
     // Three real spawned agents.
     let agents = [
         ("session-fleet-a", "agent-spawn-fleet-a", spawn_victim()),
@@ -453,6 +463,7 @@ async fn fleet_stop_kill_terminates_every_live_agent() {
         assert!(crate::m4::process_exists(*pid), "precondition: {pid} alive");
     }
 
+    let started = Instant::now();
     let response = service
         .fleet_stop_impl(
             FleetStopParams {
@@ -461,16 +472,21 @@ async fn fleet_stop_kill_terminates_every_live_agent() {
                 agent_kinds: Vec::new(),
                 grace_ms: 0,
             },
-            Some("operator-fsv"),
+            Some("operator-regression"),
         )
         .await
         .expect("fleet_stop kill must succeed");
+    let elapsed = started.elapsed();
 
-    // FSV: the report claims all three stopped with zero survivors.
+    // Readback: the report claims all three stopped with zero survivors.
     assert_eq!(response.matched, 3, "all three live agents matched");
     assert_eq!(response.succeeded, 3);
     assert_eq!(response.failed, 0);
     assert!(response.all_stopped);
+    assert!(
+        elapsed < Duration::from_secs(10),
+        "fleet_stop kill with grace_ms=0 must not serialize the fixed 30s spawn-completion grace; elapsed={elapsed:?}"
+    );
     for outcome in &response.agents {
         assert!(
             outcome.ok,
@@ -480,7 +496,7 @@ async fn fleet_stop_kill_terminates_every_live_agent() {
         assert!(outcome.surviving_process_ids.is_empty());
     }
 
-    // FSV: the OS process table, read back independently, confirms every pid is
+    // Readback: the OS process table, read back independently, confirms every pid is
     // gone — the authoritative proof.
     for (_session, _spawn, pid) in &agents {
         assert!(
@@ -489,7 +505,7 @@ async fn fleet_stop_kill_terminates_every_live_agent() {
         );
     }
 
-    // FSV: a single fleet_stop audit pair plus the per-agent kill rows exist.
+    // Readback: a single fleet_stop audit pair plus the per-agent kill rows exist.
     let audit = service.command_audit_snapshot().expect("audit snapshot");
     let fleet_rows = audit.rows.iter().filter(|r| r.tool == "fleet_stop").count();
     assert!(
@@ -501,7 +517,7 @@ async fn fleet_stop_kill_terminates_every_live_agent() {
 #[tokio::test]
 async fn fleet_stop_requires_confirm_token() {
     let temp = TempDir::new().expect("temp dir");
-    let service = fsv_service(temp.path());
+    let service = regression_service(temp.path());
     let error = service
         .fleet_stop_impl(
             FleetStopParams {
@@ -510,7 +526,7 @@ async fn fleet_stop_requires_confirm_token() {
                 agent_kinds: Vec::new(),
                 grace_ms: 0,
             },
-            Some("operator-fsv"),
+            Some("operator-regression"),
         )
         .await
         .expect_err("wrong confirm token must be refused");
@@ -524,7 +540,7 @@ async fn fleet_stop_requires_confirm_token() {
 #[tokio::test]
 async fn fleet_stop_empty_fleet_is_honest_noop() {
     let temp = TempDir::new().expect("temp dir");
-    let service = fsv_service(temp.path());
+    let service = regression_service(temp.path());
     let response = service
         .fleet_stop_impl(
             FleetStopParams {
@@ -533,7 +549,7 @@ async fn fleet_stop_empty_fleet_is_honest_noop() {
                 agent_kinds: Vec::new(),
                 grace_ms: 0,
             },
-            Some("operator-fsv"),
+            Some("operator-regression"),
         )
         .await
         .expect("empty fleet is a no-op, not an error");
@@ -546,7 +562,7 @@ async fn fleet_stop_empty_fleet_is_honest_noop() {
 #[tokio::test]
 async fn fleet_stop_filters_by_agent_kind() {
     let temp = TempDir::new().expect("temp dir");
-    let service = fsv_service(temp.path());
+    let service = regression_service(temp.path());
     let codex_pid = spawn_victim();
     let claude_pid = spawn_victim();
     register_spawned_victim(
@@ -573,7 +589,7 @@ async fn fleet_stop_filters_by_agent_kind() {
                 agent_kinds: vec!["codex".to_owned()],
                 grace_ms: 0,
             },
-            Some("operator-fsv"),
+            Some("operator-regression"),
         )
         .await
         .expect("filtered fleet_stop succeeds");
@@ -601,7 +617,7 @@ async fn fleet_stop_filters_by_agent_kind() {
                 agent_kinds: Vec::new(),
                 grace_ms: 0,
             },
-            Some("operator-fsv"),
+            Some("operator-regression"),
         )
         .await
         .expect("cleanup fleet_stop");
