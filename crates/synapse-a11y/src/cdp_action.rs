@@ -13,6 +13,8 @@
 
 #![cfg(windows)]
 
+use std::time::Duration;
+
 use chromiumoxide::Browser;
 use chromiumoxide::cdp::browser_protocol::dom::{
     BackendNodeId, GetBoxModelParams, ResolveNodeParams, ScrollIntoViewIfNeededParams,
@@ -33,6 +35,8 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::json;
 
 use crate::{A11yError, A11yResult, cdp_dom::rect_from_quad};
+
+const CDP_INPUT_COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Where a CDP action landed, in viewport CSS coordinates (diagnostics).
 #[derive(Copy, Clone, Debug, PartialEq)]
@@ -1122,72 +1126,114 @@ async fn dispatch_cdp_mouse_stroke(
     let first_point = cdp_stroke_action_point(first);
     if button == MouseButton::None {
         let mut previous_elapsed_ms = first.elapsed_ms;
-        page.execute(mouse_event(
-            DispatchMouseEventType::MouseMoved,
-            first_point,
-            MouseButton::None,
-            0,
-        ))
-        .await
-        .map_err(|err| dispatch_err(&err))?;
-        for point in points.iter().skip(1) {
-            sleep_until_sample(previous_elapsed_ms, point.elapsed_ms).await;
-            previous_elapsed_ms = point.elapsed_ms;
-            page.execute(mouse_event(
+        dispatch_mouse_event(
+            page,
+            mouse_event(
                 DispatchMouseEventType::MouseMoved,
-                cdp_stroke_action_point(*point),
+                first_point,
                 MouseButton::None,
                 0,
-            ))
-            .await
-            .map_err(|err| dispatch_err(&err))?;
+            ),
+            "move",
+            0,
+        )
+        .await?;
+        for (index, point) in points.iter().enumerate().skip(1) {
+            sleep_until_sample(previous_elapsed_ms, point.elapsed_ms).await;
+            previous_elapsed_ms = point.elapsed_ms;
+            dispatch_mouse_event(
+                page,
+                mouse_event(
+                    DispatchMouseEventType::MouseMoved,
+                    cdp_stroke_action_point(*point),
+                    MouseButton::None,
+                    0,
+                ),
+                "move",
+                index,
+            )
+            .await?;
         }
         return Ok(());
     }
 
-    page.execute(mouse_event(
-        DispatchMouseEventType::MouseMoved,
-        first_point,
-        MouseButton::None,
+    dispatch_mouse_event(
+        page,
+        mouse_event(
+            DispatchMouseEventType::MouseMoved,
+            first_point,
+            MouseButton::None,
+            0,
+        ),
+        "pre_press_move",
         0,
-    ))
-    .await
-    .map_err(|err| dispatch_err(&err))?;
-    page.execute(mouse_event(
-        DispatchMouseEventType::MousePressed,
-        first_point,
-        button.clone(),
-        1,
-    ))
-    .await
-    .map_err(|err| dispatch_err(&err))?;
+    )
+    .await?;
+    dispatch_mouse_event(
+        page,
+        mouse_event(
+            DispatchMouseEventType::MousePressed,
+            first_point,
+            button.clone(),
+            1,
+        ),
+        "press",
+        0,
+    )
+    .await?;
 
     let held_buttons = mouse_button_bit(&button);
     let mut previous_elapsed_ms = first.elapsed_ms;
-    for point in points.iter().skip(1) {
+    for (index, point) in points.iter().enumerate().skip(1) {
         sleep_until_sample(previous_elapsed_ms, point.elapsed_ms).await;
         previous_elapsed_ms = point.elapsed_ms;
-        page.execute(mouse_event_with_buttons(
-            DispatchMouseEventType::MouseMoved,
-            cdp_stroke_action_point(*point),
-            button.clone(),
-            0,
-            Some(held_buttons),
-        ))
-        .await
-        .map_err(|err| dispatch_err(&err))?;
+        dispatch_mouse_event(
+            page,
+            mouse_event_with_buttons(
+                DispatchMouseEventType::MouseMoved,
+                cdp_stroke_action_point(*point),
+                button.clone(),
+                0,
+                Some(held_buttons),
+            ),
+            "drag_move",
+            index,
+        )
+        .await?;
     }
-    page.execute(mouse_event(
-        DispatchMouseEventType::MouseReleased,
-        points
-            .last()
-            .map_or(first_point, |point| cdp_stroke_action_point(*point)),
-        button,
-        1,
-    ))
-    .await
-    .map_err(|err| dispatch_err(&err))?;
+    dispatch_mouse_event(
+        page,
+        mouse_event(
+            DispatchMouseEventType::MouseReleased,
+            points
+                .last()
+                .map_or(first_point, |point| cdp_stroke_action_point(*point)),
+            button,
+            1,
+        ),
+        "release",
+        points.len().saturating_sub(1),
+    )
+    .await?;
     Ok(())
+}
+
+async fn dispatch_mouse_event(
+    page: &chromiumoxide::Page,
+    params: DispatchMouseEventParams,
+    stage: &'static str,
+    sample_index: usize,
+) -> A11yResult<()> {
+    match tokio::time::timeout(CDP_INPUT_COMMAND_TIMEOUT, page.execute(params)).await {
+        Ok(Ok(_)) => Ok(()),
+        Ok(Err(err)) => Err(dispatch_err(&err)),
+        Err(_) => Err(A11yError::CdpAxtreeFailed {
+            detail: format!(
+                "CDP input dispatch timed out after {} ms at stage {stage} sample_index={sample_index}",
+                CDP_INPUT_COMMAND_TIMEOUT.as_millis()
+            ),
+        }),
+    }
 }
 
 async fn sleep_until_sample(previous_elapsed_ms: f64, next_elapsed_ms: f64) {

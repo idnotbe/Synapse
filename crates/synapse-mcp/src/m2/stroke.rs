@@ -43,6 +43,10 @@ const STROKE_DETAIL_MOTION_MODEL_INVALID: &str = "STROKE_MOTION_MODEL_INVALID";
 const STROKE_DETAIL_TARGET_MISSING: &str = "STROKE_TARGET_MISSING";
 const STROKE_DETAIL_TARGET_CONFLICT: &str = "STROKE_TARGET_CONFLICT";
 const STROKE_DETAIL_TARGET_UNRESOLVED: &str = "STROKE_TARGET_UNRESOLVED";
+#[cfg(windows)]
+const CDP_STROKE_MIN_DISPATCH_INTERVAL_MS: f64 = 8.0;
+#[cfg(windows)]
+const CDP_STROKE_MAX_DISPATCH_POINTS: usize = 256;
 
 #[derive(Clone, Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -269,15 +273,7 @@ pub(crate) async fn act_stroke_cdp_target(
                 "act_stroke CDP background route requires a sampled path plan",
             )
         })?;
-        let points = stroke_plan
-            .samples
-            .iter()
-            .map(|sample| synapse_a11y::CdpMouseStrokePoint {
-                x: sample.point.x,
-                y: sample.point.y,
-                elapsed_ms: sample.elapsed_ms,
-            })
-            .collect::<Vec<_>>();
+        let points = cdp_dispatch_points_from_stroke_plan(&stroke_plan);
         let button = cdp_mouse_button(params.button)?;
         let dispatch =
             synapse_a11y::cdp_mouse_stroke_target(endpoint, cdp_target_id, points, button)
@@ -300,9 +296,16 @@ pub(crate) async fn act_stroke_cdp_target(
             end_y = dispatch.end.y,
             duration_ms = dispatch.duration_ms,
             button = ?params.button,
+            planned_point_stream_count = stroke_plan.samples.len(),
             "readback=cdp_dispatch tool=act_stroke method=Input.dispatchMouseEvent"
         );
-        Ok(cdp_target_response(&params, &path, &stroke_plan, started))
+        Ok(cdp_target_response(
+            &params,
+            &path,
+            &stroke_plan,
+            dispatch.point_count,
+            started,
+        ))
     }
 
     #[cfg(not(windows))]
@@ -1101,6 +1104,7 @@ fn cdp_target_response(
     params: &ActStrokeParams,
     path: &PathSpec,
     stroke_plan: &StrokePlan,
+    dispatched_point_count: usize,
     started: Instant,
 ) -> ActStrokeResponse {
     ActStrokeResponse {
@@ -1112,7 +1116,7 @@ fn cdp_target_response(
         duration_or_speed_used: params.duration_or_speed.clone(),
         motion_model_used: params.motion_model,
         humanized: params.humanize.is_some(),
-        point_stream_count: u32::try_from(stroke_plan.samples.len()).unwrap_or(u32::MAX),
+        point_stream_count: u32::try_from(dispatched_point_count).unwrap_or(u32::MAX),
         path_length_px: stroke_plan.path_length_px,
         duration_ms: stroke_plan.duration_ms,
         modifiers_used: params.modifiers.clone(),
@@ -1121,6 +1125,55 @@ fn cdp_target_response(
         required_foreground: false,
         elapsed_ms: u32::try_from(started.elapsed().as_millis()).unwrap_or(u32::MAX),
         postcondition: postcondition_not_requested("act_stroke", "cdp_target_mouse_events"),
+    }
+}
+
+#[cfg(windows)]
+fn cdp_dispatch_points_from_stroke_plan(
+    stroke_plan: &StrokePlan,
+) -> Vec<synapse_a11y::CdpMouseStrokePoint> {
+    let samples = &stroke_plan.samples;
+    if samples.is_empty() {
+        return Vec::new();
+    }
+    if samples.len() <= 2 {
+        return samples
+            .iter()
+            .map(cdp_point_from_sample)
+            .collect::<Vec<_>>();
+    }
+
+    let duration_ms = samples
+        .last()
+        .map_or(0.0, |sample| sample.elapsed_ms.max(0.0));
+    let cap_interval_ms = duration_ms / (CDP_STROKE_MAX_DISPATCH_POINTS.saturating_sub(1) as f64);
+    let min_interval_ms = CDP_STROKE_MIN_DISPATCH_INTERVAL_MS.max(cap_interval_ms);
+    let mut points = Vec::with_capacity(samples.len().min(CDP_STROKE_MAX_DISPATCH_POINTS));
+    let first = cdp_point_from_sample(&samples[0]);
+    points.push(first);
+    let mut last_kept_elapsed_ms = first.elapsed_ms;
+
+    for sample in samples.iter().skip(1).take(samples.len().saturating_sub(2)) {
+        if sample.elapsed_ms - last_kept_elapsed_ms >= min_interval_ms {
+            points.push(cdp_point_from_sample(sample));
+            last_kept_elapsed_ms = sample.elapsed_ms;
+        }
+    }
+
+    if let Some(last) = samples.last() {
+        points.push(cdp_point_from_sample(last));
+    }
+    points
+}
+
+#[cfg(windows)]
+fn cdp_point_from_sample(
+    sample: &synapse_action::TimedPathPoint,
+) -> synapse_a11y::CdpMouseStrokePoint {
+    synapse_a11y::CdpMouseStrokePoint {
+        x: sample.point.x,
+        y: sample.point.y,
+        elapsed_ms: sample.elapsed_ms,
     }
 }
 
@@ -1595,6 +1648,42 @@ mod tests {
                 .get("fallback_path_executed")
                 .and_then(serde_json::Value::as_bool),
             Some(false)
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn cdp_stroke_dispatch_points_downsample_dense_stream_but_keep_endpoints() {
+        let params = line_params(
+            PathPoint::new(10.0, 20.0),
+            PathPoint::new(410.0, 20.0),
+            StrokeTiming::DurationMs { duration_ms: 500 },
+        );
+        let plan = match validate_and_plan_with_screen_bounds(&params, None) {
+            Ok(plan) => plan,
+            Err(error) => panic!("valid CDP stroke should plan: {error:?}"),
+        };
+        let stroke_plan = stroke_plan(&plan);
+
+        let points = cdp_dispatch_points_from_stroke_plan(stroke_plan);
+
+        println!(
+            "readback=cdp_stroke_downsample before_samples={} after_dispatch_points={} first={:?} last={:?}",
+            stroke_plan.samples.len(),
+            points.len(),
+            points.first(),
+            points.last()
+        );
+        assert_eq!(stroke_plan.samples.len(), 501);
+        assert!(points.len() < stroke_plan.samples.len() / 4);
+        assert_eq!(points.first().map(|point| point.x), Some(10.0));
+        assert_eq!(points.first().map(|point| point.elapsed_ms), Some(0.0));
+        assert_eq!(points.last().map(|point| point.x), Some(410.0));
+        assert_eq!(points.last().map(|point| point.elapsed_ms), Some(500.0));
+        assert!(
+            points
+                .windows(2)
+                .all(|pair| pair[1].elapsed_ms >= pair[0].elapsed_ms)
         );
     }
 
