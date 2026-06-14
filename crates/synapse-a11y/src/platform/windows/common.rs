@@ -1,7 +1,7 @@
 use std::{
     ffi::c_void,
     sync::{
-        Arc, Mutex, OnceLock,
+        Arc, Mutex, MutexGuard, OnceLock, TryLockError,
         atomic::{AtomicBool, Ordering},
         mpsc,
     },
@@ -36,9 +36,9 @@ use crate::{
 
 type UiaJob = Box<dyn FnOnce(&UIAutomation) + Send + 'static>;
 
-static UIA_WORKER: OnceLock<ProcessUiaWorker> = OnceLock::new();
-static UIA_WORKER_INIT_LOCK: Mutex<()> = Mutex::new(());
+static UIA_WORKER: OnceLock<Mutex<Option<Arc<ProcessUiaWorker>>>> = OnceLock::new();
 const DEFAULT_UIA_WORKER_JOB_TIMEOUT: Duration = Duration::from_secs(10);
+const UIA_WORKER_BUSY_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const FALLBACK_RUNTIME_ID_PREFIX: &str = "ffffffff";
 const FNV64_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
 const FNV64_PRIME: u64 = 0x0100_0000_01b3;
@@ -52,26 +52,35 @@ pub(super) struct RuntimeIdHexReadback {
 struct ProcessUiaWorker {
     tx: mpsc::Sender<UiaJob>,
     timed_out: Arc<AtomicBool>,
+    job_lock: Mutex<()>,
 }
 
-fn worker() -> A11yResult<&'static ProcessUiaWorker> {
-    if let Some(worker) = UIA_WORKER.get() {
-        return Ok(worker);
-    }
+fn worker_slot() -> &'static Mutex<Option<Arc<ProcessUiaWorker>>> {
+    UIA_WORKER.get_or_init(|| Mutex::new(None))
+}
 
-    let _guard = UIA_WORKER_INIT_LOCK
+fn lock_worker_slot() -> A11yResult<MutexGuard<'static, Option<Arc<ProcessUiaWorker>>>> {
+    worker_slot()
         .lock()
-        .map_err(|err| A11yError::internal(err.to_string()))?;
-    if let Some(worker) = UIA_WORKER.get() {
-        return Ok(worker);
+        .map_err(|err| A11yError::internal(err.to_string()))
+}
+
+fn worker() -> A11yResult<Arc<ProcessUiaWorker>> {
+    let mut guard = lock_worker_slot()?;
+    if let Some(worker) = guard.as_ref() {
+        if !worker.timed_out.load(Ordering::SeqCst) {
+            return Ok(Arc::clone(worker));
+        }
+        tracing::warn!(
+            code = "A11Y_UIA_WORKER_RETIRE_TIMEOUT",
+            "retiring timed-out UIA worker before accepting another job"
+        );
+        *guard = None;
     }
 
-    UIA_WORKER
-        .set(start_worker()?)
-        .map_err(|_worker| A11yError::internal("UIA worker was initialized concurrently"))?;
-    UIA_WORKER
-        .get()
-        .ok_or_else(|| A11yError::internal("UIA worker missing after initialization"))
+    let worker = Arc::new(start_worker()?);
+    *guard = Some(Arc::clone(&worker));
+    Ok(worker)
 }
 
 fn start_worker() -> A11yResult<ProcessUiaWorker> {
@@ -95,6 +104,7 @@ fn start_worker() -> A11yResult<ProcessUiaWorker> {
     Ok(ProcessUiaWorker {
         tx,
         timed_out: Arc::new(AtomicBool::new(false)),
+        job_lock: Mutex::new(()),
     })
 }
 
@@ -148,33 +158,120 @@ pub(super) fn with_automation_operation<T: Send + 'static>(
     let operation = operation.into();
     let worker = worker()?;
     if worker.timed_out.load(Ordering::SeqCst) {
+        retire_worker(&worker, "pre_send_timeout");
         return Err(A11yError::uia_worker_timeout(format!(
-            "operation={operation} phase=worker_unavailable previous_timeout=true timeout_ms={} remediation=restart synapse-mcp; previous UIA worker job exceeded its bounded deadline and the worker is fail-closed to avoid queuing more work behind a blocked cross-process provider",
+            "operation={operation} phase=worker_unavailable previous_timeout=true timeout_ms={} remediation=retry; previous UIA worker job exceeded its bounded deadline and this worker was retired so the next request can use a fresh worker",
             timeout.as_millis()
         )));
     }
 
-    let (reply_tx, reply_rx) = mpsc::sync_channel(1);
     let started = Instant::now();
+    let _job_guard = acquire_job_slot(&worker, &operation, timeout, started)?;
+    if worker.timed_out.load(Ordering::SeqCst) {
+        retire_worker(&worker, "post_lock_timeout");
+        return Err(A11yError::uia_worker_timeout(format!(
+            "operation={operation} phase=worker_unavailable previous_timeout=true timeout_ms={} elapsed_ms={} remediation=retry; previous UIA worker job exceeded its bounded deadline and this worker was retired so the next request can use a fresh worker",
+            timeout.as_millis(),
+            started.elapsed().as_millis()
+        )));
+    }
+    let Some(remaining) = timeout.checked_sub(started.elapsed()) else {
+        return Err(A11yError::uia_worker_timeout(format!(
+            "operation={operation} phase=worker_busy timeout_ms={} elapsed_ms={} remediation=retry; UIA worker was already running a bounded job and this operation was not queued behind it",
+            timeout.as_millis(),
+            started.elapsed().as_millis()
+        )));
+    };
+
+    let (reply_tx, reply_rx) = mpsc::sync_channel(1);
     worker
         .tx
         .send(Box::new(move |automation| {
             let _ = reply_tx.send(action(automation));
         }))
-        .map_err(|err| A11yError::internal(format!("send UIA worker job failed: {err}")))?;
-    match reply_rx.recv_timeout(timeout) {
+        .map_err(|err| {
+            retire_worker(&worker, "send_failed");
+            A11yError::internal(format!("send UIA worker job failed: {err}"))
+        })?;
+    match reply_rx.recv_timeout(remaining) {
         Ok(result) => result,
         Err(mpsc::RecvTimeoutError::Timeout) => {
             worker.timed_out.store(true, Ordering::SeqCst);
+            retire_worker(&worker, "reply_timeout");
             Err(A11yError::uia_worker_timeout(format!(
-                "operation={operation} phase=worker_reply_recv timeout_ms={} elapsed_ms={} remediation=restart synapse-mcp; UIA provider call did not return before the bounded worker deadline, daemon stayed alive, and the worker is fail-closed to avoid unbounded queued jobs",
+                "operation={operation} phase=worker_reply_recv timeout_ms={} elapsed_ms={} remediation=retry; UIA provider call did not return before the bounded worker deadline, daemon stayed alive, and the worker was retired so unrelated later requests can use a fresh worker",
                 timeout.as_millis(),
                 started.elapsed().as_millis()
             )))
         }
-        Err(mpsc::RecvTimeoutError::Disconnected) => Err(A11yError::internal(format!(
-            "receive UIA worker job failed for operation={operation}: channel disconnected"
-        ))),
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+            retire_worker(&worker, "reply_disconnected");
+            Err(A11yError::internal(format!(
+                "receive UIA worker job failed for operation={operation}: channel disconnected"
+            )))
+        }
+    }
+}
+
+fn acquire_job_slot<'a>(
+    worker: &'a ProcessUiaWorker,
+    operation: &str,
+    timeout: Duration,
+    started: Instant,
+) -> A11yResult<MutexGuard<'a, ()>> {
+    loop {
+        if worker.timed_out.load(Ordering::SeqCst) {
+            return Err(A11yError::uia_worker_timeout(format!(
+                "operation={operation} phase=worker_unavailable previous_timeout=true timeout_ms={} elapsed_ms={} remediation=retry; previous UIA worker job exceeded its bounded deadline and this worker was retired so the next request can use a fresh worker",
+                timeout.as_millis(),
+                started.elapsed().as_millis()
+            )));
+        }
+        match worker.job_lock.try_lock() {
+            Ok(guard) => return Ok(guard),
+            Err(TryLockError::Poisoned(err)) => {
+                return Err(A11yError::internal(format!(
+                    "UIA worker job lock poisoned for operation={operation}: {err}"
+                )));
+            }
+            Err(TryLockError::WouldBlock) => {
+                let elapsed = started.elapsed();
+                let Some(remaining) = timeout.checked_sub(elapsed) else {
+                    return Err(A11yError::uia_worker_timeout(format!(
+                        "operation={operation} phase=worker_busy timeout_ms={} elapsed_ms={} remediation=retry; UIA worker was already running a bounded job and this operation was not queued behind it",
+                        timeout.as_millis(),
+                        elapsed.as_millis()
+                    )));
+                };
+                thread::sleep(remaining.min(UIA_WORKER_BUSY_POLL_INTERVAL));
+            }
+        }
+    }
+}
+
+fn retire_worker(worker: &Arc<ProcessUiaWorker>, reason: &'static str) {
+    match lock_worker_slot() {
+        Ok(mut guard) => {
+            if guard
+                .as_ref()
+                .is_some_and(|current| Arc::ptr_eq(current, worker))
+            {
+                *guard = None;
+                tracing::warn!(
+                    code = "A11Y_UIA_WORKER_RETIRED",
+                    reason,
+                    "retired UIA worker; a later UIA request will start a fresh worker"
+                );
+            }
+        }
+        Err(error) => {
+            tracing::error!(
+                code = "A11Y_UIA_WORKER_RETIRE_FAILED",
+                reason,
+                detail = %error,
+                "could not lock UIA worker slot for retirement"
+            );
+        }
     }
 }
 
@@ -579,4 +676,64 @@ pub(super) fn map_uia_error(err: uiautomation::Error) -> A11yError {
 #[allow(clippy::missing_const_for_fn)]
 fn _hwnd_from_i64(hwnd: i64) -> HWND {
     HWND(hwnd as *mut c_void)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn dummy_worker(timed_out: bool) -> ProcessUiaWorker {
+        let (tx, _rx) = mpsc::channel::<UiaJob>();
+        ProcessUiaWorker {
+            tx,
+            timed_out: Arc::new(AtomicBool::new(timed_out)),
+            job_lock: Mutex::new(()),
+        }
+    }
+
+    #[test]
+    fn acquire_job_slot_reports_busy_instead_of_queueing() {
+        let worker = dummy_worker(false);
+        let _held = worker
+            .job_lock
+            .lock()
+            .unwrap_or_else(|error| panic!("test worker lock poisoned: {error}"));
+
+        let result = acquire_job_slot(
+            &worker,
+            "test_busy",
+            Duration::from_millis(1),
+            Instant::now(),
+        );
+
+        let Err(error) = result else {
+            panic!("busy worker should reject the second queued job");
+        };
+        assert_eq!(
+            error.code(),
+            synapse_core::error_codes::A11Y_UIA_WORKER_TIMEOUT
+        );
+        assert!(error.to_string().contains("phase=worker_busy"));
+    }
+
+    #[test]
+    fn acquire_job_slot_reports_unavailable_after_timeout_flag() {
+        let worker = dummy_worker(true);
+
+        let result = acquire_job_slot(
+            &worker,
+            "test_timeout",
+            Duration::from_millis(100),
+            Instant::now(),
+        );
+
+        let Err(error) = result else {
+            panic!("timed-out worker should reject new jobs");
+        };
+        assert_eq!(
+            error.code(),
+            synapse_core::error_codes::A11Y_UIA_WORKER_TIMEOUT
+        );
+        assert!(error.to_string().contains("phase=worker_unavailable"));
+    }
 }

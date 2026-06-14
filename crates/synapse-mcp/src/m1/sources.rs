@@ -1875,7 +1875,7 @@ fn uia_worker_timeout_error(
     crate::m1::mcp_error(
         A11Y_UIA_WORKER_TIMEOUT,
         format!(
-            "UIA traversal timed out phase={phase} hwnd=0x{:x} pid={} process={} title={:?} bounds={:?} detail={} remediation=restart synapse-mcp to create a fresh UIA worker; avoid broad UIA traversal against this target until the provider is responsive or use a background CDP/OCR path",
+            "UIA traversal timed out phase={phase} hwnd=0x{:x} pid={} process={} title={:?} bounds={:?} detail={} remediation=retry unrelated UIA targets on the fresh worker; avoid broad UIA traversal against this target until the provider is responsive or use a background CDP/OCR path",
             foreground.hwnd,
             foreground.pid,
             foreground.process_name,
