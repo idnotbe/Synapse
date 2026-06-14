@@ -410,7 +410,10 @@ pub struct ActRunShellParams {
     #[serde(default)]
     #[schemars(default)]
     pub env: BTreeMap<String, String>,
-    #[serde(default = "default_shell_timeout_ms")]
+    #[serde(
+        default = "default_shell_timeout_ms",
+        deserialize_with = "deserialize_nullable_shell_timeout_ms"
+    )]
     #[schemars(
         default = "default_shell_timeout_ms",
         range(min = 1),
@@ -8410,6 +8413,13 @@ const fn default_shell_timeout_ms() -> u64 {
     DEFAULT_SHELL_TIMEOUT_MS
 }
 
+fn deserialize_nullable_shell_timeout_ms<'de, D>(deserializer: D) -> Result<u64, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Ok(Option::<u64>::deserialize(deserializer)?.unwrap_or_else(default_shell_timeout_ms))
+}
+
 const fn default_run_shell_execution_mode() -> ActRunShellExecutionMode {
     ActRunShellExecutionMode::Auto
 }
@@ -10671,6 +10681,69 @@ mod tests {
             authorization.command_line,
             "cmd.exe /c \"echo long-timeout-ok\""
         );
+    }
+
+    #[test]
+    fn act_run_shell_deserializes_null_timeout_fields_as_omitted() {
+        let omitted: ActRunShellParams = serde_json::from_value(json!({
+            "command": "powershell.exe",
+            "args": ["-NoProfile", "-Command", "Write-Output omitted"],
+            "execution_mode": "durable"
+        }))
+        .unwrap_or_else(|error| panic!("omitted timeout fields should deserialize: {error}"));
+        let explicit_null: ActRunShellParams = serde_json::from_value(json!({
+            "command": "powershell.exe",
+            "args": ["-NoProfile", "-Command", "Write-Output null"],
+            "execution_mode": "durable",
+            "timeout_ms": null,
+            "durable_timeout_ms": null
+        }))
+        .unwrap_or_else(|error| panic!("null timeout fields should deserialize: {error}"));
+
+        println!(
+            "readback=act_run_shell_params edge=null_timeouts before=omitted after=timeout_ms:{} durable_timeout_ms:{:?}",
+            explicit_null.timeout_ms, explicit_null.durable_timeout_ms
+        );
+        assert_eq!(omitted.timeout_ms, default_shell_timeout_ms());
+        assert_eq!(explicit_null.timeout_ms, default_shell_timeout_ms());
+        assert_eq!(explicit_null.durable_timeout_ms, None);
+    }
+
+    #[test]
+    fn act_run_shell_invalid_timeout_type_still_fails_deserialization() {
+        let error = serde_json::from_value::<ActRunShellParams>(json!({
+            "command": "powershell.exe",
+            "args": ["-NoProfile", "-Command", "Write-Output invalid"],
+            "execution_mode": "durable",
+            "timeout_ms": "not-a-number"
+        }))
+        .expect_err("invalid concrete timeout type must fail");
+
+        println!(
+            "readback=act_run_shell_params edge=invalid_timeout_type after=error:{}",
+            error
+        );
+        assert!(error.to_string().contains("invalid type"));
+    }
+
+    #[test]
+    fn act_run_shell_zero_timeout_still_fails_validation() {
+        let params: ActRunShellParams = serde_json::from_value(json!({
+            "command": "powershell.exe",
+            "args": ["-NoProfile", "-Command", "Write-Output zero"],
+            "execution_mode": "durable",
+            "timeout_ms": 0
+        }))
+        .unwrap_or_else(|error| panic!("zero timeout should deserialize for validation: {error}"));
+        let error = validate_run_shell_params(&params)
+            .expect_err("zero timeout must fail closed in validation");
+
+        println!(
+            "readback=act_run_shell_params edge=zero_timeout after=error:{}",
+            error.message
+        );
+        assert_eq!(extract_error_code(&error), error_codes::TOOL_PARAMS_INVALID);
+        assert!(error.message.contains("timeout_ms must be >= 1"));
     }
 
     #[cfg(windows)]
