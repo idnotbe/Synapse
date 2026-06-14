@@ -1905,8 +1905,17 @@ pub fn start_authorized_shell_job(
 
     let monitor_paths = paths.clone();
     let monitor_status = status.clone();
+    let monitor_original_args = params.args.clone();
     tokio::spawn(async move {
-        monitor_shell_job(child, process_job, monitor_status, monitor_paths, started).await;
+        monitor_shell_job(
+            child,
+            process_job,
+            monitor_status,
+            monitor_paths,
+            started,
+            monitor_original_args,
+        )
+        .await;
     });
 
     let command_metadata = shell_command_metadata(&params.command, &params.args);
@@ -1956,6 +1965,12 @@ pub fn shell_job_status(
         refresh_shell_job_remote_metadata_from_outputs(&mut job, &paths)?;
         running = shell_job_process_still_running(&job);
     }
+    verify_shell_job_remote_cleanup_after_terminal(
+        &mut job,
+        &paths,
+        "act_run_shell_status_terminal_readback",
+        None,
+    );
     let tail_bytes =
         usize::try_from(params.tail_bytes).unwrap_or(SHELL_JOB_TAIL_MAX_BYTES as usize);
     let stdout_len_bytes = file_len(&paths.stdout_path, &params.job_id, "stdout")?;
@@ -2258,7 +2273,7 @@ pub fn cancel_shell_job(
         }
         refresh_shell_job_remote_metadata_from_outputs(&mut job, &paths)?;
         let _remote_cleanup_status =
-            attempt_shell_job_remote_cleanup(&mut job, "act_run_shell_cancel");
+            attempt_shell_job_remote_cleanup(&mut job, "act_run_shell_cancel", None);
         if job.remote_process_scope.remote_cleanup_required
             && !job.remote_process_scope.remote_cleanup_verified
             && job.remote_process_scope.remote_cleanup_status != SHELL_REMOTE_CLEANUP_FAILED
@@ -2277,7 +2292,7 @@ pub fn cancel_shell_job(
     {
         refresh_shell_job_remote_metadata_from_outputs(&mut job, &paths)?;
         let _remote_cleanup_status =
-            attempt_shell_job_remote_cleanup(&mut job, "act_run_shell_cancel");
+            attempt_shell_job_remote_cleanup(&mut job, "act_run_shell_cancel", None);
         if !job.remote_process_scope.remote_cleanup_verified
             && job.remote_process_scope.remote_cleanup_status != SHELL_REMOTE_CLEANUP_FAILED
         {
@@ -6392,6 +6407,45 @@ fn wait_for_shell_job_remote_metadata(
     }
 }
 
+fn verify_shell_job_remote_cleanup_after_terminal(
+    job: &mut ActRunShellJobStatus,
+    paths: &ShellJobPaths,
+    trigger: &'static str,
+    original_args: Option<&[String]>,
+) {
+    if !shell_job_terminal_status(&job.status)
+        || job.remote_process_scope.transport != SHELL_REMOTE_TRANSPORT_SSH
+        || !job.remote_process_scope.remote_cleanup_required
+        || job.remote_process_scope.remote_cleanup_verified
+        || job.remote_process_scope.remote_cleanup_status == SHELL_REMOTE_CLEANUP_FAILED
+        || job.remote_process_scope.remote_cleanup_status == SHELL_REMOTE_CLEANUP_NOT_TRACKED
+    {
+        return;
+    }
+
+    if let Err(error) = refresh_shell_job_remote_metadata_from_outputs(job, paths) {
+        mark_shell_job_remote_cleanup_failed(
+            job,
+            trigger,
+            "remote_metadata_read_failed",
+            &format!("{error:?}"),
+        );
+        return;
+    }
+
+    if job.remote_process_scope.remote_process_id.is_some()
+        && job.remote_process_scope.remote_process_group_id.is_some()
+    {
+        let _ = attempt_shell_job_remote_cleanup(job, trigger, original_args);
+        return;
+    }
+
+    if job.remote_process_scope.remote_cleanup_status == SHELL_REMOTE_CLEANUP_TRACKING_PENDING {
+        let terminal_status = job.status.clone();
+        mark_shell_job_remote_cleanup_unverified(job, trigger, &terminal_status);
+    }
+}
+
 fn parse_remote_process_metadata(
     stderr: &str,
     expected_job_id: &str,
@@ -6473,6 +6527,7 @@ fn valid_remote_process_number(value: &str) -> bool {
 fn attempt_shell_job_remote_cleanup(
     job: &mut ActRunShellJobStatus,
     trigger: &'static str,
+    original_args: Option<&[String]>,
 ) -> Option<String> {
     if job.remote_process_scope.transport != SHELL_REMOTE_TRANSPORT_SSH
         || !job.remote_process_scope.remote_cleanup_required
@@ -6495,7 +6550,7 @@ fn attempt_shell_job_remote_cleanup(
         );
         return Some("remote_cleanup_metadata_invalid".to_owned());
     }
-    let Some(parts) = ssh_direct_command_parts(&job.args) else {
+    let Some(parts) = ssh_cleanup_command_parts(job, original_args) else {
         mark_shell_job_remote_cleanup_failed(
             job,
             trigger,
@@ -6558,15 +6613,24 @@ fn attempt_shell_job_remote_cleanup(
                 trigger,
                 "cleanup_readback_unrecognized",
                 &format!(
-                    "SSH remote cleanup command did not produce a verified cleanup marker; exit={:?}; stdout_sha256={}; stderr_sha256={}",
+                    "SSH remote cleanup command did not produce a verified cleanup marker; exit={:?}; stdout_sha256={}; stderr_sha256={}; stdout_excerpt={:?}; stderr_excerpt={:?}",
                     readback.exit_code,
                     sha256_hex(readback.stdout.as_bytes()),
-                    sha256_hex(readback.stderr.as_bytes())
+                    sha256_hex(readback.stderr.as_bytes()),
+                    shell_cleanup_output_excerpt(&readback.stdout),
+                    shell_cleanup_output_excerpt(&readback.stderr)
                 ),
             );
             Some("remote_cleanup_readback_unrecognized".to_owned())
         }
     }
+}
+
+fn ssh_cleanup_command_parts(
+    job: &ActRunShellJobStatus,
+    original_args: Option<&[String]>,
+) -> Option<SshCommandParts> {
+    ssh_direct_command_parts(original_args.unwrap_or(&job.args))
 }
 
 fn mark_shell_job_remote_cleanup_failed(
@@ -6609,12 +6673,25 @@ struct CleanupCommandReadback {
     stderr: String,
 }
 
+fn shell_cleanup_output_excerpt(value: &str) -> String {
+    const MAX_CHARS: usize = 512;
+    let normalized = value.replace('\r', "\\r").replace('\n', "\\n");
+    let mut chars = normalized.chars();
+    let excerpt: String = chars.by_ref().take(MAX_CHARS).collect();
+    if chars.next().is_some() {
+        format!("{excerpt}...[truncated]")
+    } else {
+        excerpt
+    }
+}
+
 fn run_shell_cleanup_command_with_timeout(
     command: &str,
     args: &[String],
     timeout: Duration,
 ) -> Result<CleanupCommandReadback, String> {
-    let mut child = StdCommand::new(command);
+    let spawn_command = shell_spawn_command(command);
+    let mut child = StdCommand::new(spawn_command.as_ref());
     child
         .args(args)
         .stdin(Stdio::null())
@@ -6952,6 +7029,7 @@ async fn monitor_shell_job(
     mut status: ActRunShellJobStatus,
     paths: ShellJobPaths,
     started: Instant,
+    original_args: Vec<String>,
 ) {
     let (exit_code, timed_out, wait_error) =
         wait_shell_job_child(&mut child, status.timeout_ms).await;
@@ -7000,6 +7078,12 @@ async fn monitor_shell_job(
             terminal_shell_job_status(status.exit_code, status.timed_out, status.cancel_requested)
                 .to_owned();
     }
+    verify_shell_job_remote_cleanup_after_terminal(
+        &mut status,
+        &paths,
+        "act_run_shell_start_process_exit",
+        Some(&original_args),
+    );
     if let Err(error) = write_shell_job_status(&paths.status_path, &status) {
         tracing::error!(
             code = "M4_ACT_RUN_SHELL_JOB_FINAL_STATUS_WRITE_FAILED",
@@ -9524,6 +9608,214 @@ mod tests {
                 .iter()
                 .any(|evidence| evidence.contains("remote_tracking_unsupported"))
         );
+    }
+
+    #[test]
+    fn shell_terminal_tracking_pending_without_marker_is_loudly_unverified() {
+        let temp = tempfile::TempDir::new()
+            .unwrap_or_else(|error| panic!("create temp shell status dir: {error}"));
+        let paths = ShellJobPaths {
+            job_dir: temp.path().to_path_buf(),
+            stdout_path: temp.path().join("stdout.log"),
+            stderr_path: temp.path().join("stderr.log"),
+            status_path: temp.path().join("status.json"),
+            request_path: temp.path().join("request.json"),
+        };
+        std::fs::write(&paths.stdout_path, b"")
+            .unwrap_or_else(|error| panic!("write stdout log: {error}"));
+        std::fs::write(&paths.stderr_path, b"")
+            .unwrap_or_else(|error| panic!("write stderr log: {error}"));
+        let params = ActRunShellStartParams {
+            command: "ssh.exe".to_owned(),
+            args: vec!["aiwonder".to_owned(), "true".to_owned()],
+            working_dir: None,
+            env: BTreeMap::new(),
+            timeout_ms: None,
+            job_id: Some("issue972-no-marker".to_owned()),
+        };
+        let authorization = RunShellAuthorization {
+            command_line: "ssh.exe aiwonder true".to_owned(),
+            matched_pattern: "^ssh".to_owned(),
+        };
+        let mut status = shell_job_status_record(
+            "issue972-no-marker",
+            "ok",
+            &params,
+            &paths,
+            "request-sha",
+            &authorization,
+            "2026-06-14T00:00:00Z".to_owned(),
+            Some(1234),
+            None,
+        );
+
+        verify_shell_job_remote_cleanup_after_terminal(
+            &mut status,
+            &paths,
+            "regression_terminal_readback",
+            None,
+        );
+
+        println!(
+            "readback=act_run_shell_remote_cleanup edge=terminal_no_marker before=tracking_pending after={:?}",
+            status.remote_process_scope
+        );
+        assert_eq!(
+            status.remote_process_scope.remote_cleanup_status,
+            SHELL_REMOTE_CLEANUP_UNVERIFIED
+        );
+        assert_eq!(
+            status.error_code.as_deref(),
+            Some(error_codes::ACTION_REMOTE_PROCESS_CLEANUP_UNVERIFIED)
+        );
+        assert!(!status.remote_process_scope.remote_cleanup_verified);
+    }
+
+    #[test]
+    fn shell_terminal_not_tracked_ssh_status_is_preserved() {
+        let temp = tempfile::TempDir::new()
+            .unwrap_or_else(|error| panic!("create temp shell status dir: {error}"));
+        let paths = ShellJobPaths {
+            job_dir: temp.path().to_path_buf(),
+            stdout_path: temp.path().join("stdout.log"),
+            stderr_path: temp.path().join("stderr.log"),
+            status_path: temp.path().join("status.json"),
+            request_path: temp.path().join("request.json"),
+        };
+        std::fs::write(&paths.stdout_path, b"")
+            .unwrap_or_else(|error| panic!("write stdout log: {error}"));
+        std::fs::write(&paths.stderr_path, b"")
+            .unwrap_or_else(|error| panic!("write stderr log: {error}"));
+        let params = ActRunShellStartParams {
+            command: "ssh.exe".to_owned(),
+            args: vec!["-N".to_owned(), "aiwonder".to_owned()],
+            working_dir: None,
+            env: BTreeMap::new(),
+            timeout_ms: None,
+            job_id: Some("issue972-not-tracked".to_owned()),
+        };
+        let authorization = RunShellAuthorization {
+            command_line: "ssh.exe -N aiwonder".to_owned(),
+            matched_pattern: "^ssh".to_owned(),
+        };
+        let mut status = shell_job_status_record(
+            "issue972-not-tracked",
+            "ok",
+            &params,
+            &paths,
+            "request-sha",
+            &authorization,
+            "2026-06-14T00:00:00Z".to_owned(),
+            Some(1234),
+            None,
+        );
+
+        verify_shell_job_remote_cleanup_after_terminal(
+            &mut status,
+            &paths,
+            "regression_terminal_readback",
+            None,
+        );
+
+        println!(
+            "readback=act_run_shell_remote_cleanup edge=terminal_not_tracked before=not_tracked after={:?}",
+            status.remote_process_scope
+        );
+        assert_eq!(
+            status.remote_process_scope.remote_cleanup_status,
+            SHELL_REMOTE_CLEANUP_NOT_TRACKED
+        );
+        assert!(status.error_code.is_none());
+    }
+
+    #[test]
+    fn ssh_cleanup_command_parts_prefers_live_original_args_over_safe_status_args() {
+        let temp = tempfile::TempDir::new()
+            .unwrap_or_else(|error| panic!("create temp shell status dir: {error}"));
+        let paths = ShellJobPaths {
+            job_dir: temp.path().to_path_buf(),
+            stdout_path: temp.path().join("stdout.log"),
+            stderr_path: temp.path().join("stderr.log"),
+            status_path: temp.path().join("status.json"),
+            request_path: temp.path().join("request.json"),
+        };
+        let safe_args = vec![
+            "-i".to_owned(),
+            "[redacted-arg:sha256=deadbeef:bytes=48]".to_owned(),
+            "-l".to_owned(),
+            "croyse".to_owned(),
+            "aiwonder.mst.com".to_owned(),
+            "true".to_owned(),
+        ];
+        let original_args = vec![
+            "-i".to_owned(),
+            "//wsl.localhost/Ubuntu-24.04/home/cabdru/.ssh/id_ed25519".to_owned(),
+            "-l".to_owned(),
+            "croyse".to_owned(),
+            "aiwonder.mst.com".to_owned(),
+            "true".to_owned(),
+        ];
+        let params = ActRunShellStartParams {
+            command: "ssh".to_owned(),
+            args: safe_args,
+            working_dir: None,
+            env: BTreeMap::new(),
+            timeout_ms: None,
+            job_id: Some("issue972-redacted-status".to_owned()),
+        };
+        let authorization = RunShellAuthorization {
+            command_line:
+                "ssh -i [redacted-arg:sha256=deadbeef:bytes=48] -l croyse aiwonder.mst.com true"
+                    .to_owned(),
+            matched_pattern: "^ssh".to_owned(),
+        };
+        let status = shell_job_status_record(
+            "issue972-redacted-status",
+            "ok",
+            &params,
+            &paths,
+            "request-sha",
+            &authorization,
+            "2026-06-14T00:00:00Z".to_owned(),
+            Some(1234),
+            None,
+        );
+
+        let live_parts = ssh_cleanup_command_parts(&status, Some(&original_args))
+            .unwrap_or_else(|| panic!("parse live original cleanup args"));
+        assert!(
+            live_parts
+                .control_args
+                .iter()
+                .any(|arg| arg == "//wsl.localhost/Ubuntu-24.04/home/cabdru/.ssh/id_ed25519")
+        );
+        assert!(
+            !live_parts
+                .control_args
+                .iter()
+                .any(|arg| arg.contains("[redacted-arg:"))
+        );
+
+        let persisted_parts = ssh_cleanup_command_parts(&status, None)
+            .unwrap_or_else(|| panic!("parse persisted cleanup args"));
+        assert!(
+            persisted_parts
+                .control_args
+                .iter()
+                .any(|arg| arg.contains("[redacted-arg:"))
+        );
+    }
+
+    #[test]
+    fn shell_cleanup_output_excerpt_is_bounded_and_one_line() {
+        let input = format!("line1\r\n{}", "x".repeat(600));
+        let excerpt = shell_cleanup_output_excerpt(&input);
+
+        assert!(excerpt.contains("\\r\\n"));
+        assert!(!excerpt.contains('\r'));
+        assert!(!excerpt.contains('\n'));
+        assert!(excerpt.ends_with("...[truncated]"));
+        assert!(excerpt.len() <= 530);
     }
 
     #[test]
