@@ -2012,7 +2012,8 @@ pub fn shell_job_status(
     let diagnostics =
         shell_job_status_diagnostics(&job, running, stdout_len_bytes, stderr_len_bytes);
     job.diagnostics = Some(diagnostics);
-    write_shell_job_status(&paths.status_path, &job)?;
+    let (job, running) =
+        write_shell_job_status_readback(&paths, job, running, stdout_len_bytes, stderr_len_bytes)?;
     let stdout_tail = tail_file_lossy(&paths.stdout_path, tail_bytes)?;
     let stderr_tail = tail_file_lossy(&paths.stderr_path, tail_bytes)?;
     tracing::info!(
@@ -2039,6 +2040,36 @@ pub fn shell_job_status(
         stdout_tail,
         stderr_tail,
     })
+}
+
+fn write_shell_job_status_readback(
+    paths: &ShellJobPaths,
+    candidate: ActRunShellJobStatus,
+    candidate_running: bool,
+    stdout_len_bytes: u64,
+    stderr_len_bytes: u64,
+) -> Result<(ActRunShellJobStatus, bool), ErrorData> {
+    let candidate_status = candidate.status.clone();
+    let candidate_exit_code = candidate.exit_code;
+    let candidate_completed_at = candidate.completed_at.clone();
+    let mut persisted = write_shell_job_reconciliation_status(paths, candidate)?;
+    let terminal_won = persisted.status != candidate_status
+        || persisted.exit_code != candidate_exit_code
+        || persisted.completed_at != candidate_completed_at;
+    if !terminal_won {
+        return Ok((persisted, candidate_running));
+    }
+
+    let persisted_running = shell_job_process_still_running(&persisted);
+    persisted.diagnostics = Some(shell_job_status_diagnostics(
+        &persisted,
+        persisted_running,
+        stdout_len_bytes,
+        stderr_len_bytes,
+    ));
+    let persisted = write_shell_job_reconciliation_status(paths, persisted)?;
+    let running = shell_job_process_still_running(&persisted);
+    Ok((persisted, running))
 }
 
 fn shell_job_process_still_running(job: &ActRunShellJobStatus) -> bool {
@@ -9723,6 +9754,90 @@ mod tests {
         assert_eq!(preserved_after_unobserved.exit_code, Some(0));
         assert_eq!(readback_after_unobserved.status, "ok");
         assert_eq!(readback_after_unobserved.exit_code, Some(0));
+    }
+
+    #[test]
+    fn shell_job_status_readback_preserves_terminal_monitor_status() {
+        let temp = tempfile::TempDir::new()
+            .unwrap_or_else(|error| panic!("create temp shell status dir: {error}"));
+        let paths = ShellJobPaths {
+            job_dir: temp.path().to_path_buf(),
+            stdout_path: temp.path().join("stdout.log"),
+            stderr_path: temp.path().join("stderr.log"),
+            status_path: temp.path().join("status.json"),
+            request_path: temp.path().join("request.json"),
+        };
+        std::fs::write(&paths.stdout_path, b"issue989-ok\r\n")
+            .unwrap_or_else(|error| panic!("stdout should write: {error}"));
+        std::fs::write(&paths.stderr_path, b"")
+            .unwrap_or_else(|error| panic!("stderr should write: {error}"));
+        let params = ActRunShellStartParams {
+            command: "powershell.exe".to_owned(),
+            args: vec![
+                "-NoProfile".to_owned(),
+                "-Command".to_owned(),
+                "Write-Output issue989-ok".to_owned(),
+            ],
+            working_dir: None,
+            env: BTreeMap::new(),
+            timeout_ms: None,
+            job_id: Some("issue989-status-readback".to_owned()),
+        };
+        let authorization = RunShellAuthorization {
+            command_line: shell_command_line_from_parts(&params.command, &params.args),
+            matched_pattern: "__any_permitted__".to_owned(),
+        };
+        let request_sha = run_shell_start_request_sha256(&params)
+            .unwrap_or_else(|error| panic!("start request should hash: {error}"));
+        let mut terminal = shell_job_status_record(
+            "issue989-status-readback",
+            "ok",
+            &params,
+            &paths,
+            &request_sha,
+            &authorization,
+            "2026-06-14T00:00:00Z".to_owned(),
+            Some(4242),
+            None,
+        );
+        terminal.exit_code = Some(0);
+        terminal.completed_at = Some("2026-06-14T00:00:01Z".to_owned());
+        terminal.duration_ms = Some(1000);
+        write_shell_job_status(&paths.status_path, &terminal)
+            .unwrap_or_else(|error| panic!("terminal status should write: {error}"));
+
+        let mut stale_finalizing = terminal.clone();
+        stale_finalizing.status = "finalizing".to_owned();
+        stale_finalizing.exit_code = None;
+        stale_finalizing.completed_at = Some("2026-06-14T00:00:02Z".to_owned());
+        stale_finalizing.duration_ms = Some(2000);
+        stale_finalizing.diagnostics = Some(shell_job_status_diagnostics(
+            &stale_finalizing,
+            false,
+            13,
+            0,
+        ));
+
+        let (persisted, running) =
+            write_shell_job_status_readback(&paths, stale_finalizing, false, 13, 0).unwrap_or_else(
+                |error| panic!("status readback should preserve terminal: {error}"),
+            );
+        let readback = read_shell_job_status(&paths.status_path, "issue989-status-readback")
+            .unwrap_or_else(|error| panic!("status should read after readback write: {error}"));
+
+        println!(
+            "readback=act_run_shell_status edge=diagnostic_write_race before=candidate:finalizing/null-exit after=file_status:{} exit_code:{:?} diagnostics:{}",
+            readback.status,
+            readback.exit_code,
+            readback.diagnostics.is_some()
+        );
+        assert!(!running);
+        assert_eq!(persisted.status, "ok");
+        assert_eq!(persisted.exit_code, Some(0));
+        assert!(persisted.diagnostics.is_some());
+        assert_eq!(readback.status, "ok");
+        assert_eq!(readback.exit_code, Some(0));
+        assert!(readback.diagnostics.is_some());
     }
 
     #[test]
