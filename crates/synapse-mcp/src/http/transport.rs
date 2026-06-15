@@ -2160,7 +2160,10 @@ async fn dashboard_state(State(state): State<HttpState>, headers: HeaderMap) -> 
         .health_service
         .health_payload_with_http_sessions(Some(active_sessions));
     let sessions = match state.health_service.session_list_impl(false) {
-        Ok(sessions) => DashboardPanel::ok("session_list", sessions),
+        Ok(sessions) => DashboardPanel::ok(
+            "session_list dashboard primary agent feed",
+            dashboard_primary_session_list_data(&sessions),
+        ),
         Err(error) => DashboardPanel::error("session_list", format!("{error:?}")),
     };
     let lease = DashboardPanel::ok("control_lease_status", synapse_action::lease::status());
@@ -3602,6 +3605,63 @@ fn with_dashboard_security_headers(mut response: Response) -> Response {
     response
 }
 
+fn dashboard_primary_session_list_data(sessions: impl Serialize) -> serde_json::Value {
+    let mut data = serde_json::to_value(sessions).unwrap_or_else(|error| {
+        serde_json::json!({
+            "serialization_error": error.to_string(),
+        })
+    });
+    let Some(object) = data.as_object_mut() else {
+        return data;
+    };
+    let Some(unbound_value) = object.remove("unbound_agent_states") else {
+        return data;
+    };
+    let Some(unbound_rows) = unbound_value.as_array() else {
+        object.insert("unbound_agent_states".to_owned(), unbound_value);
+        return data;
+    };
+
+    let mut primary_rows = Vec::new();
+    let mut terminal_rows = Vec::new();
+    for row in unbound_rows.iter().cloned() {
+        if dashboard_agent_row_is_terminal(&row) {
+            terminal_rows.push(row);
+        } else {
+            primary_rows.push(row);
+        }
+    }
+    let primary_count = primary_rows.len();
+    let terminal_count = terminal_rows.len();
+
+    object.insert(
+        "unbound_agent_states".to_owned(),
+        serde_json::Value::Array(primary_rows),
+    );
+    object.insert(
+        "terminal_unbound_agent_states".to_owned(),
+        serde_json::Value::Array(terminal_rows),
+    );
+    object.insert(
+        "dashboard_unbound_agent_filter".to_owned(),
+        serde_json::json!({
+            "source_of_truth": "session_list unbound_agent_states split for dashboard attention feed",
+            "primary_unbound_agent_count": primary_count,
+            "terminal_unbound_agent_count": terminal_count,
+            "terminal_states": ["dead", "done", "exited", "closed"],
+            "reason": "terminal unbound history is diagnostic history, not actionable attention",
+        }),
+    );
+    data
+}
+
+fn dashboard_agent_row_is_terminal(row: &serde_json::Value) -> bool {
+    row.get("state")
+        .and_then(serde_json::Value::as_str)
+        .map(|state| matches!(state, "dead" | "done" | "exited" | "closed"))
+        .unwrap_or(false)
+}
+
 fn dashboard_events_panel(state: &HttpState) -> DashboardPanel {
     let (owner_session_ids, owner_read_error) =
         match state.sse_state.subscription_owner_session_ids() {
@@ -4133,6 +4193,63 @@ mod tests {
         assert!(DASHBOARD_JS.contains("_synapse_dashboard_asset"));
         assert!(DASHBOARD_JS.contains("synapse.dashboard.asset-reload"));
         assert!(DASHBOARD_JS.contains("invalid_server_asset_id"));
+    }
+
+    #[test]
+    fn dashboard_session_feed_splits_terminal_unbound_history() {
+        let source = serde_json::json!({
+            "now_unix_ms": 10,
+            "stale_after_ms": 300_000,
+            "registry_entry_count": 1,
+            "target_session_count": 0,
+            "returned_count": 1,
+            "input_lease_held": false,
+            "sessions": [
+                {
+                    "session_id": "live-session",
+                    "lifecycle": "live",
+                    "agent_state": { "state": "idle" }
+                }
+            ],
+            "unbound_agent_states": [
+                {
+                    "anchor": "agent-spawn-dead",
+                    "spawn_id": "agent-spawn-dead",
+                    "state": "dead",
+                    "reason_code": "local_model_registry_row_missing"
+                },
+                {
+                    "anchor": "agent-spawn-stuck",
+                    "spawn_id": "agent-spawn-stuck",
+                    "state": "stuck",
+                    "reason_code": "silent_timeout"
+                },
+                {
+                    "anchor": "agent-spawn-needs-input",
+                    "spawn_id": "agent-spawn-needs-input",
+                    "state": "needs_input",
+                    "reason_code": "permission_prompt"
+                }
+            ]
+        });
+
+        let data = dashboard_primary_session_list_data(&source);
+        let primary = data["unbound_agent_states"]
+            .as_array()
+            .expect("primary rows");
+        let terminal = data["terminal_unbound_agent_states"]
+            .as_array()
+            .expect("terminal rows");
+
+        assert_eq!(primary.len(), 2);
+        assert_eq!(primary[0]["state"], "stuck");
+        assert_eq!(primary[1]["state"], "needs_input");
+        assert_eq!(terminal.len(), 1);
+        assert_eq!(terminal[0]["anchor"], "agent-spawn-dead");
+        assert_eq!(
+            data["dashboard_unbound_agent_filter"]["terminal_unbound_agent_count"],
+            1
+        );
     }
 
     #[test]
