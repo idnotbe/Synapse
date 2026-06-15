@@ -530,6 +530,16 @@ fn router(
             post(dashboard_agent_kill)
                 .layer(DefaultBodyLimit::max(DASHBOARD_SAVED_VIEW_BODY_LIMIT_BYTES)),
         )
+        .route(
+            "/dashboard/timeline/pause",
+            post(dashboard_timeline_pause)
+                .layer(DefaultBodyLimit::max(DASHBOARD_SAVED_VIEW_BODY_LIMIT_BYTES)),
+        )
+        .route(
+            "/dashboard/timeline/resume",
+            post(dashboard_timeline_resume)
+                .layer(DefaultBodyLimit::max(DASHBOARD_SAVED_VIEW_BODY_LIMIT_BYTES)),
+        )
         .route("/dashboard/templates", get(dashboard_template_list))
         .route("/dashboard/models", get(dashboard_model_list))
         .route(
@@ -1333,6 +1343,12 @@ struct DashboardStateResponse {
     sessions: DashboardPanel,
     lease: DashboardPanel,
     storage: DashboardPanel,
+    target_claims: DashboardPanel,
+    timeline: DashboardPanel,
+    events: DashboardPanel,
+    hidden_desktops: DashboardPanel,
+    cdp_attachments: DashboardPanel,
+    shell_jobs: DashboardPanel,
     command_audit: DashboardPanel,
     approvals: DashboardPanel,
     suggestions: DashboardPanel,
@@ -1398,6 +1414,30 @@ struct DashboardStorageSummary {
     audit_retention_policy_count: usize,
 }
 
+#[derive(Serialize)]
+struct DashboardEventSurface {
+    source_of_truth: &'static str,
+    active_subscription_count: usize,
+    owner_session_ids: Vec<String>,
+    owner_read_error: Option<String>,
+    agent_event_ingress: serde_json::Value,
+    agent_transcript_ingest: serde_json::Value,
+}
+
+#[derive(Serialize)]
+struct DashboardHiddenDesktopSurface {
+    source_of_truth: &'static str,
+    row_count: usize,
+    rows: Vec<crate::server::session_lifecycle::SessionHiddenDesktopReadback>,
+}
+
+#[derive(Serialize)]
+struct DashboardCdpAttachmentSurface {
+    source_of_truth: &'static str,
+    row_count: usize,
+    rows: Vec<crate::server::session_lifecycle::SessionCdpTargetOwnerReadback>,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct DashboardLoginRequest {
@@ -1431,6 +1471,24 @@ struct DashboardAuthLogoutResponse {
     ok: bool,
     revoked_row_key: Option<String>,
     source_of_truth: &'static str,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DashboardTimelinePauseRequest {
+    #[serde(default)]
+    duration_ms: Option<u64>,
+}
+
+#[derive(Serialize)]
+struct DashboardTimelineControlResponse<T>
+where
+    T: Serialize,
+{
+    ok: bool,
+    trigger: &'static str,
+    source_of_truth: &'static str,
+    readback: T,
 }
 
 #[derive(Serialize)]
@@ -1918,6 +1976,18 @@ async fn dashboard_state(State(state): State<HttpState>, headers: HeaderMap) -> 
         ),
         Err(error) => DashboardPanel::error("storage_inspect", format!("{error:?}")),
     };
+    let target_claims = match state.health_service.target_claim_status_snapshot() {
+        Ok(snapshot) => DashboardPanel::ok("target_claim_status", snapshot),
+        Err(error) => DashboardPanel::error("target_claim_status", format!("{error:?}")),
+    };
+    let timeline = match state.health_service.timeline_stats_snapshot() {
+        Ok(snapshot) => DashboardPanel::ok("timeline_stats", snapshot),
+        Err(error) => DashboardPanel::error("timeline_stats", format!("{error:?}")),
+    };
+    let events = dashboard_events_panel(&state);
+    let hidden_desktops = dashboard_hidden_desktops_panel(&state);
+    let cdp_attachments = dashboard_cdp_attachments_panel(&state);
+    let shell_jobs = dashboard_shell_jobs_panel();
     let tool_names = health
         .tool_names
         .iter()
@@ -1933,6 +2003,12 @@ async fn dashboard_state(State(state): State<HttpState>, headers: HeaderMap) -> 
         sessions,
         lease,
         storage,
+        target_claims,
+        timeline,
+        events,
+        hidden_desktops,
+        cdp_attachments,
+        shell_jobs,
         command_audit: command_audit_panel(&state),
         approvals: approval_panel(&state, &tool_names, None),
         suggestions: approval_panel(
@@ -2334,6 +2410,72 @@ async fn dashboard_agent_kill(
                 source_of_truth:
                     "OS process table, session registry, CF_AGENT_EVENTS, command audit rows, agent spawn artifacts",
                 kill,
+            })
+            .into_response(),
+        ),
+        Err(error) => with_dashboard_security_headers(dashboard_error_response(
+            StatusCode::BAD_REQUEST,
+            &dashboard_error_code(&error),
+            &error.message,
+            error.data,
+        )),
+    }
+}
+
+async fn dashboard_timeline_pause(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    Json(request): Json<DashboardTimelinePauseRequest>,
+) -> Response {
+    if let Err(response) = state.dashboard_auth.authenticate(
+        &headers,
+        "POST",
+        "/dashboard/timeline/pause",
+        CsrfPolicy::Required,
+    ) {
+        return with_dashboard_security_headers(response);
+    }
+    let params = crate::m3::timeline_control::TimelinePauseParams {
+        duration_ms: request.duration_ms,
+    };
+    match state.health_service.dashboard_timeline_pause(params) {
+        Ok(readback) => with_dashboard_security_headers(
+            Json(DashboardTimelineControlResponse {
+                ok: true,
+                trigger: "dashboard.timeline_pause",
+                source_of_truth: "CF_KV timeline recorder control row + live recorder gate",
+                readback,
+            })
+            .into_response(),
+        ),
+        Err(error) => with_dashboard_security_headers(dashboard_error_response(
+            StatusCode::BAD_REQUEST,
+            &dashboard_error_code(&error),
+            &error.message,
+            error.data,
+        )),
+    }
+}
+
+async fn dashboard_timeline_resume(State(state): State<HttpState>, headers: HeaderMap) -> Response {
+    if let Err(response) = state.dashboard_auth.authenticate(
+        &headers,
+        "POST",
+        "/dashboard/timeline/resume",
+        CsrfPolicy::Required,
+    ) {
+        return with_dashboard_security_headers(response);
+    }
+    match state
+        .health_service
+        .dashboard_timeline_resume(crate::m3::timeline_control::TimelineResumeParams::default())
+    {
+        Ok(readback) => with_dashboard_security_headers(
+            Json(DashboardTimelineControlResponse {
+                ok: true,
+                trigger: "dashboard.timeline_resume",
+                source_of_truth: "CF_KV timeline recorder control row + live recorder gate",
+                readback,
             })
             .into_response(),
         ),
@@ -2770,6 +2912,69 @@ fn with_dashboard_security_headers(mut response: Response) -> Response {
     response
 }
 
+fn dashboard_events_panel(state: &HttpState) -> DashboardPanel {
+    let (owner_session_ids, owner_read_error) =
+        match state.sse_state.subscription_owner_session_ids() {
+            Ok(owner_session_ids) => (owner_session_ids, None),
+            Err(error) => (Vec::new(), Some(format!("{error:?}"))),
+        };
+    DashboardPanel::ok(
+        "SseState subscriptions + process-lifetime ingress counters",
+        DashboardEventSurface {
+            source_of_truth: "SseState subscriptions + process-lifetime ingress counters",
+            active_subscription_count: state.sse_state.active_subscription_count(),
+            owner_session_ids,
+            owner_read_error,
+            agent_event_ingress: crate::server::agent_event_ingress::ingress_stats(),
+            agent_transcript_ingest: crate::server::agent_transcripts::ingest_stats(),
+        },
+    )
+}
+
+fn dashboard_hidden_desktops_panel(state: &HttpState) -> DashboardPanel {
+    match state.health_service.hidden_desktop_readbacks() {
+        Ok(rows) => DashboardPanel::ok(
+            "session process resource ledger / hidden desktop leases",
+            DashboardHiddenDesktopSurface {
+                source_of_truth: "session process resource ledger / hidden desktop leases",
+                row_count: rows.len(),
+                rows,
+            },
+        ),
+        Err(error) => DashboardPanel::error(
+            "session process resource ledger / hidden desktop leases",
+            format!("{error:?}"),
+        ),
+    }
+}
+
+fn dashboard_cdp_attachments_panel(state: &HttpState) -> DashboardPanel {
+    match state.health_service.cdp_target_owner_readbacks() {
+        Ok(rows) => DashboardPanel::ok(
+            "CDP target ownership registry",
+            DashboardCdpAttachmentSurface {
+                source_of_truth: "CDP target ownership registry",
+                row_count: rows.len(),
+                rows,
+            },
+        ),
+        Err(error) => DashboardPanel::error("CDP target ownership registry", format!("{error:?}")),
+    }
+}
+
+fn dashboard_shell_jobs_panel() -> DashboardPanel {
+    match crate::m4::shell_jobs_dashboard_snapshot(50) {
+        Ok(snapshot) => DashboardPanel::ok(
+            "act_run_shell_status + durable shell status files",
+            snapshot,
+        ),
+        Err(error) => DashboardPanel::error(
+            "act_run_shell_status + durable shell status files",
+            format!("{error:?}"),
+        ),
+    }
+}
+
 fn approval_panel(
     state: &HttpState,
     tool_names: &BTreeSet<&str>,
@@ -2906,12 +3111,12 @@ fn dashboard_unix_time_ms() -> u64 {
         .unwrap_or(u64::MAX)
 }
 
-const DASHBOARD_CSS_FILE: &str = "dashboard-BfIu2hrX.css";
-const DASHBOARD_JS_FILE: &str = "dashboard-Dnc83wda.js";
+const DASHBOARD_CSS_FILE: &str = "dashboard-_RxSULrX.css";
+const DASHBOARD_JS_FILE: &str = "dashboard-o7Y2vVPu.js";
 const DASHBOARD_HTML: &str = include_str!("../../../../dashboard/dist/index.html");
 const DASHBOARD_CSS: &str =
-    include_str!("../../../../dashboard/dist/assets/dashboard-BfIu2hrX.css");
-const DASHBOARD_JS: &str = include_str!("../../../../dashboard/dist/assets/dashboard-Dnc83wda.js");
+    include_str!("../../../../dashboard/dist/assets/dashboard-_RxSULrX.css");
+const DASHBOARD_JS: &str = include_str!("../../../../dashboard/dist/assets/dashboard-o7Y2vVPu.js");
 #[cfg(test)]
 const DASHBOARD_APP_SOURCE: &str = include_str!("../../../../dashboard/src/app.tsx");
 #[cfg(test)]

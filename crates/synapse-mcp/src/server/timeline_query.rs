@@ -17,10 +17,39 @@ use crate::m3::timeline::{
     TimelineStatsResponse, get_timeline, required_permissions_get, required_permissions_stats,
     timeline_stats_data,
 };
-use crate::m3::timeline_control::recorder_control_handle;
+use crate::m3::timeline_control::{
+    TimelinePauseParams, TimelinePauseResponse, TimelineResumeParams, TimelineResumeResponse,
+    pause_timeline, recorder_control_handle, required_permissions_pause,
+    required_permissions_resume, resume_timeline,
+};
 
 #[tool_router(router = timeline_query_tool_router, vis = "pub(super)")]
 impl SynapseService {
+    pub(crate) fn timeline_stats_snapshot(&self) -> Result<TimelineStatsResponse, ErrorData> {
+        let params = TimelineStatsParams::default();
+        self.require_m3_permissions("timeline_stats", &required_permissions_stats(&params))?;
+        let control = recorder_control_handle(&self.m3_state_handle())?;
+        let recorder = RecorderStatus::from_control(&control);
+        let runtime = self.reflex_runtime()?;
+        timeline_stats_data(&runtime, recorder, &params)
+    }
+
+    pub(crate) fn dashboard_timeline_pause(
+        &self,
+        params: TimelinePauseParams,
+    ) -> Result<TimelinePauseResponse, ErrorData> {
+        self.require_m3_permissions("timeline_pause", &required_permissions_pause(&params))?;
+        pause_timeline(&self.m3_state_handle(), &params, "dashboard")
+    }
+
+    pub(crate) fn dashboard_timeline_resume(
+        &self,
+        params: TimelineResumeParams,
+    ) -> Result<TimelineResumeResponse, ErrorData> {
+        self.require_m3_permissions("timeline_resume", &required_permissions_resume(&params))?;
+        resume_timeline(&self.m3_state_handle(), &params, "dashboard")
+    }
+
     #[tool(
         description = "Retrieve raw operator timeline rows (CF_TIMELINE) in ascending time order for a time range and optional kinds/actor — the day-view feed for the dashboard and agents. Pages via an opaque cursor that is the physical storage key, so paging is stable under concurrent writes. Read-only; no text/app search (use timeline_search for that)."
     )]

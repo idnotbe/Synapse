@@ -67,6 +67,15 @@ export function dashboardFixture(kind: "populated" | "empty" = "populated"): Das
       schema_version: 1,
       audit_retention_policy_count: 12,
       pressure_level: { name: "Normal" },
+      cf_sizes: empty
+        ? {}
+        : {
+            CF_ACTION_LOG: 8500000,
+            CF_AGENT_TRANSCRIPTS: 1200000,
+            CF_SESSIONS: 300000,
+            CF_KV: 520000,
+            CF_TIMELINE: 9600000
+          },
       cf_row_counts: empty
         ? {}
         : {
@@ -76,6 +85,89 @@ export function dashboardFixture(kind: "populated" | "empty" = "populated"): Das
             CF_KV: 587,
             CF_TIMELINE: 6739
           }
+    }),
+    target_claims: panel("target_claim_status", {
+      session_id: "dashboard",
+      claim_count: empty ? 0 : 1,
+      claims: empty
+        ? []
+        : [
+            {
+              target_key: "window:0x111",
+              owner_session_id: "agent-codex-001",
+              expires_in_ms: 30000,
+              generation: 2
+            }
+          ]
+    }),
+    timeline: panel("timeline_stats", {
+      recorder: {
+        paused: false,
+        clipboard_feed_enabled: true,
+        file_activity_feed_enabled: true,
+        env_exclusions: [],
+        runtime_exclusions: []
+      },
+      total_rows: empty ? 0 : 6739,
+      storage_bytes: empty ? 0 : 9600000,
+      rows_by_kind: empty ? {} : { foreground: 4700, browser_navigation: 1030, session_start: 12 },
+      rows_by_day_utc: empty ? {} : { "2026-06-13": 6739 },
+      scanned_rows: empty ? 0 : 6739,
+      invalid_rows: 0,
+      scan_complete: true
+    }),
+    events: panel("SseState subscriptions + process-lifetime ingress counters", {
+      source_of_truth: "SseState subscriptions + process-lifetime ingress counters",
+      active_subscription_count: empty ? 0 : 2,
+      owner_session_ids: empty ? [] : ["agent-codex-001", "agent-local-002"],
+      owner_read_error: null,
+      agent_event_ingress: { accepted: empty ? 0 : 84, rejected: 0 },
+      agent_transcript_ingest: { ingested_rows: empty ? 0 : 837, failed_rows: 0 }
+    }),
+    hidden_desktops: panel("session process resource ledger / hidden desktop leases", {
+      source_of_truth: "session process resource ledger / hidden desktop leases",
+      row_count: 0,
+      rows: []
+    }),
+    cdp_attachments: panel("CDP target ownership registry", {
+      source_of_truth: "CDP target ownership registry",
+      row_count: empty ? 0 : 1,
+      rows: empty
+        ? []
+        : [
+            {
+              owner_key: "111:chrome-tab:1",
+              session_id: "agent-codex-001",
+              window_hwnd: 111,
+              cdp_target_id: "chrome-tab:1",
+              requested_url: "http://127.0.0.1:7700/dashboard",
+              target_url: "http://127.0.0.1:7700/dashboard#/system",
+              created_at_unix_ms: baseTime
+            }
+          ]
+    }),
+    shell_jobs: panel("act_run_shell_status + durable shell status files", {
+      source_of_truth: "durable shell status files under C:\\Users\\hotra\\AppData\\Local\\synapse\\shell-jobs\\jobs",
+      job_root: "C:\\Users\\hotra\\AppData\\Local\\synapse\\shell-jobs\\jobs",
+      max_jobs: 50,
+      job_count: empty ? 0 : 1,
+      returned_count: empty ? 0 : 1,
+      running_count: empty ? 0 : 1,
+      terminal_count: 0,
+      status_files_read: empty ? 0 : 1,
+      skipped_invalid_job_dirs: 0,
+      skipped_unreadable_status_files: 0,
+      rows: empty
+        ? []
+        : [
+            {
+              job_id: "019ecafe-demo",
+              running: true,
+              pid: 4242,
+              session_id: "agent-codex-001",
+              job: { status: "running" }
+            }
+          ]
     }),
     command_audit: panel("audit_intelligence_query", {
       row_count: empty ? 0 : 3,

@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
+import type { ColumnDef } from "@tanstack/react-table";
 import { Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip as ChartTooltip, XAxis, YAxis } from "recharts";
 import {
   BarChart3,
@@ -8,9 +9,14 @@ import {
   ClipboardList,
   Command,
   Gauge,
+  HardDrive,
   LogIn,
   LogOut,
+  MonitorUp,
   Moon,
+  Network,
+  Pause,
+  Play,
   Plus,
   RefreshCw,
   Rocket,
@@ -59,7 +65,9 @@ import {
   loginDashboard,
   logoutDashboard,
   panelData,
+  pauseTimeline,
   registerApiModel,
+  resumeTimeline,
   saveDashboardView,
   spawnAgent,
   type AgentSummary,
@@ -70,7 +78,8 @@ import {
   type FleetStatus,
   type ModelRow,
   type AgentKillResponse,
-  type SpawnAgentResponse
+  type SpawnAgentResponse,
+  type TimelineControlResponse
 } from "@/lib/dashboard-state";
 import { asArray, asRecord, cn, rawText, timeAgo, unixMsToTime } from "@/lib/utils";
 import { useUiStore, type DashboardRouteId, type Density, type Theme } from "@/store/ui-store";
@@ -405,7 +414,7 @@ export function App() {
       {route === "approvals" ? <ApprovalsView state={state} /> : null}
       {route === "analytics" ? <AnalyticsView state={state} agents={agents} attentionCount={attentionCount} stale={stale} /> : null}
       {route === "timeline" ? <TimelineView state={state} toolCalls={toolCalls} /> : null}
-      {route === "system" ? <SystemView state={state} stale={stale} /> : null}
+      {route === "system" ? <SystemView state={state} stale={stale} onRefresh={() => query.refetch()} /> : null}
       {route === "audit" ? <AuditView state={state} toolCalls={toolCalls} /> : null}
 
       <CommandPalette open={paletteOpen} commands={commands} onClose={() => setPaletteOpen(false)} />
@@ -898,31 +907,307 @@ function TimelineView({ state, toolCalls }: { state?: DashboardState; toolCalls:
   );
 }
 
-function SystemView({ state, stale }: { state?: DashboardState; stale: boolean }) {
+function SystemView({
+  state,
+  stale,
+  onRefresh
+}: {
+  state?: DashboardState;
+  stale: boolean;
+  onRefresh: () => void | Promise<unknown>;
+}) {
+  const health = asRecord(panelData(state?.daemon));
+  const subsystems = asRecord(health.subsystems);
+  const storage = asRecord(panelData(state?.storage));
+  const pressure = asRecord(storage.pressure_level);
+  const timeline = asRecord(panelData(state?.timeline));
+  const recorder = asRecord(timeline.recorder);
+  const lease = asRecord(panelData(state?.lease));
+  const targetClaims = asRecord(panelData(state?.target_claims));
+  const claims = asArray<Record<string, unknown>>(targetClaims.claims);
+  const sessions = asArray<Record<string, unknown>>(asRecord(panelData(state?.sessions)).sessions);
+  const hiddenDesktops = asArray<Record<string, unknown>>(asRecord(panelData(state?.hidden_desktops)).rows);
+  const cdpAttachments = asArray<Record<string, unknown>>(asRecord(panelData(state?.cdp_attachments)).rows);
+  const shellJobsData = asRecord(panelData(state?.shell_jobs));
+  const shellJobs = asArray<Record<string, unknown>>(shellJobsData.rows);
+  const events = asRecord(panelData(state?.events));
+  const pressureName = rawText(pressure.name || pressure.level || pressure.value || storage.pressure_level || "unknown");
+  const pressureStatus: FleetStatus = /level[34]|l[34]|refus/i.test(pressureName) ? "stuck" : /level[12]|l[12]/i.test(pressureName) ? "needs_input" : "done";
+  const recorderPaused = recorder.paused === true;
+  const [recorderBusy, setRecorderBusy] = useState<"pause" | "resume" | "">("");
+  const [recorderError, setRecorderError] = useState("");
+  const [lastRecorderControl, setLastRecorderControl] = useState<TimelineControlResponse | null>(null);
+
+  const submitRecorderControl = async (mode: "pause" | "resume") => {
+    setRecorderBusy(mode);
+    setRecorderError("");
+    try {
+      const response = mode === "pause" ? await pauseTimeline() : await resumeTimeline();
+      setLastRecorderControl(response);
+      await onRefresh();
+    } catch (error) {
+      setRecorderError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setRecorderBusy("");
+    }
+  };
+
+  const chromeBridge = asRecord(subsystems.chrome_bridge);
+  const action = asRecord(subsystems.action);
+  const daemonLifecycle = asRecord(subsystems.daemon_lifecycle);
+  const http = asRecord(subsystems.http);
+
   return (
     <>
-      <Section
-        title="Daemon"
-        tier="overview"
-        questions={["Is the daemon healthy?", "Is the dashboard stale?", "Which process owns the server?"]}
-      >
-        <div className="grid gap-4 md:grid-cols-3">
-          <StatCard label="Freshness" value={stale ? "stale" : "live"} status={stale ? "stuck" : "working"} />
-          <StatCard label="Bind" value={state?.bind_addr || "pending"} status="working" />
-          <StatCard label="Auth" value={rawText(asRecord(panelData(state?.auth)).active_session_count || 0)} status="done" />
+      <Section title="Substrate" tier="overview" questions={["Is the daemon healthy?", "Is storage refusing work?", "Is the recorder paused?"]}>
+        <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+          <StatCard label="Health" value={health.ok === true ? "ok" : "check"} status={health.ok === true && !stale ? "done" : "stuck"} delta={`pid ${rawText(health.pid || "unknown")}`} />
+          <StatCard label="Storage" value={pressureName || "unknown"} status={pressureStatus} delta={state?.storage.source || "storage_inspect"} />
+          <StatCard label="Recorder" value={recorderPaused ? "paused" : "running"} status={recorderPaused ? "needs_input" : "working"} delta={state?.timeline.source || "timeline_stats"} />
+          <StatCard label="Shell Jobs" value={rawText(shellJobsData.running_count || 0)} status={Number(shellJobsData.running_count || 0) ? "working" : "idle"} delta={`${rawText(shellJobsData.job_count || 0)} status files`} />
         </div>
       </Section>
+
       <Section
-        title="System Shape"
+        title="Daemon"
         tier="triage"
-        questions={["Which resource is largest?", "Which counters support that read?", "Can the raw readback be inspected?"]}
+        questions={["Which process owns the server?", "Is Chrome bridge connected?", "Is action routing healthy?"]}
       >
-        <SystemShape state={state} />
+        <div className="grid gap-4 xl:grid-cols-[1fr_1fr]">
+          <div className="rounded-lg border border-border bg-surface-1 p-[var(--density-card-padding)]">
+            <div className="mb-2 flex items-center gap-2 text-primary">
+              <ServerCog aria-hidden="true" className="h-4 w-4 text-info" />
+              <h3 className="text-md font-medium tracking-normal">Runtime</h3>
+            </div>
+            <MetricRow label="Bind" value={state?.bind_addr || rawText(http.bind_addr)} />
+            <MetricRow label="PID" value={rawText(health.pid)} />
+            <MetricRow label="Tools" value={rawText(health.tool_count)} />
+            <MetricRow label="Lifecycle" value={rawText(daemonLifecycle.status)} />
+            <MetricRow label="Auth SoT" value={state?.auth.source || "CF_KV dashboard-auth/v1"} />
+          </div>
+          <div className="rounded-lg border border-border bg-surface-1 p-[var(--density-card-padding)]">
+            <div className="mb-2 flex items-center gap-2 text-primary">
+              <Network aria-hidden="true" className="h-4 w-4 text-info" />
+              <h3 className="text-md font-medium tracking-normal">Bridge</h3>
+            </div>
+            <MetricRow label="Chrome" value={rawText(chromeBridge.status)} />
+            <MetricRow label="HTTP" value={rawText(http.status)} />
+            <MetricRow label="Action" value={rawText(action.status)} />
+            <MetricRow label="SSE" value={rawText(events.active_subscription_count || 0)} />
+            <MetricRow label="Tool SoT" value={state?.daemon.source || "health"} />
+          </div>
+        </div>
         <div className="mt-3">
-          <RawValue value={{ daemon: state?.daemon, storage: state?.storage, lease: state?.lease }} label="System readback" />
+          <RawValue value={{ daemon: state?.daemon, chrome_bridge: chromeBridge }} label="Daemon readback" />
+        </div>
+      </Section>
+
+      <Section
+        title="Storage"
+        tier="triage"
+        questions={["Which store is largest?", "What pressure level is active?", "Which rows back the chart?"]}
+      >
+        <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(280px,360px)]">
+          <SystemShape state={state} />
+          <div className="rounded-lg border border-border bg-surface-1 p-[var(--density-card-padding)]">
+            <div className="mb-2 flex items-center gap-2 text-primary">
+              <HardDrive aria-hidden="true" className="h-4 w-4 text-info" />
+              <h3 className="text-md font-medium tracking-normal">Pressure</h3>
+            </div>
+            <MetricRow label="Level" value={pressureName || "unknown"} />
+            <MetricRow label="Transitions" value={asArray(storage.pressure_transition_codes).length} />
+            <MetricRow label="CF rows" value={Object.keys(asRecord(storage.cf_row_counts)).length} />
+            <MetricRow label="CF sizes" value={Object.keys(asRecord(storage.cf_sizes)).length} />
+            <MetricRow label="SoT" value={state?.storage.source || "storage_inspect"} />
+          </div>
+        </div>
+      </Section>
+
+      <Section
+        title="Recorder"
+        tier="triage"
+        questions={["Is recording active?", "Do pause and resume hit the live gate?", "Which timeline counts changed?"]}
+        actions={
+          <>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button type="button" variant="ghost" size="sm" disabled={Boolean(recorderBusy)} onClick={() => submitRecorderControl("pause")}>
+                  <Pause aria-hidden="true" className="h-4 w-4" />
+                  {recorderBusy === "pause" ? "Pausing" : "Pause"}
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>Pause timeline recorder</TooltipContent>
+            </Tooltip>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button type="button" variant="ghost" size="sm" disabled={Boolean(recorderBusy)} onClick={() => submitRecorderControl("resume")}>
+                  <Play aria-hidden="true" className="h-4 w-4" />
+                  {recorderBusy === "resume" ? "Resuming" : "Resume"}
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>Resume timeline recorder</TooltipContent>
+            </Tooltip>
+          </>
+        }
+      >
+        <div className="grid gap-4 xl:grid-cols-3">
+          <StatCard label="Rows" value={rawText(timeline.total_rows || 0)} status={timeline.scan_complete === false ? "needs_input" : "done"} delta={`${rawText(timeline.scanned_rows || 0)} scanned`} />
+          <StatCard label="Invalid" value={rawText(timeline.invalid_rows || 0)} status={Number(timeline.invalid_rows || 0) ? "stuck" : "done"} delta="CF_TIMELINE decode" />
+          <StatCard label="Feeds" value={recorder.clipboard_feed_enabled || recorder.file_activity_feed_enabled ? "enabled" : "base"} status="working" delta={`paused=${rawText(recorder.paused)}`} />
+        </div>
+        {recorderError ? <div className="mt-3 rounded-lg border border-danger/40 bg-danger/10 p-3 text-sm text-danger">{recorderError}</div> : null}
+        {lastRecorderControl ? (
+          <div className="mt-3">
+            <RawValue value={lastRecorderControl} label="Recorder control readback" />
+          </div>
+        ) : null}
+        <div className="mt-3 grid gap-4 xl:grid-cols-2">
+          <RawValue value={timeline.rows_by_kind} label="Rows by kind" />
+          <RawValue value={timeline.rows_by_day_utc} label="Rows by day" />
+        </div>
+      </Section>
+
+      <Section title="Claims" tier="drill-down" questions={["Who holds the input lease?", "Which targets are claimed?", "Are claims stale?"]}>
+        <div className="mb-3 grid gap-4 md:grid-cols-3">
+          <StatCard label="Lease" value={lease.held === true ? "held" : "free"} status={lease.held === true ? "needs_input" : "done"} delta={rawText(lease.owner_session_id || "no owner")} />
+          <StatCard label="Claims" value={rawText(targetClaims.claim_count || claims.length)} status={claims.length ? "working" : "idle"} delta={state?.target_claims.source || "target_claim_status"} />
+          <StatCard label="Sessions" value={sessions.length} status={sessions.length ? "working" : "idle"} delta={state?.sessions.source || "session_list"} />
+        </div>
+        {claims.length ? (
+          <DataTable
+            data={claims}
+            getRowId={(row, index) => rawText(row.target_key || row.owner_session_id || index)}
+            columns={[
+              { id: "target", header: "Target", cell: ({ row }) => rawText(row.original.target_key || row.original.target) },
+              { id: "owner", header: "Owner", cell: ({ row }) => rawText(row.original.owner_session_id) },
+              { id: "expires", header: "Expires", cell: ({ row }) => rawText(row.original.expires_in_ms) },
+              { id: "generation", header: "Gen", cell: ({ row }) => rawText(row.original.generation) }
+            ]}
+          />
+        ) : (
+          <EmptyState title="No target claims" />
+        )}
+        <div className="mt-3">
+          <RawValue value={{ lease: state?.lease, target_claims: state?.target_claims }} label="Lease and claims readback" />
+        </div>
+      </Section>
+
+      <Section
+        title="Targets"
+        tier="drill-down"
+        questions={["Which sessions own browser tabs?", "Which hidden desktops exist?", "Which session owns each target?"]}
+      >
+        <div className="grid gap-4 xl:grid-cols-2">
+          <SystemTable
+            title="Sessions"
+            icon={MonitorUp}
+            rows={sessions}
+            empty="No session rows"
+            columns={[
+              { id: "session", header: "Session", cell: ({ row }) => rawText(row.original.session_id) },
+              { id: "lifecycle", header: "Lifecycle", cell: ({ row }) => rawText(row.original.lifecycle) },
+              { id: "target", header: "Target", cell: ({ row }) => rawText(row.original.active_target) },
+              { id: "last", header: "Last Action", cell: ({ row }) => rawText(row.original.last_action) }
+            ]}
+          />
+          <SystemTable
+            title="CDP Attachments"
+            icon={Network}
+            rows={cdpAttachments}
+            empty="No CDP owner rows"
+            columns={[
+              { id: "session", header: "Session", cell: ({ row }) => rawText(row.original.session_id) },
+              { id: "target", header: "Target", cell: ({ row }) => rawText(row.original.cdp_target_id) },
+              { id: "window", header: "HWND", cell: ({ row }) => rawText(row.original.window_hwnd) },
+              { id: "url", header: "URL", cell: ({ row }) => <span className="line-clamp-2">{rawText(row.original.target_url)}</span> }
+            ]}
+          />
+        </div>
+        <div className="mt-4">
+          <SystemTable
+            title="Hidden Desktops"
+            icon={MonitorUp}
+            rows={hiddenDesktops}
+            empty="No session-owned hidden desktop rows"
+            columns={[
+              { id: "session", header: "Session", cell: ({ row }) => rawText(row.original.session_id) },
+              { id: "desktops", header: "Desktops", cell: ({ row }) => rawText(row.original.desktop_names) },
+              { id: "pids", header: "PIDs", cell: ({ row }) => rawText(row.original.launch_pids) },
+              { id: "count", header: "Resources", cell: ({ row }) => rawText(row.original.resource_count) }
+            ]}
+          />
+        </div>
+      </Section>
+
+      <Section title="Shell Jobs" tier="drill-down" questions={["Which jobs are still running?", "Which status files were read?", "Can a job be inspected?"]}>
+        <div className="mb-3 grid gap-4 md:grid-cols-3">
+          <StatCard label="Total" value={rawText(shellJobsData.job_count || 0)} status="idle" delta={rawText(shellJobsData.job_root)} />
+          <StatCard label="Running" value={rawText(shellJobsData.running_count || 0)} status={Number(shellJobsData.running_count || 0) ? "working" : "done"} />
+          <StatCard label="Unreadable" value={rawText(shellJobsData.skipped_unreadable_status_files || 0)} status={Number(shellJobsData.skipped_unreadable_status_files || 0) ? "stuck" : "done"} />
+        </div>
+        {shellJobs.length ? (
+          <DataTable
+            data={shellJobs}
+            getRowId={(row, index) => rawText(row.job_id || index)}
+            columns={[
+              { id: "job", header: "Job", cell: ({ row }) => rawText(row.original.job_id) },
+              { id: "status", header: "Status", cell: ({ row }) => rawText(asRecord(row.original.job).status || row.original.status) },
+              { id: "running", header: "Running", cell: ({ row }) => rawText(row.original.running) },
+              { id: "pid", header: "PID", cell: ({ row }) => rawText(row.original.pid) },
+              { id: "session", header: "Session", cell: ({ row }) => rawText(row.original.session_id) }
+            ]}
+          />
+        ) : (
+          <EmptyState title="No durable shell jobs" />
+        )}
+        <div className="mt-3">
+          <RawValue value={state?.shell_jobs} label="Shell job readback" />
+        </div>
+      </Section>
+
+      <Section title="Events" tier="drill-down" questions={["How many SSE subscriptions are open?", "Which sessions own them?", "Are ingress counters moving?"]}>
+        <div className="grid gap-4 md:grid-cols-3">
+          <StatCard label="SSE" value={rawText(events.active_subscription_count || 0)} status={Number(events.active_subscription_count || 0) ? "working" : "idle"} delta={state?.events.source || "SseState"} />
+          <StatCard label="Owners" value={asArray(events.owner_session_ids).length} status="idle" />
+          <StatCard label="Ingress" value={rawText(asRecord(events.agent_event_ingress).accepted || asRecord(events.agent_event_ingress).received || 0)} status="working" />
+        </div>
+        <div className="mt-3">
+          <RawValue value={state?.events} label="Event readback" />
         </div>
       </Section>
     </>
+  );
+}
+
+function SystemTable({
+  title,
+  icon: Icon,
+  rows,
+  empty,
+  columns
+}: {
+  title: string;
+  icon: LucideIcon;
+  rows: Record<string, unknown>[];
+  empty: string;
+  columns: ColumnDef<Record<string, unknown>>[];
+}) {
+  return (
+    <div className="min-w-0">
+      <div className="mb-2 flex items-center gap-2 text-primary">
+        <Icon aria-hidden="true" className="h-4 w-4 text-info" />
+        <h3 className="text-md font-medium tracking-normal">{title}</h3>
+      </div>
+      {rows.length ? (
+        <DataTable
+          data={rows}
+          getRowId={(row, index) => rawText(row.owner_key || row.session_id || row.cdp_target_id || row.job_id || index)}
+          columns={columns}
+        />
+      ) : (
+        <EmptyState title={empty} />
+      )}
+    </div>
   );
 }
 

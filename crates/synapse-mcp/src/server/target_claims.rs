@@ -681,6 +681,25 @@ impl SynapseService {
         Ok(by_owner)
     }
 
+    pub(crate) fn target_claim_status_snapshot(
+        &self,
+    ) -> Result<TargetClaimStatusResponse, ErrorData> {
+        let now = unix_time_ms_now();
+        let live_sessions = self.live_target_claim_sessions(now, None)?;
+        let mut guard = self.lock_target_claims()?;
+        guard.prune_inactive(now, &live_sessions);
+        let claims = guard.reads(now);
+        Ok(TargetClaimStatusResponse {
+            session_id: "dashboard".to_owned(),
+            now_unix_ms: now,
+            claim_count: claims.len(),
+            target_key: None,
+            target_claim: None,
+            claims,
+            source_of_truth: source_of_truth(),
+        })
+    }
+
     pub(crate) fn ensure_target_claim_allows_action(
         &self,
         tool: &'static str,

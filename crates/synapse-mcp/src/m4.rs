@@ -564,6 +564,22 @@ pub struct ActRunShellStatusResponse {
     pub stderr_tail: String,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ShellJobsDashboardSnapshot {
+    pub source_of_truth: String,
+    pub job_root: Option<String>,
+    pub max_jobs: usize,
+    pub job_count: usize,
+    pub returned_count: usize,
+    pub running_count: usize,
+    pub terminal_count: usize,
+    pub status_files_read: usize,
+    pub skipped_invalid_job_dirs: usize,
+    pub skipped_unreadable_status_files: usize,
+    pub rows: Vec<ActRunShellStatusResponse>,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ActRunShellJobDiagnostics {
@@ -1122,9 +1138,10 @@ pub fn default_agent_spawn_mcp_url() -> String {
 
 /// Builds the MCP URL a spawned agent should phone home to, anchored to the
 /// daemon's *actual* HTTP bind address rather than the hardcoded default. A
-/// daemon running on a non-default port (e.g. an isolated FSV instance, or a
-/// future multi-daemon layout) must hand its children its own endpoint, or they
-/// connect to the wrong daemon's tools. Loopback is preserved verbatim.
+/// daemon running on a non-default port (e.g. an isolated local verification
+/// instance, or a future multi-daemon layout) must hand its children its own
+/// endpoint, or they connect to the wrong daemon's tools. Loopback is preserved
+/// verbatim.
 #[must_use]
 pub fn agent_spawn_mcp_url_for_bind(bind_addr: std::net::SocketAddr) -> String {
     format!("http://{bind_addr}/mcp")
@@ -2547,6 +2564,115 @@ pub fn cleanup_shell_jobs_for_session(
         "readback=act_run_shell_session_cleanup after=status_files_and_process_table"
     );
     Ok(readback)
+}
+
+pub fn shell_jobs_dashboard_snapshot(
+    max_jobs: usize,
+) -> Result<ShellJobsDashboardSnapshot, ErrorData> {
+    let root = shell_durable_job_root_dir()?;
+    let source_of_truth = format!("durable shell status files under {}", path_string(&root));
+    if !root.exists() {
+        return Ok(ShellJobsDashboardSnapshot {
+            source_of_truth,
+            job_root: Some(path_string(&root)),
+            max_jobs,
+            job_count: 0,
+            returned_count: 0,
+            running_count: 0,
+            terminal_count: 0,
+            status_files_read: 0,
+            skipped_invalid_job_dirs: 0,
+            skipped_unreadable_status_files: 0,
+            rows: Vec::new(),
+        });
+    }
+
+    let entries = fs::read_dir(&root).map_err(|error| {
+        shell_tool_error(
+            error_codes::STORAGE_READ_FAILED,
+            format!("dashboard shell job snapshot failed to read shell job root: {error}"),
+            json!({
+                "code": error_codes::STORAGE_READ_FAILED,
+                "path": root,
+                "reason": "dashboard_shell_job_root_read_failed",
+            }),
+        )
+    })?;
+
+    let mut job_ids = Vec::new();
+    let mut skipped_invalid_job_dirs = 0usize;
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(_error) => {
+                skipped_invalid_job_dirs = skipped_invalid_job_dirs.saturating_add(1);
+                continue;
+            }
+        };
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let Some(job_id) = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(ToOwned::to_owned)
+        else {
+            skipped_invalid_job_dirs = skipped_invalid_job_dirs.saturating_add(1);
+            continue;
+        };
+        if validate_shell_job_id(&job_id).is_err() {
+            skipped_invalid_job_dirs = skipped_invalid_job_dirs.saturating_add(1);
+            continue;
+        }
+        job_ids.push(job_id);
+    }
+    job_ids.sort();
+    job_ids.reverse();
+
+    let job_count = job_ids.len();
+    let mut rows = Vec::new();
+    let mut status_files_read = 0usize;
+    let mut skipped_unreadable_status_files = 0usize;
+    let mut running_count = 0usize;
+    let mut terminal_count = 0usize;
+    for job_id in job_ids.into_iter().take(max_jobs) {
+        match shell_job_status(
+            &ActRunShellStatusParams {
+                job_id,
+                tail_bytes: 0,
+            },
+            None,
+        ) {
+            Ok(status) => {
+                status_files_read = status_files_read.saturating_add(1);
+                if status.running {
+                    running_count = running_count.saturating_add(1);
+                }
+                if shell_job_terminal_status(&status.job.status) {
+                    terminal_count = terminal_count.saturating_add(1);
+                }
+                rows.push(status);
+            }
+            Err(_error) => {
+                skipped_unreadable_status_files = skipped_unreadable_status_files.saturating_add(1);
+            }
+        }
+    }
+
+    Ok(ShellJobsDashboardSnapshot {
+        source_of_truth,
+        job_root: Some(path_string(&root)),
+        max_jobs,
+        job_count,
+        returned_count: rows.len(),
+        running_count,
+        terminal_count,
+        status_files_read,
+        skipped_invalid_job_dirs,
+        skipped_unreadable_status_files,
+        rows,
+    })
 }
 
 pub fn run_shell_idempotency_row_key(

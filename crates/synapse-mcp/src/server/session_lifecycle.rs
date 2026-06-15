@@ -89,6 +89,19 @@ pub(crate) struct SessionHiddenDesktopReadback {
     pub resource_count: usize,
 }
 
+#[derive(Clone, Debug, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SessionCdpTargetOwnerReadback {
+    pub owner_key: String,
+    pub session_id: String,
+    pub window_hwnd: i64,
+    pub endpoint: String,
+    pub cdp_target_id: String,
+    pub requested_url: String,
+    pub target_url: String,
+    pub created_at_unix_ms: u64,
+}
+
 impl SessionProcessResource {
     pub(crate) fn new(
         session_id: String,
@@ -764,6 +777,75 @@ impl SynapseService {
             resource_count: launch_pids.len(),
             launch_pids,
         }))
+    }
+
+    pub(crate) fn hidden_desktop_readbacks(
+        &self,
+    ) -> Result<Vec<SessionHiddenDesktopReadback>, ErrorData> {
+        let guard = self.session_processes.lock().map_err(|_error| {
+            mcp_error(
+                error_codes::TOOL_INTERNAL_ERROR,
+                "session process resource lock poisoned while reading hidden desktop ownership",
+            )
+        })?;
+        let mut rows = Vec::new();
+        for (session_id, resources) in guard.iter() {
+            let mut desktop_names = BTreeSet::new();
+            let mut launch_pids = Vec::new();
+            for resource in resources.values() {
+                let Some(desktop) = resource.desktop_lease.as_ref() else {
+                    continue;
+                };
+                if !desktop.is_session_owned() {
+                    continue;
+                }
+                desktop_names.insert(desktop.name().to_owned());
+                launch_pids.push(resource.pid);
+            }
+            if desktop_names.is_empty() {
+                continue;
+            }
+            launch_pids.sort_unstable();
+            launch_pids.dedup();
+            rows.push(SessionHiddenDesktopReadback {
+                session_id: session_id.clone(),
+                desktop_names: desktop_names.into_iter().collect(),
+                resource_count: launch_pids.len(),
+                launch_pids,
+            });
+        }
+        rows.sort_by(|left, right| left.session_id.cmp(&right.session_id));
+        Ok(rows)
+    }
+
+    pub(crate) fn cdp_target_owner_readbacks(
+        &self,
+    ) -> Result<Vec<SessionCdpTargetOwnerReadback>, ErrorData> {
+        let guard = self.cdp_target_owners.lock().map_err(|_error| {
+            mcp_error(
+                error_codes::TOOL_INTERNAL_ERROR,
+                "CDP target ownership registry lock poisoned while reading dashboard snapshot",
+            )
+        })?;
+        let mut rows = guard
+            .iter()
+            .map(|(owner_key, owner)| SessionCdpTargetOwnerReadback {
+                owner_key: owner_key.clone(),
+                session_id: owner.session_id.clone(),
+                window_hwnd: owner.window_hwnd,
+                endpoint: owner.endpoint.clone(),
+                cdp_target_id: owner.cdp_target_id.clone(),
+                requested_url: owner.requested_url.clone(),
+                target_url: owner.target_url.clone(),
+                created_at_unix_ms: owner.created_at_unix_ms,
+            })
+            .collect::<Vec<_>>();
+        rows.sort_by(|left, right| {
+            left.session_id
+                .cmp(&right.session_id)
+                .then_with(|| left.owner_key.cmp(&right.owner_key))
+        });
+        Ok(rows)
     }
 
     pub(crate) fn terminated_sessions_handle(&self) -> SharedTerminatedSessions {

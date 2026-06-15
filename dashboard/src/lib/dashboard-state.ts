@@ -17,6 +17,12 @@ export interface DashboardState {
   sessions: DashboardPanel;
   lease: DashboardPanel;
   storage: DashboardPanel;
+  target_claims: DashboardPanel;
+  timeline: DashboardPanel;
+  events: DashboardPanel;
+  hidden_desktops: DashboardPanel;
+  cdp_attachments: DashboardPanel;
+  shell_jobs: DashboardPanel;
   command_audit: DashboardPanel;
   approvals: DashboardPanel;
   suggestions: DashboardPanel;
@@ -279,6 +285,13 @@ export interface AgentKillResponse {
   kill: Record<string, unknown>;
 }
 
+export interface TimelineControlResponse {
+  ok: boolean;
+  trigger: string;
+  source_of_truth: string;
+  readback: Record<string, unknown>;
+}
+
 export type DashboardRouteReadback = Record<string, unknown>;
 
 function csrfHeaders(): Record<string, string> {
@@ -416,6 +429,27 @@ export async function killAgent(request: AgentKillRequest): Promise<AgentKillRes
     body: JSON.stringify(request)
   });
   return (await readJsonOrThrow(response)) as unknown as AgentKillResponse;
+}
+
+export async function pauseTimeline(duration_ms?: number): Promise<TimelineControlResponse> {
+  const response = await fetch("/dashboard/timeline/pause", {
+    method: "POST",
+    cache: "no-store",
+    credentials: "same-origin",
+    headers: csrfHeaders(),
+    body: JSON.stringify({ duration_ms })
+  });
+  return (await readJsonOrThrow(response)) as unknown as TimelineControlResponse;
+}
+
+export async function resumeTimeline(): Promise<TimelineControlResponse> {
+  const response = await fetch("/dashboard/timeline/resume", {
+    method: "POST",
+    cache: "no-store",
+    credentials: "same-origin",
+    headers: csrfHeaders()
+  });
+  return (await readJsonOrThrow(response)) as unknown as TimelineControlResponse;
 }
 
 export async function fetchDashboardState(): Promise<DashboardState> {
