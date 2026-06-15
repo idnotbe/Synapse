@@ -86,6 +86,7 @@ const MAX_NAME_CHARS: usize = 64;
 const MAX_SECRET_CHARS: usize = 512;
 const WEBHOOK_TIMEOUT_MS: u64 = 15_000;
 const WORKER_TICK_MS: u64 = 1_000;
+const AMBIENT_SILENT_TIMEOUT_SUPPRESSED: &str = "ambient_unprobeable_silent_timeout";
 
 // ---------------------------------------------------------------------------
 // Severity & attention-state mapping (the response ladder, decided up front)
@@ -347,12 +348,24 @@ pub(crate) struct EscalationItem {
     /// escalation no longer needs to interrupt the operator.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tier0_toast_removed: Option<ToastRemovalOutcome>,
-    /// True when quiet hours made the on-PC toast digest-only
-    /// (`suppress_popup=true`). Critical escalations never set this.
+    /// True when Tier 0 should avoid a popup. Quiet-hours rows still write a
+    /// digest-only Action Center entry; policy-suppressed rows skip Tier 0 and
+    /// record `tier0_suppressed_reason`.
     pub tier0_quiet_digest: bool,
+    /// Why Tier 0 is not fired at all. Distinct from quiet digest, which still
+    /// writes an Action Center row with popup suppressed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tier0_suppressed_reason: Option<String>,
     /// True when off-machine push is suppressed because the escalation opened
     /// inside a quiet-hours window (low/medium only; critical never suppressed).
     pub tier1_quiet_suppressed: bool,
+    /// Why off-machine push is suppressed for non-quiet-hours policy reasons.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tier1_suppressed_reason: Option<String>,
+    /// Why no linked pending approvals-inbox row was created for this
+    /// escalation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval_suppressed_reason: Option<String>,
     /// Whether this escalation is eligible for off-machine push at all
     /// (severity ≥ threshold, ≥1 webhook configured, not quiet-suppressed).
     pub tier1_eligible: bool,
@@ -949,10 +962,18 @@ fn open_escalation(
     let in_quiet = quiet_now(policy, current_local_minute_of_day());
     // Critical routes even during quiet hours; low/medium are suppressed.
     let quiet_suppressed = in_quiet && severity < Severity::Critical;
-    let tier1_eligible =
-        !policy.webhooks.is_empty() && severity >= policy.min_tier1_severity && !quiet_suppressed;
+    let policy_suppressed_reason = operator_interrupt_suppressed_reason(transition);
+    let tier1_eligible = !policy.webhooks.is_empty()
+        && severity >= policy.min_tier1_severity
+        && !quiet_suppressed
+        && policy_suppressed_reason.is_none();
     let ttl = policy.ttl_for(severity);
     let context = build_context(transition, severity, now_unix_ms, ttl);
+    let status = if policy_suppressed_reason.is_some() {
+        EscalationStatus::Acked
+    } else {
+        EscalationStatus::Pending
+    };
     let item = EscalationItem {
         schema_version: SCHEMA_VERSION,
         escalation_id,
@@ -964,24 +985,33 @@ fn open_escalation(
         attention_state: transition.state_to.as_str().to_owned(),
         reason_code: Some(transition.reason_code.clone()),
         context,
-        status: EscalationStatus::Pending,
+        status,
         created_at_unix_ms: now_unix_ms,
         updated_at_unix_ms: now_unix_ms,
         expires_at_unix_ms: now_unix_ms.saturating_add(ttl),
         tier0_fired: false,
         tier0_toast_removed: None,
-        tier0_quiet_digest: quiet_suppressed,
+        tier0_quiet_digest: quiet_suppressed || policy_suppressed_reason.is_some(),
+        tier0_suppressed_reason: policy_suppressed_reason.clone(),
         tier1_quiet_suppressed: quiet_suppressed,
+        tier1_suppressed_reason: policy_suppressed_reason.clone(),
+        approval_suppressed_reason: policy_suppressed_reason.clone(),
         tier1_eligible,
         ladder_index: 0,
         // First off-machine channel may fire immediately when eligible.
         next_escalate_at_unix_ms: tier1_eligible.then_some(now_unix_ms),
         channel_attempts: Vec::new(),
-        acked_at_unix_ms: None,
-        acked_via: None,
+        acked_at_unix_ms: policy_suppressed_reason.as_ref().map(|_reason| now_unix_ms),
+        acked_via: policy_suppressed_reason
+            .as_ref()
+            .map(|reason| format!("policy:{reason}")),
         closed_reason: None,
     };
-    let approval_rows = approval_rows_for_opened_escalation(&item, now_unix_ms)?;
+    let approval_rows = if item.approval_suppressed_reason.is_some() {
+        Vec::new()
+    } else {
+        approval_rows_for_opened_escalation(&item, now_unix_ms)?
+    };
     write_item_and_audit_with_extra_rows(
         db,
         &item,
@@ -990,8 +1020,10 @@ fn open_escalation(
             "severity": severity.as_str(),
             "tier1_eligible": tier1_eligible,
             "quiet_suppressed": quiet_suppressed,
+            "policy_suppressed_reason": policy_suppressed_reason,
             "configured_webhooks": policy.webhooks.len(),
             "approval_id": item.approval_id,
+            "approval_row_written": !approval_rows.is_empty(),
         }),
         approval_rows,
     )?;
@@ -1003,9 +1035,28 @@ fn open_escalation(
         attention_state = %item.attention_state,
         tier1_eligible,
         quiet_suppressed,
+        policy_suppressed_reason = item.tier0_suppressed_reason.as_deref(),
         "readback=CF_KV escalation opened"
     );
     Ok(item)
+}
+
+fn operator_interrupt_suppressed_reason(transition: &StateTransition) -> Option<String> {
+    if transition.state_to == AgentLifecycleState::Stuck
+        && transition.reason_code == "silent_timeout_unprobeable"
+        && transition
+            .spawn_id
+            .as_deref()
+            .is_some_and(|spawn_id| spawn_id.starts_with("agent-spawn-ambient-"))
+        && transition
+            .evidence
+            .get("probed_pid")
+            .is_some_and(Value::is_null)
+    {
+        Some(AMBIENT_SILENT_TIMEOUT_SUPPRESSED.to_owned())
+    } else {
+        None
+    }
 }
 
 fn build_context(
@@ -1307,7 +1358,7 @@ pub(crate) async fn process_pending(
         let mut dirty = false;
 
         // Tier 0 — on-PC toast (always, regardless of egress config).
-        if !item.tier0_fired {
+        if item.tier0_suppressed_reason.is_none() && !item.tier0_fired {
             match fire_tier0(&item).await {
                 Ok(()) => {
                     item.tier0_fired = true;

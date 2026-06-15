@@ -86,6 +86,16 @@ fn linked_approval(db: &Db, item: &EscalationItem) -> ApprovalItemRecord {
     decode_json::<ApprovalItemRecord>(&value).expect("decode approval item")
 }
 
+fn linked_approval_absent(db: &Db, item: &EscalationItem) {
+    let key = approval_item_key(&item.approval_id);
+    assert!(
+        read_exact_row(db, &key)
+            .expect("read approval item")
+            .is_none(),
+        "suppressed diagnostic escalation must not create a pending approval row"
+    );
+}
+
 fn approval_audit_events(db: &Db, approval_id: &str) -> Vec<ApprovalAuditRecord> {
     let prefix = format!("{APPROVAL_AUDIT_PREFIX}{approval_id}/");
     db.scan_cf_prefix(cf::CF_KV, prefix.as_bytes())
@@ -303,6 +313,99 @@ fn stuck_is_critical_and_ready_for_review_is_low() {
         10,
     );
     assert_eq!(only_open(&db, "done-agent").severity, Severity::Low);
+}
+
+#[test]
+fn ambient_unprobeable_silent_timeout_is_policy_acked_without_operator_page() {
+    let db = db();
+    let anchor = "agent-spawn-ambient-claude-issue1038";
+    let transition = StateTransition {
+        anchor: anchor.to_owned(),
+        spawn_id: Some(anchor.to_owned()),
+        session_id: None,
+        state_from: AgentLifecycleState::Working,
+        state_to: AgentLifecycleState::Stuck,
+        reason_code: "silent_timeout_unprobeable".to_owned(),
+        waiting_for: Some("silent_for_ms:130000".to_owned()),
+        runaway: false,
+        evidence: json!({
+            "last_event_kind": "tool_call_started",
+            "probed_pid": null,
+            "silent_ms": 130000,
+            "stuck_after_ms": 120000,
+        }),
+    };
+
+    note_transition(&db, &transition, 1_000);
+
+    let item = only_open(&db, anchor);
+    assert_eq!(item.severity, Severity::Critical);
+    assert_eq!(item.status, EscalationStatus::Acked);
+    assert_eq!(
+        item.acked_via.as_deref(),
+        Some("policy:ambient_unprobeable_silent_timeout")
+    );
+    assert_eq!(item.acked_at_unix_ms, Some(1_000));
+    assert_eq!(
+        item.tier0_suppressed_reason.as_deref(),
+        Some("ambient_unprobeable_silent_timeout")
+    );
+    assert_eq!(
+        item.tier1_suppressed_reason.as_deref(),
+        Some("ambient_unprobeable_silent_timeout")
+    );
+    assert_eq!(
+        item.approval_suppressed_reason.as_deref(),
+        Some("ambient_unprobeable_silent_timeout")
+    );
+    assert!(!item.tier0_fired, "suppression must not create a toast");
+    assert!(
+        !item.tier1_eligible,
+        "suppression must not route off-machine"
+    );
+    assert_eq!(item.next_escalate_at_unix_ms, None);
+    linked_approval_absent(&db, &item);
+    assert!(
+        approval_audit_events(&db, &item.approval_id).is_empty(),
+        "no approval row means no approval audit spam"
+    );
+}
+
+#[test]
+fn probeable_stuck_agent_still_pages_operator() {
+    let db = db();
+    let anchor = "agent-spawn-issue1038-probeable";
+    let transition = StateTransition {
+        anchor: anchor.to_owned(),
+        spawn_id: Some(anchor.to_owned()),
+        session_id: Some("session-issue1038-probeable".to_owned()),
+        state_from: AgentLifecycleState::Working,
+        state_to: AgentLifecycleState::Stuck,
+        reason_code: "silent_timeout".to_owned(),
+        waiting_for: Some("silent_for_ms:130000".to_owned()),
+        runaway: false,
+        evidence: json!({
+            "last_event_kind": "tool_call_started",
+            "probed_pid": 4242,
+            "silent_ms": 130000,
+            "stuck_after_ms": 120000,
+        }),
+    };
+
+    note_transition(&db, &transition, 2_000);
+
+    let item = only_open(&db, anchor);
+    assert_eq!(item.severity, Severity::Critical);
+    assert_eq!(item.status, EscalationStatus::Pending);
+    assert_eq!(item.tier0_suppressed_reason, None);
+    assert_eq!(item.tier1_suppressed_reason, None);
+    assert_eq!(item.approval_suppressed_reason, None);
+    let approval = linked_approval(&db, &item);
+    assert_eq!(approval.status, ApprovalStatus::Pending);
+    assert!(
+        !approval.toast.suppress_popup,
+        "probeable stuck agents still interrupt"
+    );
 }
 
 #[test]
