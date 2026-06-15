@@ -87,6 +87,17 @@ pub(crate) const DEFAULT_RUNAWAY_IDENTICAL_CALLS: u32 = 5;
 /// (their journal rows remain the durable record).
 const DEAD_RETENTION_MS: u64 = 24 * 60 * 60 * 1000;
 
+/// An UNPROBEABLE agent — one with no OS pid the daemon can liveness-check,
+/// e.g. an observed/ambient session tailed from a transcript on disk — that has
+/// gone silent this long is treated as ENDED, not merely stuck. With no pid and
+/// no progress there is no live process for an operator to act on, so it
+/// transitions straight to `Dead` (auto-reaped after `DEAD_RETENTION_MS`),
+/// keeping un-actionable dormant sessions out of the attention queue instead of
+/// piling up forever. A resumed session re-registers and revives (see
+/// `apply_event`). Mirrors Filebeat `ignore_older`, k8s TTL-after-finished, and
+/// Kestra's DISCONNECTED→TERMINATED. Env-overridable; default 30 min.
+pub(crate) const DEFAULT_UNPROBEABLE_DEAD_AFTER_MS: u64 = 30 * 60 * 1000;
+
 /// Rebuild lookback window over `CF_AGENT_EVENTS`.
 const REBUILD_LOOKBACK_NS: u64 = 24 * 60 * 60 * 1_000_000_000;
 
@@ -250,6 +261,7 @@ pub(crate) struct LivenessConfig {
     pub stuck_after_ms: u64,
     pub sweep_interval_ms: u64,
     pub runaway_identical_calls: u32,
+    pub unprobeable_dead_after_ms: u64,
 }
 
 impl Default for LivenessConfig {
@@ -258,6 +270,7 @@ impl Default for LivenessConfig {
             stuck_after_ms: DEFAULT_STUCK_AFTER_MS,
             sweep_interval_ms: DEFAULT_SWEEP_INTERVAL_MS,
             runaway_identical_calls: DEFAULT_RUNAWAY_IDENTICAL_CALLS,
+            unprobeable_dead_after_ms: DEFAULT_UNPROBEABLE_DEAD_AFTER_MS,
         }
     }
 }
@@ -299,6 +312,10 @@ pub(crate) fn load_liveness_config() -> Result<LivenessConfig, String> {
             u64::from(DEFAULT_RUNAWAY_IDENTICAL_CALLS),
         )?)
         .map_err(|_error| "SYNAPSE_AGENT_RUNAWAY_TOOL_CALLS exceeds u32 range".to_owned())?,
+        unprobeable_dead_after_ms: parse_env_u64(
+            "SYNAPSE_AGENT_UNPROBEABLE_DEAD_AFTER_MS",
+            DEFAULT_UNPROBEABLE_DEAD_AFTER_MS,
+        )?,
     };
     Ok(*LIVENESS_CONFIG.get_or_init(|| config))
 }
@@ -335,9 +352,17 @@ impl AgentStateTracker {
             std::collections::btree_map::Entry::Occupied(occupied) => occupied.into_mut(),
         };
 
-        // A dead agent stays dead: a hook delivered after a kill (or a
-        // straggler exit) must never resurrect it.
-        if entry.state == AgentLifecycleState::Dead {
+        // A dead agent stays dead for straggler exits/hooks — a kill or late
+        // exit must never resurrect it. The ONE exception is a fresh
+        // re-registration (`SpawnRequested`): an observed/ambient session that
+        // was reaped for dormancy resumes by appending to the same transcript,
+        // and the ingester re-registers it. Re-binding to the same anchor
+        // (rather than leaving it dead or forking a duplicate) is the explicit
+        // resurrection guard the dormancy reap requires — it falls through to
+        // `reduce`, which maps `SpawnRequested` → `Spawning`.
+        if entry.state == AgentLifecycleState::Dead
+            && !matches!(record.kind, AgentEventKind::SpawnRequested)
+        {
             if !matches!(record.kind, AgentEventKind::Exited | AgentEventKind::Killed) {
                 tracing::warn!(
                     code = "AGENT_STATE_EVENT_AFTER_DEATH",
@@ -454,6 +479,7 @@ impl AgentStateTracker {
         &mut self,
         now_unix_ms: u64,
         stuck_after_ms: u64,
+        unprobeable_dead_after_ms: u64,
         process_alive: &dyn Fn(u32) -> bool,
     ) -> Vec<StateTransition> {
         let mut transitions = Vec::new();
@@ -479,6 +505,32 @@ impl AgentStateTracker {
                     now_unix_ms,
                 ));
                 continue;
+            }
+            // Unprobeable end-of-life: an agent with no pid to liveness-check
+            // (an observed/ambient session tailed from disk) that has gone
+            // silent past the ended threshold has no live process left to
+            // attend to. Transition straight to Dead (reaped after retention)
+            // so dormant, un-actionable sessions leave the attention queue
+            // instead of accumulating forever. Covers working/idle/stuck alike:
+            // an idle observed session that stopped appending has ended just as
+            // surely as a working one. A resume re-registers and revives.
+            if entry.probe_pid().is_none() {
+                let silent_ms = now_unix_ms.saturating_sub(entry.last_event_unix_ms);
+                if silent_ms >= unprobeable_dead_after_ms {
+                    transitions.push(force_transition(
+                        entry,
+                        AgentLifecycleState::Dead,
+                        "unprobeable_silent_ended",
+                        None,
+                        json!({
+                            "silent_ms": silent_ms,
+                            "unprobeable_dead_after_ms": unprobeable_dead_after_ms,
+                            "last_event_kind": entry.last_event_kind,
+                        }),
+                        now_unix_ms,
+                    ));
+                    continue;
+                }
             }
             // Silence applies only while the agent claims to be making
             // progress; waiting states legitimately sit quiet for hours.
@@ -946,9 +998,12 @@ pub(crate) fn liveness_sweep_once(db: &Db, now_unix_ms: u64) -> usize {
                 return 0;
             }
         };
-        guard.sweep(now_unix_ms, config.stuck_after_ms, &|pid| {
-            crate::m4::process_exists(pid)
-        })
+        guard.sweep(
+            now_unix_ms,
+            config.stuck_after_ms,
+            config.unprobeable_dead_after_ms,
+            &|pid| crate::m4::process_exists(pid),
+        )
     };
     emit_transitions(db, &transitions);
     transitions.len()
@@ -1379,7 +1434,12 @@ mod tests {
         let now = unix_time_ns_now() / 1_000_000 + DEFAULT_STUCK_AFTER_MS + 1;
 
         // pid 11 alive → stuck; pid 22 gone → dead (no exit event existed).
-        let transitions = tracker.sweep(now, DEFAULT_STUCK_AFTER_MS, &|pid| pid == 11);
+        let transitions = tracker.sweep(
+            now,
+            DEFAULT_STUCK_AFTER_MS,
+            DEFAULT_UNPROBEABLE_DEAD_AFTER_MS,
+            &|pid| pid == 11,
+        );
         assert_eq!(transitions.len(), 2, "{transitions:?}");
         let stuck = transitions
             .iter()
@@ -1415,6 +1475,7 @@ mod tests {
         let transitions = tracker.sweep(
             now + DEFAULT_STUCK_AFTER_MS * 10,
             DEFAULT_STUCK_AFTER_MS,
+            DEFAULT_UNPROBEABLE_DEAD_AFTER_MS,
             &|pid| pid == 11,
         );
         assert!(
@@ -1439,9 +1500,12 @@ mod tests {
         tracker.apply_event(&live);
 
         let now = unix_time_ns_now() / 1_000_000 + DEFAULT_STUCK_AFTER_MS + 1;
-        let transitions = tracker.sweep(now, DEFAULT_STUCK_AFTER_MS, &|_pid| {
-            panic!("no pid is known; the probe must not run")
-        });
+        let transitions = tracker.sweep(
+            now,
+            DEFAULT_STUCK_AFTER_MS,
+            DEFAULT_UNPROBEABLE_DEAD_AFTER_MS,
+            &|_pid| panic!("no pid is known; the probe must not run"),
+        );
         assert_eq!(transitions.len(), 1, "{transitions:?}");
         assert_eq!(transitions[0].anchor, spawn);
         assert_eq!(transitions[0].state_to, AgentLifecycleState::Stuck);
@@ -1453,6 +1517,60 @@ mod tests {
                 .state,
             AgentLifecycleState::Idle
         );
+    }
+
+    #[test]
+    fn unprobeable_silent_past_threshold_ends_and_revives_on_reregister() {
+        let mut tracker = AgentStateTracker::default();
+        let spawn = "agent-spawn-ambient-claude-ut-dormant";
+        // An observed/ambient session with no pid: registered, started a tool
+        // call, then the underlying Claude session was closed mid-tool — its
+        // last journaled event is `tool_call_started` (Working) and there is no
+        // pid to probe (this is exactly the live silent_timeout_unprobeable
+        // pile-up). Source of truth = the in-memory tracker state.
+        tracker.apply_event(&event(AgentEventKind::SpawnRequested, Some(spawn), None));
+        tracker.apply_event(&tool_call(spawn, "act_run_shell", "sha256:dormant"));
+        assert_eq!(
+            tracker.unbound_reads(0)[0].state,
+            AgentLifecycleState::Working
+        );
+
+        // Below the ended threshold it is merely Stuck/unprobeable (still
+        // visible), not reaped — no false-positive end-of-life.
+        let base = unix_time_ns_now() / 1_000_000;
+        let just_stuck = base + DEFAULT_STUCK_AFTER_MS + 1;
+        let transitions = tracker.sweep(
+            just_stuck,
+            DEFAULT_STUCK_AFTER_MS,
+            DEFAULT_UNPROBEABLE_DEAD_AFTER_MS,
+            &|_pid| panic!("unprobeable: probe must not run"),
+        );
+        assert_eq!(transitions.len(), 1);
+        assert_eq!(transitions[0].state_to, AgentLifecycleState::Stuck);
+        assert_eq!(transitions[0].reason_code, "silent_timeout_unprobeable");
+
+        // Past the ended threshold it transitions straight to Dead so it leaves
+        // the attention queue and is pruned after retention.
+        let ended = base + DEFAULT_UNPROBEABLE_DEAD_AFTER_MS + 1;
+        let transitions = tracker.sweep(
+            ended,
+            DEFAULT_STUCK_AFTER_MS,
+            DEFAULT_UNPROBEABLE_DEAD_AFTER_MS,
+            &|_pid| panic!("unprobeable: probe must not run"),
+        );
+        assert_eq!(transitions.len(), 1, "{transitions:?}");
+        assert_eq!(transitions[0].state_to, AgentLifecycleState::Dead);
+        assert_eq!(transitions[0].reason_code, "unprobeable_silent_ended");
+        assert!(transitions[0].evidence["silent_ms"].as_u64().unwrap() >= DEFAULT_UNPROBEABLE_DEAD_AFTER_MS);
+
+        // Resurrection guard: the session resumes (appends again) and the
+        // ingester re-registers it. A fresh SpawnRequested must revive the same
+        // anchor rather than be ignored as a post-death straggler.
+        let revived = tracker
+            .apply_event(&event(AgentEventKind::SpawnRequested, Some(spawn), None))
+            .expect("re-registration must revive a dormancy-reaped agent");
+        assert_eq!(revived.state_from, AgentLifecycleState::Dead);
+        assert_eq!(revived.state_to, AgentLifecycleState::Spawning);
     }
 
     /// Physical-row integration: events written through the journal choke
