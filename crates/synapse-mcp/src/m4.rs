@@ -6061,21 +6061,7 @@ fn write_shell_job_status(path: &Path, status: &ActRunShellJobStatus) -> Result<
             }),
         )
     })?;
-    if let Err(error) = fs::remove_file(path)
-        && error.kind() != io::ErrorKind::NotFound
-    {
-        return Err(shell_tool_error(
-            error_codes::STORAGE_WRITE_FAILED,
-            format!("act_run_shell failed to replace shell job status file: {error}"),
-            json!({
-                "code": error_codes::STORAGE_WRITE_FAILED,
-                "job_id": safe_status.job_id,
-                "path": path,
-                "reason": "job_status_replace_failed",
-            }),
-        ));
-    }
-    fs::rename(&tmp_path, path).map_err(|error| {
+    commit_shell_job_status_file(&tmp_path, path, &safe_status.job_id).map_err(|error| {
         shell_tool_error(
             error_codes::STORAGE_WRITE_FAILED,
             format!("act_run_shell failed to commit shell job status file: {error}"),
@@ -6088,6 +6074,61 @@ fn write_shell_job_status(path: &Path, status: &ActRunShellJobStatus) -> Result<
             }),
         )
     })
+}
+
+#[cfg(windows)]
+fn commit_shell_job_status_file(tmp_path: &Path, path: &Path, _job_id: &str) -> io::Result<()> {
+    use windows::{
+        Win32::Foundation::{ERROR_ACCESS_DENIED, ERROR_SHARING_VIOLATION},
+        Win32::Storage::FileSystem::{
+            MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
+        },
+        core::PCWSTR,
+    };
+
+    let tmp_wide = path_to_nul_terminated_wide(tmp_path);
+    let path_wide = path_to_nul_terminated_wide(path);
+    let flags = MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH;
+    let started = Instant::now();
+    loop {
+        // SAFETY: both vectors are NUL-terminated and live for the duration of the call.
+        match unsafe { MoveFileExW(PCWSTR(tmp_wide.as_ptr()), PCWSTR(path_wide.as_ptr()), flags) } {
+            Ok(()) => return Ok(()),
+            Err(error) if started.elapsed() < Duration::from_millis(500) => {
+                let low_code = win32_error_low_code(&error);
+                if low_code == ERROR_ACCESS_DENIED.0 || low_code == ERROR_SHARING_VIOLATION.0 {
+                    std::thread::sleep(Duration::from_millis(5));
+                    continue;
+                }
+                return Err(io::Error::from_raw_os_error(low_code as i32));
+            }
+            Err(error) => {
+                return Err(io::Error::from_raw_os_error(
+                    win32_error_low_code(&error) as i32
+                ));
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
+fn win32_error_low_code(error: &windows::core::Error) -> u32 {
+    (error.code().0 as u32) & 0xFFFF
+}
+
+#[cfg(windows)]
+fn path_to_nul_terminated_wide(path: &Path) -> Vec<u16> {
+    use std::os::windows::ffi::OsStrExt;
+
+    path.as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect()
+}
+
+#[cfg(not(windows))]
+fn commit_shell_job_status_file(tmp_path: &Path, path: &Path, _job_id: &str) -> io::Result<()> {
+    fs::rename(tmp_path, path)
 }
 
 fn read_shell_job_status(path: &Path, job_id: &str) -> Result<ActRunShellJobStatus, ErrorData> {
@@ -9806,6 +9847,98 @@ mod tests {
         assert_eq!(read_status.request_sha256, request_sha);
         assert!(read_status.args_sha256.len() == 64);
         assert!(read_status.command_line_sha256.len() == 64);
+    }
+
+    #[test]
+    fn shell_job_status_rewrite_has_no_missing_poll_window() {
+        use std::{
+            sync::{
+                Arc,
+                atomic::{AtomicBool, AtomicUsize, Ordering},
+            },
+            thread,
+        };
+
+        let temp = tempfile::TempDir::new()
+            .unwrap_or_else(|error| panic!("create temp shell status dir: {error}"));
+        let paths = ShellJobPaths {
+            job_dir: temp.path().to_path_buf(),
+            stdout_path: temp.path().join("stdout.log"),
+            stderr_path: temp.path().join("stderr.log"),
+            status_path: temp.path().join("status.json"),
+            request_path: temp.path().join("request.json"),
+        };
+        let params = ActRunShellStartParams {
+            command: "powershell.exe".to_owned(),
+            args: vec![
+                "-NoProfile".to_owned(),
+                "-Command".to_owned(),
+                "Write-Output issue1012-status-race".to_owned(),
+            ],
+            working_dir: None,
+            env: BTreeMap::new(),
+            timeout_ms: None,
+            job_id: Some("issue1012-status-race".to_owned()),
+        };
+        let authorization = RunShellAuthorization {
+            command_line: shell_command_line_from_parts(&params.command, &params.args),
+            matched_pattern: "__any_permitted__".to_owned(),
+        };
+        let request_sha = run_shell_start_request_sha256(&params)
+            .unwrap_or_else(|error| panic!("start request should hash: {error}"));
+        let mut status = shell_job_status_record(
+            "issue1012-status-race",
+            "running",
+            &params,
+            &paths,
+            &request_sha,
+            &authorization,
+            "2026-06-15T00:00:00Z".to_owned(),
+            Some(4242),
+            None,
+        );
+        write_shell_job_status(&paths.status_path, &status)
+            .unwrap_or_else(|error| panic!("initial status should write: {error}"));
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let read_errors = Arc::new(AtomicUsize::new(0));
+        let status_path = paths.status_path.clone();
+        let reader_stop = Arc::clone(&stop);
+        let reader_errors = Arc::clone(&read_errors);
+        let reader = thread::spawn(move || {
+            while !reader_stop.load(Ordering::Relaxed) {
+                if read_shell_job_status(&status_path, "issue1012-status-race").is_err() {
+                    reader_errors.fetch_add(1, Ordering::Relaxed);
+                }
+                thread::yield_now();
+            }
+        });
+
+        for iteration in 0..1_000 {
+            status.duration_ms = Some(iteration);
+            status.status = if iteration % 2 == 0 {
+                "running".to_owned()
+            } else {
+                "finalizing".to_owned()
+            };
+            write_shell_job_status(&paths.status_path, &status)
+                .unwrap_or_else(|error| panic!("status rewrite should commit: {error}"));
+        }
+
+        stop.store(true, Ordering::Relaxed);
+        reader
+            .join()
+            .unwrap_or_else(|error| panic!("reader thread should join: {error:?}"));
+        let final_readback = read_shell_job_status(&paths.status_path, "issue1012-status-race")
+            .unwrap_or_else(|error| panic!("final status should read: {error}"));
+
+        println!(
+            "readback=act_run_shell_status edge=status_replace_race before=1000_rewrites after=read_errors:{} final_status:{}",
+            read_errors.load(Ordering::Relaxed),
+            final_readback.status
+        );
+        assert_eq!(read_errors.load(Ordering::Relaxed), 0);
+        assert_eq!(final_readback.job_id, "issue1012-status-race");
     }
 
     #[test]
