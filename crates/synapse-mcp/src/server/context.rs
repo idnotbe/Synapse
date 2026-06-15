@@ -633,7 +633,9 @@ impl SynapseService {
                     "error",
                 )
                 .with_channel("dashboard")
-                .with_error(super::command_audit::command_audit_error_from_error_data(error)),
+                .with_error(
+                    super::command_audit::command_audit_error_from_error_data(error),
+                ),
             )?,
         };
         result
@@ -1300,18 +1302,6 @@ pub(super) fn mcp_session_id_from_request_context(
     request_context: &RequestContext<RoleServer>,
 ) -> Result<Option<String>, ErrorData> {
     mcp_session_id_from_extensions(&request_context.extensions)
-}
-
-pub(super) fn optional_mcp_session_id_from_request_context(
-    request_context: &RequestContext<RoleServer>,
-) -> Result<Option<String>, ErrorData> {
-    let Some(parts) = request_context
-        .extensions
-        .get::<axum::http::request::Parts>()
-    else {
-        return Ok(crate::http::current_mcp_session_id());
-    };
-    mcp_session_id_from_headers(&parts.headers)
 }
 
 fn mcp_session_id_from_extensions(
