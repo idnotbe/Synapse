@@ -1391,6 +1391,7 @@ struct DashboardStateResponse {
     generated_at_unix_ms: u64,
     bind_addr: String,
     token_policy: &'static str,
+    dashboard_assets: DashboardPanel,
     auth: DashboardPanel,
     daemon: DashboardPanel,
     sessions: DashboardPanel,
@@ -1418,6 +1419,14 @@ struct DashboardPanel {
     data: serde_json::Value,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
+}
+
+#[derive(Serialize)]
+struct DashboardAssetSurface {
+    schema_version: u32,
+    source_of_truth: &'static str,
+    js_file: &'static str,
+    css_file: &'static str,
 }
 
 impl DashboardPanel {
@@ -2191,6 +2200,15 @@ async fn dashboard_state(State(state): State<HttpState>, headers: HeaderMap) -> 
         generated_at_unix_ms: dashboard_unix_time_ms(),
         bind_addr: state.bind_addr.to_string(),
         token_policy: "dashboard responses never include bearer tokens",
+        dashboard_assets: DashboardPanel::ok(
+            "embedded dashboard dist assets",
+            DashboardAssetSurface {
+                schema_version: 1,
+                source_of_truth: "synapse-mcp embedded dashboard dist asset constants",
+                js_file: DASHBOARD_JS_FILE,
+                css_file: DASHBOARD_CSS_FILE,
+            },
+        ),
         auth: DashboardPanel::ok("CF_KV dashboard-auth/v1", state.dashboard_auth.snapshot()),
         daemon: DashboardPanel::ok("health", &health),
         sessions,
@@ -3784,11 +3802,11 @@ fn dashboard_unix_time_ms() -> u64 {
 }
 
 const DASHBOARD_CSS_FILE: &str = "dashboard-DGTECjYz.css";
-const DASHBOARD_JS_FILE: &str = "dashboard-BJ9vpCUd.js";
+const DASHBOARD_JS_FILE: &str = "dashboard-B67Ki1g-.js";
 const DASHBOARD_HTML: &str = include_str!("../../../../dashboard/dist/index.html");
 const DASHBOARD_CSS: &str =
     include_str!("../../../../dashboard/dist/assets/dashboard-DGTECjYz.css");
-const DASHBOARD_JS: &str = include_str!("../../../../dashboard/dist/assets/dashboard-BJ9vpCUd.js");
+const DASHBOARD_JS: &str = include_str!("../../../../dashboard/dist/assets/dashboard-B67Ki1g-.js");
 #[cfg(test)]
 const DASHBOARD_APP_SOURCE: &str = include_str!("../../../../dashboard/src/app.tsx");
 #[cfg(test)]
@@ -4104,6 +4122,17 @@ mod tests {
         assert!(!DASHBOARD_HTML.contains("href=\"http://"));
         assert!(!DASHBOARD_HTML.contains("href=\"https://"));
         assert!(!DASHBOARD_HTML.contains("<script>"));
+    }
+
+    #[test]
+    fn dashboard_bundle_contains_asset_reload_contract() {
+        assert!(DASHBOARD_STATE_SOURCE.contains("dashboardAssetReloadDecision"));
+        assert!(DASHBOARD_STATE_SOURCE.contains("invalid_server_asset_id"));
+        assert!(DASHBOARD_STATE_SOURCE.contains("_synapse_dashboard_asset"));
+        assert!(DASHBOARD_APP_SOURCE.contains("claimDashboardAssetReload"));
+        assert!(DASHBOARD_JS.contains("_synapse_dashboard_asset"));
+        assert!(DASHBOARD_JS.contains("synapse.dashboard.asset-reload"));
+        assert!(DASHBOARD_JS.contains("invalid_server_asset_id"));
     }
 
     #[test]

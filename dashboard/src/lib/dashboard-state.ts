@@ -12,6 +12,7 @@ export interface DashboardState {
   generated_at_unix_ms: number;
   bind_addr: string;
   token_policy: string;
+  dashboard_assets?: DashboardPanel<DashboardAssetSurface>;
   auth: DashboardPanel;
   daemon: DashboardPanel;
   sessions: DashboardPanel;
@@ -30,6 +31,27 @@ export interface DashboardState {
   agent_transcripts: DashboardPanel;
   hygiene: DashboardPanel;
   local_models: DashboardPanel;
+}
+
+export interface DashboardAssetSurface {
+  schema_version: number;
+  source_of_truth: string;
+  js_file: string;
+  css_file: string;
+}
+
+export interface DashboardAssetReloadDecision {
+  shouldReload: boolean;
+  reason:
+    | "asset_match"
+    | "asset_mismatch"
+    | "missing_server_asset_id"
+    | "invalid_server_asset_id"
+    | "missing_client_asset_id"
+    | "state_unavailable";
+  expectedJsFile?: string;
+  currentJsFile?: string;
+  reloadKey?: string;
 }
 
 export interface AgentSummary {
@@ -692,6 +714,67 @@ export async function fetchDashboardState(): Promise<DashboardState> {
     throw new Error(`dashboard state failed: ${response.status}`);
   }
   return response.json();
+}
+
+const DASHBOARD_ASSET_RELOAD_PARAM = "_synapse_dashboard_asset";
+const DASHBOARD_ASSET_RELOAD_SESSION_KEY = "synapse.dashboard.asset-reload";
+
+function dashboardLoadedJsFile(): string {
+  if (typeof document === "undefined") return "";
+  for (const script of Array.from(document.scripts)) {
+    const src = script.getAttribute("src") || "";
+    const match = src.match(/(?:^|\/)(dashboard-[^/?#]+\.js)(?:[?#].*)?$/);
+    if (match?.[1]) return match[1];
+  }
+  return "";
+}
+
+function isDashboardJsAssetFile(value: string): boolean {
+  return /^dashboard-[A-Za-z0-9_-]+\.js$/.test(value);
+}
+
+export function dashboardAssetReloadDecision(state?: DashboardState): DashboardAssetReloadDecision {
+  if (!state) return { shouldReload: false, reason: "state_unavailable" };
+  const expectedJsFile = rawText(asRecord(state.dashboard_assets?.data).js_file);
+  if (!expectedJsFile) return { shouldReload: false, reason: "missing_server_asset_id" };
+  if (!isDashboardJsAssetFile(expectedJsFile)) {
+    return { shouldReload: false, reason: "invalid_server_asset_id", expectedJsFile };
+  }
+  const currentJsFile = dashboardLoadedJsFile();
+  if (!currentJsFile) {
+    return { shouldReload: false, reason: "missing_client_asset_id", expectedJsFile };
+  }
+  if (currentJsFile === expectedJsFile) {
+    return { shouldReload: false, reason: "asset_match", expectedJsFile, currentJsFile };
+  }
+  return {
+    shouldReload: true,
+    reason: "asset_mismatch",
+    expectedJsFile,
+    currentJsFile,
+    reloadKey: `${currentJsFile}->${expectedJsFile}`
+  };
+}
+
+export function claimDashboardAssetReload(decision: DashboardAssetReloadDecision): boolean {
+  if (!decision.shouldReload || !decision.reloadKey || !decision.expectedJsFile) return false;
+  if (typeof window === "undefined") return false;
+  const url = new URL(window.location.href);
+  if (url.searchParams.get(DASHBOARD_ASSET_RELOAD_PARAM) === decision.expectedJsFile) return false;
+  try {
+    const previous = window.sessionStorage.getItem(DASHBOARD_ASSET_RELOAD_SESSION_KEY);
+    if (previous === decision.reloadKey) return false;
+    window.sessionStorage.setItem(DASHBOARD_ASSET_RELOAD_SESSION_KEY, decision.reloadKey);
+  } catch {
+    // The URL marker below still bounds reloads if sessionStorage is unavailable.
+  }
+  return true;
+}
+
+export function dashboardAssetReloadUrl(expectedJsFile: string): string {
+  const url = new URL(window.location.href);
+  url.searchParams.set(DASHBOARD_ASSET_RELOAD_PARAM, expectedJsFile);
+  return url.toString();
 }
 
 export function panelData<T = Record<string, unknown>>(panel?: DashboardPanel): T {

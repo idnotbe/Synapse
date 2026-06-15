@@ -60,6 +60,9 @@ import {
 import {
   buildAgents,
   buildToolCalls,
+  claimDashboardAssetReload,
+  dashboardAssetReloadDecision,
+  dashboardAssetReloadUrl,
   decideApproval,
   deleteDashboardView,
   fetchAuditQuery,
@@ -243,6 +246,13 @@ export function App() {
     }
     icon.href = commandMarkUrl;
   }, []);
+
+  useEffect(() => {
+    const decision = dashboardAssetReloadDecision(query.data);
+    if (!claimDashboardAssetReload(decision)) return;
+    document.title = "Synapse Command Center";
+    window.location.replace(dashboardAssetReloadUrl(decision.expectedJsFile || ""));
+  }, [query.data]);
 
   const agents = useMemo(() => buildAgents(query.data), [query.data]);
   const toolCalls = useMemo(() => buildToolCalls(query.data), [query.data]);
