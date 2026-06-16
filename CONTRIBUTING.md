@@ -45,7 +45,17 @@ the roadmap (see the README "What's left on the docket" section).
    cargo clippy --workspace --all-targets
    cargo test --workspace
    ```
-3. **Iterate with fast builds.** Use `cargo check` (~15 s) or `cargo build`
+3. **Enable the local pre-push gate (once per clone):**
+   ```bash
+   git config core.hooksPath .githooks
+   ```
+   This repo uses no CI (GitHub Actions are forbidden), so `.githooks/pre-push`
+   is the automated backstop: it runs `cargo clippy --workspace --all-targets`
+   before any push that touches `.rs`/`Cargo.*` and blocks the push on failure
+   (it skips docs-only pushes). It is a fast compile+lint gate, not a substitute
+   for `cargo test --workspace` or manual verification. Bypass only for a genuine
+   non-compiling emergency with `git push --no-verify`.
+4. **Iterate with fast builds.** Use `cargo check` (~15 s) or `cargo build`
    (dev, ~45 s incremental) for the edit loop. Run `cargo build --release` ONLY
    to ship/run the real `synapse-mcp.exe` daemon — never as compile feedback.
    See [docs/BUILD-AND-MAINTENANCE.md](docs/BUILD-AND-MAINTENANCE.md) for the
