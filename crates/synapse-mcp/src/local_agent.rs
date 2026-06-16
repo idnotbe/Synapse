@@ -612,7 +612,7 @@ impl Runner {
         let result = match self
             .mcp
             .peer()
-            .call_tool(CallToolRequestParams::new(tool_name.clone()).with_arguments(args))
+            .call_tool(CallToolRequestParams::new(tool_name.clone()).with_arguments(args.clone()))
             .await
         {
             Ok(result) => result,
@@ -684,9 +684,15 @@ impl Runner {
             }
         };
         let is_error = result.is_error.unwrap_or(false);
-        let result_value = tool_result_value(&result);
+        let mut result_value = tool_result_value(&result);
         self.fail_if_tool_result_contains_control_shutdown(&tool_name, &result_value)
             .await?;
+        if !is_error && tool_name == "workspace_put" {
+            let readback = readback_workspace_put(self.mcp.peer(), &args)
+                .await
+                .context("workspace_put post-write readback")?;
+            result_value = attach_workspace_put_readback(result_value, readback);
+        }
         let result_text = bounded_result_text(&result_value);
         self.messages.push(json!({
             "role": "tool",
@@ -1083,16 +1089,17 @@ impl Runner {
     }
 
     async fn chat_completion(&self) -> anyhow::Result<ChatCompletion> {
+        let stream = should_stream(self.cli.no_stream, self.tool_exposure);
         let mut body = json!({
             "model": self.registry.model_id,
             "messages": self.messages,
             "tools": self.openai_tools,
             "tool_choice": "auto",
             "temperature": 0,
-            "stream": !self.cli.no_stream,
+            "stream": stream,
         });
         apply_runtime_preset(&self.registry, &mut body);
-        if !self.cli.no_stream {
+        if stream {
             body["stream_options"] = json!({"include_usage": true});
         }
         let mut request = self.http.post(self.endpoint_url.clone()).json(&body);
@@ -1108,7 +1115,7 @@ impl Runner {
             let body = response.text().await.unwrap_or_default();
             bail!("MODEL_ENDPOINT_UNREACHABLE: endpoint returned HTTP {status}: {body}");
         }
-        if self.cli.no_stream {
+        if !stream {
             let text = response.text().await.context("read non-stream response")?;
             parse_non_stream_response(&text)
         } else {
@@ -1313,6 +1320,82 @@ async fn call_mcp_tool_json(
         );
     }
     Ok(tool_result_value(&result))
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct WorkspacePutReadbackPlan {
+    arguments: JsonObject,
+    expected_value: Value,
+}
+
+async fn readback_workspace_put(
+    peer: &rmcp::service::Peer<rmcp::service::RoleClient>,
+    put_args: &JsonObject,
+) -> anyhow::Result<Value> {
+    let plan = workspace_put_readback_plan(put_args)?;
+    let readback = call_mcp_tool_json(peer, "workspace_get", plan.arguments.clone()).await?;
+    workspace_put_readback_record(&plan, &readback)
+}
+
+fn workspace_put_readback_plan(put_args: &JsonObject) -> anyhow::Result<WorkspacePutReadbackPlan> {
+    let key = put_args
+        .get("key")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow::anyhow!("WORKSPACE_PUT_READBACK_ARGS_INVALID: missing key"))?;
+    let expected_value = put_args
+        .get("value")
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("WORKSPACE_PUT_READBACK_ARGS_INVALID: missing value"))?;
+    let mut arguments = Map::new();
+    arguments.insert("key".to_owned(), Value::String(key.to_owned()));
+    if let Some(run_id) = put_args.get("run_id").and_then(Value::as_str) {
+        arguments.insert("run_id".to_owned(), Value::String(run_id.to_owned()));
+    }
+    Ok(WorkspacePutReadbackPlan {
+        arguments,
+        expected_value,
+    })
+}
+
+fn workspace_put_readback_record(
+    plan: &WorkspacePutReadbackPlan,
+    readback: &Value,
+) -> anyhow::Result<Value> {
+    let actual_value = readback
+        .get("entry")
+        .and_then(|entry| entry.get("value"))
+        .cloned()
+        .ok_or_else(|| {
+            anyhow::anyhow!("WORKSPACE_PUT_READBACK_INVALID: workspace_get missing entry.value")
+        })?;
+    if actual_value != plan.expected_value {
+        bail!(
+            "WORKSPACE_PUT_READBACK_MISMATCH: expected {}, got {}",
+            plan.expected_value,
+            actual_value
+        );
+    }
+    Ok(json!({
+        "tool": "workspace_get",
+        "arguments": plan.arguments.clone(),
+        "expected_value": plan.expected_value.clone(),
+        "actual_value": actual_value,
+        "matched": true,
+        "storage_readback": readback.get("storage_readback").cloned().unwrap_or(Value::Null),
+    }))
+}
+
+fn attach_workspace_put_readback(mut result_value: Value, readback: Value) -> Value {
+    match &mut result_value {
+        Value::Object(map) => {
+            map.insert("post_write_readback".to_owned(), readback);
+            result_value
+        }
+        _ => json!({
+            "tool_result": result_value,
+            "post_write_readback": readback,
+        }),
+    }
 }
 
 fn tool_result_value(result: &rmcp::model::CallToolResult) -> Value {
@@ -1528,6 +1611,10 @@ fn registry_runtime_preset(row: &LocalModelRegistryRow) -> &str {
         .unwrap_or("open_ai_compatible")
 }
 
+fn should_stream(cli_no_stream: bool, tool_exposure: ToolExposure) -> bool {
+    !cli_no_stream && tool_exposure != ToolExposure::Internalized
+}
+
 fn apply_runtime_preset(row: &LocalModelRegistryRow, body: &mut Value) {
     match registry_runtime_preset(row) {
         "deepseek_v4_flash_non_thinking" => {
@@ -1639,7 +1726,7 @@ fn assistant_message(completion: &ChatCompletion) -> Value {
             .collect::<Vec<_>>();
         json!({
             "role": "assistant",
-            "content": if completion.content.is_empty() { Value::Null } else { Value::String(completion.content.clone()) },
+            "content": completion.content,
             "tool_calls": tool_calls,
         })
     }
@@ -1916,6 +2003,7 @@ fn local_agent_spawn_root_dir() -> anyhow::Result<PathBuf> {
 /// approach is therefore retired; this prompt only governs behavior.
 fn system_prompt(tool_exposure: ToolExposure, tools: &[Tool]) -> String {
     const BASE: &str = "Synapse agent. Use the attached MCP tools to inspect and change state.\nRules:\n- Never invent tool results.\n- After a tool stores an artifact, read it back to confirm before reporting success.\n- Summarize only after the required tool calls succeed.";
+    const INTERNALIZED_BASE: &str = "Synapse agent. Return no prose when a tool call is needed.\nRules:\n- Emit exactly one tool call.\n- Use exact argument keys.\n- Never invent tool results.\n- After a tool stores an artifact, read it back before reporting success.";
     match tool_exposure {
         // Direct: the model holds every tool schema natively, so it just needs
         // to know they are there and callable by name.
@@ -1939,7 +2027,7 @@ fn system_prompt(tool_exposure: ToolExposure, tools: &[Tool]) -> String {
         // Internalized: the surface is in the weights and the model was trained
         // on bare user turns — keep the prompt to behavioral rules only, with no
         // tool framing, to stay on-distribution and near-empty.
-        ToolExposure::Internalized => BASE.to_string(),
+        ToolExposure::Internalized => INTERNALIZED_BASE.to_string(),
     }
 }
 
@@ -2148,6 +2236,93 @@ mod tests {
     }
 
     #[test]
+    fn assistant_tool_call_message_keeps_string_content_for_chat_templates() {
+        let completion = ChatCompletion {
+            content: String::new(),
+            tool_calls: vec![OpenAiToolCall {
+                id: "call-1".to_owned(),
+                name: "workspace_get".to_owned(),
+                arguments: r#"{"key":"probe"}"#.to_owned(),
+            }],
+            ..ChatCompletion::default()
+        };
+        let message = assistant_message(&completion);
+        assert_eq!(message["role"], "assistant");
+        assert_eq!(message["content"], "");
+        assert!(message["content"].is_string());
+        assert_eq!(
+            message["tool_calls"][0]["function"]["name"],
+            "workspace_get"
+        );
+    }
+
+    #[test]
+    fn workspace_put_readback_plan_uses_exact_key_and_run_id() -> anyhow::Result<()> {
+        let put_args: JsonObject = serde_json::from_value(json!({
+            "run_id": "issue1053",
+            "key": "known-key",
+            "value": {"expected": 4, "actual": 4},
+        }))?;
+        let plan = workspace_put_readback_plan(&put_args)?;
+        assert_eq!(plan.arguments["run_id"], "issue1053");
+        assert_eq!(plan.arguments["key"], "known-key");
+        assert_eq!(plan.expected_value["actual"], 4);
+        Ok(())
+    }
+
+    #[test]
+    fn workspace_put_readback_record_fails_on_value_mismatch() -> anyhow::Result<()> {
+        let put_args: JsonObject = serde_json::from_value(json!({
+            "run_id": "issue1053",
+            "key": "known-key",
+            "value": {"expected": 4, "actual": 4},
+        }))?;
+        let plan = workspace_put_readback_plan(&put_args)?;
+        let mismatch = json!({
+            "entry": {
+                "value": {"expected": 4, "actual": 5},
+            },
+            "storage_readback": {
+                "value_sha256": "sha256:synthetic",
+            },
+        });
+        let error = workspace_put_readback_record(&plan, &mismatch)
+            .expect_err("mismatched readback must fail");
+        assert!(
+            error
+                .to_string()
+                .contains("WORKSPACE_PUT_READBACK_MISMATCH")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn workspace_put_readback_record_preserves_storage_hash() -> anyhow::Result<()> {
+        let put_args: JsonObject = serde_json::from_value(json!({
+            "run_id": "issue1053",
+            "key": "known-key",
+            "value": {"expected": 4, "actual": 4},
+        }))?;
+        let plan = workspace_put_readback_plan(&put_args)?;
+        let readback = json!({
+            "entry": {
+                "value": {"expected": 4, "actual": 4},
+            },
+            "storage_readback": {
+                "value_sha256": "sha256:synthetic",
+            },
+        });
+        let record = workspace_put_readback_record(&plan, &readback)?;
+        assert_eq!(record["matched"], true);
+        assert_eq!(record["actual_value"]["actual"], 4);
+        assert_eq!(
+            record["storage_readback"]["value_sha256"],
+            "sha256:synthetic"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn tool_exposure_routes_when_provider_tool_cap_is_lower_than_synapse_surface() {
         let mut row = test_local_agent_row();
         row.max_tools = Some(128);
@@ -2167,7 +2342,18 @@ mod tests {
         // The behavioral prompt carries no tool framing (no catalog meta-tools).
         let prompt = system_prompt(ToolExposure::Internalized, &[]);
         assert!(!prompt.contains(SYNAPSE_TOOL_CATALOG));
+        assert!(!prompt.contains("attached MCP tools"));
         assert!(!prompt.contains("attached directly"));
+        assert!(prompt.contains("Return no prose when a tool call is needed"));
+        assert!(prompt.contains("Emit exactly one tool call"));
+        assert!(prompt.contains("exact argument keys"));
+        // Internalized serving endpoints are validated through non-streaming
+        // probes and may return JSON even when asked to stream; keep the runner
+        // on the same non-streaming path so tool_calls are parsed.
+        assert!(!should_stream(false, ToolExposure::Internalized));
+        assert!(!should_stream(true, ToolExposure::Internalized));
+        assert!(should_stream(false, ToolExposure::Direct));
+        assert!(!should_stream(true, ToolExposure::Direct));
         // The request body for an internalized session must drop tools+choice.
         let mut body = json!({"tools": [], "tool_choice": "auto", "model": "x"});
         apply_runtime_preset(&row, &mut body);
