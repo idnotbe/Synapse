@@ -33,6 +33,7 @@ const NORMAL_ALLOWED_EXACT: &[&str] = &[
     "agent_pause",
     "agent_query",
     "agent_receipts",
+    "agent_respawn",
     "agent_resume",
     "agent_send",
     "agent_send_broadcast",
