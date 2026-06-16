@@ -1749,7 +1749,9 @@ mod scope_gate_tests {
 
         let error = match service.ensure_supported_use_allows_action("act_run_shell") {
             Ok(value) => {
-                anyhow::bail!("forced no-perception must fail closed even for non-foreground tools, got {value:?}")
+                anyhow::bail!(
+                    "forced no-perception must fail closed even for non-foreground tools, got {value:?}"
+                )
             }
             Err(error) => error,
         };

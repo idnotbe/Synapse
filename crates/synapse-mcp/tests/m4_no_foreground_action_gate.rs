@@ -1,13 +1,14 @@
-//! End-to-end FSV for #1061: the background daemon must serve non-foreground
-//! action-gated tools even when no window is focused (locked screen, desktop
-//! focus, unattended session), while foreground-driving tools stay fail-closed.
+//! End-to-end regression coverage for #1061: the background daemon must serve
+//! non-foreground action-gated tools even when no window is focused (locked
+//! screen, desktop focus, unattended session), while foreground-driving tools
+//! stay fail-closed.
 //!
 //! These tests drive the REAL daemon over the REAL stdio MCP transport with the
 //! `SYNAPSE_MCP_FORCE_NO_FOREGROUND` fixture, which reproduces the actual
-//! `GetForegroundWindow returned null` condition. Full-state verification reads
-//! the daemon's real persisted reflex registry (`reflex_list`), not just the
-//! tool return value. Complements the in-module gate unit tests with proof over
-//! the real transport.
+//! `GetForegroundWindow returned null` condition. The test reads the daemon's
+//! real persisted reflex registry (`reflex_list`), not just the tool return
+//! value. Complements the in-module gate unit tests with proof over the real
+//! transport. Manual FSV is still required before issue closure.
 
 use anyhow::{Context, ensure};
 use serde_json::{Value, json};
@@ -62,7 +63,7 @@ async fn reflex_register_succeeds_with_no_foreground_window() -> anyhow::Result<
         .context("reflex_id missing from registration response")?
         .to_owned();
 
-    // FULL-STATE VERIFICATION: the reflex is physically in the registry.
+    // Separate state readback: the reflex is physically in the registry.
     let after = client.tools_call("reflex_list", json!({})).await?;
     let after_text = serde_json::to_string(&after)?;
     ensure!(
