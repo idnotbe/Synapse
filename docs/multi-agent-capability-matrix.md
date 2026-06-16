@@ -56,6 +56,7 @@ The model-selection overlay is a checked extension of the capability matrix. It 
 | agent_send | normal_agent | no | no | no | no | none - default-safe |
 | agent_send_broadcast | normal_agent | no | no | no | no | none - default-safe |
 | agent_stats | normal_agent | no | no | no | no | none - default-safe |
+| agent_steer | normal_agent | no | no | no | no | none - default-safe |
 | agent_template_delete | normal_agent | no | no | no | no | none - default-safe |
 | agent_template_get | normal_agent | no | no | no | no | none - default-safe |
 | agent_template_list | normal_agent | no | no | no | no | none - default-safe |
@@ -147,6 +148,7 @@ Research basis:
 | agent_send | session control | current MCP session id plus named live recipient session id | CF_KV durable recipient-prefix write with immediate exact-row readback and Notify wake | no foreground lease | control | none (#795) | session_list recipient lifecycle plus CF_KV row key/hash/depth after write |
 | agent_send_broadcast | session control | current MCP session id plus a broadcast selector over the live session registry | CF_KV durable per-recipient write fan-out returning a per-recipient delivered or skipped outcome | no foreground lease | control | none (#908) | session_list recipient lifecycle plus CF_KV rows written per recipient |
 | agent_stats | session control | the agent event journal | journal-authoritative metrics rollup with exact nearest-rank percentiles scanning CF_AGENT_EVENTS | no foreground lease | control | none (#903) | CF_AGENT_EVENTS rows plus the scanned_rows equals events_total readback |
+| agent_steer | session control | target agent MCP session id or agent-spawn-* id | resolves the agent in the live session registry then injects an instruction over the cooperative steering mailbox (durable steer row); codex app-server inject, claude stream-json stdin, and PTY stdin channels are reported unavailable, never faked; an optional read receipt turns delivery into provable consumption | no foreground lease | control | none (#905); PTY stdin channel tracked by #902 | CF_KV steer mailbox row with the byte-identical instruction, CF_AGENT_EVENTS message_sent row, and CF_ACTION_LOG command-audit rows |
 | agent_template_delete | session control | template id namespaced in CF_KV | CF_KV template-store row delete with flush and readback | no foreground lease | control | none (#909) | CF_KV template row absent after delete |
 | agent_template_get | session control | template id namespaced in CF_KV | CF_KV template-store row read | no foreground lease | control | none (#909) | CF_KV template row returned |
 | agent_template_list | session control | CF_KV template-store prefix | CF_KV template-store prefix scan | no foreground lease | control | none (#909) | CF_KV template rows returned |

@@ -7,7 +7,7 @@ use synapse_test_utils::stdio_mcp_client::StdioMcpClient;
 const MATRIX_DOC: &str = include_str!("../../../docs/multi-agent-capability-matrix.md");
 const TOOL_PROFILES_SOURCE: &str = include_str!("../src/server/tool_profiles.rs");
 
-const EXPECTED_MATRIX_TOOLS: [&str; 81] = [
+const EXPECTED_MATRIX_TOOLS: [&str; 82] = [
     "act_click",
     "act_clipboard",
     "act_combo",
@@ -40,6 +40,7 @@ const EXPECTED_MATRIX_TOOLS: [&str; 81] = [
     "agent_send",
     "agent_send_broadcast",
     "agent_stats",
+    "agent_steer",
     "agent_template_delete",
     "agent_template_get",
     "agent_template_list",

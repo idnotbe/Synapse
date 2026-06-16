@@ -35,6 +35,7 @@ const NORMAL_ALLOWED_EXACT: &[&str] = &[
     "agent_send",
     "agent_send_broadcast",
     "agent_stats",
+    "agent_steer",
     "agent_wait",
     "approval_decide",
     "approval_gate",
