@@ -79,6 +79,8 @@ const TOOL_AGENT_INTERRUPT: &str = "agent_interrupt";
 const TOOL_AGENT_KILL: &str = "agent_kill";
 const TOOL_FLEET_STOP: &str = "fleet_stop";
 const TOOL_AGENT_STEER: &str = "agent_steer";
+const TOOL_AGENT_PAUSE: &str = "agent_pause";
+const TOOL_AGENT_RESUME: &str = "agent_resume";
 
 /// TTL for a cooperative steering instruction. Long enough that an agent busy
 /// in a multi-minute turn still sees it when it next drains its inbox, short
@@ -344,6 +346,45 @@ pub struct AgentSteerResponse {
     pub process: ProcessReadback,
 }
 
+#[derive(Clone, Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AgentPauseParams {
+    /// The agent to pause/resume: its own MCP session id, or `agent-spawn-*` id.
+    pub session_id: String,
+}
+
+/// Shared response for `agent_pause` and `agent_resume`. Both freeze/thaw the
+/// agent's whole owned process tree and prove the outcome by reading the OS
+/// thread table back, so the response shape is identical.
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AgentSuspendResponse {
+    pub requested_id: String,
+    pub session_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub spawn_id: Option<String>,
+    pub agent_kind: String,
+    pub lifecycle: String,
+    pub resolution_source: String,
+    /// `pause` or `resume`.
+    pub operation: String,
+    /// Whole tree fully suspended BEFORE this call (physical thread-table read).
+    pub was_suspended_before: bool,
+    /// Whole tree fully suspended AFTER this call (physical thread-table read).
+    pub is_suspended_after: bool,
+    /// True when the call changed nothing because the tree was already in the
+    /// requested state — pause/resume are idempotent and never stack suspends.
+    pub no_op: bool,
+    /// True when the call reached the requested terminal state (paused for
+    /// pause, running for resume), judged by the thread-table readback.
+    pub ok: bool,
+    /// Physical suspend/resume readback (per-pid thread suspend counts after).
+    pub suspend: crate::m4::OwnedProcessSuspendReadback,
+    /// The `StateChanged` journal row, written only when the state changed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub journal_event: Option<JournalReadback>,
+}
+
 // ----------------------------------------------------------------------------
 // Resolved-target model
 // ----------------------------------------------------------------------------
@@ -441,6 +482,40 @@ impl SynapseService {
         );
         let caller = super::context::mcp_session_id_from_request_context(&request_context)?;
         self.agent_steer_impl(params.0, caller.as_deref()).map(Json)
+    }
+
+    #[tool(
+        description = "Pause (freeze) ONE running spawned agent (#906) by its MCP session id or agent-spawn-* id. Suspends every process in the agent's owned tree with ntdll NtSuspendProcess (race-free, the PsSuspend/py-spy approach), then reads the OS thread table back to PROVE every thread is suspended. Idempotent: an already-paused tree is a no-op (never stacks suspend counts). Resume with agent_resume. Errors if the tree cannot be fully suspended."
+    )]
+    pub async fn agent_pause(
+        &self,
+        params: Parameters<AgentPauseParams>,
+        request_context: RequestContext<RoleServer>,
+    ) -> Result<Json<AgentSuspendResponse>, ErrorData> {
+        tracing::info!(
+            code = "MCP_TOOL_INVOCATION",
+            kind = "agent_pause",
+            "tool.invocation kind=agent_pause"
+        );
+        let caller = super::context::mcp_session_id_from_request_context(&request_context)?;
+        self.agent_pause_impl(params.0, caller.as_deref()).map(Json)
+    }
+
+    #[tool(
+        description = "Resume (thaw) ONE paused spawned agent (#906) by its MCP session id or agent-spawn-* id. Resumes every process in the agent's owned tree with ntdll NtResumeProcess, then reads the OS thread table back to PROVE every thread is running again. Idempotent: an already-running tree is a no-op. Errors if the tree cannot be fully resumed."
+    )]
+    pub async fn agent_resume(
+        &self,
+        params: Parameters<AgentPauseParams>,
+        request_context: RequestContext<RoleServer>,
+    ) -> Result<Json<AgentSuspendResponse>, ErrorData> {
+        tracing::info!(
+            code = "MCP_TOOL_INVOCATION",
+            kind = "agent_resume",
+            "tool.invocation kind=agent_resume"
+        );
+        let caller = super::context::mcp_session_id_from_request_context(&request_context)?;
+        self.agent_resume_impl(params.0, caller.as_deref()).map(Json)
     }
 }
 
@@ -1109,6 +1184,197 @@ impl SynapseService {
                 row_key: None,
             },
         }
+    }
+
+    // ------------------------------------------------------------------
+    // agent_pause / agent_resume (#906)
+    // ------------------------------------------------------------------
+
+    fn agent_pause_impl(
+        &self,
+        params: AgentPauseParams,
+        caller_session: Option<&str>,
+    ) -> Result<AgentSuspendResponse, ErrorData> {
+        self.suspend_resume_core(params, caller_session, true)
+    }
+
+    fn agent_resume_impl(
+        &self,
+        params: AgentPauseParams,
+        caller_session: Option<&str>,
+    ) -> Result<AgentSuspendResponse, ErrorData> {
+        self.suspend_resume_core(params, caller_session, false)
+    }
+
+    /// Shared suspend/resume path. `pause=true` freezes the tree, `pause=false`
+    /// thaws it. The OS thread table is the source of truth for the before/after
+    /// state, the operation is idempotent (never stacks suspend counts), and a
+    /// `StateChanged` journal row is written only when the state actually changed.
+    fn suspend_resume_core(
+        &self,
+        params: AgentPauseParams,
+        caller_session: Option<&str>,
+        pause: bool,
+    ) -> Result<AgentSuspendResponse, ErrorData> {
+        let tool = if pause {
+            TOOL_AGENT_PAUSE
+        } else {
+            TOOL_AGENT_RESUME
+        };
+        let operation = if pause { "pause" } else { "resume" };
+        let lookup = validate_lookup_id(&params.session_id, tool)?;
+        let target = self.resolve_spawned_agent(&lookup, tool)?;
+        if target.dead {
+            return Err(mcp_error(
+                error_codes::TOOL_PARAMS_INVALID,
+                format!(
+                    "AGENT_ALREADY_DEAD: agent {} (session {}) is closed; {operation} targets a live agent",
+                    lookup, target.session_id
+                ),
+            ));
+        }
+        let process = process_readback_for_target(&target);
+        if process.live_process_ids.is_empty() {
+            return Err(mcp_error(
+                error_codes::TOOL_PARAMS_INVALID,
+                format!(
+                    "AGENT_NO_LIVE_PROCESS: agent {} (session {}) has no live process tree to {operation}",
+                    lookup, target.session_id
+                ),
+            ));
+        }
+
+        // Physical state BEFORE acting.
+        let states_before = crate::m4::process_tree_suspend_state(&process.live_process_ids);
+        let was_suspended_before = !states_before.is_empty()
+            && states_before.iter().all(|state| state.fully_suspended);
+        let any_suspended_before = states_before.iter().any(|state| state.suspended_threads > 0);
+        // Idempotency: pause is a no-op when already fully suspended (stacking a
+        // second suspend would need a second resume); resume is a no-op when no
+        // thread is suspended at all.
+        let no_op = if pause {
+            was_suspended_before
+        } else {
+            !any_suspended_before
+        };
+
+        let payload = json!({
+            "requested_id": lookup,
+            "operation": operation,
+            "from": caller_session,
+            "process_tree_ids": process.process_tree_ids,
+        });
+        let before = json!({
+            "process": &process,
+            "states_before": &states_before,
+            "was_suspended_before": was_suspended_before,
+        });
+        self.command_audit_intent(
+            CommandAuditInput::mcp(
+                tool,
+                operation,
+                caller_session.map(ToOwned::to_owned),
+                Some(target.session_id.clone()),
+                payload.clone(),
+                before.clone(),
+                Value::Null,
+                "pending",
+            )
+            .with_target(json!({ "spawn_id": target.spawn_id, "agent_kind": target.agent_kind })),
+        )?;
+
+        let suspend = if no_op {
+            // Report current physical state without mutating suspend counts.
+            crate::m4::OwnedProcessSuspendReadback {
+                process_ids: process.process_tree_ids.clone(),
+                live_process_ids: process.live_process_ids.clone(),
+                applied_process_ids: Vec::new(),
+                failed: Vec::new(),
+                all_suspended: was_suspended_before,
+                all_running: !any_suspended_before,
+                states_after: states_before.clone(),
+            }
+        } else if pause {
+            crate::m4::suspend_owned_process_ids(&process.process_tree_ids)
+        } else {
+            crate::m4::resume_owned_process_ids(&process.process_tree_ids)
+        };
+
+        let is_suspended_after = suspend.all_suspended;
+        let ok = if pause {
+            suspend.all_suspended
+        } else {
+            suspend.all_running
+        };
+
+        // Journal a StateChanged row only when this call actually changed state.
+        let journal_event = if no_op {
+            None
+        } else {
+            Some(self.journal_lifecycle_event(
+                AgentEventKind::StateChanged,
+                &target,
+                tool,
+                None,
+                json!({
+                    "operation": operation,
+                    "was_suspended_before": was_suspended_before,
+                    "suspend": &suspend,
+                }),
+            )?)
+        };
+
+        let response = AgentSuspendResponse {
+            requested_id: lookup,
+            session_id: target.session_id.clone(),
+            spawn_id: target.spawn_id.clone(),
+            agent_kind: target.agent_kind.clone(),
+            lifecycle: target.lifecycle.clone(),
+            resolution_source: target.resolution_source.clone(),
+            operation: operation.to_owned(),
+            was_suspended_before,
+            is_suspended_after,
+            no_op,
+            ok,
+            suspend,
+            journal_event,
+        };
+
+        let after = json!({
+            "operation": operation,
+            "no_op": response.no_op,
+            "ok": response.ok,
+            "is_suspended_after": response.is_suspended_after,
+            "suspend": &response.suspend,
+        });
+        self.command_audit_final(
+            CommandAuditInput::mcp(
+                tool,
+                operation,
+                caller_session.map(ToOwned::to_owned),
+                Some(target.session_id.clone()),
+                payload,
+                before,
+                after,
+                if response.ok { "ok" } else { "error" },
+            )
+            .with_target(json!({ "spawn_id": target.spawn_id, "agent_kind": target.agent_kind })),
+        )?;
+
+        if !response.ok {
+            return Err(mcp_error(
+                error_codes::TOOL_INTERNAL_ERROR,
+                format!(
+                    "AGENT_{}_INCOMPLETE: agent {} (session {}) could not be fully {operation}d; per-pid failures: {:?}; thread state after: {:?}",
+                    operation.to_ascii_uppercase(),
+                    response.requested_id,
+                    response.session_id,
+                    response.suspend.failed,
+                    response.suspend.states_after,
+                ),
+            ));
+        }
+        Ok(response)
     }
 
     // ------------------------------------------------------------------

@@ -836,6 +836,150 @@ async fn agent_steer_delivers_cooperative_mailbox_and_journals_message_sent() {
     assert!(!crate::m4::process_exists(pid));
 }
 
+// ---------------------------------------------------------------------------
+// agent_pause / agent_resume (#906) — deterministic param coverage + FSV
+// ---------------------------------------------------------------------------
+
+#[test]
+fn pause_params_reject_unknown_fields() {
+    let result: Result<AgentPauseParams, _> =
+        serde_json::from_value(json!({ "session_id": "s-1", "grace_ms": 10 }));
+    assert!(
+        result.is_err(),
+        "agent_pause/agent_resume take only session_id; unknown fields must be rejected"
+    );
+}
+
+#[tokio::test]
+async fn pause_unknown_session_errors_structurally() {
+    let temp = TempDir::new().expect("temp dir");
+    let service = regression_service(temp.path());
+    let error = service
+        .agent_pause_impl(
+            AgentPauseParams {
+                session_id: "session-does-not-exist".to_owned(),
+            },
+            Some("operator-regression"),
+        )
+        .expect_err("unknown session must error");
+    assert!(
+        error.message.contains("AGENT_NOT_FOUND"),
+        "unexpected error: {}",
+        error.message
+    );
+}
+
+#[tokio::test]
+#[ignore = "real-process FSV: suspends/resumes a real OS process and reads the thread table back; host-load-sensitive; run with `cargo test -p synapse-mcp -- --ignored`"]
+async fn agent_pause_resume_freezes_real_process_tree_and_is_idempotent() {
+    let temp = TempDir::new().expect("temp dir");
+    let service = regression_service(temp.path());
+    let session = "session-regression-pause-1";
+    let spawn = "agent-spawn-regression-pause-1";
+    let pid = spawn_victim();
+    let _guard = VictimGuard { pid };
+    register_spawned_victim(&service, session, spawn, pid, "local-model");
+
+    // Baseline: the live process has running threads, none suspended.
+    let baseline = crate::m4::process_tree_suspend_state(&[pid]);
+    assert!(
+        baseline.iter().any(|s| s.total_threads > 0),
+        "victim must have live threads before pause: {baseline:?}"
+    );
+    assert!(
+        baseline.iter().all(|s| s.suspended_threads == 0),
+        "victim must not be suspended before pause: {baseline:?}"
+    );
+
+    // Pause: every thread must be suspended afterwards (physical SoT).
+    let paused = service
+        .agent_pause_impl(
+            AgentPauseParams {
+                session_id: session.to_owned(),
+            },
+            Some("operator-regression"),
+        )
+        .expect("pause must fully suspend the tree");
+    assert!(paused.ok && paused.is_suspended_after && !paused.no_op);
+    assert!(
+        paused.journal_event.is_some(),
+        "a state change must journal a StateChanged row"
+    );
+    assert!(
+        paused
+            .suspend
+            .states_after
+            .iter()
+            .all(|s| s.fully_suspended && s.suspended_threads == s.total_threads),
+        "every thread must be suspended: {:?}",
+        paused.suspend.states_after
+    );
+
+    // Independent physical readback of the OS thread table confirms suspension.
+    let observed = crate::m4::process_tree_suspend_state(&paused.suspend.live_process_ids);
+    assert!(
+        observed.iter().all(|s| s.total_threads > 0 && s.fully_suspended),
+        "independent thread-table read must show the tree frozen: {observed:?}"
+    );
+
+    // Pause again: idempotent no-op (must not stack a second suspend count).
+    let repaused = service
+        .agent_pause_impl(
+            AgentPauseParams {
+                session_id: session.to_owned(),
+            },
+            Some("operator-regression"),
+        )
+        .expect("second pause is a no-op");
+    assert!(repaused.no_op && repaused.ok && repaused.is_suspended_after);
+    assert!(
+        repaused.journal_event.is_none(),
+        "a no-op must not journal a StateChanged row"
+    );
+
+    // Resume: every thread must be running again (one resume suffices because
+    // pause never stacked).
+    let resumed = service
+        .agent_resume_impl(
+            AgentPauseParams {
+                session_id: session.to_owned(),
+            },
+            Some("operator-regression"),
+        )
+        .expect("resume must fully thaw the tree");
+    assert!(resumed.ok && !resumed.is_suspended_after && !resumed.no_op);
+    let observed_running = crate::m4::process_tree_suspend_state(&resumed.suspend.live_process_ids);
+    assert!(
+        observed_running.iter().all(|s| s.suspended_threads == 0),
+        "independent thread-table read must show the tree running: {observed_running:?}"
+    );
+
+    // Resume again: idempotent no-op.
+    let reresumed = service
+        .agent_resume_impl(
+            AgentPauseParams {
+                session_id: session.to_owned(),
+            },
+            Some("operator-regression"),
+        )
+        .expect("second resume is a no-op");
+    assert!(reresumed.no_op && reresumed.ok);
+
+    // Cleanup.
+    let _ = service
+        .agent_kill_impl(
+            AgentKillParams {
+                session_id: session.to_owned(),
+                grace_ms: 0,
+                interrupt_first: false,
+            },
+            Some("operator-regression"),
+        )
+        .await
+        .expect("cleanup kill");
+    assert!(!crate::m4::process_exists(pid));
+}
+
 #[tokio::test]
 #[ignore = "real-process FSV: spawns a real OS process victim; host-load-sensitive; run with `cargo test -p synapse-mcp -- --ignored`"]
 async fn agent_interrupt_delivers_cooperative_mailbox_and_journals_interrupted() {
