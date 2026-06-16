@@ -901,6 +901,46 @@ pub struct CdpNavigateTabResponse {
     pub target_selection_reason: String,
 }
 
+#[derive(Clone, Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CdpActivateTabParams {
+    /// Browser HWND whose target table contains the CDP target. If omitted, the
+    /// caller must already have an active CDP session target.
+    #[serde(default)]
+    pub window_hwnd: Option<i64>,
+    /// CDP TargetID to activate. If omitted, the active session CDP target is used.
+    #[serde(default)]
+    pub cdp_target_id: Option<String>,
+    /// Optional readback budget for confirming the tab became active. Defaults to
+    /// the bridge command budget and is capped by the daemon command timeout.
+    #[serde(default)]
+    pub wait_timeout_ms: Option<u64>,
+}
+
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CdpActivateTabResponse {
+    pub session_id: String,
+    pub window_hwnd: i64,
+    pub transport: String,
+    pub endpoint: String,
+    pub cdp_target_id: String,
+    /// Whether the tab was the active tab in its window before activation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before_active: Option<bool>,
+    /// Tab is now the active tab in its window (read back after activation).
+    pub active: bool,
+    pub url: String,
+    pub title: String,
+    pub readback_backend: String,
+    pub backend_tier_used: String,
+    /// Always false: activation selects the tab within its window and never
+    /// seizes the human OS foreground.
+    pub required_foreground: bool,
+    pub target_candidate_count: u32,
+    pub target_selection_reason: String,
+}
+
 pub fn empty_input_schema() -> Arc<JsonObject> {
     common::schema_for_type::<EmptyParams>()
 }

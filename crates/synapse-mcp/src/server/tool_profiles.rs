@@ -46,6 +46,7 @@ const NORMAL_ALLOWED_EXACT: &[&str] = &[
     "approval_request",
     "audit_intelligence_query",
     "capture_screenshot",
+    "cdp_activate_tab",
     "cdp_bridge_reload",
     "cdp_close_tab",
     "cdp_navigate_tab",
@@ -106,6 +107,7 @@ const NORMAL_ALLOWED_PREFIXES: &[&str] = &["agent_template_", "task_"];
 const BROWSER_CONTROL_ALLOWED_EXACT: &[&str] = &[
     "approval_list",
     "capture_screenshot",
+    "cdp_activate_tab",
     "cdp_bridge_reload",
     "cdp_close_tab",
     "cdp_navigate_tab",

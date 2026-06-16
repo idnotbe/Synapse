@@ -133,6 +133,7 @@ fn error_codes_match_literal_names() {
     assert_literal!(SAFETY_KILLSWITCH_ACTIVE);
     assert_literal!(SAFETY_PROCESS_DENYLISTED);
     assert_literal!(SAFETY_SHELL_DENIED_BY_POLICY);
+    assert_literal!(SAFETY_SHELL_GLOBAL_INPUT_DENIED);
     assert_literal!(SAFETY_LAUNCH_DENIED_BY_POLICY);
     assert_literal!(SAFETY_SECRET_REDACTED);
     assert_literal!(SAFETY_PERMISSION_DENIED);

@@ -1,11 +1,12 @@
 const PROTOCOL_VERSION = 1;
-const BRIDGE_BUILD_ID = "synapse-chrome-bridge-2026-06-15-1011-reload-self-997-type-active-v1";
-const BRIDGE_BUILD_SHA256 = "d3b6eba7db70928066b39e687884fd34d06da19db115026ca5e3f94b8fc62e46";
+const BRIDGE_BUILD_ID = "synapse-chrome-bridge-2026-06-16-activate-tab-1189-v1";
+const BRIDGE_BUILD_SHA256 = "4a5c0307cda4d2812e054977fc703c558ebc27c2d31c99cb1bcfbbe788a026da";
 const COMMAND_CAPABILITIES = Object.freeze([
   "openTab",
   "closeTab",
   "targetInfo",
   "navigateTab",
+  "activateTab",
   "reloadSelf",
   "typeActiveElement"
 ]);
@@ -351,6 +352,8 @@ async function handleCommand(command) {
       result = await handleTypeActiveElement(params);
     } else if (kind === "navigateTab") {
       result = await handleNavigateTab(params);
+    } else if (kind === "activateTab") {
+      result = await handleActivateTab(params);
     } else if (kind === "reloadSelf") {
       result = handleReloadSelf(params);
       reloadAfterResponse = true;
@@ -596,6 +599,47 @@ async function handleNavigateTab(params) {
     readback_backend: "chrome.tabs.get",
     navigation_error_text: null,
     is_download: null,
+    target_candidate_count: selected.targetCandidateCount,
+    target_selection_reason: selected.selectionReason
+  };
+}
+
+// Make a specific tab the active tab WITHIN ITS OWN WINDOW without taking the
+// OS foreground. chrome.tabs.update({active:true}) selects the tab in its
+// window; per the Chrome API it "does not affect whether the window is focused"
+// (windows.update handles that, which we deliberately never call). This is the
+// background-safe Playwright bringToFront analogue (#1189) that lets agents
+// activate a tab for render-dependent capture without seizing the human's
+// foreground — eliminating the global SendKeys workaround (#1204).
+async function handleActivateTab(params) {
+  const selected = await selectTabTarget(params, { requireTargetId: true });
+  const waitTimeoutMs = normalizeWaitTimeout(params.waitTimeoutMs);
+  const before = await tabPageState(selected.tabId, selected.target);
+  try {
+    await chrome.tabs.update(selected.tabId, { active: true });
+  } catch (error) {
+    throw bridgeError(
+      ERROR_AXTREE_FAILED,
+      `chrome.tabs.update(${selected.tabId}, {active:true}) failed: ${errorMessage(error)}; ` +
+        `before active=${before.active} url=${JSON.stringify(before.url)}`
+    );
+  }
+  const after = await waitForTabPageState(selected.tabId, selected.target, waitTimeoutMs, {
+    description: "tab to become the active tab in its window (active=true)",
+    matches: (state) => state.active === true
+  });
+  return {
+    extension_id: chrome.runtime.id,
+    target_id: after.target_id || selected.target.id,
+    tab_id: selected.tabId,
+    chrome_window_id: after.chrome_window_id,
+    before_active: before.active,
+    active: after.active,
+    highlighted: after.highlighted,
+    url: after.url,
+    title: after.title,
+    ready_state: after.ready_state,
+    readback_backend: "chrome.tabs.get",
     target_candidate_count: selected.targetCandidateCount,
     target_selection_reason: selected.selectionReason
   };

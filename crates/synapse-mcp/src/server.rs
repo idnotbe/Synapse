@@ -23,9 +23,10 @@ use crate::{
     http::sse::SseState,
     m1::{
         CaptureScreenshotFormat, CaptureScreenshotParams, CaptureScreenshotResponse,
-        CdpActiveElementInfo, CdpBridgeHostReadback, CdpBridgeReloadAckReadback,
-        CdpBridgeReloadParams, CdpBridgeReloadResponse, CdpCloseTabParams, CdpCloseTabResponse,
-        CdpNavigateAction, CdpNavigateTabParams, CdpNavigateTabResponse, CdpOpenTabParams,
+        CdpActivateTabParams, CdpActivateTabResponse, CdpActiveElementInfo, CdpBridgeHostReadback,
+        CdpBridgeReloadAckReadback, CdpBridgeReloadParams, CdpBridgeReloadResponse,
+        CdpCloseTabParams, CdpCloseTabResponse, CdpNavigateAction, CdpNavigateTabParams,
+        CdpNavigateTabResponse, CdpOpenTabParams,
         CdpOpenTabResponse, CdpTargetInfoParams, CdpTargetInfoResponse, FindParams, FindResponse,
         HiddenDesktopPipFrameParams, HiddenDesktopPipFrameResponse, HiddenDesktopPipStreamStatus,
         M1State, ObserveParams, ReadTextParams, SetCaptureTargetParams, SetCaptureTargetResponse,

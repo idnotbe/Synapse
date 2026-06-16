@@ -39,9 +39,9 @@ const EXTENSION_ORIGIN: &str = "chrome-extension://leoocgnkjnplbfdbklajepahofecg
 const BRIDGE_TOKEN_HEADER: &str = "x-synapse-bridge-token";
 const BRIDGE_PROTOCOL_VERSION: u32 = 1;
 const EXPECTED_EXTENSION_BUILD_ID: &str =
-    "synapse-chrome-bridge-2026-06-15-1011-reload-self-997-type-active-v1";
+    "synapse-chrome-bridge-2026-06-16-activate-tab-1189-v1";
 const EXPECTED_EXTENSION_BUILD_SHA256: &str =
-    "d3b6eba7db70928066b39e687884fd34d06da19db115026ca5e3f94b8fc62e46";
+    "4a5c0307cda4d2812e054977fc703c558ebc27c2d31c99cb1bcfbbe788a026da";
 const REQUIRED_DIRECT_HTTP_CAPABILITIES: &[&str] = &[
     "closeTab",
     "navigateTab",
@@ -635,6 +635,28 @@ pub(crate) struct ChromeDebuggerNavigateResult {
     pub is_download: Option<bool>,
     pub target_candidate_count: u32,
     pub target_selection_reason: String,
+    pub extension_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub(crate) struct ChromeDebuggerActivateTabResult {
+    pub target_id: String,
+    pub tab_id: u32,
+    #[serde(default)]
+    pub chrome_window_id: Option<i64>,
+    #[serde(default)]
+    pub before_active: Option<bool>,
+    pub active: bool,
+    #[serde(default)]
+    pub highlighted: Option<bool>,
+    pub url: String,
+    pub title: String,
+    #[serde(default)]
+    pub ready_state: String,
+    pub readback_backend: String,
+    pub target_candidate_count: u32,
+    pub target_selection_reason: String,
+    #[serde(default)]
     pub extension_id: Option<String>,
 }
 
@@ -2161,6 +2183,34 @@ pub(crate) async fn navigate_tab(
     })
 }
 
+/// Background-safe tab activation (#1189): selects `target_id` as the active
+/// tab in its own Chrome window via `chrome.tabs.update({active:true})` without
+/// taking the OS foreground. Refused before queueing if the live Chrome
+/// profile/process readback is popup-unsafe, identical to the other tabs-only
+/// verbs.
+pub(crate) async fn activate_tab(
+    hwnd: i64,
+    target_id: &str,
+    wait_timeout_ms: u64,
+) -> Result<ChromeDebuggerActivateTabResult, ChromeDebuggerBridgeError> {
+    ensure_normal_bridge_popup_safe(hwnd, "activateTab")?;
+    let result = bridge()
+        .send_command(
+            "activateTab",
+            json!({
+                "hwnd": hwnd,
+                "targetIdHint": target_id,
+                "waitTimeoutMs": wait_timeout_ms,
+            }),
+        )
+        .await?;
+    serde_json::from_value::<ChromeDebuggerActivateTabResult>(result).map_err(|error| {
+        ChromeDebuggerBridgeError::protocol(format!(
+            "decode Chrome debugger activateTab response: {error}"
+        ))
+    })
+}
+
 pub(crate) fn validate_reload_wait_timeout(
     value: Option<u64>,
 ) -> Result<u64, ChromeDebuggerBridgeError> {
@@ -2842,6 +2892,16 @@ fn chrome_response_readback_summary(kind: &str, result: Option<&Value>) -> Optio
             "after_url": result.get("after_url"),
             "ready_state": result.get("ready_state"),
             "readback_backend": result.get("readback_backend"),
+        }),
+        "activateTab" => json!({
+            "target_id": result.get("target_id"),
+            "tab_id": result.get("tab_id"),
+            "chrome_window_id": result.get("chrome_window_id"),
+            "before_active": result.get("before_active"),
+            "active": result.get("active"),
+            "readback_backend": result.get("readback_backend"),
+            "target_selection_reason": result.get("target_selection_reason"),
+            "extension_id": result.get("extension_id"),
         }),
         "targetInfo" => json!({
             "target_id": result.get("target_id"),

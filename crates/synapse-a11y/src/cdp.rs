@@ -313,6 +313,14 @@ pub struct CdpCloseTabResult {
     pub target_count_after: u32,
 }
 
+#[cfg(windows)]
+#[derive(Clone, Debug)]
+pub struct CdpActivateTabResult {
+    pub target_id: String,
+    pub title: String,
+    pub url: String,
+}
+
 /// Reads the current CDP `Target.getTargets` table for `endpoint`.
 ///
 /// This is the physical Source of Truth for tab-target lifecycle checks; callers
@@ -438,6 +446,55 @@ pub async fn cdp_close_target(endpoint: &str, target_id: &str) -> A11yResult<Cdp
             target_id: target_id.to_owned(),
             target_count_before: u32::try_from(before.len()).unwrap_or(u32::MAX),
             target_count_after: u32::try_from(after.len()).unwrap_or(u32::MAX),
+        })
+    }
+    .await;
+
+    handler_task.abort();
+    result
+}
+
+/// Brings a raw-CDP page target to the front of its automation browser via
+/// `Target.activateTarget` (the CDP-level analogue of selecting the tab). This
+/// is for Synapse-launched automation profiles; it does not seize the human OS
+/// foreground. Background-safe tab activation (#1189).
+#[cfg(windows)]
+pub async fn cdp_activate_target(
+    endpoint: &str,
+    target_id: &str,
+) -> A11yResult<CdpActivateTabResult> {
+    use chromiumoxide::cdp::browser_protocol::target::ActivateTargetParams;
+    use futures_util::StreamExt as _;
+
+    let CdpAttachment {
+        browser,
+        mut handler,
+        ..
+    } = attach_chromiumoxide(endpoint).await?;
+    let handler_task = tokio::spawn(async move { while handler.next().await.is_some() {} });
+
+    let result = async {
+        let targets = cdp_list_targets_with_browser(&browser).await?;
+        let Some(summary) = targets
+            .into_iter()
+            .find(|target| target.target_id == target_id)
+        else {
+            return Err(A11yError::CdpAxtreeFailed {
+                detail: format!(
+                    "Target.activateTarget refused: Target.getTargets readback did not contain target_id {target_id:?}"
+                ),
+            });
+        };
+        browser
+            .execute(ActivateTargetParams::new(target_id.to_owned()))
+            .await
+            .map_err(|error| A11yError::CdpAxtreeFailed {
+                detail: format!("Target.activateTarget({target_id:?}): {error}"),
+            })?;
+        Ok(CdpActivateTabResult {
+            target_id: target_id.to_owned(),
+            title: summary.title,
+            url: summary.url,
         })
     }
     .await;

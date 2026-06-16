@@ -3612,6 +3612,19 @@ fn validate_run_shell_params(params: &ActRunShellParams) -> Result<(), ErrorData
     }
     validate_run_shell_environment(&params.env)?;
     validate_run_shell_command_shape(params, command)?;
+    if let Some(marker) = detect_shell_global_input(&shell_command_line(params)) {
+        return Err(shell_tool_error(
+            error_codes::SAFETY_SHELL_GLOBAL_INPUT_DENIED,
+            "act_run_shell command performs global OS keyboard/mouse/foreground input, which bypasses the foreground input lease and lands on the human operator's foreground window (the #717 background-first violation); use the lease-gated act_press/act_type/act_stroke primitives for input, or cdp_activate_tab to select a browser tab, instead of injecting input through a shell",
+            json!({
+                "code": error_codes::SAFETY_SHELL_GLOBAL_INPUT_DENIED,
+                "matched_marker": marker,
+                "reason": "global_input_via_shell_denied",
+                "command": params.command,
+                "remediation": "act_press|act_type|act_stroke (lease-gated) for input, or cdp_activate_tab for browser-tab selection",
+            }),
+        ));
+    }
     if params.timeout_ms == 0 {
         return Err(mcp_error(
             error_codes::TOOL_PARAMS_INVALID,
@@ -8993,6 +9006,34 @@ fn shell_command_line(params: &ActRunShellParams) -> String {
     shell_command_line_from_parts(&params.command, &params.args)
 }
 
+/// Distinctive substrings of global OS input / foreground-seizing APIs that a
+/// shell command must not invoke. These are session-unscoped Win32/.NET/COM
+/// calls that bypass Synapse's foreground input lease and act on the human
+/// operator's foreground window — exactly the contention #717 eliminates
+/// (#1204). The names are specific enough that they do not appear in ordinary
+/// build/test/deploy commands.
+const SHELL_GLOBAL_INPUT_MARKERS: &[&str] = &[
+    "sendkeys",
+    "sendwait",
+    "sendinput",
+    "keybd_event",
+    "mouse_event",
+    "setcursorpos",
+    "setforegroundwindow",
+    "bringwindowtotop",
+    "autohotkey",
+];
+
+/// Returns the first global-input marker found in a composed shell command line
+/// (case-insensitive), or `None` if the command does not invoke global OS input.
+fn detect_shell_global_input(command_line: &str) -> Option<&'static str> {
+    let haystack = command_line.to_ascii_lowercase();
+    SHELL_GLOBAL_INPUT_MARKERS
+        .iter()
+        .copied()
+        .find(|marker| haystack.contains(marker))
+}
+
 fn shell_command_line_from_parts(command: &str, args: &[String]) -> String {
     std::iter::once(command)
         .chain(args.iter().map(String::as_str))
@@ -10331,6 +10372,73 @@ mod tests {
             shell_command_line(&params),
             "cmd.exe /c \"echo hello\" \"\""
         );
+    }
+
+    // Regression for #1204: the exact SendKeys command an agent used to activate
+    // a background Chrome tab — which landed on the human's foreground window —
+    // must be rejected by authorize_run_shell, even though shell_config_for
+    // allowlists the precise command line (the guard runs before the allowlist).
+    #[test]
+    fn run_shell_rejects_global_sendkeys_input() {
+        let params = shell_params(
+            "powershell",
+            vec![
+                "-NoProfile",
+                "-Command",
+                "Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.SendKeys]::SendWait('^9'); Start-Sleep -Milliseconds 750",
+            ],
+            5_000,
+        );
+        let error = authorize_run_shell(&shell_config_for(&params), &params)
+            .expect_err("a SendKeys global-input command must be denied");
+        assert_eq!(
+            error.data.as_ref().and_then(|data| data.get("code")),
+            Some(&json!(error_codes::SAFETY_SHELL_GLOBAL_INPUT_DENIED)),
+            "global-input shell command must fail with SAFETY_SHELL_GLOBAL_INPUT_DENIED"
+        );
+    }
+
+    #[test]
+    fn run_shell_rejects_each_global_input_marker() {
+        for snippet in [
+            "[System.Windows.Forms.SendKeys]::Send('a')",
+            "$wsh.SendKeys('{ENTER}')",
+            "[Win32]::SendInput($n, $inputs, $size)",
+            "keybd_event(0x41, 0, 0, 0)",
+            "mouse_event(2, 0, 0, 0, 0)",
+            "[Win32]::SetCursorPos(10, 10)",
+            "[Win32]::SetForegroundWindow($h)",
+            "[Win32]::BringWindowToTop($h)",
+            "AutoHotkey.exe send.ahk",
+        ] {
+            let params = shell_params("powershell", vec!["-Command", snippet], 5_000);
+            let error = authorize_run_shell(&shell_config_for(&params), &params)
+                .expect_err("global-input snippet must be denied");
+            assert_eq!(
+                error.data.as_ref().and_then(|data| data.get("code")),
+                Some(&json!(error_codes::SAFETY_SHELL_GLOBAL_INPUT_DENIED)),
+                "global-input snippet must be denied: {snippet}"
+            );
+        }
+    }
+
+    #[test]
+    fn run_shell_allows_ordinary_commands_without_global_input() {
+        // Benign build/test/deploy commands must not trip the guard.
+        for params in [
+            shell_params("cmd.exe", vec!["/c", "echo hello"], 5_000),
+            shell_params("powershell", vec!["-Command", "Get-Process chrome"], 5_000),
+            shell_params("git", vec!["status", "--short"], 5_000),
+            shell_params("cargo", vec!["build", "--release"], 5_000),
+        ] {
+            assert!(
+                detect_shell_global_input(&shell_command_line(&params)).is_none(),
+                "benign command must not be flagged as global input: {}",
+                shell_command_line(&params)
+            );
+            authorize_run_shell(&shell_config_for(&params), &params)
+                .unwrap_or_else(|error| panic!("benign command must authorize: {error}"));
+        }
     }
 
     #[test]

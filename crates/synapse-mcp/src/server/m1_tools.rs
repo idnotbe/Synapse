@@ -1,8 +1,9 @@
 use super::{
     CaptureScreenshotFormat, CaptureScreenshotParams, CaptureScreenshotResponse,
-    CdpActiveElementInfo, CdpBridgeHostReadback, CdpBridgeReloadAckReadback, CdpBridgeReloadParams,
-    CdpBridgeReloadResponse, CdpCloseTabParams, CdpCloseTabResponse, CdpNavigateAction,
-    CdpNavigateTabParams, CdpNavigateTabResponse, CdpOpenTabParams, CdpOpenTabResponse,
+    CdpActivateTabParams, CdpActivateTabResponse, CdpActiveElementInfo, CdpBridgeHostReadback,
+    CdpBridgeReloadAckReadback, CdpBridgeReloadParams, CdpBridgeReloadResponse, CdpCloseTabParams,
+    CdpCloseTabResponse, CdpNavigateAction, CdpNavigateTabParams, CdpNavigateTabResponse,
+    CdpOpenTabParams, CdpOpenTabResponse,
     CdpTargetInfoParams, CdpTargetInfoResponse, CdpTargetOwner, ErrorData, FindParams,
     FindResponse, Health, HiddenDesktopPipFrameParams, HiddenDesktopPipFrameResponse,
     HiddenDesktopPipStreamStatus, Json, ObserveParams, Parameters, ReadTextParams, SessionTarget,
@@ -1386,6 +1387,43 @@ impl SynapseService {
         self.audit_action_result_for_session(TOOL, &result, &session_id)?;
         result.map(Json)
     }
+
+    #[tool(
+        description = "Make the calling session's CDP tab the active tab in its own Chrome window WITHOUT taking the OS foreground (the background-safe Playwright bringToFront analogue). Raw CDP uses Target.activateTarget; the normal Chrome extension bridge uses chrome.tabs.update({active:true}), which per the Chrome API does not focus the window. Requires an active session CDP target or a target owned by this session; never uses the human foreground tab as a fallback and never seizes the operator's foreground. Use this instead of injecting global keystrokes (e.g. SendKeys) through act_run_shell."
+    )]
+    pub async fn cdp_activate_tab(
+        &self,
+        params: Parameters<CdpActivateTabParams>,
+        request_context: RequestContext<RoleServer>,
+    ) -> Result<Json<CdpActivateTabResponse>, ErrorData> {
+        const TOOL: &str = "cdp_activate_tab";
+        tracing::info!(
+            code = "MCP_TOOL_INVOCATION",
+            kind = TOOL,
+            "tool.invocation kind=cdp_activate_tab"
+        );
+        let session_id = require_target_session_id(&request_context)?;
+        let wait_timeout_ms = validate_cdp_navigation_wait_timeout(params.0.wait_timeout_ms)?;
+        let (window_hwnd, cdp_target_id) = self.resolve_cdp_tab_mutation_target(
+            TOOL,
+            &session_id,
+            params.0.window_hwnd,
+            params.0.cdp_target_id.as_deref(),
+        )?;
+        let request_details = json!({
+            "session_id": &session_id,
+            "window_hwnd": window_hwnd,
+            "cdp_target_id": &cdp_target_id,
+            "wait_timeout_ms": wait_timeout_ms,
+            "required_foreground": false,
+        });
+        self.audit_action_started_with_details_for_session(TOOL, &request_details, &session_id)?;
+        let result = self
+            .cdp_activate_tab_impl(&session_id, window_hwnd, &cdp_target_id, wait_timeout_ms)
+            .await;
+        self.audit_action_result_for_session(TOOL, &result, &session_id)?;
+        result.map(Json)
+    }
 }
 
 /// Resolves the calling session id for target tools, failing loud when absent
@@ -1624,28 +1662,47 @@ impl SynapseService {
         session_id: &str,
         params: &CdpNavigateTabParams,
     ) -> Result<(i64, String), ErrorData> {
-        if let Some(target_id) = params.cdp_target_id.as_deref() {
+        self.resolve_cdp_tab_mutation_target(
+            "cdp_navigate_tab",
+            session_id,
+            params.window_hwnd,
+            params.cdp_target_id.as_deref(),
+        )
+    }
+
+    /// Resolves and ownership-checks the (window_hwnd, cdp_target_id) for a
+    /// background CDP tab mutation (navigate/activate). Refuses to fall back to
+    /// the human foreground tab: requires either the active CDP session target
+    /// or an explicit target id owned by this MCP session. Shared by
+    /// cdp_navigate_tab and cdp_activate_tab.
+    fn resolve_cdp_tab_mutation_target(
+        &self,
+        tool: &str,
+        session_id: &str,
+        window_hwnd_param: Option<i64>,
+        cdp_target_id_param: Option<&str>,
+    ) -> Result<(i64, String), ErrorData> {
+        if let Some(target_id) = cdp_target_id_param {
             validate_cdp_target_id(target_id)?;
         }
         let active_target = self.session_target(Some(session_id))?;
-        let owner = params
-            .cdp_target_id
-            .as_deref()
+        let owner = cdp_target_id_param
             .map(|target_id| self.cdp_target_owner_for_navigation(session_id, target_id))
             .transpose()?
             .flatten();
-        let target_id = match (params.cdp_target_id.as_ref(), active_target.as_ref()) {
-            (Some(target_id), _) => target_id.clone(),
+        let target_id = match (cdp_target_id_param, active_target.as_ref()) {
+            (Some(target_id), _) => target_id.to_owned(),
             (None, Some(SessionTarget::Cdp { cdp_target_id, .. })) => cdp_target_id.clone(),
             (None, Some(SessionTarget::Window { .. }) | None) => {
                 return Err(mcp_error(
                     error_codes::TARGET_NOT_SET,
-                    "cdp_navigate_tab requires an active CDP session target or explicit cdp_target_id owned by this session; refusing to use the human foreground tab",
+                    format!(
+                        "{tool} requires an active CDP session target or explicit cdp_target_id owned by this session; refusing to use the human foreground tab"
+                    ),
                 ));
             }
         };
-        let window_hwnd = params
-            .window_hwnd
+        let window_hwnd = window_hwnd_param
             .or_else(|| owner.as_ref().map(|owner| owner.window_hwnd))
             .or_else(|| match active_target.as_ref() {
                 Some(SessionTarget::Cdp { window_hwnd, .. }) => Some(*window_hwnd),
@@ -1655,7 +1712,9 @@ impl SynapseService {
             .ok_or_else(|| {
                 mcp_error(
                     error_codes::TARGET_NOT_SET,
-                    "cdp_navigate_tab requires window_hwnd when using an explicit target id without an active session target",
+                    format!(
+                        "{tool} requires window_hwnd when using an explicit target id without an active session target"
+                    ),
                 )
             })?;
         let active_matches = matches!(
@@ -1669,7 +1728,7 @@ impl SynapseService {
             return Err(mcp_error(
                 error_codes::ACTION_TARGET_INVALID,
                 format!(
-                    "cdp_navigate_tab refused target {target_id:?}: target is not the active CDP target and is not owned by this MCP session"
+                    "{tool} refused target {target_id:?}: target is not the active CDP target and is not owned by this MCP session"
                 ),
             ));
         }
@@ -1679,7 +1738,7 @@ impl SynapseService {
             return Err(mcp_error(
                 error_codes::ACTION_TARGET_INVALID,
                 format!(
-                    "cdp_navigate_tab refused target {target_id:?}: owner window {:#x} does not match requested window {:#x}",
+                    "{tool} refused target {target_id:?}: owner window {:#x} does not match requested window {:#x}",
                     owner.window_hwnd, window_hwnd
                 ),
             ));
@@ -2620,6 +2679,113 @@ impl SynapseService {
             target_candidate_count: navigated.target_candidate_count,
             target_selection_reason: navigated.target_selection_reason,
         })
+    }
+
+    #[cfg(windows)]
+    async fn cdp_activate_tab_impl(
+        &self,
+        session_id: &str,
+        window_hwnd: i64,
+        cdp_target_id: &str,
+        wait_timeout_ms: u64,
+    ) -> Result<CdpActivateTabResponse, ErrorData> {
+        if let Some(endpoint) = synapse_a11y::endpoint_for_window(window_hwnd) {
+            let activated = synapse_a11y::cdp_activate_target(&endpoint, cdp_target_id)
+                .await
+                .map_err(|error| {
+                    mcp_error(
+                        error.code(),
+                        format!(
+                            "cdp_activate_tab raw Target.activateTarget command/readback failed: {error}"
+                        ),
+                    )
+                })?;
+            tracing::info!(
+                code = "CDP_BACKGROUND_TAB_ACTIVATED",
+                session_id = %session_id,
+                hwnd = window_hwnd,
+                endpoint = %endpoint,
+                cdp_target_id = %activated.target_id,
+                transport = "raw_cdp",
+                "readback=Target.activateTarget outcome=target_activated_without_foreground"
+            );
+            return Ok(CdpActivateTabResponse {
+                session_id: session_id.to_owned(),
+                window_hwnd,
+                transport: "raw_cdp".to_owned(),
+                endpoint,
+                cdp_target_id: activated.target_id,
+                before_active: None,
+                active: true,
+                url: activated.url,
+                title: activated.title,
+                readback_backend: "Target.activateTarget".to_owned(),
+                backend_tier_used: "cdp".to_owned(),
+                required_foreground: false,
+                target_candidate_count: 0,
+                target_selection_reason: "target_id".to_owned(),
+            });
+        }
+
+        let activated =
+            crate::chrome_debugger_bridge::activate_tab(window_hwnd, cdp_target_id, wait_timeout_ms)
+                .await
+                .map_err(|error| {
+                    mcp_error(
+                        error.code(),
+                        format!(
+                            "cdp_activate_tab Chrome bridge chrome.tabs.update({{active:true}}) failed: {}",
+                            error.detail()
+                        ),
+                    )
+                })?;
+        let endpoint = activated
+            .extension_id
+            .as_deref()
+            .map(chrome_debugger_endpoint)
+            .unwrap_or_else(chrome_debugger_default_endpoint);
+        tracing::info!(
+            code = "CDP_BACKGROUND_TAB_ACTIVATED",
+            session_id = %session_id,
+            hwnd = window_hwnd,
+            endpoint = %endpoint,
+            cdp_target_id = %activated.target_id,
+            tab_id = activated.tab_id,
+            before_active = ?activated.before_active,
+            active = activated.active,
+            transport = "chrome_tabs_extension",
+            "readback=chrome.tabs.get outcome=target_activated_without_foreground"
+        );
+        Ok(CdpActivateTabResponse {
+            session_id: session_id.to_owned(),
+            window_hwnd,
+            transport: "chrome_tabs_extension".to_owned(),
+            endpoint,
+            cdp_target_id: activated.target_id,
+            before_active: activated.before_active,
+            active: activated.active,
+            url: activated.url,
+            title: activated.title,
+            readback_backend: activated.readback_backend,
+            backend_tier_used: "chrome_tabs".to_owned(),
+            required_foreground: false,
+            target_candidate_count: activated.target_candidate_count,
+            target_selection_reason: activated.target_selection_reason,
+        })
+    }
+
+    #[cfg(not(windows))]
+    async fn cdp_activate_tab_impl(
+        &self,
+        _session_id: &str,
+        _window_hwnd: i64,
+        _cdp_target_id: &str,
+        _wait_timeout_ms: u64,
+    ) -> Result<CdpActivateTabResponse, ErrorData> {
+        Err(mcp_error(
+            error_codes::A11Y_NOT_AVAILABLE,
+            "cdp_activate_tab is only available on Windows in this build",
+        ))
     }
 
     #[cfg(not(windows))]
