@@ -614,11 +614,7 @@ impl Runner {
                     "tool": tool_name,
                     "message": error.to_string(),
                     "recoverable": !fatal,
-                    "suggestion": if fatal {
-                        "The connection to the Synapse tool server was lost; the run is ending."
-                    } else {
-                        "The tool call failed. Read the message, re-check the tool's input schema with synapse_tool_catalog, then retry with corrected arguments or choose a different tool."
-                    },
+                    "suggestion": tool_failure_suggestion(fatal, self.tool_exposure),
                 });
                 let result_value = json!({ "error": detail });
                 self.messages.push(json!({
@@ -1721,12 +1717,26 @@ fn local_agent_spawn_root_dir() -> anyhow::Result<PathBuf> {
         .join("agent-spawns"))
 }
 
+/// Behavioral doctrine prepended to every spawned agent's conversation (the
+/// system message). Compressed per `docs/compressionprompt.md`: the load-bearing
+/// constraints and the routed meta-tool names are kept verbatim; meta-framing,
+/// restatement, and why-prose are cut; imperative present tense; one rule per
+/// line; controlled vocabulary ("tool", not "function/MCP tool" interchangeably).
+///
+/// Tool *awareness* is intentionally NOT injected here: spawned local models
+/// carry the Synapse surface in their LoRA'd weights, and API models receive the
+/// full tool schemas from the MCP attachment (Direct exposure). The manifest
+/// approach is therefore retired; this prompt only governs behavior.
 fn system_prompt(tool_exposure: ToolExposure, tools: &[Tool]) -> String {
-    let base = "You are a local Synapse agent. Use the provided MCP tools to inspect and change state. Never invent tool results. When a task asks for a stored artifact, call the relevant Synapse tool and then read it back. Finish with a concise summary only after the needed tool calls have succeeded.";
+    const BASE: &str = "Synapse agent. Use the attached MCP tools to inspect and change state.\nRules:\n- Never invent tool results.\n- After a tool stores an artifact, read it back to confirm before reporting success.\n- Summarize only after the required tool calls succeed.";
     match tool_exposure {
+        // Direct: the model holds every tool schema natively, so it just needs
+        // to know they are there and callable by name.
         ToolExposure::Direct => format!(
-            "{base}\n\nAll Synapse MCP tools from this session's strict tools/list are attached directly as model tools."
+            "{BASE}\n\nEvery Synapse tool is attached directly; call any by name and read its schema from your tool list."
         ),
+        // Routed: a capped provider sees only the two meta-tools, so the
+        // indirection mechanism is load-bearing and stated exactly.
         ToolExposure::Routed => {
             let names = tools
                 .iter()
@@ -1734,10 +1744,28 @@ fn system_prompt(tool_exposure: ToolExposure, tools: &[Tool]) -> String {
                 .collect::<Vec<_>>()
                 .join(", ");
             format!(
-                "{base}\n\nThis provider has a lower function-count cap than the live Synapse tool surface, so tools are exposed through a routed harness. Call {catalog} to inspect exact tool schemas and call {call_tool} with a real Synapse tool name plus arguments to execute it. The routed harness can call every real Synapse MCP tool loaded by this session, including file, shell, browser/perception, agent, dashboard, and local-model tools. Live tool names: {names}",
+                "{BASE}\n\nYour provider caps tool count below the full Synapse surface, so tools route through two meta-tools:\n- {catalog} — list/inspect tools (name=<tool> for one, query=<text> to search).\n- {call_tool} {{name, arguments}} — execute any real Synapse tool.\nThis reaches every Synapse tool (perception, action, agent, task, dashboard, local-model). Tools: {names}",
                 catalog = SYNAPSE_TOOL_CATALOG,
                 call_tool = SYNAPSE_TOOL_CALL,
             )
+        }
+    }
+}
+
+/// One-line, exposure-aware recovery hint fed back to the model when a tool call
+/// fails. Compressed (imperative, no meta) and *correct per exposure*: only
+/// Routed sessions actually have `synapse_tool_catalog`, so Direct (API-model)
+/// sessions must not be told to use a tool that is not attached.
+fn tool_failure_suggestion(fatal: bool, exposure: ToolExposure) -> &'static str {
+    if fatal {
+        return "Connection to the Synapse tool server was lost; the run is ending.";
+    }
+    match exposure {
+        ToolExposure::Routed => {
+            "Tool call failed. Read the message, re-check the tool's schema with synapse_tool_catalog, then retry with corrected arguments or pick a different tool."
+        }
+        ToolExposure::Direct => {
+            "Tool call failed. Read the message, re-check the tool's input schema, then retry with corrected arguments or pick a different tool."
         }
     }
 }
@@ -1903,6 +1931,94 @@ mod tests {
         assert_eq!(reasoning["thinking"]["type"], "enabled");
         assert_eq!(reasoning["reasoning_effort"], "max");
         assert!(reasoning.get("tool_choice").is_none());
+    }
+
+    fn prompt_test_tools() -> Vec<Tool> {
+        ["observe", "act_type", "agent_send"]
+            .iter()
+            .map(|name| {
+                serde_json::from_value(json!({
+                    "name": name,
+                    "description": "synthetic",
+                    "inputSchema": {"type": "object", "properties": {}},
+                }))
+                .expect("synthetic Tool")
+            })
+            .collect()
+    }
+
+    /// Round-trip proxy for compressionprompt.md §5.5: every load-bearing
+    /// constraint from the original verbose prompt must survive the compression,
+    /// and the result must actually be shorter (compression, not bloat). Also
+    /// pins the Direct/Routed correctness invariant: a Direct (API-model) session
+    /// is never told about `synapse_tool_catalog`, which it does not have.
+    #[test]
+    fn system_prompt_keeps_load_bearing_constraints_and_compresses() {
+        // The exact verbose prompts this change replaced (origin/main 3537242).
+        const OLD_BASE: &str = "You are a local Synapse agent. Use the provided MCP tools to inspect and change state. Never invent tool results. When a task asks for a stored artifact, call the relevant Synapse tool and then read it back. Finish with a concise summary only after the needed tool calls have succeeded.";
+        let old_direct = format!(
+            "{OLD_BASE}\n\nAll Synapse MCP tools from this session's strict tools/list are attached directly as model tools."
+        );
+        let old_routed = format!(
+            "{OLD_BASE}\n\nThis provider has a lower function-count cap than the live Synapse tool surface, so tools are exposed through a routed harness. Call synapse_tool_catalog to inspect exact tool schemas and call synapse_tool with a real Synapse tool name plus arguments to execute it. The routed harness can call every real Synapse MCP tool loaded by this session, including file, shell, browser/perception, agent, dashboard, and local-model tools. Live tool names: observe, act_type, agent_send"
+        );
+
+        let tools = prompt_test_tools();
+        let direct = system_prompt(ToolExposure::Direct, &tools);
+        let routed = system_prompt(ToolExposure::Routed, &tools);
+
+        // Load-bearing behavioral constraints survive verbatim in both modes.
+        for prompt in [&direct, &routed] {
+            assert!(prompt.contains("Synapse agent"), "identity");
+            assert!(prompt.contains("inspect and change state"), "capability");
+            assert!(prompt.contains("Never invent tool results"), "no-fabrication");
+            assert!(prompt.contains("read it back"), "read-back verification");
+            assert!(
+                prompt.contains("Summarize only after the required tool calls succeed"),
+                "summary-gating"
+            );
+        }
+        // Direct mode must NOT advertise the routed-only meta-tools (it has the
+        // real schemas attached; synapse_tool_catalog is not in its tool list).
+        assert!(!direct.contains(SYNAPSE_TOOL_CATALOG));
+        assert!(!direct.contains(SYNAPSE_TOOL_CALL));
+        // Routed mode keeps the indirection mechanism and the live names.
+        assert!(routed.contains(SYNAPSE_TOOL_CATALOG));
+        assert!(routed.contains(SYNAPSE_TOOL_CALL));
+        for tool in &tools {
+            assert!(routed.contains(tool.name.as_ref()));
+        }
+
+        // Compression: char count is the tiktoken-absent proxy (~4 chars/token).
+        println!(
+            "readback=prompt_compress direct old={} new={} routed old={} new={}",
+            old_direct.len(),
+            direct.len(),
+            old_routed.len(),
+            routed.len()
+        );
+        assert!(
+            direct.len() < old_direct.len(),
+            "Direct prompt must be shorter than the verbose original"
+        );
+        assert!(
+            routed.len() < old_routed.len(),
+            "Routed prompt must be shorter than the verbose original"
+        );
+    }
+
+    #[test]
+    fn tool_failure_suggestion_is_exposure_aware() {
+        // Direct sessions have no synapse_tool_catalog — must not be told to use it.
+        let direct = tool_failure_suggestion(false, ToolExposure::Direct);
+        assert!(!direct.contains("synapse_tool_catalog"));
+        assert!(direct.contains("input schema"));
+        // Routed sessions do have it — the hint names it.
+        let routed = tool_failure_suggestion(false, ToolExposure::Routed);
+        assert!(routed.contains("synapse_tool_catalog"));
+        // A dead transport is terminal regardless of exposure.
+        assert!(tool_failure_suggestion(true, ToolExposure::Direct).contains("run is ending"));
+        assert!(tool_failure_suggestion(true, ToolExposure::Routed).contains("run is ending"));
     }
 
     #[tokio::test]
