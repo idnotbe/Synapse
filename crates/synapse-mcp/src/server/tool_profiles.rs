@@ -176,13 +176,21 @@ pub(crate) enum ToolProfileKind {
 }
 
 impl ToolProfileKind {
-    fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::NormalAgent => "normal_agent",
             Self::BrowserControl => "browser_control",
             Self::BreakGlass => "break_glass",
             Self::FullCapability => "full_capability",
         }
+    }
+
+    /// Whether this profile is permitted to reach a human-foreground action
+    /// tier. Only the break-glass/admin and trusted full-capability local-model
+    /// profiles may; `normal_agent`/`browser_control` are background-first and a
+    /// foreground tier from them is a policy violation (#1004/#1006).
+    pub(crate) const fn allows_foreground_tier(self) -> bool {
+        matches!(self, Self::BreakGlass | Self::FullCapability)
     }
 
     fn label(self) -> &'static str {

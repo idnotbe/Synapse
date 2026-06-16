@@ -297,6 +297,8 @@ impl SynapseService {
         let profile_id = audit_context.profile_id.clone();
         let profile_version = audit_context.profile_version.clone();
         let profile_schema_version = audit_context.profile_schema_version;
+        let foreground_tier =
+            self.action_audit_foreground_tier(tool, status, session_id.as_deref(), details);
         let value = json!({
             "schema_version": 1,
             "audit_id": format!("{ts_ns:020}-{seq:010}"),
@@ -311,6 +313,7 @@ impl SynapseService {
             "status": status,
             "error_code": error_code,
             "foreground": self.action_audit_foreground(),
+            "foreground_tier": foreground_tier,
             "active_profile_id": active_profile.profile_id,
             "active_profile_schema_version": active_profile.schema_version,
             "redacted": false,
@@ -364,6 +367,66 @@ impl SynapseService {
                 "read_error_message": error.message.to_string(),
             }),
         }
+    }
+
+    /// Compute the per-row foreground-tier policy block (#1006): which backend
+    /// tier the action used, whether it required the human foreground, the live
+    /// foreground-input lease state, and the calling session's foreground
+    /// policy. When a session whose profile is NOT allowed to reach the
+    /// foreground tier nonetheless records `required_foreground=true` on a
+    /// non-denied action, this is a background-first policy violation and is
+    /// surfaced as a high-severity audit marker + ERROR log (queryable via
+    /// `audit_intelligence_query`).
+    fn action_audit_foreground_tier(
+        &self,
+        tool: &'static str,
+        status: &str,
+        session_id: Option<&str>,
+        details: &Value,
+    ) -> Value {
+        let required_foreground = detail_required_foreground(details);
+        let backend_tier = detail_backend_tier(details);
+        let lease = synapse_action::lease::status();
+        let caller_is_owner =
+            session_id.is_some() && lease.owner_session_id.as_deref() == session_id;
+        let profile = self
+            .tool_profile_snapshot(session_id)
+            .ok()
+            .map(|snapshot| snapshot.profile);
+        let policy_label = profile.map_or("unknown", super::tool_profiles::ToolProfileKind::as_str);
+        let policy_allows_foreground =
+            profile.is_some_and(super::tool_profiles::ToolProfileKind::allows_foreground_tier);
+        // A denied action never actually touched the foreground, so it is not a
+        // violation even if it was a foreground-tier request.
+        let foreground_policy_violation =
+            required_foreground && !policy_allows_foreground && status != "denied";
+        if foreground_policy_violation {
+            tracing::error!(
+                code = "ACTION_FOREGROUND_TIER_POLICY_VIOLATION",
+                tool,
+                status,
+                session_id = session_id.unwrap_or("<none>"),
+                profile = policy_label,
+                backend_tier = backend_tier.as_deref().unwrap_or("<none>"),
+                lease_owner = lease.owner_session_id.as_deref().unwrap_or("<none>"),
+                "a session whose tool profile forbids the foreground tier recorded a \
+                 foreground-tier action; background-first policy violation (#1006)"
+            );
+        }
+        json!({
+            "required_foreground": required_foreground,
+            "backend_tier": backend_tier,
+            "foreground_input_lease": {
+                "held": lease.held,
+                "owner_session_id": lease.owner_session_id,
+                "caller_is_owner": caller_is_owner,
+                "expires_in_ms": lease.expires_in_ms,
+            },
+            "session_foreground_policy": policy_label,
+            "policy_allows_foreground": policy_allows_foreground,
+            "foreground_policy_violation": foreground_policy_violation,
+            "allowed": !foreground_policy_violation,
+        })
     }
 
     fn action_audit_observed_profile(
@@ -425,6 +488,44 @@ struct ActionAuditProfileRef {
     schema_version: Option<u32>,
 }
 
+/// Extract the foreground requirement from a tool's audit `details`. A tool
+/// either states it directly (`required_foreground`) or reports it per backend
+/// attempt (`tier_attempts[].required_foreground`); any foreground-requiring
+/// attempt makes the action foreground-tier.
+fn detail_required_foreground(details: &Value) -> bool {
+    if details.get("required_foreground").and_then(Value::as_bool) == Some(true) {
+        return true;
+    }
+    details
+        .get("tier_attempts")
+        .and_then(Value::as_array)
+        .is_some_and(|attempts| {
+            attempts.iter().any(|attempt| {
+                attempt.get("required_foreground").and_then(Value::as_bool) == Some(true)
+            })
+        })
+}
+
+/// Extract the backend tier a tool used, from whichever field the tool records.
+fn detail_backend_tier(details: &Value) -> Option<String> {
+    for key in ["backend_tier_used", "backend_tier", "tier"] {
+        if let Some(tier) = details.get(key).and_then(Value::as_str) {
+            return Some(tier.to_owned());
+        }
+    }
+    // Otherwise, the last delivered tier attempt, if any.
+    details
+        .get("tier_attempts")
+        .and_then(Value::as_array)
+        .and_then(|attempts| {
+            attempts
+                .iter()
+                .rev()
+                .find_map(|attempt| attempt.get("tier").and_then(Value::as_str))
+        })
+        .map(str::to_owned)
+}
+
 fn next_audit_key_parts() -> (u64, u32) {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -453,4 +554,127 @@ fn error_data_code(error: &ErrorData) -> Option<&str> {
 fn non_empty(value: &str) -> Option<String> {
     let trimmed = value.trim();
     (!trimmed.is_empty()).then(|| trimmed.to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{num::NonZeroUsize, path::Path};
+
+    use tempfile::TempDir;
+    use tokio_util::sync::CancellationToken;
+
+    use crate::{m2::M2ServiceConfig, m3::M3ServiceConfig, m4::M4ServiceConfig};
+
+    fn service_with_db(path: &Path) -> SynapseService {
+        SynapseService::try_with_m2_shutdown_reason_and_m3_config(
+            CancellationToken::new(),
+            "test",
+            CancellationToken::new(),
+            &M2ServiceConfig::default(),
+            M3ServiceConfig::from_cli_parts(
+                Some(path.join("db")),
+                Some(path.to_path_buf()),
+                false,
+                "127.0.0.1:0".to_owned(),
+                NonZeroUsize::new(4).expect("nonzero"),
+                false,
+                true,
+                None,
+                false,
+                None,
+            ),
+            M4ServiceConfig::default(),
+        )
+        .expect("construct service")
+    }
+
+    #[test]
+    fn detail_required_foreground_reads_direct_flag_and_tier_attempts() {
+        assert!(detail_required_foreground(&json!({ "required_foreground": true })));
+        assert!(!detail_required_foreground(&json!({ "required_foreground": false })));
+        assert!(!detail_required_foreground(&json!({})));
+        // any foreground-requiring tier attempt makes the whole action foreground-tier
+        assert!(detail_required_foreground(&json!({
+            "tier_attempts": [
+                { "tier": "uia", "required_foreground": false },
+                { "tier": "foreground_sendinput", "required_foreground": true },
+            ]
+        })));
+        assert!(!detail_required_foreground(&json!({
+            "tier_attempts": [{ "tier": "cdp", "required_foreground": false }]
+        })));
+    }
+
+    #[test]
+    fn detail_backend_tier_prefers_explicit_then_last_attempt() {
+        assert_eq!(
+            detail_backend_tier(&json!({ "backend_tier_used": "cdp" })).as_deref(),
+            Some("cdp")
+        );
+        assert_eq!(
+            detail_backend_tier(&json!({ "backend_tier": "uia" })).as_deref(),
+            Some("uia")
+        );
+        assert_eq!(
+            detail_backend_tier(&json!({
+                "tier_attempts": [{ "tier": "uia" }, { "tier": "postmessage" }]
+            }))
+            .as_deref(),
+            Some("postmessage")
+        );
+        assert_eq!(detail_backend_tier(&json!({})), None);
+    }
+
+    #[test]
+    fn profile_foreground_allowance_matches_break_glass_only() {
+        use super::super::tool_profiles::ToolProfileKind;
+        assert!(!ToolProfileKind::NormalAgent.allows_foreground_tier());
+        assert!(!ToolProfileKind::BrowserControl.allows_foreground_tier());
+        assert!(ToolProfileKind::BreakGlass.allows_foreground_tier());
+        assert!(ToolProfileKind::FullCapability.allows_foreground_tier());
+    }
+
+    #[test]
+    fn foreground_tier_block_flags_normal_agent_foreground_as_violation() {
+        let dir = TempDir::new().expect("tmp");
+        let service = service_with_db(dir.path());
+        let session_id = "issue1006-normal-session";
+
+        // A normal_agent session that records a foreground-tier action is a
+        // background-first policy violation. The profile is resolved from the
+        // real CF_SESSIONS row (default normal_agent for a non-local session).
+        let violation = service.action_audit_foreground_tier(
+            "act_type",
+            "ok",
+            Some(session_id),
+            &json!({ "required_foreground": true, "backend_tier_used": "foreground_sendinput" }),
+        );
+        assert_eq!(violation["session_foreground_policy"], "normal_agent");
+        assert_eq!(violation["required_foreground"], true);
+        assert_eq!(violation["backend_tier"], "foreground_sendinput");
+        assert_eq!(violation["policy_allows_foreground"], false);
+        assert_eq!(violation["foreground_policy_violation"], true);
+        assert_eq!(violation["allowed"], false);
+
+        // A background action from the same session is allowed and not flagged.
+        let ok = service.action_audit_foreground_tier(
+            "cdp_target_info",
+            "ok",
+            Some(session_id),
+            &json!({ "required_foreground": false }),
+        );
+        assert_eq!(ok["required_foreground"], false);
+        assert_eq!(ok["foreground_policy_violation"], false);
+        assert_eq!(ok["allowed"], true);
+
+        // A denied foreground request never touched the foreground -> not a violation.
+        let denied = service.action_audit_foreground_tier(
+            "act_type",
+            "denied",
+            Some(session_id),
+            &json!({ "required_foreground": true }),
+        );
+        assert_eq!(denied["foreground_policy_violation"], false);
+    }
 }
