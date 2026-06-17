@@ -965,6 +965,68 @@ pub struct CdpActivateTabResponse {
     pub target_selection_reason: String,
 }
 
+/// Parameters for `browser_evaluate` (#1065/#1067): evaluate a JavaScript
+/// expression in the calling session's owned CDP page target.
+#[derive(Clone, Debug, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct BrowserEvaluateParams {
+    /// JavaScript expression to evaluate in the page's main world. To return an
+    /// object literal, parenthesize it (e.g. `({a: 1})`). Use an async IIFE plus
+    /// `await_promise` for asynchronous work (e.g. `(async () => await
+    /// fetch('/x').then(r => r.status))()`).
+    pub expression: String,
+    /// CDP TargetID to evaluate in. If omitted, the active session CDP target is
+    /// used. The target must be owned by this session; the human foreground tab
+    /// is never an implicit fallback.
+    #[serde(default)]
+    pub cdp_target_id: Option<String>,
+    /// Browser HWND that owns the target. Required only when passing an explicit
+    /// `cdp_target_id` without an active session target.
+    #[serde(default)]
+    pub window_hwnd: Option<i64>,
+    /// Await a returned promise/thenable before resolving. Defaults to true.
+    #[serde(default)]
+    pub await_promise: Option<bool>,
+    /// Serialize the result by value as JSON. Defaults to true. Set false to
+    /// receive only the type/description handle for non-serializable values
+    /// (DOM nodes, functions).
+    #[serde(default)]
+    pub return_by_value: Option<bool>,
+}
+
+/// Response for `browser_evaluate`. The evaluated value plus the page context it
+/// was read against and the `Runtime.RemoteObject` type metadata.
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct BrowserEvaluateResponse {
+    pub session_id: String,
+    pub window_hwnd: i64,
+    pub transport: String,
+    pub endpoint: String,
+    pub cdp_target_id: String,
+    pub url: String,
+    pub title: String,
+    pub ready_state: String,
+    /// `Runtime.RemoteObject.type` of the result.
+    pub result_type: String,
+    /// `Runtime.RemoteObject.subtype` when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_subtype: Option<String>,
+    pub returned_by_value: bool,
+    /// Serialized JSON value when `returned_by_value`; JSON `null` otherwise.
+    pub value: serde_json::Value,
+    /// Engine string rendering for non-by-value handles.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Present for values that cannot be JSON-represented ("Infinity", "NaN", …).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unserializable_value: Option<String>,
+    pub readback_backend: String,
+    pub backend_tier_used: String,
+    /// Always false: evaluation attaches to the owned background target only.
+    pub required_foreground: bool,
+}
+
 pub fn empty_input_schema() -> Arc<JsonObject> {
     common::schema_for_type::<EmptyParams>()
 }

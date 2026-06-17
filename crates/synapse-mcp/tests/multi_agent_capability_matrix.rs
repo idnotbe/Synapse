@@ -547,6 +547,7 @@ fn is_matrix_scope_tool(name: &str) -> bool {
         || name.starts_with("action_diagnostic_")
         || name.starts_with("agent_")
         || name.starts_with("audio_")
+        || name.starts_with("browser_")
         || name.starts_with("cdp_")
         || name.starts_with("control_lease_")
         || name.starts_with("fleet_")

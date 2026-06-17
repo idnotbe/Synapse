@@ -1,5 +1,6 @@
 use super::{
-    CaptureScreenshotFormat, CaptureScreenshotParams, CaptureScreenshotResponse,
+    BrowserEvaluateParams, BrowserEvaluateResponse, CaptureScreenshotFormat,
+    CaptureScreenshotParams, CaptureScreenshotResponse,
     CdpActivateTabParams, CdpActivateTabResponse, CdpActiveElementInfo, CdpBridgeHostReadback,
     CdpBridgeReloadAckReadback, CdpBridgeReloadParams, CdpBridgeReloadResponse, CdpCloseTabParams,
     CdpCloseTabResponse, CdpNavigateAction, CdpNavigateTabParams, CdpNavigateTabResponse,
@@ -1447,6 +1448,61 @@ impl SynapseService {
         self.audit_action_result_for_session(TOOL, &result, &session_id)?;
         result.map(Json)
     }
+
+    #[tool(
+        description = "Evaluate a JavaScript expression in the calling session's owned background browser tab via raw CDP Runtime.evaluate, returning the JSON value plus Runtime.RemoteObject type metadata read back from the same target. Requires an active session CDP target or an explicit cdp_target_id owned by this session; never uses the human foreground tab as a fallback. JS exceptions are surfaced loudly (thrown message, class, source location). Background-safe: never activates the tab or uses OS foreground input. This is the keystone for page content / element introspection / state queries / web-first assertions. Only the raw CDP transport supports arbitrary evaluation; the popup-safe normal extension bridge never attaches the debugger and fails closed with a clear reason."
+    )]
+    pub async fn browser_evaluate(
+        &self,
+        params: Parameters<BrowserEvaluateParams>,
+        request_context: RequestContext<RoleServer>,
+    ) -> Result<Json<BrowserEvaluateResponse>, ErrorData> {
+        const TOOL: &str = "browser_evaluate";
+        tracing::info!(
+            code = "MCP_TOOL_INVOCATION",
+            kind = TOOL,
+            "tool.invocation kind=browser_evaluate"
+        );
+        let session_id = require_target_session_id(&request_context)?;
+        validate_browser_evaluate_params(&params.0)?;
+        let request_details = browser_evaluate_resolution_request_details(&session_id, &params.0);
+        let resolution = self.resolve_cdp_tab_mutation_target(
+            TOOL,
+            &session_id,
+            params.0.window_hwnd,
+            params.0.cdp_target_id.as_deref(),
+        );
+        let (window_hwnd, cdp_target_id) = self.audit_cdp_target_resolution_result(
+            TOOL,
+            &session_id,
+            &request_details,
+            resolution,
+        )?;
+        let await_promise = params.0.await_promise.unwrap_or(true);
+        let return_by_value = params.0.return_by_value.unwrap_or(true);
+        let request_details = json!({
+            "session_id": &session_id,
+            "window_hwnd": window_hwnd,
+            "cdp_target_id": &cdp_target_id,
+            "expression_len": params.0.expression.len(),
+            "await_promise": await_promise,
+            "return_by_value": return_by_value,
+            "required_foreground": false,
+        });
+        self.audit_action_started_with_details_for_session(TOOL, &request_details, &session_id)?;
+        let result = self
+            .browser_evaluate_impl(
+                &session_id,
+                window_hwnd,
+                &cdp_target_id,
+                &params.0.expression,
+                await_promise,
+                return_by_value,
+            )
+            .await;
+        self.audit_action_result_for_session(TOOL, &result, &session_id)?;
+        result.map(Json)
+    }
 }
 
 /// Resolves the calling session id for target tools, failing loud when absent
@@ -2339,6 +2395,86 @@ impl SynapseService {
     }
 
     #[cfg(windows)]
+    async fn browser_evaluate_impl(
+        &self,
+        session_id: &str,
+        window_hwnd: i64,
+        cdp_target_id: &str,
+        expression: &str,
+        await_promise: bool,
+        return_by_value: bool,
+    ) -> Result<BrowserEvaluateResponse, ErrorData> {
+        let Some(endpoint) = synapse_a11y::endpoint_for_window(window_hwnd) else {
+            return Err(mcp_error(
+                error_codes::A11Y_CDP_EXTENSION_UNAVAILABLE,
+                format!(
+                    "browser_evaluate requires a raw CDP debugging endpoint for window {window_hwnd:#x}; the popup-safe normal Chrome extension bridge does not expose arbitrary Runtime.evaluate (it never attaches the debugger). Open the target in a raw-CDP Chrome (launched with --remote-debugging-port) and retry."
+                ),
+            ));
+        };
+        let evaluated = synapse_a11y::cdp_evaluate_expression(
+            &endpoint,
+            cdp_target_id,
+            expression,
+            await_promise,
+            return_by_value,
+        )
+        .await
+        .map_err(|error| {
+            mcp_error(
+                error.code(),
+                format!("browser_evaluate raw CDP Runtime.evaluate failed: {error}"),
+            )
+        })?;
+        tracing::info!(
+            code = "CDP_BACKGROUND_EVALUATE",
+            session_id = %session_id,
+            hwnd = window_hwnd,
+            endpoint = %endpoint,
+            cdp_target_id = %evaluated.target_id,
+            result_type = %evaluated.result_type,
+            returned_by_value = evaluated.returned_by_value,
+            target_url = %evaluated.url,
+            "readback=Runtime.evaluate outcome=evaluated"
+        );
+        Ok(BrowserEvaluateResponse {
+            session_id: session_id.to_owned(),
+            window_hwnd,
+            transport: "raw_cdp".to_owned(),
+            endpoint,
+            cdp_target_id: evaluated.target_id,
+            url: evaluated.url,
+            title: evaluated.title,
+            ready_state: evaluated.ready_state,
+            result_type: evaluated.result_type,
+            result_subtype: evaluated.result_subtype,
+            returned_by_value: evaluated.returned_by_value,
+            value: evaluated.value,
+            description: evaluated.description,
+            unserializable_value: evaluated.unserializable_value,
+            readback_backend: "Runtime.evaluate".to_owned(),
+            backend_tier_used: "cdp".to_owned(),
+            required_foreground: false,
+        })
+    }
+
+    #[cfg(not(windows))]
+    async fn browser_evaluate_impl(
+        &self,
+        _session_id: &str,
+        _window_hwnd: i64,
+        _cdp_target_id: &str,
+        _expression: &str,
+        _await_promise: bool,
+        _return_by_value: bool,
+    ) -> Result<BrowserEvaluateResponse, ErrorData> {
+        Err(mcp_error(
+            error_codes::A11Y_NOT_AVAILABLE,
+            "browser_evaluate is only available on Windows in this build",
+        ))
+    }
+
+    #[cfg(windows)]
     async fn cdp_open_tab_raw_impl(
         &self,
         session_id: &str,
@@ -2988,6 +3124,22 @@ fn cdp_target_info_resolution_request_details(
     })
 }
 
+fn browser_evaluate_resolution_request_details(
+    session_id: &str,
+    params: &BrowserEvaluateParams,
+) -> Value {
+    json!({
+        "session_id": session_id,
+        "window_hwnd": params.window_hwnd,
+        "requested_cdp_target": cdp_target_id_audit_ref(params.cdp_target_id.as_deref()),
+        "expression_len": params.expression.len(),
+        "await_promise": params.await_promise.unwrap_or(true),
+        "return_by_value": params.return_by_value.unwrap_or(true),
+        "required_foreground": false,
+        "phase": "target_resolution",
+    })
+}
+
 fn cdp_navigate_resolution_request_details(
     session_id: &str,
     params: &CdpNavigateTabParams,
@@ -3093,6 +3245,33 @@ fn validate_cdp_target_id(cdp_target_id: &str) -> Result<(), ErrorData> {
             error_codes::TOOL_PARAMS_INVALID,
             "cdp_target_id must not contain NUL",
         ));
+    }
+    Ok(())
+}
+
+/// Upper bound on the evaluated expression size. Generous enough for injected
+/// helper bundles, but bounded so a single tool call cannot ship an unbounded
+/// payload through the protocol.
+const BROWSER_EVALUATE_MAX_EXPRESSION_BYTES: usize = 1_048_576;
+
+fn validate_browser_evaluate_params(params: &BrowserEvaluateParams) -> Result<(), ErrorData> {
+    if params.expression.trim().is_empty() {
+        return Err(mcp_error(
+            error_codes::TOOL_PARAMS_INVALID,
+            "browser_evaluate requires a non-empty expression",
+        ));
+    }
+    if params.expression.len() > BROWSER_EVALUATE_MAX_EXPRESSION_BYTES {
+        return Err(mcp_error(
+            error_codes::TOOL_PARAMS_INVALID,
+            format!(
+                "browser_evaluate expression is {} bytes; the maximum is {BROWSER_EVALUATE_MAX_EXPRESSION_BYTES} bytes",
+                params.expression.len()
+            ),
+        ));
+    }
+    if let Some(target_id) = params.cdp_target_id.as_deref() {
+        validate_cdp_target_id(target_id)?;
     }
     Ok(())
 }
@@ -5055,16 +5234,17 @@ fn escape_json_pointer(segment: &str) -> String {
 #[cfg(all(test, windows))]
 mod tests {
     use super::{
-        CdpTargetOwner, SessionTarget, SynapseService, TargetWire, attach_find_hygiene_annotations,
-        attach_ocr_hygiene_annotations, cdp_activate_resolution_request_details,
-        cdp_target_info_resolution_request_details, hidden_desktop_pip_ended_response,
-        hidden_worker_target_miss, mcp_error, ocr_cache_key, page_text_info_from_parts,
-        perception_window_hwnd, resolve_capture_target_window_context, sha256_hex, target_wire,
-        template_value, validate_target_window,
+        BROWSER_EVALUATE_MAX_EXPRESSION_BYTES, CdpTargetOwner, SessionTarget, SynapseService,
+        TargetWire, attach_find_hygiene_annotations, attach_ocr_hygiene_annotations,
+        cdp_activate_resolution_request_details, cdp_target_info_resolution_request_details,
+        hidden_desktop_pip_ended_response, hidden_worker_target_miss, mcp_error, ocr_cache_key,
+        page_text_info_from_parts, perception_window_hwnd, resolve_capture_target_window_context,
+        sha256_hex, target_wire, template_value, validate_browser_evaluate_params,
+        validate_target_window,
     };
     use crate::m1::{
-        CdpActivateTabParams, CdpTargetInfoParams, FindResponse, FindResult, FindResultKind,
-        HiddenDesktopPipFrameParams, HiddenDesktopPipStreamStatus,
+        BrowserEvaluateParams, CdpActivateTabParams, CdpTargetInfoParams, FindResponse, FindResult,
+        FindResultKind, HiddenDesktopPipFrameParams, HiddenDesktopPipStreamStatus,
     };
     use crate::{m2::M2ServiceConfig, m3::M3ServiceConfig, m4::M4ServiceConfig};
     use std::{num::NonZeroUsize, path::Path};
@@ -5072,6 +5252,60 @@ mod tests {
     use synapse_storage::cf;
     use tempfile::TempDir;
     use tokio_util::sync::CancellationToken;
+
+    #[test]
+    fn browser_evaluate_params_validation_edges() {
+        // Happy: a normal expression passes.
+        assert!(
+            validate_browser_evaluate_params(&BrowserEvaluateParams {
+                expression: "1 + 1".to_owned(),
+                ..Default::default()
+            })
+            .is_ok()
+        );
+        // Edge 1: empty / whitespace-only expression is rejected loudly.
+        for blank in ["", "   ", "\t\n"] {
+            let error = validate_browser_evaluate_params(&BrowserEvaluateParams {
+                expression: blank.to_owned(),
+                ..Default::default()
+            })
+            .expect_err("blank expression must be rejected");
+            let code = error
+                .data
+                .as_ref()
+                .and_then(|data| data.get("code"))
+                .and_then(serde_json::Value::as_str);
+            assert_eq!(code, Some(error_codes::TOOL_PARAMS_INVALID));
+        }
+        // Edge 2: an oversize expression (one byte past the cap) is rejected.
+        let oversize = "x".repeat(BROWSER_EVALUATE_MAX_EXPRESSION_BYTES + 1);
+        let error = validate_browser_evaluate_params(&BrowserEvaluateParams {
+            expression: oversize,
+            ..Default::default()
+        })
+        .expect_err("oversize expression must be rejected");
+        let code = error
+            .data
+            .as_ref()
+            .and_then(|data| data.get("code"))
+            .and_then(serde_json::Value::as_str);
+        assert_eq!(code, Some(error_codes::TOOL_PARAMS_INVALID));
+        // Edge 3: an explicit empty cdp_target_id is rejected by the shared
+        // target-id validator before any CDP attach is attempted.
+        let error = validate_browser_evaluate_params(&BrowserEvaluateParams {
+            expression: "1".to_owned(),
+            cdp_target_id: Some("   ".to_owned()),
+            ..Default::default()
+        })
+        .expect_err("blank cdp_target_id must be rejected");
+        let code = error
+            .data
+            .as_ref()
+            .and_then(|data| data.get("code"))
+            .and_then(serde_json::Value::as_str);
+        assert_eq!(code, Some(error_codes::TOOL_PARAMS_INVALID));
+        println!("readback=browser_evaluate validation edges all rejected with TOOL_PARAMS_INVALID");
+    }
 
     #[test]
     fn validate_target_window_rejects_dead_hwnd() {

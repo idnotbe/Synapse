@@ -22,7 +22,8 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     http::sse::SseState,
     m1::{
-        CaptureScreenshotFormat, CaptureScreenshotParams, CaptureScreenshotResponse,
+        BrowserEvaluateParams, BrowserEvaluateResponse, CaptureScreenshotFormat,
+        CaptureScreenshotParams, CaptureScreenshotResponse,
         CdpActivateTabParams, CdpActivateTabResponse, CdpActiveElementInfo, CdpBridgeHostReadback,
         CdpBridgeReloadAckReadback, CdpBridgeReloadParams, CdpBridgeReloadResponse,
         CdpCloseTabParams, CdpCloseTabResponse, CdpNavigateAction, CdpNavigateTabParams,

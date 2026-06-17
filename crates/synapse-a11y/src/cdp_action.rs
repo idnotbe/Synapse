@@ -159,6 +159,35 @@ pub struct CdpPageTextState {
     pub max_chars: usize,
 }
 
+/// Result of evaluating a JavaScript expression in a CDP page target via
+/// `Runtime.evaluate` (#1065/#1067). Background-safe: this never activates the
+/// tab or uses OS foreground input — it attaches CDP to the owned target only.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct CdpEvaluateResult {
+    pub target_id: String,
+    pub url: String,
+    pub title: String,
+    pub ready_state: String,
+    /// `Runtime.RemoteObject.type` (e.g. "object", "string", "number",
+    /// "boolean", "undefined", "function", "symbol", "bigint").
+    pub result_type: String,
+    /// `Runtime.RemoteObject.subtype` when present (e.g. "array", "null",
+    /// "node", "error", "promise", "date", "regexp").
+    pub result_subtype: Option<String>,
+    /// True when the value was serialized by value (JSON round-trippable).
+    pub returned_by_value: bool,
+    /// The serialized JSON value when `returnByValue` produced one; JSON `null`
+    /// otherwise (inspect `result_type`/`description` for non-serializable
+    /// handles such as DOM nodes or functions).
+    pub value: Value,
+    /// `Runtime.RemoteObject.description` (the engine's string rendering),
+    /// useful for non-by-value handles where `value` is `null`.
+    pub description: Option<String>,
+    /// `Runtime.RemoteObject.unserializableValue` (e.g. "Infinity", "NaN",
+    /// "-0", bigint literals) when the value cannot be represented as JSON.
+    pub unserializable_value: Option<String>,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct CdpPageNavigationResult {
     pub target_id: String,
@@ -730,6 +759,118 @@ pub async fn cdp_page_text_target(
             })
     })
     .await
+}
+
+/// Evaluates a JavaScript `expression` in a specific CDP page target and returns
+/// a structured, separately-read result. JS exceptions are surfaced loudly as
+/// `A11Y_CDP_AXTREE_FAILED` carrying the thrown message, class, location and
+/// stack — they are never swallowed or coerced to a success value.
+///
+/// `await_promise` awaits a returned thenable before resolving;
+/// `return_by_value` serializes the result as JSON (set false to receive only
+/// the type/description handle for non-serializable values like DOM nodes).
+///
+/// This is the keystone for the Playwright-parity browser surface (#1063): page
+/// content, element introspection, state queries and assertions are all built on
+/// it. It is background-safe — no tab activation, no OS foreground input.
+///
+/// # Errors
+///
+/// `A11Y_CDP_ATTACH_FAILED` if the endpoint/target cannot be reached;
+/// `A11Y_CDP_AXTREE_FAILED` if the evaluate command fails at the protocol level,
+/// the page throws an exception, or the result cannot be decoded.
+pub async fn cdp_evaluate_expression(
+    endpoint: &str,
+    target_id: &str,
+    expression: &str,
+    await_promise: bool,
+    return_by_value: bool,
+) -> A11yResult<CdpEvaluateResult> {
+    use chromiumoxide::cdp::js_protocol::runtime::EvaluateParams;
+    let expression = expression.to_owned();
+    with_target_page(endpoint, target_id, |page| async move {
+        let target_id = page.target_id().inner().clone();
+        // Read URL/title/readyState separately so the result carries the page
+        // context it was evaluated against (FSV source-of-truth correlation).
+        let state = read_page_state(&page).await?;
+        let params = EvaluateParams::builder()
+            .expression(expression)
+            .return_by_value(return_by_value)
+            .await_promise(await_promise)
+            .build()
+            .map_err(|err| A11yError::CdpAxtreeFailed {
+                detail: format!("Runtime.evaluate params build: {err}"),
+            })?;
+        let returns = page
+            .execute(params)
+            .await
+            .map_err(|err| A11yError::CdpAxtreeFailed {
+                detail: format!("Runtime.evaluate: {err}"),
+            })?
+            .result;
+        if let Some(exception) = returns.exception_details.as_ref() {
+            return Err(A11yError::CdpAxtreeFailed {
+                detail: format!(
+                    "Runtime.evaluate threw: {}",
+                    format_evaluate_exception(exception)
+                ),
+            });
+        }
+        let remote = returns.result;
+        let result_type = remote_object_type_str(&remote.r#type);
+        let result_subtype = remote
+            .subtype
+            .as_ref()
+            .and_then(|subtype| serde_json::to_value(subtype).ok())
+            .and_then(|value| value.as_str().map(ToOwned::to_owned));
+        Ok(CdpEvaluateResult {
+            target_id,
+            url: state.url,
+            title: state.title,
+            ready_state: state.ready_state,
+            result_type,
+            result_subtype,
+            returned_by_value: return_by_value,
+            value: remote.value.unwrap_or(Value::Null),
+            description: remote.description,
+            unserializable_value: remote
+                .unserializable_value
+                .as_ref()
+                .map(|raw| raw.inner().clone()),
+        })
+    })
+    .await
+}
+
+/// Renders a `Runtime.RemoteObject.type` enum to its protocol string.
+fn remote_object_type_str(
+    object_type: &chromiumoxide::cdp::js_protocol::runtime::RemoteObjectType,
+) -> String {
+    serde_json::to_value(object_type)
+        .ok()
+        .and_then(|value| value.as_str().map(ToOwned::to_owned))
+        .unwrap_or_else(|| "unknown".to_owned())
+}
+
+/// Formats a `Runtime.ExceptionDetails` into a single, fully-detailed line so
+/// the failure is actionable: the thrown class+message (from the RemoteObject
+/// description when present, which includes the stack), and the source location.
+fn format_evaluate_exception(
+    exception: &chromiumoxide::cdp::js_protocol::runtime::ExceptionDetails,
+) -> String {
+    let mut detail = exception.text.clone();
+    if let Some(thrown) = exception.exception.as_ref() {
+        if let Some(description) = thrown.description.as_ref() {
+            // For thrown Errors the description is "Name: message\n    at ...".
+            detail = format!("{detail}: {description}");
+        } else if let Some(value) = thrown.value.as_ref() {
+            detail = format!("{detail}: {value}");
+        }
+    }
+    format!(
+        "{detail} (line {}, column {})",
+        exception.line_number, exception.column_number
+    )
 }
 
 /// Navigates/reloads/history-navigates a specific CDP page target and returns a
