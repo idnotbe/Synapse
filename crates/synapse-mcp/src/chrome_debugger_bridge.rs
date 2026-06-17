@@ -39,14 +39,17 @@ const EXTENSION_ORIGIN: &str = "chrome-extension://leoocgnkjnplbfdbklajepahofecg
 const BRIDGE_TOKEN_HEADER: &str = "x-synapse-bridge-token";
 const BRIDGE_PROTOCOL_VERSION: u32 = 1;
 const EXPECTED_EXTENSION_BUILD_ID: &str =
-    "synapse-chrome-bridge-2026-06-17-dom-action-set-field-v1";
+    "synapse-chrome-bridge-2026-06-17-page-vitals-evaluate-v1";
 const EXPECTED_EXTENSION_BUILD_SHA256: &str =
-    "73214efb5b05ab9caf0df44f8c3decb43833f9a45248f15b69413b5dac6e3ee7";
+    "7a77ff099704319e36345d4310c2fcb8abcb5e6176725d076aab664585097c6f";
 const REQUIRED_DIRECT_HTTP_CAPABILITIES: &[&str] = &[
+    "activateTab",
     "closeTab",
     "domAction",
+    "evaluateScript",
     "navigateTab",
     "openTab",
+    "pageVitals",
     "reloadSelf",
     "targetInfo",
     "targetInfoPageText",
@@ -644,9 +647,65 @@ pub(crate) struct ChromeDebuggerTargetInfo {
     pub active_element: Option<ChromeDebuggerActiveElement>,
     #[serde(default)]
     pub page_text: Option<ChromeDebuggerPageText>,
+    #[serde(default)]
+    pub page_vitals: Option<ChromeDebuggerPageVitals>,
     pub target_candidate_count: u32,
     pub target_selection_reason: String,
     pub extension_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub(crate) struct ChromeDebuggerLargestContentfulPaint {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub entry_type: String,
+    #[serde(default)]
+    pub start_time: f64,
+    #[serde(default)]
+    pub render_time: f64,
+    #[serde(default)]
+    pub load_time: f64,
+    #[serde(default)]
+    pub size: f64,
+    #[serde(default)]
+    pub element_tag_name: Option<String>,
+    #[serde(default)]
+    pub element_id: Option<String>,
+    #[serde(default)]
+    pub element_class_name: Option<String>,
+    #[serde(default)]
+    pub element_selector: Option<String>,
+    #[serde(default)]
+    pub element_text: Option<String>,
+    #[serde(default)]
+    pub element_current_src: Option<String>,
+    #[serde(default)]
+    pub element_url: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub(crate) struct ChromeDebuggerPageVitals {
+    #[serde(default)]
+    pub available: bool,
+    #[serde(default)]
+    pub readback_source: String,
+    #[serde(default)]
+    pub visibility_state: Option<String>,
+    #[serde(default)]
+    pub document_hidden: Option<bool>,
+    #[serde(default)]
+    pub ready_state: Option<String>,
+    #[serde(default)]
+    pub lcp_supported: Option<bool>,
+    #[serde(default)]
+    pub lcp_entry_count: usize,
+    #[serde(default)]
+    pub lcp: Option<ChromeDebuggerLargestContentfulPaint>,
+    #[serde(default)]
+    pub error_code: Option<String>,
+    #[serde(default)]
+    pub error_detail: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -732,6 +791,38 @@ pub(crate) struct ChromeDebuggerActivateTabResult {
     pub title: String,
     #[serde(default)]
     pub ready_state: String,
+    pub readback_backend: String,
+    pub target_candidate_count: u32,
+    pub target_selection_reason: String,
+    #[serde(default)]
+    pub extension_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub(crate) struct ChromeDebuggerEvaluateScriptResult {
+    pub target_id: String,
+    pub tab_id: u32,
+    #[serde(default)]
+    pub chrome_window_id: Option<i64>,
+    pub url: String,
+    pub title: String,
+    #[serde(default)]
+    pub ready_state: String,
+    #[serde(default)]
+    pub scope: String,
+    #[serde(default)]
+    pub result_type: String,
+    #[serde(default)]
+    pub result_subtype: Option<String>,
+    #[serde(default)]
+    pub returned_by_value: bool,
+    #[serde(default)]
+    pub value: Value,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub unserializable_value: Option<String>,
+    #[serde(default)]
     pub readback_backend: String,
     pub target_candidate_count: u32,
     pub target_selection_reason: String,
@@ -2330,6 +2421,35 @@ pub(crate) async fn activate_tab(
     })
 }
 
+pub(crate) async fn evaluate_script(
+    hwnd: i64,
+    target_id: &str,
+    expression: &str,
+    args: &[Value],
+    await_promise: bool,
+    return_by_value: bool,
+) -> Result<ChromeDebuggerEvaluateScriptResult, ChromeDebuggerBridgeError> {
+    ensure_normal_bridge_popup_safe(hwnd, "evaluateScript")?;
+    let result = bridge()
+        .send_command(
+            "evaluateScript",
+            json!({
+                "hwnd": hwnd,
+                "targetIdHint": target_id,
+                "expression": expression,
+                "args": args,
+                "awaitPromise": await_promise,
+                "returnByValue": return_by_value,
+            }),
+        )
+        .await?;
+    serde_json::from_value::<ChromeDebuggerEvaluateScriptResult>(result).map_err(|error| {
+        ChromeDebuggerBridgeError::protocol(format!(
+            "decode Chrome debugger evaluateScript response: {error}"
+        ))
+    })
+}
+
 pub(crate) struct ChromeDebuggerDomActionRequest<'a> {
     pub hwnd: i64,
     pub target_id: &'a str,
@@ -3060,6 +3180,42 @@ fn chrome_response_readback_summary(kind: &str, result: Option<&Value>) -> Optio
             "target_selection_reason": result.get("target_selection_reason"),
             "extension_id": result.get("extension_id"),
         }),
+        "evaluateScript" => json!({
+            "target_id": result.get("target_id"),
+            "tab_id": result.get("tab_id"),
+            "chrome_window_id": result.get("chrome_window_id"),
+            "scope": result.get("scope"),
+            "result_type": result.get("result_type"),
+            "result_subtype": result.get("result_subtype"),
+            "returned_by_value": result.get("returned_by_value"),
+            "readback_backend": result.get("readback_backend"),
+            "target_selection_reason": result.get("target_selection_reason"),
+            "extension_id": result.get("extension_id"),
+        }),
+        "pageVitals" => json!({
+            "target_id": result.get("target_id"),
+            "tab_id": result.get("tab_id"),
+            "chrome_window_id": result.get("chrome_window_id"),
+            "visibility_state": result
+                .get("page_vitals")
+                .and_then(|value| value.get("visibility_state")),
+            "document_hidden": result
+                .get("page_vitals")
+                .and_then(|value| value.get("document_hidden")),
+            "lcp_supported": result
+                .get("page_vitals")
+                .and_then(|value| value.get("lcp_supported")),
+            "lcp_entry_count": result
+                .get("page_vitals")
+                .and_then(|value| value.get("lcp_entry_count")),
+            "lcp_size": result
+                .get("page_vitals")
+                .and_then(|value| value.get("lcp"))
+                .and_then(|value| value.get("size")),
+            "readback_backend": result.get("readback_backend"),
+            "target_selection_reason": result.get("target_selection_reason"),
+            "extension_id": result.get("extension_id"),
+        }),
         "targetInfo" | "targetInfoPageText" => json!({
             "target_id": result.get("target_id"),
             "tab_id": result.get("tab_id"),
@@ -3075,6 +3231,15 @@ fn chrome_response_readback_summary(kind: &str, result: Option<&Value>) -> Optio
             "page_text_truncated": result
                 .get("page_text")
                 .and_then(|value| value.get("text_truncated")),
+            "page_vitals_available": result
+                .get("page_vitals")
+                .and_then(|value| value.get("available")),
+            "page_vitals_visibility_state": result
+                .get("page_vitals")
+                .and_then(|value| value.get("visibility_state")),
+            "page_vitals_lcp_entry_count": result
+                .get("page_vitals")
+                .and_then(|value| value.get("lcp_entry_count")),
             "target_candidate_count": result.get("target_candidate_count"),
             "target_selection_reason": result.get("target_selection_reason"),
             "extension_id": result.get("extension_id"),

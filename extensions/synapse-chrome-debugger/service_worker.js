@@ -1,6 +1,6 @@
 const PROTOCOL_VERSION = 1;
-const BRIDGE_BUILD_ID = "synapse-chrome-bridge-2026-06-17-dom-action-set-field-v1";
-const BRIDGE_BUILD_SHA256 = "73214efb5b05ab9caf0df44f8c3decb43833f9a45248f15b69413b5dac6e3ee7";
+const BRIDGE_BUILD_ID = "synapse-chrome-bridge-2026-06-17-page-vitals-evaluate-v1";
+const BRIDGE_BUILD_SHA256 = "7a77ff099704319e36345d4310c2fcb8abcb5e6176725d076aab664585097c6f";
 const COMMAND_CAPABILITIES = Object.freeze([
   "openTab",
   "closeTab",
@@ -8,6 +8,8 @@ const COMMAND_CAPABILITIES = Object.freeze([
   "targetInfoPageText",
   "navigateTab",
   "activateTab",
+  "evaluateScript",
+  "pageVitals",
   "domAction",
   "reloadSelf",
   "typeActiveElement",
@@ -363,6 +365,10 @@ async function handleCommand(command) {
       result = await handleTypeActiveElement(params);
     } else if (kind === "setFieldValue") {
       result = await handleSetFieldValue(params);
+    } else if (kind === "evaluateScript") {
+      result = await handleEvaluateScript(params);
+    } else if (kind === "pageVitals") {
+      result = await handlePageVitals(params);
     } else if (kind === "navigateTab") {
       result = await handleNavigateTab(params);
     } else if (kind === "activateTab") {
@@ -469,6 +475,7 @@ async function handleTargetInfo(params) {
   const state = await tabPageState(selected.tabId, selected.target);
   const activeElement = await tabActiveElementState(selected.tabId);
   const pageText = await tabPageTextState(selected.tabId);
+  const pageVitals = await tabPageVitalsState(selected.tabId);
   return {
     extension_id: chrome.runtime.id,
     target_id: state.target_id || selected.target.id,
@@ -484,8 +491,87 @@ async function handleTargetInfo(params) {
     readback_backend: "chrome.tabs.get+chrome.scripting.executeScript",
     active_element: activeElement,
     page_text: pageText,
+    page_vitals: pageVitals,
     target_candidate_count: selected.targetCandidateCount,
     target_selection_reason: selected.selectionReason
+  };
+}
+
+async function handlePageVitals(params) {
+  const selected = await selectTabTarget(params, { requireTargetId: true });
+  const state = await tabPageState(selected.tabId, selected.target);
+  const pageVitals = await tabPageVitalsState(selected.tabId);
+  return {
+    extension_id: chrome.runtime.id,
+    target_id: state.target_id || selected.target.id,
+    tab_id: selected.tabId,
+    chrome_window_id: state.chrome_window_id,
+    url: state.url || "",
+    title: state.title || "",
+    ready_state: state.ready_state || "",
+    readback_backend: "chrome.tabs.get+chrome.scripting.executeScript",
+    page_vitals: pageVitals,
+    target_candidate_count: selected.targetCandidateCount,
+    target_selection_reason: selected.selectionReason
+  };
+}
+
+async function handleEvaluateScript(params) {
+  const selected = await selectTabTarget(params, { requireTargetId: true });
+  const expression = String(params.expression ?? "");
+  const args = Array.isArray(params.args) ? params.args : [];
+  const awaitPromise = params.awaitPromise !== false;
+  const returnByValue = params.returnByValue !== false;
+  if (!expression.trim()) {
+    throw bridgeError(ERROR_ATTACH_FAILED, "evaluateScript requires a non-empty expression");
+  }
+  if (!chrome.scripting || typeof chrome.scripting.executeScript !== "function") {
+    throw bridgeError(
+      ERROR_CHROME_SCRIPTING_EXECUTE_FAILED,
+      "chrome.scripting.executeScript unavailable; extension is missing scripting permission"
+    );
+  }
+  let results;
+  try {
+    results = await chrome.scripting.executeScript({
+      target: { tabId: selected.tabId },
+      func: evaluateScriptInPage,
+      args: [{ expression, args, awaitPromise, returnByValue }]
+    });
+  } catch (error) {
+    throw bridgeError(
+      ERROR_CHROME_SCRIPTING_EXECUTE_FAILED,
+      `chrome.scripting.executeScript evaluateScript(${selected.tabId}) failed: ${errorMessage(error)}`
+    );
+  }
+  const first = Array.isArray(results) ? results[0] : null;
+  const evaluated = first?.result;
+  if (!evaluated || typeof evaluated !== "object") {
+    throw bridgeError(
+      ERROR_CHROME_SCRIPTING_EXECUTE_FAILED,
+      "chrome.scripting.executeScript evaluateScript returned no structured result"
+    );
+  }
+  if (!evaluated.ok) {
+    throw bridgeError(
+      String(evaluated.error_code || ERROR_CHROME_SCRIPTING_EXECUTE_FAILED),
+      `evaluateScript failed: ${String(evaluated.error_detail || "")}`
+    );
+  }
+  const state = await tabPageState(selected.tabId, selected.target);
+  return {
+    extension_id: chrome.runtime.id,
+    target_id: state.target_id || selected.target.id,
+    tab_id: selected.tabId,
+    chrome_window_id: state.chrome_window_id,
+    url: state.url || "",
+    title: state.title || "",
+    ready_state: state.ready_state || "",
+    scope: "page",
+    readback_backend: "chrome.scripting.executeScript+chrome.tabs.get",
+    target_candidate_count: selected.targetCandidateCount,
+    target_selection_reason: selected.selectionReason,
+    ...evaluated
   };
 }
 
@@ -1062,6 +1148,62 @@ async function tabPageTextState(tabId) {
   }
 }
 
+async function tabPageVitalsState(tabId) {
+  if (!chrome.scripting || typeof chrome.scripting.executeScript !== "function") {
+    return {
+      available: false,
+      readback_source: "chrome.scripting.executeScript",
+      visibility_state: null,
+      document_hidden: null,
+      ready_state: null,
+      lcp_supported: null,
+      lcp_entry_count: 0,
+      lcp: null,
+      error_code: "CHROME_SCRIPTING_UNAVAILABLE",
+      error_detail: "Chrome scripting API is unavailable; extension is missing scripting permission"
+    };
+  }
+  try {
+    const results = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: readPageVitalsInPage
+    });
+    const first = Array.isArray(results) ? results[0] : null;
+    if (!first || typeof first.result !== "object" || first.result === null) {
+      return {
+        available: false,
+        readback_source: "chrome.scripting.executeScript",
+        visibility_state: null,
+        document_hidden: null,
+        ready_state: null,
+        lcp_supported: null,
+        lcp_entry_count: 0,
+        lcp: null,
+        error_code: "CHROME_SCRIPTING_EMPTY_RESULT",
+        error_detail: "chrome.scripting.executeScript returned no page-vitals result"
+      };
+    }
+    return {
+      available: true,
+      readback_source: "chrome.scripting.executeScript",
+      ...first.result
+    };
+  } catch (error) {
+    return {
+      available: false,
+      readback_source: "chrome.scripting.executeScript",
+      visibility_state: null,
+      document_hidden: null,
+      ready_state: null,
+      lcp_supported: null,
+      lcp_entry_count: 0,
+      lcp: null,
+      error_code: "CHROME_SCRIPTING_EXECUTE_FAILED",
+      error_detail: errorMessage(error)
+    };
+  }
+}
+
 function readPageTextInPage(maxChars) {
   const limit = Number.isSafeInteger(maxChars) && maxChars >= 0 ? Math.min(maxChars, 65536) : 4096;
   const source =
@@ -1088,6 +1230,272 @@ function readPageTextInPage(maxChars) {
     text_truncated: textLen > limit,
     max_chars: limit
   };
+}
+
+function readPageVitalsInPage() {
+  function stringValue(value) {
+    return value === null || value === undefined ? "" : String(value);
+  }
+  function numberValue(value) {
+    return typeof value === "number" && Number.isFinite(value) ? value : 0;
+  }
+  function trimText(value, maxChars) {
+    const normalized = stringValue(value).replace(/\s+/g, " ").trim();
+    return Array.from(normalized).slice(0, maxChars).join("");
+  }
+  function cssEscape(value) {
+    if (typeof CSS !== "undefined" && typeof CSS.escape === "function") {
+      return CSS.escape(value);
+    }
+    return stringValue(value).replace(/["\\#.:,[\]>+~*'()=]/g, "\\$&");
+  }
+  function elementSelector(element) {
+    if (!element || element.nodeType !== 1) {
+      return null;
+    }
+    const parts = [];
+    let current = element;
+    while (current && current.nodeType === 1 && parts.length < 6) {
+      const local = stringValue(current.localName || current.tagName).toLowerCase();
+      let part = local || "element";
+      if (current.id) {
+        part += "#" + cssEscape(current.id);
+        parts.unshift(part);
+        break;
+      }
+      const classes = Array.from(current.classList || []).slice(0, 2);
+      for (const className of classes) {
+        part += "." + cssEscape(className);
+      }
+      const parent = current.parentElement;
+      if (parent) {
+        const siblings = Array.from(parent.children || []).filter((node) => node.localName === current.localName);
+        if (siblings.length > 1) {
+          part += `:nth-of-type(${siblings.indexOf(current) + 1})`;
+        }
+      }
+      parts.unshift(part);
+      current = parent;
+    }
+    return parts.join(" > ");
+  }
+  function lcpSummary(entry) {
+    const element = entry && entry.element && entry.element.nodeType === 1 ? entry.element : null;
+    return {
+      name: stringValue(entry && entry.name),
+      entry_type: stringValue(entry && entry.entryType) || "largest-contentful-paint",
+      start_time: numberValue(entry && entry.startTime),
+      render_time: numberValue(entry && entry.renderTime),
+      load_time: numberValue(entry && entry.loadTime),
+      size: numberValue(entry && entry.size),
+      element_tag_name: element ? stringValue(element.tagName).toLowerCase() : null,
+      element_id: element ? stringValue(element.id) : null,
+      element_class_name: element ? stringValue(element.className) : null,
+      element_selector: element ? elementSelector(element) : null,
+      element_text: element ? trimText(element.innerText || element.textContent || "", 2048) : null,
+      element_current_src: element && "currentSrc" in element ? stringValue(element.currentSrc) : null,
+      element_url: element && "url" in entry ? stringValue(entry.url) : null
+    };
+  }
+  try {
+    const supported = Boolean(
+      typeof PerformanceObserver !== "undefined" &&
+        Array.isArray(PerformanceObserver.supportedEntryTypes) &&
+        PerformanceObserver.supportedEntryTypes.includes("largest-contentful-paint")
+    );
+    const entries = supported && performance && typeof performance.getEntriesByType === "function"
+      ? performance.getEntriesByType("largest-contentful-paint")
+      : [];
+    const last = entries.length > 0 ? entries[entries.length - 1] : null;
+    return {
+      available: true,
+      readback_source: "PerformanceObserver.supportedEntryTypes+performance.getEntriesByType",
+      visibility_state: stringValue(document.visibilityState),
+      document_hidden: Boolean(document.hidden),
+      ready_state: stringValue(document.readyState),
+      lcp_supported: supported,
+      lcp_entry_count: entries.length,
+      lcp: last ? lcpSummary(last) : null,
+      error_code: null,
+      error_detail: null
+    };
+  } catch (error) {
+    return {
+      available: false,
+      readback_source: "PerformanceObserver.supportedEntryTypes+performance.getEntriesByType",
+      visibility_state: typeof document !== "undefined" ? stringValue(document.visibilityState) : null,
+      document_hidden: typeof document !== "undefined" ? Boolean(document.hidden) : null,
+      ready_state: typeof document !== "undefined" ? stringValue(document.readyState) : null,
+      lcp_supported: false,
+      lcp_entry_count: 0,
+      lcp: null,
+      error_code: "PAGE_VITALS_READ_FAILED",
+      error_detail: error && error.message ? String(error.message) : String(error)
+    };
+  }
+}
+
+async function evaluateScriptInPage(request) {
+  const expression = String((request && request.expression) || "");
+  const args = Array.isArray(request && request.args) ? request.args : [];
+  const awaitPromise = !request || request.awaitPromise !== false;
+  const returnByValue = !request || request.returnByValue !== false;
+  if (!expression.trim()) {
+    return {
+      ok: false,
+      error_code: "CHROME_SCRIPT_EXPRESSION_EMPTY",
+      error_detail: "evaluateScript expression is empty"
+    };
+  }
+  try {
+    let value;
+    if (args.length > 0) {
+      const fn = (0, eval)(`(${expression})`);
+      if (typeof fn !== "function") {
+        return {
+          ok: false,
+          error_code: "CHROME_SCRIPT_EXPRESSION_NOT_FUNCTION",
+          error_detail: "evaluateScript with args requires expression to evaluate to a function"
+        };
+      }
+      value = fn(...args);
+    } else {
+      value = (0, eval)(expression);
+    }
+    if (
+      awaitPromise &&
+      value &&
+      (typeof value === "object" || typeof value === "function") &&
+      typeof value.then === "function"
+    ) {
+      value = await value;
+    }
+    return {
+      ok: true,
+      ...serializeScriptValue(value, returnByValue)
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      error_code: "CHROME_SCRIPT_EVALUATE_THROWN",
+      error_detail: error && error.stack ? String(error.stack) : error && error.message ? String(error.message) : String(error)
+    };
+  }
+
+  function serializeScriptValue(value, wantValue) {
+    const type = remoteObjectType(value);
+    const subtype = remoteObjectSubtype(value);
+    const description = remoteObjectDescription(value, type, subtype);
+    const unserializable = unserializableValue(value);
+    if (!wantValue || unserializable !== null || type === "undefined" || type === "function" || type === "symbol" || subtype === "node") {
+      return {
+        result_type: type,
+        result_subtype: subtype,
+        returned_by_value: wantValue,
+        value: null,
+        description,
+        unserializable_value: unserializable
+      };
+    }
+    try {
+      const json = JSON.stringify(value);
+      if (json === undefined) {
+        return {
+          result_type: type,
+          result_subtype: subtype,
+          returned_by_value: wantValue,
+          value: null,
+          description,
+          unserializable_value: null
+        };
+      }
+      return {
+        result_type: type,
+        result_subtype: subtype,
+        returned_by_value: wantValue,
+        value: JSON.parse(json),
+        description,
+        unserializable_value: null
+      };
+    } catch (error) {
+      return {
+        result_type: type,
+        result_subtype: subtype,
+        returned_by_value: false,
+        value: null,
+        description: `${description}; JSON serialization failed: ${error && error.message ? String(error.message) : String(error)}`,
+        unserializable_value: null
+      };
+    }
+  }
+
+  function remoteObjectType(value) {
+    if (value === null) {
+      return "object";
+    }
+    const type = typeof value;
+    return type || "undefined";
+  }
+
+  function remoteObjectSubtype(value) {
+    if (value === null) {
+      return "null";
+    }
+    if (Array.isArray(value)) {
+      return "array";
+    }
+    if (typeof Node !== "undefined" && value instanceof Node) {
+      return "node";
+    }
+    if (value instanceof Date) {
+      return "date";
+    }
+    if (value instanceof RegExp) {
+      return "regexp";
+    }
+    if (value instanceof Error) {
+      return "error";
+    }
+    return null;
+  }
+
+  function remoteObjectDescription(value, type, subtype) {
+    if (subtype === "node" && value && value.nodeType === 1) {
+      const tag = String(value.tagName || "").toLowerCase();
+      const id = value.id ? `#${value.id}` : "";
+      return `<${tag}${id}>`;
+    }
+    if (type === "undefined") {
+      return "undefined";
+    }
+    if (type === "symbol" || type === "function" || type === "bigint") {
+      return String(value);
+    }
+    if (subtype === "error") {
+      return value && value.stack ? String(value.stack) : String(value);
+    }
+    try {
+      return String(value);
+    } catch (_) {
+      return type;
+    }
+  }
+
+  function unserializableValue(value) {
+    if (typeof value === "number" && !Number.isFinite(value)) {
+      if (Number.isNaN(value)) {
+        return "NaN";
+      }
+      return value > 0 ? "Infinity" : "-Infinity";
+    }
+    if (Object.is(value, -0)) {
+      return "-0";
+    }
+    if (typeof value === "bigint") {
+      return `${String(value)}n`;
+    }
+    return null;
+  }
 }
 
 function readActiveElementInPage() {

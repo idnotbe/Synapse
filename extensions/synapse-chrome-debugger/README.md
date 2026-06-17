@@ -74,17 +74,20 @@ error as an unsafe-profile condition, logs it with
 backoff. This keeps the failure visible while preventing any browser command
 from queueing on an unsafe end-user Chrome profile.
 
-Background tab commands (`openTab`, `closeTab`, `navigateTab`, and
-`typeActiveElement`) use
+Background tab commands (`openTab`, `closeTab`, `navigateTab`, `activateTab`,
+`targetInfoPageText`, `evaluateScript`, `pageVitals`, and `typeActiveElement`) use
 `chrome.tabs.create`, `chrome.tabs.remove`, `chrome.tabs.update`,
 `chrome.tabs.reload`, `chrome.tabs.goBack`, `chrome.tabs.goForward`, and
-`chrome.scripting.executeScript` against the selected tab's active element. They
-do not call `chrome.debugger.getTargets` or `chrome.debugger.attach`; target IDs
-returned by this path are synthetic `chrome-tab:<tabId>` IDs backed by
-`chrome.tabs` readback. The daemon refuses these normal-profile commands before
-queueing them whenever the live Chrome profile/process Source of Truth still
-contains any external `debugger` or `nativeMessaging` surface, because even a tab
-event can wake another extension's debugger/native-host popup on an unsafe host.
+`chrome.scripting.executeScript` against the selected tab. `evaluateScript` is
+page-scoped only and returns CDP-like value metadata; `pageVitals` and
+`targetInfoPageText` read the page Performance Timeline for LCP plus document
+visibility state. They do not call `chrome.debugger.getTargets` or
+`chrome.debugger.attach`; target IDs returned by this path are synthetic
+`chrome-tab:<tabId>` IDs backed by `chrome.tabs` readback. The daemon refuses
+these normal-profile commands before queueing them whenever the live Chrome
+profile/process Source of Truth still contains any external `debugger` or
+`nativeMessaging` surface, because even a tab event can wake another extension's
+debugger/native-host popup on an unsafe host.
 
 The lifecycle command `reloadSelf` is limited to self-reload. It validates the
 expected extension ID and expected build ID, acknowledges the request to the

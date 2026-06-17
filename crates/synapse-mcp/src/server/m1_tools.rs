@@ -4,19 +4,19 @@ use super::{
     BrowserLocateParams, BrowserLocateResponse, CaptureScreenshotFormat, CaptureScreenshotParams,
     CaptureScreenshotResponse, CdpActivateTabParams, CdpActivateTabResponse, CdpActiveElementInfo,
     CdpBridgeHostReadback, CdpBridgeReloadAckReadback, CdpBridgeReloadParams,
-    CdpBridgeReloadResponse, CdpCloseTabParams, CdpCloseTabResponse, CdpNavigateAction,
-    CdpNavigateTabParams, CdpNavigateTabResponse, CdpOpenTabParams, CdpOpenTabResponse,
-    CdpPageTextInfo, CdpTargetInfoParams, CdpTargetInfoResponse, CdpTargetOwner, ElementInspection,
-    ErrorData, FindParams, FindResponse, Health, HiddenDesktopPipFrameParams,
-    HiddenDesktopPipFrameResponse, HiddenDesktopPipStreamStatus, Json, ObserveParams, Parameters,
-    ReadTextParams, SessionTarget, SetCaptureTargetParams, SetCaptureTargetResponse,
-    SetPerceptionModeParams, SetPerceptionModeResponse, SetTargetParam, SetTargetParams,
-    SynapseService, TargetResponse, TargetWire, WindowListEntry, WindowListParams,
-    WindowListResponse, empty_input_schema, mcp_error, observe_include, observe_input,
-    populate_audio_summary, populate_clipboard_summary, populate_detection_from_state,
-    populate_fs_recent, read_text_request_uncached, resolve_read_text_request,
-    set_capture_target_in_state, set_perception_mode_in_state, set_target_input_schema, tool,
-    tool_router,
+    CdpBridgeReloadResponse, CdpCloseTabParams, CdpCloseTabResponse, CdpLargestContentfulPaintInfo,
+    CdpNavigateAction, CdpNavigateTabParams, CdpNavigateTabResponse, CdpOpenTabParams,
+    CdpOpenTabResponse, CdpPageTextInfo, CdpPageVitalsInfo, CdpTargetInfoParams,
+    CdpTargetInfoResponse, CdpTargetOwner, ElementInspection, ErrorData, FindParams, FindResponse,
+    Health, HiddenDesktopPipFrameParams, HiddenDesktopPipFrameResponse,
+    HiddenDesktopPipStreamStatus, Json, ObserveParams, Parameters, ReadTextParams, SessionTarget,
+    SetCaptureTargetParams, SetCaptureTargetResponse, SetPerceptionModeParams,
+    SetPerceptionModeResponse, SetTargetParam, SetTargetParams, SynapseService, TargetResponse,
+    TargetWire, WindowListEntry, WindowListParams, WindowListResponse, empty_input_schema,
+    mcp_error, observe_include, observe_input, populate_audio_summary, populate_clipboard_summary,
+    populate_detection_from_state, populate_fs_recent, read_text_request_uncached,
+    resolve_read_text_request, set_capture_target_in_state, set_perception_mode_in_state,
+    set_target_input_schema, tool, tool_router,
 };
 use crate::m1::{
     ClipboardTimelineSample, FsTimelineEvent, effective_ocr_backend,
@@ -1284,7 +1284,7 @@ impl SynapseService {
     }
 
     #[tool(
-        description = "Read the calling session's active browser tab target, or an explicit session-owned target, without navigation, activation, or debugger attach. Raw CDP uses Target.getTargets plus bounded Runtime.evaluate page-text readback; the normal Chrome bridge uses chrome.tabs.get plus content-script active-element/page-text readback where extension permissions allow. It never uses the human foreground tab as an implicit fallback. Page text is untrusted perceived web content; suspicious text is annotated in page_text."
+        description = "Read the calling session's active browser tab target, or an explicit session-owned target, without navigation, activation, or debugger attach. Raw CDP uses Target.getTargets plus bounded Runtime.evaluate page-text and page-vitals readback; the normal Chrome bridge uses chrome.tabs.get plus content-script active-element/page-text/page-vitals readback where extension permissions allow. It never uses the human foreground tab as an implicit fallback. Page text is untrusted perceived web content; suspicious text is annotated in page_text. page_vitals reports document visibility plus Largest Contentful Paint entries from the page Performance Timeline without pretending hidden-tab LCP is valid."
     )]
     pub async fn cdp_target_info(
         &self,
@@ -1453,7 +1453,7 @@ impl SynapseService {
     }
 
     #[tool(
-        description = "Evaluate JavaScript in the calling session's owned background browser tab via raw CDP, returning the JSON value plus Runtime.RemoteObject type metadata read back from the same target. Page scope (default): `expression` is evaluated via Runtime.evaluate; pass `args` to invoke it as a function with those args. Element scope: pass `element_id` and a function `expression`, called Playwright-style as fn(element, ...args) via Runtime.callFunctionOn. Requires an active session CDP target or an explicit cdp_target_id/element owned by this session; never uses the human foreground tab as a fallback. JS exceptions are surfaced loudly (thrown message, class, source location). Background-safe: never activates the tab or uses OS foreground input. This is the keystone for page content / element introspection / state queries / web-first assertions. Only the raw CDP transport supports arbitrary evaluation; the popup-safe normal extension bridge never attaches the debugger and fails closed with a clear reason."
+        description = "Evaluate JavaScript in the calling session's owned background browser tab, returning the JSON value plus Runtime.RemoteObject-like type metadata read back from the same target. Raw CDP uses Runtime.evaluate / Runtime.callFunctionOn. The normal Chrome bridge uses chrome.scripting.executeScript for page-scope evaluation only and never attaches the debugger. Page scope (default): `expression` is evaluated directly; pass `args` to invoke it as a function with those args. Element scope requires raw CDP: pass `element_id` and a function `expression`, called Playwright-style as fn(element, ...args) via Runtime.callFunctionOn. Requires an active session CDP target or an explicit cdp_target_id/element owned by this session; never uses the human foreground tab as a fallback. JS exceptions are surfaced loudly. Background-safe: never activates the tab or uses OS foreground input. This is the keystone for page content / element introspection / state queries / web-first assertions."
     )]
     pub async fn browser_evaluate(
         &self,
@@ -2855,6 +2855,7 @@ impl SynapseService {
                 "readback=Target.getTargets outcome=target_present"
             );
             let page_text = raw_cdp_page_text_info(&endpoint, &target.target_id).await;
+            let page_vitals = raw_cdp_page_vitals_info(&endpoint, &target.target_id).await;
             return Ok(CdpTargetInfoResponse {
                 session_id: session_id.to_owned(),
                 window_hwnd,
@@ -2877,6 +2878,7 @@ impl SynapseService {
                 target_selection_reason: "target_id".to_owned(),
                 active_element: None,
                 page_text,
+                page_vitals,
             });
         }
 
@@ -2938,6 +2940,7 @@ impl SynapseService {
             target_selection_reason: info.target_selection_reason,
             active_element: info.active_element.as_ref().map(chrome_active_element_info),
             page_text: info.page_text.as_ref().map(chrome_page_text_info),
+            page_vitals: info.page_vitals.as_ref().map(chrome_page_vitals_info),
         })
     }
 
@@ -2959,12 +2962,80 @@ impl SynapseService {
         return_by_value: bool,
     ) -> Result<BrowserEvaluateResponse, ErrorData> {
         let Some(endpoint) = synapse_a11y::endpoint_for_window(window_hwnd) else {
-            return Err(mcp_error(
-                error_codes::A11Y_CDP_EXTENSION_UNAVAILABLE,
-                format!(
-                    "browser_evaluate requires a raw CDP debugging endpoint for window {window_hwnd:#x}; the popup-safe normal Chrome extension bridge does not expose arbitrary Runtime.evaluate (it never attaches the debugger). Open the target in a raw-CDP Chrome (launched with --remote-debugging-port) and retry."
-                ),
-            ));
+            if backend_node_id.is_some() {
+                return Err(mcp_error(
+                    error_codes::A11Y_CDP_EXTENSION_UNAVAILABLE,
+                    format!(
+                        "browser_evaluate element scope requires raw CDP for window {window_hwnd:#x}; the normal Chrome bridge exposes page-scope chrome.scripting.executeScript only and never attaches the debugger"
+                    ),
+                ));
+            }
+            let evaluated = crate::chrome_debugger_bridge::evaluate_script(
+                window_hwnd,
+                cdp_target_id,
+                expression,
+                args,
+                await_promise,
+                return_by_value,
+            )
+            .await
+            .map_err(|error| {
+                mcp_error(
+                    error.code(),
+                    format!(
+                        "browser_evaluate Chrome bridge chrome.scripting.executeScript failed: {}",
+                        error.detail()
+                    ),
+                )
+            })?;
+            let endpoint = evaluated
+                .extension_id
+                .as_deref()
+                .map(chrome_debugger_endpoint)
+                .unwrap_or_else(chrome_debugger_default_endpoint);
+            tracing::info!(
+                code = "CDP_BACKGROUND_EVALUATE",
+                session_id = %session_id,
+                hwnd = window_hwnd,
+                endpoint = %endpoint,
+                cdp_target_id = %evaluated.target_id,
+                scope = "page",
+                element_id = element_id.unwrap_or(""),
+                arg_count = args.len(),
+                result_type = %evaluated.result_type,
+                returned_by_value = evaluated.returned_by_value,
+                target_url = %evaluated.url,
+                "readback=chrome.scripting.executeScript outcome=evaluated"
+            );
+            return Ok(BrowserEvaluateResponse {
+                session_id: session_id.to_owned(),
+                window_hwnd,
+                transport: "chrome_tabs_extension".to_owned(),
+                endpoint,
+                cdp_target_id: evaluated.target_id,
+                scope: if evaluated.scope.trim().is_empty() {
+                    "page".to_owned()
+                } else {
+                    evaluated.scope
+                },
+                element_id: None,
+                url: evaluated.url,
+                title: evaluated.title,
+                ready_state: evaluated.ready_state,
+                result_type: evaluated.result_type,
+                result_subtype: evaluated.result_subtype,
+                returned_by_value: evaluated.returned_by_value,
+                value: evaluated.value,
+                description: evaluated.description,
+                unserializable_value: evaluated.unserializable_value,
+                readback_backend: if evaluated.readback_backend.trim().is_empty() {
+                    "chrome.scripting.executeScript".to_owned()
+                } else {
+                    evaluated.readback_backend
+                },
+                backend_tier_used: "chrome_tabs".to_owned(),
+                required_foreground: false,
+            });
         };
         let (evaluated, scope, readback_backend) = if let Some(backend_node_id) = backend_node_id {
             // Element scope: callFunctionOn the resolved node with args; `this`
@@ -5538,6 +5609,110 @@ fn elapsed_ms_u64(start: Instant) -> u64 {
 }
 
 const CDP_TARGET_INFO_PAGE_TEXT_MAX_CHARS: usize = 4096;
+const CDP_TARGET_INFO_PAGE_VITALS_SCRIPT: &str = r###"
+(() => {
+  function stringValue(value) {
+    return value === null || value === undefined ? "" : String(value);
+  }
+  function numberValue(value) {
+    return typeof value === "number" && Number.isFinite(value) ? value : 0;
+  }
+  function trimText(value, maxChars) {
+    const normalized = stringValue(value).replace(/\s+/g, " ").trim();
+    return Array.from(normalized).slice(0, maxChars).join("");
+  }
+  function cssEscape(value) {
+    if (typeof CSS !== "undefined" && typeof CSS.escape === "function") {
+      return CSS.escape(value);
+    }
+    return stringValue(value).replace(/["\\#.:,[\]>+~*'()=]/g, "\\$&");
+  }
+  function elementSelector(element) {
+    if (!element || element.nodeType !== 1) {
+      return null;
+    }
+    const parts = [];
+    let current = element;
+    while (current && current.nodeType === 1 && parts.length < 6) {
+      const local = stringValue(current.localName || current.tagName).toLowerCase();
+      let part = local || "element";
+      if (current.id) {
+        part += "#" + cssEscape(current.id);
+        parts.unshift(part);
+        break;
+      }
+      const classes = Array.from(current.classList || []).slice(0, 2);
+      for (const className of classes) {
+        part += "." + cssEscape(className);
+      }
+      const parent = current.parentElement;
+      if (parent) {
+        const siblings = Array.from(parent.children || []).filter((node) => node.localName === current.localName);
+        if (siblings.length > 1) {
+          part += `:nth-of-type(${siblings.indexOf(current) + 1})`;
+        }
+      }
+      parts.unshift(part);
+      current = parent;
+    }
+    return parts.join(" > ");
+  }
+  function lcpSummary(entry) {
+    const element = entry && entry.element && entry.element.nodeType === 1 ? entry.element : null;
+    return {
+      name: stringValue(entry && entry.name),
+      entry_type: stringValue(entry && entry.entryType) || "largest-contentful-paint",
+      start_time: numberValue(entry && entry.startTime),
+      render_time: numberValue(entry && entry.renderTime),
+      load_time: numberValue(entry && entry.loadTime),
+      size: numberValue(entry && entry.size),
+      element_tag_name: element ? stringValue(element.tagName).toLowerCase() : null,
+      element_id: element ? stringValue(element.id) : null,
+      element_class_name: element ? stringValue(element.className) : null,
+      element_selector: element ? elementSelector(element) : null,
+      element_text: element ? trimText(element.innerText || element.textContent || "", 2048) : null,
+      element_current_src: element && "currentSrc" in element ? stringValue(element.currentSrc) : null,
+      element_url: element && "url" in entry ? stringValue(entry.url) : null
+    };
+  }
+  try {
+    const supported = Boolean(
+      typeof PerformanceObserver !== "undefined" &&
+        Array.isArray(PerformanceObserver.supportedEntryTypes) &&
+        PerformanceObserver.supportedEntryTypes.includes("largest-contentful-paint")
+    );
+    const entries = supported && performance && typeof performance.getEntriesByType === "function"
+      ? performance.getEntriesByType("largest-contentful-paint")
+      : [];
+    const last = entries.length > 0 ? entries[entries.length - 1] : null;
+    return {
+      available: true,
+      readback_source: "PerformanceObserver.supportedEntryTypes+performance.getEntriesByType",
+      visibility_state: stringValue(document.visibilityState),
+      document_hidden: Boolean(document.hidden),
+      ready_state: stringValue(document.readyState),
+      lcp_supported: supported,
+      lcp_entry_count: entries.length,
+      lcp: last ? lcpSummary(last) : null,
+      error_code: null,
+      error_detail: null
+    };
+  } catch (error) {
+    return {
+      available: false,
+      readback_source: "PerformanceObserver.supportedEntryTypes+performance.getEntriesByType",
+      visibility_state: typeof document !== "undefined" ? stringValue(document.visibilityState) : null,
+      document_hidden: typeof document !== "undefined" ? Boolean(document.hidden) : null,
+      ready_state: typeof document !== "undefined" ? stringValue(document.readyState) : null,
+      lcp_supported: false,
+      lcp_entry_count: 0,
+      lcp: null,
+      error_code: "PAGE_VITALS_READ_FAILED",
+      error_detail: error && error.message ? String(error.message) : String(error)
+    };
+  }
+})()
+"###;
 
 #[cfg(windows)]
 async fn raw_cdp_page_text_info(endpoint: &str, target_id: &str) -> Option<CdpPageTextInfo> {
@@ -5561,6 +5736,36 @@ async fn raw_cdp_page_text_info(endpoint: &str, target_id: &str) -> Option<CdpPa
 }
 
 #[cfg(windows)]
+async fn raw_cdp_page_vitals_info(endpoint: &str, target_id: &str) -> Option<CdpPageVitalsInfo> {
+    Some(
+        match synapse_a11y::cdp_evaluate_expression(
+            endpoint,
+            target_id,
+            CDP_TARGET_INFO_PAGE_VITALS_SCRIPT,
+            true,
+            true,
+        )
+        .await
+        {
+            Ok(readback) => match serde_json::from_value::<
+                crate::chrome_debugger_bridge::ChromeDebuggerPageVitals,
+            >(readback.value)
+            {
+                Ok(page_vitals) => chrome_page_vitals_info(&page_vitals),
+                Err(error) => unavailable_page_vitals_info(
+                    "Runtime.evaluate",
+                    error_codes::A11Y_CDP_AXTREE_FAILED,
+                    format!("Runtime.evaluate page vitals decode failed: {error}"),
+                ),
+            },
+            Err(error) => {
+                unavailable_page_vitals_info("Runtime.evaluate", error.code(), error.to_string())
+            }
+        },
+    )
+}
+
+#[cfg(windows)]
 fn raw_cdp_page_text_readback_info(readback: synapse_a11y::CdpPageTextState) -> CdpPageTextInfo {
     page_text_info_from_parts(
         true,
@@ -5572,6 +5777,84 @@ fn raw_cdp_page_text_readback_info(readback: synapse_a11y::CdpPageTextState) -> 
         None,
         None,
     )
+}
+
+#[cfg(windows)]
+fn chrome_page_vitals_info(
+    page_vitals: &crate::chrome_debugger_bridge::ChromeDebuggerPageVitals,
+) -> CdpPageVitalsInfo {
+    CdpPageVitalsInfo {
+        available: page_vitals.available,
+        readback_source: if page_vitals.readback_source.trim().is_empty() {
+            "chrome.scripting.executeScript"
+        } else {
+            page_vitals.readback_source.as_str()
+        }
+        .to_owned(),
+        visibility_state: non_empty_string(page_vitals.visibility_state.as_deref()),
+        document_hidden: page_vitals.document_hidden,
+        ready_state: non_empty_string(page_vitals.ready_state.as_deref()),
+        lcp_supported: page_vitals.lcp_supported,
+        lcp_entry_count: page_vitals.lcp_entry_count,
+        lcp: page_vitals
+            .lcp
+            .as_ref()
+            .map(chrome_largest_contentful_paint_info),
+        error_code: page_vitals.error_code.clone(),
+        error_detail_sha256: page_vitals
+            .error_detail
+            .as_deref()
+            .and_then(non_empty_text_sha256),
+    }
+}
+
+#[cfg(windows)]
+fn chrome_largest_contentful_paint_info(
+    lcp: &crate::chrome_debugger_bridge::ChromeDebuggerLargestContentfulPaint,
+) -> CdpLargestContentfulPaintInfo {
+    CdpLargestContentfulPaintInfo {
+        name: lcp.name.clone(),
+        entry_type: if lcp.entry_type.trim().is_empty() {
+            "largest-contentful-paint".to_owned()
+        } else {
+            lcp.entry_type.clone()
+        },
+        start_time: lcp.start_time,
+        render_time: lcp.render_time,
+        load_time: lcp.load_time,
+        size: lcp.size,
+        element_tag_name: non_empty_string(lcp.element_tag_name.as_deref()),
+        element_id: non_empty_string(lcp.element_id.as_deref()),
+        element_class_name: non_empty_string(lcp.element_class_name.as_deref()),
+        element_selector: non_empty_string(lcp.element_selector.as_deref()),
+        element_text_len: lcp.element_text.as_ref().map(|text| text.chars().count()),
+        element_text_sha256: lcp.element_text.as_deref().and_then(non_empty_text_sha256),
+        element_current_src_sha256: lcp
+            .element_current_src
+            .as_deref()
+            .and_then(non_empty_text_sha256),
+        element_url_sha256: lcp.element_url.as_deref().and_then(non_empty_text_sha256),
+    }
+}
+
+#[cfg(windows)]
+fn unavailable_page_vitals_info(
+    readback_source: &str,
+    error_code: impl Into<String>,
+    error_detail: impl Into<String>,
+) -> CdpPageVitalsInfo {
+    CdpPageVitalsInfo {
+        available: false,
+        readback_source: readback_source.to_owned(),
+        visibility_state: None,
+        document_hidden: None,
+        ready_state: None,
+        lcp_supported: None,
+        lcp_entry_count: 0,
+        lcp: None,
+        error_code: Some(error_code.into()),
+        error_detail_sha256: non_empty_text_sha256(&error_detail.into()),
+    }
 }
 
 #[cfg(windows)]
@@ -5742,6 +6025,11 @@ fn chrome_bridge_reload_ack_readback(
 
 fn non_empty_text_sha256(value: &str) -> Option<String> {
     (!value.trim().is_empty()).then(|| sha256_hex(value.as_bytes()))
+}
+
+fn non_empty_string(value: Option<&str>) -> Option<String> {
+    let value = value?.trim();
+    (!value.is_empty()).then(|| value.to_owned())
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
@@ -6395,10 +6683,10 @@ mod tests {
         BROWSER_EVALUATE_MAX_EXPRESSION_BYTES, CdpTargetOwner, SessionTarget, SynapseService,
         TargetWire, attach_find_hygiene_annotations, attach_ocr_hygiene_annotations,
         cdp_activate_resolution_request_details, cdp_target_info_resolution_request_details,
-        hidden_desktop_pip_ended_response, hidden_worker_target_miss, mcp_error, ocr_cache_key,
-        page_text_info_from_parts, perception_window_hwnd, resolve_capture_target_window_context,
-        sha256_hex, target_wire, template_value, validate_browser_evaluate_params,
-        validate_target_window,
+        chrome_page_vitals_info, hidden_desktop_pip_ended_response, hidden_worker_target_miss,
+        mcp_error, ocr_cache_key, page_text_info_from_parts, perception_window_hwnd,
+        resolve_capture_target_window_context, sha256_hex, target_wire, template_value,
+        unavailable_page_vitals_info, validate_browser_evaluate_params, validate_target_window,
     };
     use crate::m1::{
         BrowserEvaluateParams, CdpActivateTabParams, CdpTargetInfoParams, FindResponse, FindResult,
@@ -6516,6 +6804,79 @@ mod tests {
         assert_eq!(code, Some(error_codes::TOOL_PARAMS_INVALID));
         println!(
             "readback=browser_evaluate validation edges all rejected with TOOL_PARAMS_INVALID"
+        );
+    }
+
+    #[test]
+    fn page_vitals_conversion_hashes_lcp_sensitive_fields() {
+        let page_vitals = crate::chrome_debugger_bridge::ChromeDebuggerPageVitals {
+            available: true,
+            readback_source: "chrome.scripting.executeScript".to_owned(),
+            visibility_state: Some("visible".to_owned()),
+            document_hidden: Some(false),
+            ready_state: Some("complete".to_owned()),
+            lcp_supported: Some(true),
+            lcp_entry_count: 1,
+            lcp: Some(
+                crate::chrome_debugger_bridge::ChromeDebuggerLargestContentfulPaint {
+                    name: "hero".to_owned(),
+                    entry_type: "largest-contentful-paint".to_owned(),
+                    start_time: 12.0,
+                    render_time: 13.0,
+                    load_time: 0.0,
+                    size: 4096.0,
+                    element_tag_name: Some("h1".to_owned()),
+                    element_id: Some("hero-title".to_owned()),
+                    element_class_name: Some("hero title".to_owned()),
+                    element_selector: Some("main > h1#hero-title".to_owned()),
+                    element_text: Some("Store meaning, not tokens".to_owned()),
+                    element_current_src: Some("https://example.test/hero.png".to_owned()),
+                    element_url: Some("https://example.test/hero.png".to_owned()),
+                },
+            ),
+            error_code: None,
+            error_detail: None,
+        };
+
+        let readback = chrome_page_vitals_info(&page_vitals);
+
+        assert!(readback.available);
+        assert_eq!(readback.visibility_state.as_deref(), Some("visible"));
+        assert_eq!(readback.document_hidden, Some(false));
+        assert_eq!(readback.lcp_entry_count, 1);
+        let lcp = readback.lcp.expect("lcp readback");
+        assert_eq!(lcp.element_text_len, Some(25));
+        assert_eq!(
+            lcp.element_text_sha256.as_deref(),
+            Some(sha256_hex(b"Store meaning, not tokens").as_str())
+        );
+        assert_eq!(
+            lcp.element_current_src_sha256.as_deref(),
+            Some(sha256_hex(b"https://example.test/hero.png").as_str())
+        );
+        println!(
+            "readback=page_vitals hash edge visibility={:?} lcp_count={} text_len={:?}",
+            readback.visibility_state, readback.lcp_entry_count, lcp.element_text_len
+        );
+    }
+
+    #[test]
+    fn unavailable_page_vitals_hashes_error_detail() {
+        let readback = unavailable_page_vitals_info(
+            "Runtime.evaluate",
+            error_codes::A11Y_CDP_AXTREE_FAILED,
+            "synthetic page vitals failure detail",
+        );
+
+        assert!(!readback.available);
+        assert_eq!(readback.lcp_entry_count, 0);
+        assert_eq!(
+            readback.error_detail_sha256.as_deref(),
+            Some(sha256_hex("synthetic page vitals failure detail".as_bytes()).as_str())
+        );
+        println!(
+            "readback=page_vitals unavailable edge code={:?} detail_hash={:?}",
+            readback.error_code, readback.error_detail_sha256
         );
     }
 
@@ -6741,7 +7102,7 @@ mod tests {
     fn target_wire_maps_session_target_variants() {
         match target_wire(&SessionTarget::Window { hwnd: 0x1234 }) {
             TargetWire::Window { window_hwnd } => assert_eq!(window_hwnd, 0x1234),
-            other => panic!("expected window wire, got {other:?}"),
+            other @ TargetWire::Cdp { .. } => panic!("expected window wire, got {other:?}"),
         }
         match target_wire(&SessionTarget::Cdp {
             window_hwnd: 0x4321,
@@ -6754,7 +7115,7 @@ mod tests {
                 assert_eq!(window_hwnd, 0x4321);
                 assert_eq!(cdp_target_id, "TID-1");
             }
-            other => panic!("expected cdp wire, got {other:?}"),
+            other @ TargetWire::Window { .. } => panic!("expected cdp wire, got {other:?}"),
         }
     }
 

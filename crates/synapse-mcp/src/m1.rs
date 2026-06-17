@@ -679,6 +679,57 @@ pub struct CdpTargetInfoResponse {
     pub active_element: Option<CdpActiveElementInfo>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub page_text: Option<CdpPageTextInfo>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page_vitals: Option<CdpPageVitalsInfo>,
+}
+
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CdpLargestContentfulPaintInfo {
+    pub name: String,
+    pub entry_type: String,
+    pub start_time: f64,
+    pub render_time: f64,
+    pub load_time: f64,
+    pub size: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub element_tag_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub element_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub element_class_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub element_selector: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub element_text_len: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub element_text_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub element_current_src_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub element_url_sha256: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CdpPageVitalsInfo {
+    pub available: bool,
+    pub readback_source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visibility_state: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub document_hidden: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ready_state: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lcp_supported: Option<bool>,
+    pub lcp_entry_count: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lcp: Option<CdpLargestContentfulPaintInfo>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_detail_sha256: Option<String>,
 }
 
 /// Parameters for `window_list` (#1021). All fields optional; an empty object
