@@ -23,6 +23,7 @@ use crate::m1::{
     hidden_desktop_input_from_worker_snapshot,
 };
 use crate::m3::activity_recorder::BrowserNavigationEvent;
+use crate::server::session_continuity::PersistedCdpTargetOwner;
 use rmcp::{RoleServer, service::RequestContext};
 
 use std::{
@@ -1223,7 +1224,7 @@ impl SynapseService {
     }
 
     #[tool(
-        description = "Close a CDP tab previously created by this MCP session with cdp_open_tab. Refuses targets owned by another session or not owned by this session; it never activates the browser."
+        description = "Close a CDP tab created by Synapse cdp_open_tab. Same-session closes use the in-memory owner row; after daemon/session churn, close authority can be restored only from the durable Synapse-created owner row when this session also holds an exact target_claim for the CDP target and creator/client lineage matches. Refuses unowned, unclaimed, ambiguous, unrelated, or human-foreground-fallback targets; it never activates the browser."
     )]
     pub async fn cdp_close_tab(
         &self,
@@ -1987,12 +1988,29 @@ impl SynapseService {
     fn register_cdp_target_owner(&self, owner: CdpTargetOwner) -> Result<String, ErrorData> {
         let owner_key =
             cdp_target_owner_key(owner.window_hwnd, &owner.endpoint, &owner.cdp_target_id);
+        {
+            let guard = self.lock_cdp_target_owners()?;
+            if let Some(existing) = guard.get(&owner_key) {
+                return Err(mcp_error(
+                    error_codes::ACTION_TARGET_INVALID,
+                    format!(
+                        "CDP target {:?} on endpoint {:?} window {:#x} is already owned by MCP session {:?}",
+                        existing.cdp_target_id,
+                        existing.endpoint,
+                        existing.window_hwnd,
+                        existing.session_id
+                    ),
+                ));
+            }
+        }
+        self.persist_cdp_target_owner(&owner_key, &owner)?;
         let mut guard = self.lock_cdp_target_owners()?;
         if let Some(existing) = guard.get(&owner_key) {
+            self.delete_persisted_cdp_target_owner(&owner_key, &owner.cdp_target_id)?;
             return Err(mcp_error(
                 error_codes::ACTION_TARGET_INVALID,
                 format!(
-                    "CDP target {:?} on endpoint {:?} window {:#x} is already owned by MCP session {:?}",
+                    "CDP target {:?} on endpoint {:?} window {:#x} became owned by MCP session {:?} during registration",
                     existing.cdp_target_id,
                     existing.endpoint,
                     existing.window_hwnd,
@@ -2012,7 +2030,37 @@ impl SynapseService {
         let mut guard = self.lock_cdp_target_owners()?;
         let removed = guard.remove(owner_key);
         drop(guard);
+        if let Some(owner) = removed.as_ref() {
+            self.delete_persisted_cdp_target_owner(owner_key, &owner.cdp_target_id)?;
+        }
         Ok(removed)
+    }
+
+    fn release_closed_cdp_target_claim(
+        &self,
+        session_id: &str,
+        window_hwnd: i64,
+        cdp_target_id: &str,
+    ) -> Result<bool, ErrorData> {
+        let target = SessionTarget::Cdp {
+            window_hwnd,
+            cdp_target_id: cdp_target_id.to_owned(),
+        };
+        let target_key = super::target_claims::target_key(&target);
+        let mut guard = self.lock_target_claims()?;
+        match guard.release(session_id, &target_key) {
+            Ok(released) => Ok(released.is_some()),
+            Err(conflict) => {
+                tracing::warn!(
+                    code = "CDP_BACKGROUND_TAB_CLAIM_RELEASE_CONFLICT",
+                    session_id = %session_id,
+                    target_key = %target_key,
+                    conflict = ?conflict,
+                    "readback=target_claim_registry outcome=claim_left_visible"
+                );
+                Ok(false)
+            }
+        }
     }
 
     fn cdp_target_owner_for_close(
@@ -2022,39 +2070,217 @@ impl SynapseService {
     ) -> Result<(String, CdpTargetOwner), ErrorData> {
         let active_target = self.session_target(Some(session_id))?;
         let owners = self.cdp_target_owners_for_target_id(target_id)?;
-        if owners.is_empty() {
-            return Err(mcp_error(
-                error_codes::ACTION_TARGET_INVALID,
-                format!(
-                    "cdp_close_tab refused target {target_id:?}: target is not owned by this session or was already closed"
-                ),
-            ));
-        }
         let owned_by_session = owners
             .iter()
             .filter(|(_key, owner)| owner.session_id == session_id)
             .cloned()
             .collect::<Vec<_>>();
-        if owned_by_session.is_empty() {
-            let owner_sessions = owners
-                .iter()
-                .map(|(_key, owner)| owner.session_id.as_str())
-                .collect::<Vec<_>>()
-                .join(",");
-            return Err(mcp_error(
-                error_codes::ACTION_TARGET_INVALID,
-                format!(
-                    "cdp_close_tab refused target {target_id:?}: owner_session_id(s)={owner_sessions:?}, requesting_session_id={session_id:?}",
-                ),
-            ));
+        if !owned_by_session.is_empty() {
+            return select_cdp_owner_for_session(
+                "cdp_close_tab",
+                session_id,
+                target_id,
+                active_target.as_ref(),
+                owned_by_session,
+            );
         }
-        select_cdp_owner_for_session(
-            "cdp_close_tab",
+        self.recover_cdp_target_owner_for_close(
             session_id,
             target_id,
             active_target.as_ref(),
-            owned_by_session,
+            owners,
         )
+    }
+
+    fn recover_cdp_target_owner_for_close(
+        &self,
+        session_id: &str,
+        target_id: &str,
+        active_target: Option<&SessionTarget>,
+        memory_owners: Vec<(String, CdpTargetOwner)>,
+    ) -> Result<(String, CdpTargetOwner), ErrorData> {
+        let persisted = self.read_persisted_cdp_target_owners_for_target_id(target_id)?;
+        if persisted.is_empty() {
+            return Err(cdp_close_unowned_error(
+                target_id,
+                session_id,
+                &memory_owners,
+            ));
+        }
+        let mut claimed = Vec::new();
+        for (owner_key, row) in persisted {
+            let target = SessionTarget::Cdp {
+                window_hwnd: row.owner.window_hwnd,
+                cdp_target_id: row.owner.cdp_target_id.clone(),
+            };
+            if self
+                .target_claim_for_session(session_id, &target)?
+                .is_some()
+            {
+                claimed.push((owner_key, row));
+            }
+        }
+        if claimed.is_empty() {
+            return Err(mcp_error(
+                error_codes::ACTION_TARGET_INVALID,
+                format!(
+                    "cdp_close_tab refused recovered target {target_id:?}: this session must hold an exact target_claim for the persisted CDP target before durable close authority can be restored"
+                ),
+            ));
+        }
+        let selected = select_persisted_cdp_owner_for_claimed_close(
+            session_id,
+            target_id,
+            active_target,
+            claimed,
+        )?;
+        self.ensure_persisted_cdp_owner_recoverable(session_id, &selected.1)?;
+        let mut owner = selected.1.owner.clone();
+        owner.session_id = session_id.to_owned();
+        let owner_key = selected.0;
+        self.persist_cdp_target_owner(&owner_key, &owner)?;
+        {
+            let mut guard = self.lock_cdp_target_owners()?;
+            guard.insert(owner_key.clone(), owner.clone());
+        }
+        tracing::info!(
+            code = "CDP_TARGET_OWNER_RECOVERED_FOR_CLOSE",
+            session_id = %session_id,
+            prior_owner_session_id = %selected.1.owner_session_id,
+            owner_key = %owner_key,
+            hwnd = owner.window_hwnd,
+            endpoint = %owner.endpoint,
+            cdp_target_id = %owner.cdp_target_id,
+            "readback=CF_SESSIONS+target_claim outcome=close_authority_recovered"
+        );
+        Ok((owner_key, owner))
+    }
+
+    fn ensure_persisted_cdp_owner_recoverable(
+        &self,
+        session_id: &str,
+        persisted: &PersistedCdpTargetOwner,
+    ) -> Result<(), ErrorData> {
+        if persisted.owner_session_id == session_id {
+            return Ok(());
+        }
+        let now = unix_ms_now();
+        let persisted_owner_registry_read =
+            self.session_registry_read_optional(&persisted.owner_session_id)?;
+        if let Some(owner_read) = persisted_owner_registry_read.as_ref()
+            && owner_read.lifecycle == "live"
+            && owner_read.started_at_unix_ms <= persisted.stored_at_unix_ms
+        {
+            let (_requester, owner, _in_flight) = self.ensure_same_agent_adoption_allowed(
+                session_id,
+                &persisted.owner_session_id,
+                now,
+            )?;
+            tracing::info!(
+                code = "CDP_TARGET_OWNER_LIVE_SAME_AGENT_RECOVERY_ALLOWED",
+                session_id = %session_id,
+                owner_session_id = %persisted.owner_session_id,
+                owner_lifecycle = %owner.lifecycle,
+                "readback=session_registry edge=live_same_agent_owner"
+            );
+            return Ok(());
+        }
+        if let Some(owner_read) = persisted_owner_registry_read.as_ref()
+            && owner_read.lifecycle == "live"
+        {
+            tracing::info!(
+                code = "CDP_TARGET_OWNER_REHYDRATED_SESSION_IGNORED_FOR_CLOSE",
+                session_id = %session_id,
+                owner_session_id = %persisted.owner_session_id,
+                owner_started_at_unix_ms = owner_read.started_at_unix_ms,
+                persisted_stored_at_unix_ms = persisted.stored_at_unix_ms,
+                persisted_owner_started_at_unix_ms = ?persisted.owner_started_at_unix_ms,
+                "readback=session_registry+CF_SESSIONS edge=post_restart_session_id_rehydrated"
+            );
+        }
+        let requester = self.current_session_registry_read(session_id)?;
+        if requester.lifecycle != "live" {
+            return Err(mcp_error(
+                error_codes::ACTION_TARGET_INVALID,
+                format!(
+                    "cdp_close_tab refused recovered target {:?}: requesting session {session_id:?} is not live in session registry",
+                    persisted.owner.cdp_target_id
+                ),
+            ));
+        }
+        if requester.agent_kind == "unknown"
+            || persisted.owner_agent_kind == "unknown"
+            || requester.agent_kind != persisted.owner_agent_kind
+        {
+            return Err(mcp_error(
+                error_codes::ACTION_TARGET_INVALID,
+                format!(
+                    "cdp_close_tab refused recovered target {:?}: persisted owner agent_kind {:?} does not match requesting agent_kind {:?}",
+                    persisted.owner.cdp_target_id, persisted.owner_agent_kind, requester.agent_kind
+                ),
+            ));
+        }
+        if requester.client_name.is_none() || requester.client_name != persisted.owner_client_name {
+            return Err(mcp_error(
+                error_codes::ACTION_TARGET_INVALID,
+                format!(
+                    "cdp_close_tab refused recovered target {:?}: persisted owner client_name does not match requesting session",
+                    persisted.owner.cdp_target_id
+                ),
+            ));
+        }
+        if let Some(owner_started_at) = persisted.owner_started_at_unix_ms
+            && requester.started_at_unix_ms <= owner_started_at
+        {
+            return Err(mcp_error(
+                error_codes::ACTION_TARGET_INVALID,
+                format!(
+                    "cdp_close_tab refused recovered target {:?}: requesting session is not newer than persisted owner session",
+                    persisted.owner.cdp_target_id
+                ),
+            ));
+        }
+        Ok(())
+    }
+
+    fn current_session_registry_read(
+        &self,
+        session_id: &str,
+    ) -> Result<super::session_registry::SessionRegistryRead, ErrorData> {
+        let now = unix_ms_now();
+        self.session_registry_read_optional_at(session_id, now)?
+            .ok_or_else(|| {
+                mcp_error(
+                    error_codes::ACTION_TARGET_INVALID,
+                    format!(
+                        "cdp_close_tab refused recovered target: requesting session {session_id:?} is missing from session registry"
+                    ),
+                )
+            })
+    }
+
+    fn session_registry_read_optional(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<super::session_registry::SessionRegistryRead>, ErrorData> {
+        self.session_registry_read_optional_at(session_id, unix_ms_now())
+    }
+
+    fn session_registry_read_optional_at(
+        &self,
+        session_id: &str,
+        now: u64,
+    ) -> Result<Option<super::session_registry::SessionRegistryRead>, ErrorData> {
+        let guard = self.session_registry_ref().lock().map_err(|_error| {
+            mcp_error(
+                error_codes::TOOL_INTERNAL_ERROR,
+                "session registry lock poisoned while validating recovered CDP close authority",
+            )
+        })?;
+        Ok(guard
+            .reads(now)
+            .into_iter()
+            .find(|read| read.session_id == session_id))
     }
 
     fn resolve_cdp_navigation_target(
@@ -3301,6 +3527,8 @@ impl SynapseService {
             let _removed = self.remove_cdp_target_owner(owner_key)?;
             let previous = self.clear_session_cdp_target_if_matches(session_id, cdp_target_id)?;
             let current = self.get_session_target_wire(session_id)?;
+            let claim_released =
+                self.release_closed_cdp_target_claim(session_id, owner.window_hwnd, cdp_target_id)?;
             tracing::info!(
                 code = "CDP_BACKGROUND_TAB_CLOSED",
                 session_id = %session_id,
@@ -3314,6 +3542,7 @@ impl SynapseService {
                 owner_created_at_unix_ms = owner.created_at_unix_ms,
                 target_count_before = closed.target_count_before,
                 target_count_after = closed.target_count_after,
+                target_claim_released = claim_released,
                 "readback=chrome.tabs.query outcome=target_absent"
             );
             return Ok(CdpCloseTabResponse {
@@ -3340,6 +3569,8 @@ impl SynapseService {
         let _removed = self.remove_cdp_target_owner(owner_key)?;
         let previous = self.clear_session_cdp_target_if_matches(session_id, cdp_target_id)?;
         let current = self.get_session_target_wire(session_id)?;
+        let claim_released =
+            self.release_closed_cdp_target_claim(session_id, owner.window_hwnd, cdp_target_id)?;
         tracing::info!(
             code = "CDP_BACKGROUND_TAB_CLOSED",
             session_id = %session_id,
@@ -3350,6 +3581,7 @@ impl SynapseService {
             requested_url = %owner.requested_url,
             target_url = %owner.target_url,
             owner_created_at_unix_ms = owner.created_at_unix_ms,
+            target_claim_released = claim_released,
             "readback=Target.getTargets outcome=target_absent"
         );
         Ok(CdpCloseTabResponse {
@@ -3791,6 +4023,86 @@ fn select_cdp_owner_for_session(
             "{tool} refused target {target_id:?}: target id is ambiguous for MCP session {session_id:?}; set this session's active CDP target or pass a target id that maps to one owned browser surface. matches={owner_surfaces}"
         ),
     ))
+}
+
+fn select_persisted_cdp_owner_for_claimed_close(
+    session_id: &str,
+    target_id: &str,
+    active_target: Option<&SessionTarget>,
+    owners: Vec<(String, PersistedCdpTargetOwner)>,
+) -> Result<(String, PersistedCdpTargetOwner), ErrorData> {
+    if owners.len() == 1 {
+        return owners.into_iter().next().ok_or_else(|| {
+            mcp_error(
+                error_codes::TOOL_INTERNAL_ERROR,
+                "cdp_close_tab internal persisted owner selection lost single CDP owner",
+            )
+        });
+    }
+    let active_window = match active_target {
+        Some(SessionTarget::Cdp {
+            window_hwnd,
+            cdp_target_id,
+        }) if cdp_target_ids_equal(cdp_target_id, target_id) => Some(*window_hwnd),
+        Some(SessionTarget::Window { .. }) | Some(SessionTarget::Cdp { .. }) | None => None,
+    };
+    if let Some(active_window) = active_window {
+        let active_matches = owners
+            .iter()
+            .filter(|(_key, owner)| owner.owner.window_hwnd == active_window)
+            .cloned()
+            .collect::<Vec<_>>();
+        if active_matches.len() == 1 {
+            return active_matches.into_iter().next().ok_or_else(|| {
+                mcp_error(
+                    error_codes::TOOL_INTERNAL_ERROR,
+                    "cdp_close_tab internal persisted owner selection lost active CDP owner",
+                )
+            });
+        }
+    }
+    let owner_surfaces = owners
+        .iter()
+        .map(|(_key, row)| {
+            format!(
+                "hwnd=0x{:x},endpoint={},owner_session_id={}",
+                row.owner.window_hwnd, row.owner.endpoint, row.owner_session_id
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" | ");
+    Err(mcp_error(
+        error_codes::ACTION_TARGET_INVALID,
+        format!(
+            "cdp_close_tab refused recovered target {target_id:?}: target id is ambiguous for MCP session {session_id:?}; set this session's active CDP target to the exact claimed browser surface. matches={owner_surfaces}"
+        ),
+    ))
+}
+
+fn cdp_close_unowned_error(
+    target_id: &str,
+    session_id: &str,
+    owners: &[(String, CdpTargetOwner)],
+) -> ErrorData {
+    if owners.is_empty() {
+        return mcp_error(
+            error_codes::ACTION_TARGET_INVALID,
+            format!(
+                "cdp_close_tab refused target {target_id:?}: target is not owned by this session, has no persisted Synapse-created ownership row, or was already closed"
+            ),
+        );
+    }
+    let owner_sessions = owners
+        .iter()
+        .map(|(_key, owner)| owner.session_id.as_str())
+        .collect::<Vec<_>>()
+        .join(",");
+    mcp_error(
+        error_codes::ACTION_TARGET_INVALID,
+        format!(
+            "cdp_close_tab refused target {target_id:?}: owner_session_id(s)={owner_sessions:?}, requesting_session_id={session_id:?}",
+        ),
+    )
 }
 
 fn cdp_target_info_resolution_request_details(
@@ -6093,7 +6405,11 @@ mod tests {
         FindResultKind, HiddenDesktopPipFrameParams, HiddenDesktopPipStreamStatus,
     };
     use crate::{m2::M2ServiceConfig, m3::M3ServiceConfig, m4::M4ServiceConfig};
-    use std::{num::NonZeroUsize, path::Path};
+    use rmcp::{
+        model::{ClientCapabilities, Implementation, InitializeRequestParams},
+        transport::streamable_http_server::session::SessionState,
+    };
+    use std::{collections::BTreeSet, num::NonZeroUsize, path::Path};
     use synapse_core::{OcrResult, OcrWord, PERCEIVED_TEXT_UNTRUSTED_NOTICE, Rect, error_codes};
     use synapse_storage::cf;
     use tempfile::TempDir;
@@ -6572,6 +6888,188 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn cdp_close_recovers_persisted_owner_only_with_exact_claim() -> anyhow::Result<()> {
+        let dir = TempDir::new()?;
+        let service = service_with_temp_db(dir.path())?;
+        let owner_session = "issue1210-old-codex-session";
+        let current_session = "issue1210-current-codex-session";
+        let now = crate::server::session_registry::unix_time_ms_now();
+        seed_session_client(
+            &service,
+            owner_session,
+            "codex-cli",
+            now.saturating_sub(1_000),
+        )?;
+        seed_session_client(&service, current_session, "codex-cli", now)?;
+        close_session_registry_row(&service, owner_session, now.saturating_add(1))?;
+
+        let target_id = "chrome-tab:issue1210-recover";
+        let owner_key = service.register_cdp_target_owner(CdpTargetOwner {
+            session_id: owner_session.to_owned(),
+            window_hwnd: 0x7777,
+            endpoint: "chrome-extension://test/chrome.tabs".to_owned(),
+            cdp_target_id: target_id.to_owned(),
+            requested_url: "about:blank".to_owned(),
+            target_url: "about:blank".to_owned(),
+            created_at_unix_ms: now,
+        })?;
+        service.cdp_target_owners_ref().lock().unwrap().clear();
+
+        let unclaimed = service
+            .cdp_target_owner_for_close(current_session, target_id)
+            .expect_err("persisted close recovery must require an exact target claim");
+        assert_eq!(
+            unclaimed.data.as_ref().and_then(|data| data.get("code")),
+            Some(&serde_json::json!(error_codes::ACTION_TARGET_INVALID))
+        );
+        assert!(
+            unclaimed
+                .message
+                .contains("must hold an exact target_claim")
+        );
+
+        insert_test_target_claim(&service, current_session, 0x7777, target_id)?;
+        let (recovered_key, recovered_owner) =
+            service.cdp_target_owner_for_close(current_session, target_id)?;
+        assert_eq!(recovered_key, owner_key);
+        assert_eq!(recovered_owner.session_id, current_session);
+        assert_eq!(recovered_owner.window_hwnd, 0x7777);
+
+        let rows = service.read_persisted_cdp_target_owners_for_target_id(target_id)?;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].1.owner_session_id, current_session);
+        assert_eq!(rows[0].1.owner_client_name.as_deref(), Some("codex-cli"));
+        Ok(())
+    }
+
+    #[test]
+    fn cdp_close_recovery_refuses_wrong_client_identity() -> anyhow::Result<()> {
+        let dir = TempDir::new()?;
+        let service = service_with_temp_db(dir.path())?;
+        let owner_session = "issue1210-owner-codex-session";
+        let current_session = "issue1210-current-claude-session";
+        let now = crate::server::session_registry::unix_time_ms_now();
+        seed_session_client(
+            &service,
+            owner_session,
+            "codex-cli",
+            now.saturating_sub(1_000),
+        )?;
+        seed_session_client(&service, current_session, "claude-code", now)?;
+        close_session_registry_row(&service, owner_session, now.saturating_add(1))?;
+
+        let target_id = "chrome-tab:issue1210-wrong-client";
+        service.register_cdp_target_owner(CdpTargetOwner {
+            session_id: owner_session.to_owned(),
+            window_hwnd: 0x8888,
+            endpoint: "chrome-extension://test/chrome.tabs".to_owned(),
+            cdp_target_id: target_id.to_owned(),
+            requested_url: "about:blank".to_owned(),
+            target_url: "about:blank".to_owned(),
+            created_at_unix_ms: now,
+        })?;
+        service.cdp_target_owners_ref().lock().unwrap().clear();
+        insert_test_target_claim(&service, current_session, 0x8888, target_id)?;
+
+        let error = service
+            .cdp_target_owner_for_close(current_session, target_id)
+            .expect_err("different client identity must not recover close authority");
+        assert_eq!(
+            error.data.as_ref().and_then(|data| data.get("code")),
+            Some(&serde_json::json!(error_codes::ACTION_TARGET_INVALID))
+        );
+        assert!(error.message.contains("agent_kind"));
+        Ok(())
+    }
+
+    #[test]
+    fn cdp_close_recovery_ignores_rehydrated_owner_session_id() -> anyhow::Result<()> {
+        let dir = TempDir::new()?;
+        let owner_session = "issue1210-owner-rehydrated-session";
+        let current_session = "issue1210-current-recovery-session";
+        let target_id = "chrome-tab:issue1210-rehydrated-owner";
+        let owner_started_at = crate::server::session_registry::unix_time_ms_now();
+
+        {
+            let service = service_with_temp_db(dir.path())?;
+            seed_session_client(
+                &service,
+                owner_session,
+                "codex-mcp-client",
+                owner_started_at,
+            )?;
+            service.register_cdp_target_owner(CdpTargetOwner {
+                session_id: owner_session.to_owned(),
+                window_hwnd: 0x9999,
+                endpoint: "chrome-extension://test/chrome.tabs".to_owned(),
+                cdp_target_id: target_id.to_owned(),
+                requested_url: "about:blank#rehydrated".to_owned(),
+                target_url: "about:blank#rehydrated".to_owned(),
+                created_at_unix_ms: owner_started_at.saturating_add(10),
+            })?;
+        }
+
+        let service = service_with_temp_db(dir.path())?;
+        let rows = service.read_persisted_cdp_target_owners_for_target_id(target_id)?;
+        assert_eq!(rows.len(), 1);
+        let persisted_stored_at = rows[0].1.stored_at_unix_ms;
+        let rehydrated_started_at = persisted_stored_at.saturating_add(1_000);
+        service.session_registry_ref().lock().unwrap().record_seen(
+            owner_session,
+            Some("tools/call:health".to_owned()),
+            rehydrated_started_at,
+        );
+        seed_session_client(
+            &service,
+            current_session,
+            "codex-mcp-client",
+            rehydrated_started_at.saturating_add(1_000),
+        )?;
+        service.cdp_target_owners_ref().lock().unwrap().clear();
+        insert_test_target_claim(&service, current_session, 0x9999, target_id)?;
+
+        let (recovered_key, recovered_owner) =
+            service.cdp_target_owner_for_close(current_session, target_id)?;
+        assert_eq!(recovered_key, rows[0].0);
+        assert_eq!(recovered_owner.session_id, current_session);
+        assert_eq!(recovered_owner.window_hwnd, 0x9999);
+
+        let updated_rows = service.read_persisted_cdp_target_owners_for_target_id(target_id)?;
+        assert_eq!(updated_rows.len(), 1);
+        assert_eq!(updated_rows[0].1.owner_session_id, current_session);
+        assert_eq!(
+            updated_rows[0].1.owner_client_name.as_deref(),
+            Some("codex-mcp-client")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn cdp_close_claim_cleanup_releases_current_session_claim() -> anyhow::Result<()> {
+        let dir = TempDir::new()?;
+        let service = service_with_temp_db(dir.path())?;
+        let session_id = "issue1210-close-claim-cleanup-session";
+        let target_id = "chrome-tab:issue1210-close-claim-cleanup";
+        let now = crate::server::session_registry::unix_time_ms_now();
+        seed_session_client(&service, session_id, "codex-mcp-client", now)?;
+        insert_test_target_claim(&service, session_id, 0xaaaa, target_id)?;
+
+        assert!(
+            service.release_closed_cdp_target_claim(session_id, 0xaaaa, target_id)?,
+            "close cleanup should release the current session's exact CDP claim"
+        );
+        assert!(
+            !service.release_closed_cdp_target_claim(session_id, 0xaaaa, target_id)?,
+            "close cleanup should be idempotent when no matching claim remains"
+        );
+        let claims = service
+            .lock_target_claims()?
+            .reads(crate::server::session_registry::unix_time_ms_now());
+        assert!(claims.is_empty());
+        Ok(())
+    }
+
     fn service_with_temp_db(path: &Path) -> anyhow::Result<SynapseService> {
         SynapseService::try_with_m2_shutdown_reason_and_m3_config(
             CancellationToken::new(),
@@ -6592,6 +7090,64 @@ mod tests {
             ),
             M4ServiceConfig::default(),
         )
+    }
+
+    fn seed_session_client(
+        service: &SynapseService,
+        session_id: &str,
+        client_name: &str,
+        now_unix_ms: u64,
+    ) -> anyhow::Result<()> {
+        let state = SessionState::new(InitializeRequestParams::new(
+            ClientCapabilities::default(),
+            Implementation::new(client_name, "0.0.0-test"),
+        ));
+        service
+            .session_registry_ref()
+            .lock()
+            .unwrap()
+            .record_initialized(session_id, &state, "http", now_unix_ms);
+        Ok(())
+    }
+
+    fn close_session_registry_row(
+        service: &SynapseService,
+        session_id: &str,
+        now_unix_ms: u64,
+    ) -> anyhow::Result<()> {
+        service
+            .session_registry_ref()
+            .lock()
+            .unwrap()
+            .record_closed(session_id, now_unix_ms);
+        Ok(())
+    }
+
+    fn insert_test_target_claim(
+        service: &SynapseService,
+        session_id: &str,
+        window_hwnd: i64,
+        target_id: &str,
+    ) -> anyhow::Result<()> {
+        let now = crate::server::session_registry::unix_time_ms_now();
+        let mut live = BTreeSet::new();
+        live.insert(session_id.to_owned());
+        service
+            .lock_target_claims()?
+            .claim(
+                session_id,
+                SessionTarget::Cdp {
+                    window_hwnd,
+                    cdp_target_id: target_id.to_owned(),
+                },
+                60_000,
+                now,
+                &live,
+            )
+            .map_err(|conflict| {
+                anyhow::anyhow!("insert test target claim conflict: {conflict:?}")
+            })?;
+        Ok(())
     }
 
     fn action_log_count(service: &SynapseService) -> anyhow::Result<u64> {

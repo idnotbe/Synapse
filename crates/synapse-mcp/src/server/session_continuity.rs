@@ -11,10 +11,13 @@ use synapse_storage::{Db, cf};
 
 use crate::m3::SharedM3State;
 
-use super::{SessionTarget, SynapseService, m1_tools::validate_target_window, mcp_error};
+use super::{
+    CdpTargetOwner, SessionTarget, SynapseService, m1_tools::validate_target_window, mcp_error,
+};
 
 const SESSION_TARGET_PREFIX: &str = "mcp/session-target/v1/";
 const SESSION_LEASE_PREFIX: &str = "mcp/session-lease/v1/";
+const SESSION_CDP_TARGET_OWNER_PREFIX: &str = "mcp/session-cdp-target-owner/v1/";
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct PersistedSessionTarget {
@@ -32,6 +35,18 @@ struct PersistedSessionLease {
     renewed_at_unix_ms: u64,
     ttl_ms: u64,
     expires_at_unix_ms: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub(crate) struct PersistedCdpTargetOwner {
+    pub schema_version: u32,
+    pub owner_key: String,
+    pub stored_at_unix_ms: u64,
+    pub owner_session_id: String,
+    pub owner_client_name: Option<String>,
+    pub owner_agent_kind: String,
+    pub owner_started_at_unix_ms: Option<u64>,
+    pub owner: CdpTargetOwner,
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
@@ -164,6 +179,100 @@ impl SynapseService {
             "restored active session target from CF_SESSIONS"
         );
         Ok(Some(persisted.target))
+    }
+
+    pub(super) fn persist_cdp_target_owner(
+        &self,
+        owner_key: &str,
+        owner: &CdpTargetOwner,
+    ) -> Result<(), ErrorData> {
+        let owner_read = self.session_registry_read_for_persistence(&owner.session_id)?;
+        let row = PersistedCdpTargetOwner {
+            schema_version: 1,
+            owner_key: owner_key.to_owned(),
+            stored_at_unix_ms: unix_ms_now(),
+            owner_session_id: owner.session_id.clone(),
+            owner_client_name: owner_read
+                .as_ref()
+                .and_then(|read| read.client_name.clone()),
+            owner_agent_kind: owner_read
+                .as_ref()
+                .map_or_else(|| "unknown".to_owned(), |read| read.agent_kind.clone()),
+            owner_started_at_unix_ms: owner_read.as_ref().map(|read| read.started_at_unix_ms),
+            owner: owner.clone(),
+        };
+        let encoded = synapse_storage::encode_json(&row).map_err(|error| {
+            mcp_error(
+                error_codes::TOOL_INTERNAL_ERROR,
+                format!("encode persisted CDP target owner failed: {error}"),
+            )
+        })?;
+        let db = self.session_continuity_db()?;
+        db.put_batch_pressure_bypass(
+            cf::CF_SESSIONS,
+            [(
+                cdp_target_owner_row_key(owner_key, &owner.cdp_target_id),
+                encoded,
+            )],
+        )
+        .map_err(|error| mcp_error(error.code(), error.to_string()))?;
+        tracing::info!(
+            code = "MCP_SESSION_CDP_TARGET_OWNER_PERSISTED",
+            owner_session_id = %owner.session_id,
+            owner_key = %owner_key,
+            hwnd = owner.window_hwnd,
+            endpoint = %owner.endpoint,
+            cdp_target_id = %owner.cdp_target_id,
+            "readback=CF_SESSIONS after=cdp_target_owner_persisted"
+        );
+        Ok(())
+    }
+
+    pub(super) fn delete_persisted_cdp_target_owner(
+        &self,
+        owner_key: &str,
+        cdp_target_id: &str,
+    ) -> Result<bool, ErrorData> {
+        let db = self.session_continuity_db()?;
+        delete_persisted_cdp_target_owner_from_db(&db, owner_key, cdp_target_id)
+            .map_err(|error| mcp_error(error_codes::STORAGE_CORRUPTED, error))
+    }
+
+    pub(super) fn read_persisted_cdp_target_owners_for_target_id(
+        &self,
+        cdp_target_id: &str,
+    ) -> Result<Vec<(String, PersistedCdpTargetOwner)>, ErrorData> {
+        let db = self.session_continuity_db()?;
+        let prefix = cdp_target_owner_target_prefix(cdp_target_id);
+        let rows = db
+            .scan_cf_prefix(cf::CF_SESSIONS, &prefix)
+            .map_err(|error| mcp_error(error.code(), error.to_string()))?;
+        let mut decoded = Vec::new();
+        for (row_key, value) in rows {
+            let row =
+                synapse_storage::decode_json::<PersistedCdpTargetOwner>(&value).map_err(|error| {
+                    mcp_error(
+                        error.code(),
+                        format!(
+                            "decode persisted CDP target owner failed for target {cdp_target_id:?}: {error}"
+                        ),
+                    )
+                })?;
+            validate_persisted_cdp_target_owner(cdp_target_id, &row)?;
+            if row_key != cdp_target_owner_row_key(&row.owner_key, &row.owner.cdp_target_id) {
+                return Err(mcp_error(
+                    error_codes::STORAGE_CORRUPTED,
+                    format!(
+                        "persisted CDP target owner row key mismatch for target {cdp_target_id:?}: row_key={} owner_key={}",
+                        String::from_utf8_lossy(&row_key),
+                        row.owner_key
+                    ),
+                ));
+            }
+            decoded.push((row.owner_key.clone(), row));
+        }
+        decoded.sort_by(|left, right| left.0.cmp(&right.0));
+        Ok(decoded)
     }
 
     pub(super) fn persist_session_lease(
@@ -514,6 +623,23 @@ impl SynapseService {
         Ok(Some(persisted))
     }
 
+    fn session_registry_read_for_persistence(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<super::session_registry::SessionRegistryRead>, ErrorData> {
+        let now = unix_ms_now();
+        let guard = self.session_registry_ref().lock().map_err(|_error| {
+            mcp_error(
+                error_codes::TOOL_INTERNAL_ERROR,
+                "session registry lock poisoned while reading CDP owner client identity",
+            )
+        })?;
+        Ok(guard
+            .reads(now)
+            .into_iter()
+            .find(|read| read.session_id == session_id))
+    }
+
     fn session_continuity_db(&self) -> Result<Arc<Db>, ErrorData> {
         let mut state = self.m3_state.lock().map_err(|_error| {
             mcp_error(
@@ -639,6 +765,104 @@ fn cf_row_exists(db: &Db, key: &[u8]) -> synapse_storage::StorageResult<bool> {
         rows.into_iter()
             .any(|(row_key, _value)| row_key.as_slice() == key)
     })
+}
+
+pub(crate) fn delete_persisted_cdp_target_owner_row(
+    m3_state: &SharedM3State,
+    owner_key: &str,
+    cdp_target_id: &str,
+) -> Result<bool, String> {
+    let db = session_continuity_db_from_state(m3_state)?;
+    delete_persisted_cdp_target_owner_from_db(&db, owner_key, cdp_target_id)
+}
+
+fn delete_persisted_cdp_target_owner_from_db(
+    db: &Db,
+    owner_key: &str,
+    cdp_target_id: &str,
+) -> Result<bool, String> {
+    let key = cdp_target_owner_row_key(owner_key, cdp_target_id);
+    let existed_before = cf_row_exists(db, &key).map_err(|error| error.to_string())?;
+    db.delete_batch(cf::CF_SESSIONS, [key.clone()])
+        .map_err(|error| error.to_string())?;
+    let exists_after = cf_row_exists(db, &key).map_err(|error| error.to_string())?;
+    if exists_after {
+        return Err(format!(
+            "persisted CDP target owner row still exists after delete owner_key={owner_key:?} cdp_target_id={cdp_target_id:?}"
+        ));
+    }
+    tracing::info!(
+        code = "MCP_SESSION_CDP_TARGET_OWNER_DELETED",
+        owner_key = %owner_key,
+        cdp_target_id = %cdp_target_id,
+        existed_before,
+        "readback=CF_SESSIONS after=cdp_target_owner_deleted"
+    );
+    Ok(existed_before)
+}
+
+fn validate_persisted_cdp_target_owner(
+    requested_cdp_target_id: &str,
+    row: &PersistedCdpTargetOwner,
+) -> Result<(), ErrorData> {
+    if row.schema_version != 1 {
+        return Err(mcp_error(
+            error_codes::STORAGE_CORRUPTED,
+            format!(
+                "persisted CDP target owner row has unsupported schema_version={}",
+                row.schema_version
+            ),
+        ));
+    }
+    if row.owner_key.trim().is_empty() {
+        return Err(mcp_error(
+            error_codes::STORAGE_CORRUPTED,
+            "persisted CDP target owner row has empty owner_key",
+        ));
+    }
+    if row.owner_session_id != row.owner.session_id {
+        return Err(mcp_error(
+            error_codes::STORAGE_CORRUPTED,
+            format!(
+                "persisted CDP target owner session mismatch: row_session_id={} owner_session_id={}",
+                row.owner_session_id, row.owner.session_id
+            ),
+        ));
+    }
+    if normalize_cdp_target_id(&row.owner.cdp_target_id)
+        != normalize_cdp_target_id(requested_cdp_target_id)
+    {
+        return Err(mcp_error(
+            error_codes::STORAGE_CORRUPTED,
+            format!(
+                "persisted CDP target owner target mismatch: requested={requested_cdp_target_id:?} row={:?}",
+                row.owner.cdp_target_id
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn cdp_target_owner_target_prefix(cdp_target_id: &str) -> Vec<u8> {
+    let normalized = normalize_cdp_target_id(cdp_target_id);
+    format!(
+        "{SESSION_CDP_TARGET_OWNER_PREFIX}{}:{normalized}/",
+        normalized.len()
+    )
+    .into_bytes()
+}
+
+fn cdp_target_owner_row_key(owner_key: &str, cdp_target_id: &str) -> Vec<u8> {
+    format!(
+        "{}{}",
+        String::from_utf8_lossy(&cdp_target_owner_target_prefix(cdp_target_id)),
+        owner_key
+    )
+    .into_bytes()
+}
+
+fn normalize_cdp_target_id(cdp_target_id: &str) -> String {
+    cdp_target_id.trim().to_ascii_lowercase()
 }
 
 fn session_continuity_db_from_state(m3_state: &SharedM3State) -> Result<Arc<Db>, String> {

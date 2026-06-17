@@ -883,7 +883,8 @@ impl SessionLifecycleState {
         report.continuity = self.cleanup_continuity(session_id);
         report.audit_session = self.cleanup_audit_session(session_id);
         report.clipboard = self.cleanup_clipboard(session_id);
-        report.cdp = cleanup_session_cdp_targets(&self.cdp_target_owners, session_id).await;
+        report.cdp =
+            cleanup_session_cdp_targets(&self.m3_state, &self.cdp_target_owners, session_id).await;
         report.target_claims = self.cleanup_target_claims(session_id);
         report.shell = cleanup_shell_jobs(session_id, reason);
         report.processes = self.cleanup_owned_processes(session_id, options);
@@ -1698,6 +1699,7 @@ fn cleanup_shell_jobs(session_id: &str, reason: &str) -> SessionShellCleanupRepo
 }
 
 async fn cleanup_session_cdp_targets(
+    m3_state: &SharedM3State,
     cdp_target_owners: &SharedCdpTargetOwners,
     session_id: &str,
 ) -> SessionCdpCleanupReport {
@@ -1720,13 +1722,32 @@ async fn cleanup_session_cdp_targets(
         owned_before: owned.len(),
         target_ids: owned
             .iter()
-            .map(|owner| owner.cdp_target_id.clone())
+            .map(|(_owner_key, owner)| owner.cdp_target_id.clone())
             .collect(),
         ..SessionCdpCleanupReport::default()
     };
-    for owner in owned {
+    for (owner_key, owner) in owned {
         match close_cdp_target_for_cleanup(&owner.cdp_target_id, &owner).await {
             Ok(()) => {
+                if let Err(detail) =
+                    super::session_continuity::delete_persisted_cdp_target_owner_row(
+                        m3_state,
+                        &owner_key,
+                        &owner.cdp_target_id,
+                    )
+                {
+                    report.failed = report.failed.saturating_add(1);
+                    tracing::error!(
+                        code = error_codes::STORAGE_CORRUPTED,
+                        session_id,
+                        hwnd = owner.window_hwnd,
+                        endpoint = %owner.endpoint,
+                        cdp_target_id = %owner.cdp_target_id,
+                        detail = %detail,
+                        "session lifecycle closed CDP target but failed to delete persisted owner row"
+                    );
+                    continue;
+                }
                 report.closed = report.closed.saturating_add(1);
                 tracing::info!(
                     code = "MCP_SESSION_CDP_TARGET_CLEANUP",
@@ -1757,20 +1778,19 @@ async fn cleanup_session_cdp_targets(
 fn remove_session_cdp_target_owners(
     cdp_target_owners: &SharedCdpTargetOwners,
     session_id: &str,
-) -> Result<Vec<CdpTargetOwner>, String> {
+) -> Result<Vec<(String, CdpTargetOwner)>, String> {
     let mut guard = cdp_target_owners
         .lock()
         .map_err(|_error| "CDP target ownership registry lock poisoned".to_owned())?;
-    let owned_ids = guard
-        .iter()
-        .filter_map(|(target_id, owner)| {
-            (owner.session_id == session_id).then(|| target_id.clone())
-        })
-        .collect::<Vec<_>>();
-    let owned = owned_ids
-        .into_iter()
-        .filter_map(|target_id| guard.remove(&target_id))
-        .collect();
+    let mut owned = Vec::new();
+    guard.retain(|target_id, owner| {
+        if owner.session_id == session_id {
+            owned.push((target_id.clone(), owner.clone()));
+            false
+        } else {
+            true
+        }
+    });
     Ok(owned)
 }
 

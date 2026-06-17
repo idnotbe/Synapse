@@ -837,6 +837,22 @@ impl SynapseService {
         Ok(())
     }
 
+    pub(crate) fn target_claim_for_session(
+        &self,
+        session_id: &str,
+        target: &SessionTarget,
+    ) -> Result<Option<TargetClaimRead>, ErrorData> {
+        let now = unix_time_ms_now();
+        let live_sessions = self.live_target_claim_sessions(now, Some(session_id))?;
+        let mut guard = self.lock_target_claims()?;
+        guard.prune_inactive(now, &live_sessions);
+        let claim = guard
+            .get(&target_key(target))
+            .filter(|entry| entry.owner_session_id == session_id)
+            .map(|entry| entry.read(now));
+        Ok(claim)
+    }
+
     fn resolve_target_claim_target(
         &self,
         session_id: &str,
@@ -876,7 +892,7 @@ impl SynapseService {
         Ok(live)
     }
 
-    fn ensure_same_agent_adoption_allowed(
+    pub(crate) fn ensure_same_agent_adoption_allowed(
         &self,
         requester_session_id: &str,
         owner_session_id: &str,
@@ -1023,7 +1039,7 @@ pub(crate) fn cleanup_claims_for_session(
 }
 
 impl TargetClaimRegistry {
-    fn claim(
+    pub(crate) fn claim(
         &mut self,
         session_id: &str,
         target: SessionTarget,
@@ -1073,7 +1089,7 @@ impl TargetClaimRegistry {
         Ok((entry, outcome))
     }
 
-    fn release(
+    pub(crate) fn release(
         &mut self,
         session_id: &str,
         target_key: &str,

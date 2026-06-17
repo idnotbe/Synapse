@@ -267,7 +267,7 @@ pub(crate) enum SessionTarget {
 /// target reads never serialize behind another session's snapshot.
 pub(crate) type SharedSessionTargets = Arc<Mutex<HashMap<String, SessionTarget>>>;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 pub(crate) struct CdpTargetOwner {
     pub session_id: String,
     pub window_hwnd: i64,
