@@ -1,6 +1,6 @@
 const PROTOCOL_VERSION = 1;
-const BRIDGE_BUILD_ID = "synapse-chrome-bridge-2026-06-16-target-info-text-1206-v1";
-const BRIDGE_BUILD_SHA256 = "3ab6a7287913bbd234e8c1283e2fd0e8814f229bd6df6853287c358a973271a9";
+const BRIDGE_BUILD_ID = "synapse-chrome-bridge-2026-06-17-set-field-value-v1";
+const BRIDGE_BUILD_SHA256 = "aa134c36b51b7a02ebcf4c94523e8034c85aa958776aa12e7815edd7d5e68540";
 const COMMAND_CAPABILITIES = Object.freeze([
   "openTab",
   "closeTab",
@@ -9,7 +9,8 @@ const COMMAND_CAPABILITIES = Object.freeze([
   "navigateTab",
   "activateTab",
   "reloadSelf",
-  "typeActiveElement"
+  "typeActiveElement",
+  "setFieldValue"
 ]);
 const EXPECTED_EXTENSION_ID = "leoocgnkjnplbfdbklajepahofecgfbk";
 const DAEMON_BASE_URL = "http://127.0.0.1:7700";
@@ -352,6 +353,8 @@ async function handleCommand(command) {
       result = await handleTargetInfo(params);
     } else if (kind === "typeActiveElement") {
       result = await handleTypeActiveElement(params);
+    } else if (kind === "setFieldValue") {
+      result = await handleSetFieldValue(params);
     } else if (kind === "navigateTab") {
       result = await handleNavigateTab(params);
     } else if (kind === "activateTab") {
@@ -1171,6 +1174,251 @@ function dispatchSyntheticInputEvent(element, type, text, cancelable) {
     event = new Event(type, { bubbles: true, cancelable });
   }
   return element.dispatchEvent(event);
+}
+
+// #1000/#717: background-safe field REPLACE for the user's normal Chrome. Runs
+// entirely in-page via chrome.scripting (no debugger attach, no OS foreground,
+// works on occluded/inactive tabs that UIA cannot see). Resolves the target by
+// a strict CSS selector (exactly one editable, visible match) or the current
+// active element, then replaces the value with the NATIVE prototype setter so
+// React/Vue/Angular controlled inputs do not silently revert the change.
+async function handleSetFieldValue(params) {
+  const selected = await selectTabTarget(params, { requireTargetId: true });
+  const text = String(params.text ?? "");
+  const selector = params.selector == null ? null : String(params.selector);
+  const activeElement = Boolean(params.activeElement);
+  if (!chrome.scripting || typeof chrome.scripting.executeScript !== "function") {
+    throw bridgeError(
+      ERROR_AXTREE_FAILED,
+      "chrome.scripting.executeScript unavailable; extension is missing scripting permission"
+    );
+  }
+  let results;
+  try {
+    results = await chrome.scripting.executeScript({
+      target: { tabId: selected.tabId },
+      func: setFieldValueInPage,
+      args: [{ selector, activeElement, text }]
+    });
+  } catch (error) {
+    throw bridgeError(
+      ERROR_AXTREE_FAILED,
+      `chrome.scripting.executeScript setFieldValue(${selected.tabId}) failed: ${errorMessage(error)}`
+    );
+  }
+  const first = Array.isArray(results) ? results[0] : null;
+  const result = first?.result;
+  if (!result || typeof result !== "object") {
+    throw bridgeError(
+      ERROR_AXTREE_FAILED,
+      "chrome.scripting.executeScript setFieldValue returned no structured result"
+    );
+  }
+  if (!result.ok) {
+    throw bridgeError(
+      ERROR_AXTREE_FAILED,
+      `setFieldValue failed: code=${String(result.error_code || "UNKNOWN")} detail=${String(result.error_detail || "")}`
+    );
+  }
+  return {
+    extension_id: chrome.runtime.id,
+    target_id: selected.target.id,
+    tab_id: selected.tabId,
+    chars_requested: [...text].length,
+    readback_backend: "chrome.scripting.executeScript",
+    target_candidate_count: selected.targetCandidateCount,
+    target_selection_reason: selected.selectionReason,
+    ...result
+  };
+}
+
+function setFieldValueInPage(request) {
+  const selector = request && request.selector != null ? String(request.selector) : null;
+  const wantActive = Boolean(request && request.activeElement);
+  const inputText = String((request && request.text) ?? "");
+
+  function isEditable(el) {
+    if (!el || el.nodeType !== 1) {
+      return false;
+    }
+    if (el.disabled || el.readOnly) {
+      return false;
+    }
+    const tag = String(el.tagName || "").toLowerCase();
+    if (tag === "textarea") {
+      return true;
+    }
+    if (tag === "input") {
+      const type = String(el.getAttribute("type") || "text").toLowerCase();
+      const nonText = ["button", "submit", "reset", "checkbox", "radio", "range", "color", "file", "image", "hidden"];
+      return !nonText.includes(type);
+    }
+    return Boolean(
+      el.isContentEditable ||
+        String(el.getAttribute && el.getAttribute("contenteditable") || "").toLowerCase() === "true"
+    );
+  }
+  function isVisible(el) {
+    if (!el || typeof el.getClientRects !== "function") {
+      return false;
+    }
+    if (el.getClientRects().length > 0) {
+      return true;
+    }
+    // Occluded windows still lay out the DOM; fall back to box model.
+    return Boolean(el.offsetWidth || el.offsetHeight);
+  }
+  function readValue(el) {
+    const tag = String(el.tagName || "").toLowerCase();
+    if ((tag === "input" || tag === "textarea") && "value" in el) {
+      return String(el.value ?? "");
+    }
+    return String(el.innerText || el.textContent || "");
+  }
+
+  let element = null;
+  let resolvedBy = "";
+  let matchCount = 0;
+  if (selector) {
+    let nodes;
+    try {
+      nodes = Array.from(document.querySelectorAll(selector));
+    } catch (error) {
+      return {
+        ok: false,
+        error_code: "CHROME_SET_FIELD_SELECTOR_INVALID",
+        error_detail: `querySelectorAll(${selector}) threw: ${String(error && error.message || error)}`
+      };
+    }
+    const editable = nodes.filter((node) => isEditable(node) && isVisible(node));
+    matchCount = editable.length;
+    if (editable.length === 0) {
+      return {
+        ok: false,
+        error_code: "CHROME_SET_FIELD_NOT_FOUND",
+        error_detail: `selector matched ${nodes.length} node(s), 0 editable+visible`,
+        selector_match_count: nodes.length
+      };
+    }
+    if (editable.length > 1) {
+      return {
+        ok: false,
+        error_code: "CHROME_SET_FIELD_NOT_UNIQUE",
+        error_detail: `selector matched ${editable.length} editable+visible nodes; refine the selector for a unique target`,
+        editable_match_count: editable.length
+      };
+    }
+    element = editable[0];
+    resolvedBy = "selector";
+  } else if (wantActive) {
+    element = document.activeElement;
+    resolvedBy = "active_element";
+    matchCount = element ? 1 : 0;
+  } else {
+    return {
+      ok: false,
+      error_code: "CHROME_SET_FIELD_BAD_LOCATOR",
+      error_detail: "setFieldValue requires a selector or active_element=true"
+    };
+  }
+
+  if (!element) {
+    return { ok: false, error_code: "CHROME_ACTIVE_ELEMENT_MISSING", error_detail: "no element resolved" };
+  }
+  if (!isEditable(element)) {
+    return {
+      ok: false,
+      error_code: "CHROME_ACTIVE_ELEMENT_NOT_EDITABLE",
+      error_detail: `resolved element ${String(element.tagName || "")} is not an editable field`
+    };
+  }
+
+  const beforeValue = readValue(element);
+  try {
+    element.focus();
+  } catch (_) {
+    // focus failures are not fatal; value mutation + readback is the source of truth
+  }
+
+  // beforeinput is cancelable; a page handler may legitimately block input.
+  let beforeInputEvent;
+  try {
+    beforeInputEvent = new InputEvent("beforeinput", {
+      bubbles: true,
+      cancelable: true,
+      data: inputText,
+      inputType: "insertReplacementText"
+    });
+  } catch (_) {
+    beforeInputEvent = new Event("beforeinput", { bubbles: true, cancelable: true });
+  }
+  const beforeInputOk = element.dispatchEvent(beforeInputEvent);
+  if (!beforeInputOk) {
+    return {
+      ok: false,
+      error_code: "CHROME_BEFOREINPUT_CANCELLED",
+      error_detail: "a page beforeinput listener cancelled the background replace",
+      before_value: beforeValue
+    };
+  }
+
+  const tag = String(element.tagName || "").toLowerCase();
+  let expected;
+  if ((tag === "input" || tag === "textarea") && "value" in element) {
+    const proto = tag === "input" ? window.HTMLInputElement.prototype : window.HTMLTextAreaElement.prototype;
+    const descriptor = Object.getOwnPropertyDescriptor(proto, "value");
+    if (descriptor && typeof descriptor.set === "function") {
+      descriptor.set.call(element, inputText);
+    } else {
+      element.value = inputText;
+    }
+    if (typeof element.setSelectionRange === "function") {
+      try {
+        element.setSelectionRange(inputText.length, inputText.length);
+      } catch (_) {
+        // selection is best-effort; ignore on inputs that disallow it
+      }
+    }
+    expected = String(element.value ?? "");
+  } else {
+    element.textContent = inputText;
+    expected = String(element.innerText || element.textContent || "");
+  }
+
+  let inputEvent;
+  try {
+    inputEvent = new InputEvent("input", { bubbles: true, cancelable: false, data: inputText, inputType: "insertReplacementText" });
+  } catch (_) {
+    inputEvent = new Event("input", { bubbles: true });
+  }
+  element.dispatchEvent(inputEvent);
+  element.dispatchEvent(new Event("change", { bubbles: true }));
+
+  const afterValue = readValue(element);
+  if (afterValue !== expected) {
+    return {
+      ok: false,
+      error_code: "CHROME_SET_FIELD_VALUE_MISMATCH",
+      error_detail: `post-set readback diverged from the applied value (expected_len=${expected.length} after_len=${afterValue.length}); a page framework may have reverted it`,
+      resolved_by: resolvedBy,
+      match_count: matchCount,
+      tag_name: tag,
+      before_value: beforeValue,
+      after_value: afterValue,
+      expected_value: expected
+    };
+  }
+
+  return {
+    ok: true,
+    resolved_by: resolvedBy,
+    match_count: matchCount,
+    tag_name: tag,
+    is_editable: true,
+    before_value: beforeValue,
+    after_value: afterValue,
+    expected_value: expected
+  };
 }
 
 function tabsNavigationMethod(action) {

@@ -39,9 +39,9 @@ const EXTENSION_ORIGIN: &str = "chrome-extension://leoocgnkjnplbfdbklajepahofecg
 const BRIDGE_TOKEN_HEADER: &str = "x-synapse-bridge-token";
 const BRIDGE_PROTOCOL_VERSION: u32 = 1;
 const EXPECTED_EXTENSION_BUILD_ID: &str =
-    "synapse-chrome-bridge-2026-06-16-target-info-text-1206-v1";
+    "synapse-chrome-bridge-2026-06-17-set-field-value-v1";
 const EXPECTED_EXTENSION_BUILD_SHA256: &str =
-    "3ab6a7287913bbd234e8c1283e2fd0e8814f229bd6df6853287c358a973271a9";
+    "aa134c36b51b7a02ebcf4c94523e8034c85aa958776aa12e7815edd7d5e68540";
 const REQUIRED_DIRECT_HTTP_CAPABILITIES: &[&str] = &[
     "closeTab",
     "navigateTab",
@@ -50,6 +50,7 @@ const REQUIRED_DIRECT_HTTP_CAPABILITIES: &[&str] = &[
     "targetInfo",
     "targetInfoPageText",
     "typeActiveElement",
+    "setFieldValue",
 ];
 const LEGACY_DIRECT_HTTP_CAPABILITIES: &[&str] =
     &["closeTab", "navigateTab", "openTab", "targetInfo"];
@@ -532,6 +533,39 @@ pub(crate) struct ChromeDebuggerTypeActiveElementResult {
     pub expected_value: Option<String>,
     #[serde(default)]
     pub events_dispatched: Vec<String>,
+    pub target_candidate_count: u32,
+    pub target_selection_reason: String,
+    pub extension_id: Option<String>,
+}
+
+/// Result of the background-safe `setFieldValue` bridge command (#1000/#717):
+/// an in-page React-safe field REPLACE on the user's normal Chrome, with no
+/// debugger attach and no OS foreground. `before_value`/`after_value` are the
+/// raw in-page field values returned to the daemon for an exact Source-of-Truth
+/// comparison; they are hashed before leaving the daemon and never logged raw.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub(crate) struct ChromeDebuggerSetFieldValueResult {
+    pub target_id: String,
+    pub tab_id: u32,
+    #[serde(default)]
+    pub chars_requested: u32,
+    pub readback_backend: String,
+    /// `selector` or `active_element`.
+    #[serde(default)]
+    pub resolved_by: String,
+    /// Number of editable+visible nodes the selector matched (1 on success).
+    #[serde(default)]
+    pub match_count: u32,
+    #[serde(default)]
+    pub tag_name: String,
+    #[serde(default)]
+    pub is_editable: bool,
+    #[serde(default)]
+    pub before_value: Option<String>,
+    #[serde(default)]
+    pub after_value: Option<String>,
+    #[serde(default)]
+    pub expected_value: Option<String>,
     pub target_candidate_count: u32,
     pub target_selection_reason: String,
     pub extension_id: Option<String>,
@@ -2182,6 +2216,39 @@ pub(crate) async fn type_active_element(
     })
 }
 
+/// Background-safe field REPLACE via the normal Chrome bridge (#1000/#717).
+/// Resolves the target in-page by a strict CSS `selector` (exactly one
+/// editable+visible match) or the current `active_element`, replaces its value
+/// with the native prototype setter (React-safe), and returns the raw before/
+/// after values for the daemon's Source-of-Truth check. No foreground, no
+/// debugger attach; works on inactive/occluded tabs UIA cannot perceive.
+pub(crate) async fn set_field_value(
+    hwnd: i64,
+    target_id: &str,
+    selector: Option<&str>,
+    active_element: bool,
+    text: &str,
+) -> Result<ChromeDebuggerSetFieldValueResult, ChromeDebuggerBridgeError> {
+    ensure_normal_bridge_popup_safe(hwnd, "setFieldValue")?;
+    let result = bridge()
+        .send_command(
+            "setFieldValue",
+            json!({
+                "hwnd": hwnd,
+                "targetIdHint": target_id,
+                "selector": selector,
+                "activeElement": active_element,
+                "text": text,
+            }),
+        )
+        .await?;
+    serde_json::from_value::<ChromeDebuggerSetFieldValueResult>(result).map_err(|error| {
+        ChromeDebuggerBridgeError::protocol(format!(
+            "decode Chrome debugger setFieldValue response: {error}"
+        ))
+    })
+}
+
 pub(crate) async fn navigate_tab(
     hwnd: i64,
     target_id: &str,
@@ -2956,6 +3023,17 @@ fn chrome_response_readback_summary(kind: &str, result: Option<&Value>) -> Optio
             "target_id": result.get("target_id"),
             "tab_id": result.get("tab_id"),
             "chars_typed": result.get("chars_typed"),
+            "readback_backend": result.get("readback_backend"),
+            "target_candidate_count": result.get("target_candidate_count"),
+            "target_selection_reason": result.get("target_selection_reason"),
+            "extension_id": result.get("extension_id"),
+        }),
+        "setFieldValue" => json!({
+            "target_id": result.get("target_id"),
+            "tab_id": result.get("tab_id"),
+            "resolved_by": result.get("resolved_by"),
+            "match_count": result.get("match_count"),
+            "tag_name": result.get("tag_name"),
             "readback_backend": result.get("readback_backend"),
             "target_candidate_count": result.get("target_candidate_count"),
             "target_selection_reason": result.get("target_selection_reason"),
