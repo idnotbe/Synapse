@@ -95,6 +95,36 @@ describe("buildAgents live session status", () => {
     assert.equal(agents[0].status, "failed");
   });
 
+  test("does not make terminal attached registry failures actionable", () => {
+    const agents = buildAgents(
+      dashboardState({
+        attached_agent_registry: {
+          rows: [
+            {
+              registry_id: "agent-spawn-local-dead",
+              kind: "local-model",
+              lifecycle: "dead",
+              state: "dead",
+              reason_code: "local_model_registry_row_missing",
+              counts_as_live: false,
+              kill_handle: {
+                available: true,
+                target_id: "agent-spawn-local-dead"
+              }
+            }
+          ]
+        },
+        sessions: [],
+        unbound_agent_states: [],
+        terminal_unbound_agent_states: []
+      })
+    );
+
+    assert.equal(agents.length, 1);
+    assert.equal(agents[0].status, "failed");
+    assert.equal(agents[0].killable, false);
+  });
+
   test("falls back to stale timing only for unknown live lifecycle rows", () => {
     const agents = buildAgents(
       dashboardState({

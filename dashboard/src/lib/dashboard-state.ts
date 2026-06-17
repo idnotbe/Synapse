@@ -839,14 +839,16 @@ export function buildAgents(state?: DashboardState): AgentSummary[] {
         const windowTitle = rawText(visibleWindow.window_title);
         const source = rawText(row.source);
         const countsAsLive = Boolean(row.counts_as_live);
+        const terminal = terminalStatus(stateName, reason);
+        const killable = !terminal && countsAsLive && Boolean(killHandle.available);
         return {
           id,
           spawnId: spawnId || undefined,
           killId: rawText(killHandle.target_id) || spawnId || sessionId || id,
-          killable: Boolean(killHandle.available),
+          killable,
           kind: rawText(row.kind || "agent"),
           lifecycle: countsAsLive ? "live" : rawText(row.lifecycle || "observed"),
-          status: statusFromAgentState(stateName, reason),
+          status: terminal ?? statusFromAgentState(stateName, reason),
           summary: [processSummary, windowTitle, source].filter(Boolean).join(" / "),
           lastSeenMs: Number.isFinite(lastSeenMs) ? lastSeenMs : undefined,
           lastAction: source,
