@@ -1571,6 +1571,47 @@ impl SynapseService {
                 ));
             }
         };
+        if let Err(error) =
+            self.require_spawned_agent_session_live(&matched.session_id, &files, agent_kind)
+        {
+            let cleanup = crate::m4::terminate_owned_process_tree(launch_response.pid);
+            let completion_artifacts = write_agent_spawn_daemon_terminal_artifacts(
+                &files,
+                &params,
+                &spawn_id,
+                "task_not_started",
+                "spawned agent session ended before durable spawn readiness could be returned",
+                json!({
+                    "reason": "spawned_session_ended_before_ready",
+                    "wait_timeout_ms": params.wait_timeout_ms,
+                    "session_id": matched.session_id,
+                    "session_liveness_error": error,
+                    "cleanup": cleanup,
+                }),
+            );
+            return Err(agent_spawn_tool_error(
+                error_codes::ACTION_AGENT_SPAWN_TASK_NOT_STARTED,
+                "act_spawn_agent observed task-start readiness but the spawned MCP session was no longer live before ready could be returned; exact spawned PID cleanup was attempted",
+                json!({
+                    "code": error_codes::ACTION_AGENT_SPAWN_TASK_NOT_STARTED,
+                    "reason": "spawned_session_ended_before_ready",
+                    "spawn_id": spawn_id,
+                    "cli": agent_kind.as_str(),
+                    "launcher_process_id": launch_response.pid,
+                    "agent_process_id": matched.agent_process_id,
+                    "session_id": matched.session_id,
+                    "mcp_url": params.mcp_url,
+                    "wait_timeout_ms": params.wait_timeout_ms,
+                    "target": params.target,
+                    "log_dir": files.log_dir.display().to_string(),
+                    "task_started_path": files.task_started_path.display().to_string(),
+                    "readiness_files": agent_spawn_readiness_file_readback(&files),
+                    "session_liveness_error": error,
+                    "cleanup": cleanup,
+                    "completion_artifacts": completion_artifacts,
+                }),
+            ));
+        }
         let control = match read_spawned_agent_control_artifact(&files, agent_kind) {
             Ok(control) => control,
             Err(error) => {
@@ -1908,25 +1949,23 @@ impl SynapseService {
             "task_started_path": files.task_started_path.display().to_string(),
         });
         while !agent_spawn_deadline_remaining(deadline).is_zero() {
+            self.require_spawned_agent_session_live(&matched.session_id, files, agent_kind)?;
             match read_agent_spawn_task_start_artifact(
                 files, params, agent_kind, spawn_id, matched,
             )? {
                 Some(read) => return Ok(read),
                 None => {
-                    // The cooperative artifact is absent. Before treating that as
-                    // "not started", check whether the daemon can OBSERVE the agent
-                    // already executing — a capable agent often does the work but
-                    // skips the bookkeeping helper. Observed liveness is real proof.
-                    if let Some(evidence) = agent_spawn_observed_task_progress(files, agent_kind) {
-                        return Ok(AgentSpawnTaskStartRead {
-                            started_at_unix_ms: unix_time_ms_now(),
-                            readiness_source: evidence,
-                        });
-                    }
+                    // Observed work is diagnostic evidence, not the readiness
+                    // verdict. #1225 requires durable session liveness plus the
+                    // task-start artifact so a torn-down session cannot later be
+                    // journaled as spawn_ready.
+                    let observed_task_progress =
+                        agent_spawn_observed_task_progress(files, agent_kind);
                     last_observed = json!({
                         "reason": "task_start_artifact_not_observed",
                         "task_started_path": files.task_started_path.display().to_string(),
                         "completion_status": read_json_file_lossy(&files.completion_status_path),
+                        "observed_task_progress": observed_task_progress,
                         "stdout_bytes": file_len(&files.stdout_path),
                         "stderr_bytes": file_len(&files.stderr_path),
                         "final_message_bytes": file_len(&files.final_message_path),
@@ -1952,6 +1991,59 @@ impl SynapseService {
             "reason": "task_start_artifact_timeout",
             "task_started_path": files.task_started_path.display().to_string(),
             "last_observed": last_observed,
+        }))
+    }
+
+    fn require_spawned_agent_session_live(
+        &self,
+        session_id: &str,
+        files: &AgentSpawnFiles,
+        agent_kind: ActSpawnAgentCli,
+    ) -> Result<(), serde_json::Value> {
+        let liveness = self.spawned_agent_session_liveness_readback(session_id)?;
+        if liveness.get("lifecycle").and_then(Value::as_str) == Some("live") {
+            return Ok(());
+        }
+        Err(json!({
+            "reason": "spawned_session_not_live",
+            "session_id": session_id,
+            "session_liveness": liveness,
+            "readiness_files": agent_spawn_readiness_file_readback(files),
+            "observed_task_progress": agent_spawn_observed_task_progress(files, agent_kind),
+        }))
+    }
+
+    fn spawned_agent_session_liveness_readback(
+        &self,
+        session_id: &str,
+    ) -> Result<serde_json::Value, serde_json::Value> {
+        let list = self.session_list_impl(true).map_err(|error| {
+            json!({
+                "reason": "session_list_read_failed",
+                "session_id": session_id,
+                "error": error.message,
+                "data": error.data,
+            })
+        })?;
+        let Some(summary) = list
+            .sessions
+            .iter()
+            .find(|summary| summary.registry.session_id == session_id)
+        else {
+            return Ok(json!({
+                "reason": "spawned_session_missing_from_registry",
+                "session_id": session_id,
+                "session_count": list.sessions.len(),
+            }));
+        };
+        Ok(json!({
+            "session_id": summary.registry.session_id,
+            "lifecycle": summary.registry.lifecycle,
+            "closed_at_unix_ms": summary.registry.closed_at_unix_ms,
+            "last_seen_unix_ms": summary.registry.last_seen_unix_ms,
+            "last_seen_ms_ago": summary.registry.last_seen_ms_ago,
+            "last_action": summary.registry.last_action,
+            "last_reason_code": summary.registry.last_reason_code,
         }))
     }
 
@@ -2197,10 +2289,9 @@ struct MatchedSpawnSession {
 #[derive(Debug)]
 struct AgentSpawnTaskStartRead {
     started_at_unix_ms: u64,
-    /// How task-start readiness was proven: `"task_start_artifact"` (the agent
-    /// ran the cooperative write-task-started helper) or a daemon-OBSERVED
-    /// liveness signal label when the agent did real work but skipped the
-    /// bookkeeping step. Surfaced in the spawn response for auditing.
+    /// How task-start readiness was proven. #1225 keeps this fail-closed:
+    /// successful readiness requires the cooperative task-start artifact plus a
+    /// live spawned MCP session at readback time.
     readiness_source: &'static str,
 }
 
@@ -4418,16 +4509,9 @@ fn read_agent_spawn_task_start_artifact(
     }))
 }
 
-/// Daemon-OBSERVABLE evidence that a spawned agent actually began (and often
-/// finished) executing its task, independent of whether the model chose to run
-/// the cooperative `write-task-started.ps1` bookkeeping helper. The spawn
-/// readiness protocol injects prompt instructions telling the agent to call MCP
-/// tools and run that helper; a capable agent frequently does its real work but
-/// skips or reorders the ceremony. Gating liveness solely on the bookkeeping
-/// artifact then declares a working — often already finished — agent "dead".
-/// This inspects signals the daemon controls/observes directly and returns the
-/// evidence label when the task is provably underway. Positive evidence only;
-/// absence returns None so the deadline still governs genuinely stuck spawns.
+/// Daemon-OBSERVABLE evidence that a spawned agent began executing. This is
+/// diagnostic/session-attribution evidence only; #1225 forbids treating it as
+/// final spawn readiness without a live session plus task-start artifact.
 fn agent_spawn_observed_task_progress(
     files: &AgentSpawnFiles,
     agent_kind: ActSpawnAgentCli,
@@ -4623,6 +4707,15 @@ fn spawn_session_candidate_readiness(
             "expected": "new distinct MCP session id",
         });
     }
+    if summary.registry.lifecycle != "live" {
+        return json!({
+            "ready": false,
+            "reason": "session_not_live",
+            "lifecycle": summary.registry.lifecycle,
+            "closed_at_unix_ms": summary.registry.closed_at_unix_ms,
+            "last_reason_code": summary.registry.last_reason_code,
+        });
+    }
     if summary.registry.started_at_unix_ms + 2_000 < launched_at_unix_ms {
         return json!({
             "ready": false,
@@ -4696,6 +4789,7 @@ fn spawn_session_identity_matches(
     launched_at_unix_ms: u64,
 ) -> bool {
     !before_session_ids.contains(&summary.registry.session_id)
+        && summary.registry.lifecycle == "live"
         && summary.registry.started_at_unix_ms + 2_000 >= launched_at_unix_ms
         && summary_matches_cli(summary, agent_kind)
 }
@@ -4837,6 +4931,69 @@ mod tests {
             template_id: None,
             template_version: None,
             template_config_hash: None,
+        }
+    }
+
+    fn test_spawn_session_summary(
+        lifecycle: &str,
+        last_action: Option<&str>,
+    ) -> crate::server::session_tools::SessionSummary {
+        crate::server::session_tools::SessionSummary {
+            registry: crate::server::session_registry::SessionRegistryRead {
+                session_id: "spawned-session".to_owned(),
+                transport: "http".to_owned(),
+                client_name: Some("codex-mcp-client".to_owned()),
+                client_version: Some("test".to_owned()),
+                protocol_version: Some("test".to_owned()),
+                agent_kind: "codex".to_owned(),
+                lifecycle: lifecycle.to_owned(),
+                started_at_unix_ms: 1_000,
+                last_seen_unix_ms: 1_500,
+                last_seen_ms_ago: 50,
+                stale_after_ms: 300_000,
+                closed_at_unix_ms: (lifecycle != "live").then_some(1_550),
+                last_action: last_action.map(ToOwned::to_owned),
+                last_reason_code: (lifecycle != "live")
+                    .then_some("http_session_store_deleted".to_owned()),
+                spawned_agent: None,
+            },
+            active_target: None,
+            agent_logical_foreground:
+                crate::server::session_tools::AgentLogicalForegroundReadback {
+                    source_of_truth: "test".to_owned(),
+                    session_id: "spawned-session".to_owned(),
+                    status: "missing".to_owned(),
+                    target: None,
+                    persisted_row_key: None,
+                    no_human_os_foreground_fallback: true,
+                    missing_reason: Some("test".to_owned()),
+                },
+            foreground_lane: crate::server::session_tools::ForegroundLaneReadback {
+                source_of_truth: "test".to_owned(),
+                session_id: "spawned-session".to_owned(),
+                status: "missing".to_owned(),
+                capacity_model: "test".to_owned(),
+                capacity_exhausted: false,
+                lane_kind: None,
+                target_key: None,
+                target: None,
+                target_claim: None,
+                owner_session_id: None,
+                explicit_real_foreground_lease: false,
+                no_human_os_foreground_fallback: true,
+                missing_reason: Some("test".to_owned()),
+            },
+            target_claims: Vec::new(),
+            lease: crate::server::session_tools::SessionLeaseReadback {
+                held: false,
+                owner_session_id: None,
+                is_owner: false,
+                acquired_at_ms_ago: None,
+                renewed_at_ms_ago: None,
+                ttl_ms: None,
+                expires_in_ms: None,
+            },
+            agent_state: None,
         }
     }
 
@@ -5010,6 +5167,63 @@ mod tests {
             Some(&json!(error_codes::TOOL_PARAMS_INVALID))
         );
         assert!(error.message.contains("must be <="));
+    }
+
+    #[test]
+    fn spawn_session_readiness_rejects_closed_session_even_after_tool_call() {
+        let summary = test_spawn_session_summary("closed", Some("tools/call:session_list"));
+        let before_session_ids = BTreeSet::new();
+        let readiness = spawn_session_candidate_readiness(
+            &summary,
+            ActSpawnAgentCli::Codex,
+            None,
+            &before_session_ids,
+            1_000,
+        );
+
+        assert_eq!(readiness.get("ready").and_then(Value::as_bool), Some(false));
+        assert_eq!(
+            readiness.get("reason").and_then(Value::as_str),
+            Some("session_not_live")
+        );
+        assert_eq!(
+            readiness.get("last_reason_code").and_then(Value::as_str),
+            Some("http_session_store_deleted")
+        );
+        assert!(
+            !spawn_session_identity_matches(
+                &summary,
+                ActSpawnAgentCli::Codex,
+                &before_session_ids,
+                1_000,
+            ),
+            "closed sessions must not bind through the task-start or observed-progress paths"
+        );
+    }
+
+    #[test]
+    fn spawn_session_readiness_accepts_live_tool_call() {
+        let summary = test_spawn_session_summary("live", Some("tools/call:session_list"));
+        let before_session_ids = BTreeSet::new();
+        let readiness = spawn_session_candidate_readiness(
+            &summary,
+            ActSpawnAgentCli::Codex,
+            None,
+            &before_session_ids,
+            1_000,
+        );
+
+        assert_eq!(readiness.get("ready").and_then(Value::as_bool), Some(true));
+        assert_eq!(
+            readiness.get("reason").and_then(Value::as_str),
+            Some("tool_call_observed")
+        );
+        assert!(spawn_session_identity_matches(
+            &summary,
+            ActSpawnAgentCli::Codex,
+            &before_session_ids,
+            1_000,
+        ));
     }
 
     #[test]
