@@ -421,7 +421,7 @@ impl SynapseService {
     }
 
     #[tool(
-        description = "Capture a PNG/JPEG screenshot. With an active session CDP target, captures that exact browser tab through raw CDP Page.captureScreenshot or the safe normal Chrome bridge Page.captureScreenshot path; it never downgrades to the browser HWND, does not reject a session-owned tab merely because it is active/highlighted in a focused Chrome window, and verifies target/window readback before writing bytes. With window_hwnd or a window target, captures that window in the background using passive per-window WGC and interprets region as client-relative. With no target, preserves legacy foreground-window or absolute screen-region capture. PrintWindow is disabled for normal targets because it executes target-process WM_PRINT/WM_PRINTCLIENT handlers, but session-owned hidden-desktop targets use an explicit per-desktop worker PrintWindow path."
+        description = "Capture a PNG/JPEG screenshot. With an active session raw CDP target, captures that exact browser tab through Page.captureScreenshot. The normal authenticated Chrome bridge is debugger-free and refuses Page.captureScreenshot before queueing any Chrome command, because Chrome's debugger infobar changes viewport/layout and breaks coordinate truth; use raw CDP on a dedicated silent automation profile or passive window capture instead. With window_hwnd or a window target, captures that window in the background using passive per-window WGC and interprets region as client-relative. With no target, preserves legacy foreground-window or absolute screen-region capture. PrintWindow is disabled for normal targets because it executes target-process WM_PRINT/WM_PRINTCLIENT handlers, but session-owned hidden-desktop targets use an explicit per-desktop worker PrintWindow path."
     )]
     pub async fn capture_screenshot(
         &self,
@@ -1073,7 +1073,7 @@ impl SynapseService {
                 mcp_error(
                     error.code(),
                     format!(
-                        "capture_screenshot Chrome bridge Page.captureScreenshot/readback failed: {}",
+                        "capture_screenshot popup-free Chrome bridge refused debugger screenshot/readback: {}",
                         error.detail()
                     ),
                 )
@@ -1635,7 +1635,7 @@ impl SynapseService {
     }
 
     #[tool(
-        description = "Evaluate JavaScript in the calling session's owned browser tab, returning the JSON value plus Runtime.RemoteObject-like type metadata read back from the same target. Raw CDP uses Runtime.evaluate / Runtime.callFunctionOn. The normal Chrome bridge uses guarded chrome.debugger Runtime.evaluate for page-scope evaluation on session-owned chrome-tab targets, detaches in a finally path, and does not reject a target merely because it is active/highlighted in a focused Chrome window. Page scope (default): `expression` is evaluated directly; pass `args` to invoke it as a function with those args. Element scope requires raw CDP: pass `element_id` and a function `expression`, called Playwright-style as fn(element, ...args) via Runtime.callFunctionOn. Requires an active session CDP target or an explicit cdp_target_id/element owned by this session; never uses an unrelated human foreground tab as a fallback. JS exceptions are surfaced loudly. Target-scoped: never changes tab activation or uses OS foreground input. This is the keystone for page content / element introspection / state queries / web-first assertions."
+        description = "Evaluate JavaScript in the calling session's owned browser tab, returning the JSON value plus Runtime.RemoteObject-like type metadata read back from the same target. Raw CDP uses Runtime.evaluate / Runtime.callFunctionOn. The normal authenticated Chrome bridge is debugger-free and intentionally refuses arbitrary page eval before queueing any Chrome command, because Chrome's debugger infobar changes viewport/layout and chrome.scripting cannot safely provide arbitrary string evaluation under page/extension CSP; use cdp_target_info/browser_set_value/target_act for popup-free normal-profile read/action surfaces or raw CDP in a dedicated silent automation profile for arbitrary evaluation. Page scope (default): `expression` is evaluated directly; pass `args` to invoke it as a function with those args. Element scope requires raw CDP: pass `element_id` and a function `expression`, called Playwright-style as fn(element, ...args) via Runtime.callFunctionOn. Requires an active session CDP target or an explicit cdp_target_id/element owned by this session; never uses an unrelated human foreground tab as a fallback. JS exceptions are surfaced loudly. Target-scoped: never changes tab activation or uses OS foreground input."
     )]
     pub async fn browser_evaluate(
         &self,
@@ -3325,7 +3325,7 @@ impl SynapseService {
                 return Err(mcp_error(
                     error_codes::A11Y_CDP_EXTENSION_UNAVAILABLE,
                     format!(
-                        "browser_evaluate element scope requires raw CDP for window {window_hwnd:#x}; the normal Chrome bridge exposes only page-scope guarded chrome.debugger Runtime.evaluate on session-owned tabs"
+                        "browser_evaluate element scope requires raw CDP for window {window_hwnd:#x}; the normal Chrome bridge is debugger-free and does not expose arbitrary page evaluation"
                     ),
                 ));
             }
@@ -3342,7 +3342,7 @@ impl SynapseService {
                 mcp_error(
                     error.code(),
                     format!(
-                        "browser_evaluate Chrome bridge Runtime.evaluate failed: {}",
+                        "browser_evaluate normal Chrome bridge refused arbitrary page evaluation: {}",
                         error.detail()
                     ),
                 )
@@ -3364,7 +3364,7 @@ impl SynapseService {
                 result_type = %evaluated.result_type,
                 returned_by_value = evaluated.returned_by_value,
                 target_url = %evaluated.url,
-                "readback=chrome.debugger.Runtime.evaluate outcome=evaluated"
+                "readback=chrome.scripting.executeScript outcome=evaluated"
             );
             return Ok(BrowserEvaluateResponse {
                 session_id: session_id.to_owned(),
@@ -3388,7 +3388,7 @@ impl SynapseService {
                 description: evaluated.description,
                 unserializable_value: evaluated.unserializable_value,
                 readback_backend: if evaluated.readback_backend.trim().is_empty() {
-                    "chrome.debugger.Runtime.evaluate".to_owned()
+                    "chrome.scripting.executeScript".to_owned()
                 } else {
                     evaluated.readback_backend
                 },

@@ -1,16 +1,14 @@
 const PROTOCOL_VERSION = 1;
-const BRIDGE_BUILD_ID = "synapse-chrome-bridge-2026-06-17-alarm-reconnect-v1";
-const BRIDGE_BUILD_SHA256 = "c8c59aaedd0fcf3d92006aa02ea8b794d1aef07d9ab9fe8d95c562b505ff87ea";
+const BRIDGE_BUILD_ID = "synapse-chrome-bridge-2026-06-18-popup-free-tabs-v2";
+const BRIDGE_BUILD_SHA256 = "e7493db900f64eaddefe89573c61d211ee264f7345681dc25d38178f65d8018f";
 const COMMAND_CAPABILITIES = Object.freeze([
   "alarmReconnect",
   "openTab",
   "closeTab",
-  "capturePageScreenshot",
   "targetInfo",
   "targetInfoPageText",
   "navigateTab",
   "activateTab",
-  "evaluateScript",
   "pageVitals",
   "domAction",
   "reloadSelf",
@@ -47,10 +45,6 @@ const AGENT_NAVIGATION_CLAIM_TTL_MS = 30000;
 const MAX_RECENT_NAVIGATION_KEYS = 128;
 const MAX_PAGE_TEXT_CHARS = 4096;
 const OPEN_WINDOW_BOUNDS_TOLERANCE_PX = 96;
-const CAPTURE_SCREENSHOT_ATTACH_TIMEOUT_MS = 5000;
-const CAPTURE_SCREENSHOT_COMMAND_TIMEOUT_MS = 15000;
-const CAPTURE_SCREENSHOT_MAX_ATTEMPTS = 2;
-const CAPTURE_SCREENSHOT_RETRY_DELAY_MS = 150;
 
 let hostId = null;
 let bridgeToken = null;
@@ -406,7 +400,7 @@ async function handleCommand(command) {
     } else if (kind === "closeTab") {
       result = await handleCloseTab(params);
     } else if (kind === "capturePageScreenshot") {
-      result = await handleCapturePageScreenshot(params);
+      result = rejectAttachCommand(kind, params);
     } else if (kind === "targetInfo" || kind === "targetInfoPageText") {
       result = await handleTargetInfo(params);
     } else if (kind === "typeActiveElement") {
@@ -414,7 +408,7 @@ async function handleCommand(command) {
     } else if (kind === "setFieldValue") {
       result = await handleSetFieldValue(params);
     } else if (kind === "evaluateScript") {
-      result = await handleEvaluateScript(params);
+      result = rejectAttachCommand(kind, params);
     } else if (kind === "pageVitals") {
       result = await handlePageVitals(params);
     } else if (kind === "navigateTab") {
@@ -458,8 +452,7 @@ function rejectAttachCommand(kind, params) {
   throw bridgeError(
     ERROR_DEBUGGER_WARNING_UNSUPPRESSED,
     `normal Synapse Chrome Bridge refused ${String(kind)} before browser debugger startup; ` +
-      `the normal end-user extension exposes chrome.debugger only for guarded ` +
-      `session-owned capturePageScreenshot, not DOM/action attach commands. ` +
+      `the normal end-user extension is debugger-free and cannot call chrome.debugger. ` +
       `hwnd=${String(params?.hwnd ?? "unknown")} remediation=use raw CDP with a dedicated ` +
       `Synapse-launched automation profile`
   );
@@ -593,290 +586,7 @@ async function handlePageVitals(params) {
 }
 
 async function handleCapturePageScreenshot(params) {
-  const selected = await selectTabTarget(params, { requireTargetId: true });
-  const before = await tabPageState(selected.tabId, selected.target);
-  const windowId = before.chrome_window_id || selected.target.chromeWindowId;
-  const expectedWindowId = optionalInteger(params.expectedChromeWindowId);
-  if (
-    Number.isInteger(expectedWindowId) &&
-    Number.isInteger(windowId) &&
-    windowId !== expectedWindowId
-  ) {
-    throw bridgeError(
-      ERROR_AXTREE_FAILED,
-      `capturePageScreenshot refused target ${selected.target.id}: tab is in Chrome window ${windowId}, expected ${expectedWindowId}`
-    );
-  }
-  if (!Number.isInteger(windowId)) {
-    throw bridgeError(
-      ERROR_AXTREE_FAILED,
-      `capturePageScreenshot could not resolve chrome window id for target ${JSON.stringify(selected.target.id)}`
-    );
-  }
-  const captureWindow = await chromeWindowState(windowId);
-  if (!chrome.debugger || typeof chrome.debugger.attach !== "function" || typeof chrome.debugger.sendCommand !== "function") {
-    throw bridgeError(
-      ERROR_AXTREE_FAILED,
-      "chrome.debugger unavailable; extension is missing debugger permission for Page.captureScreenshot"
-    );
-  }
-  const capture = await capturePageScreenshotWithRetry(selected);
-  const screenshot = capture.screenshot;
-  const imageData = typeof screenshot?.data === "string" ? screenshot.data : "";
-  if (!imageData) {
-    throw bridgeError(
-      ERROR_AXTREE_FAILED,
-      "Page.captureScreenshot returned no image data"
-    );
-  }
-  const imageDataUrl = `data:image/png;base64,${imageData}`;
-  const after = await tabPageState(selected.tabId, selected.target);
-  return {
-    extension_id: chrome.runtime.id,
-    target_id: after.target_id || selected.target.id,
-    tab_id: selected.tabId,
-    chrome_window_id: windowId,
-    chrome_window_focused: typeof captureWindow?.focused === "boolean" ? captureWindow.focused : null,
-    chrome_window_state: typeof captureWindow?.state === "string" ? captureWindow.state : "",
-    url: after.url || "",
-    title: after.title || "",
-    ready_state: after.ready_state || "",
-    before_active: Boolean(before.active),
-    active_for_capture: Boolean(after.active),
-    before_highlighted: Boolean(before.highlighted),
-    highlighted_for_capture: Boolean(after.highlighted),
-    previous_active_tab_id: null,
-    restored_previous_active: false,
-    image_format: "png",
-    image_data_url: imageDataUrl,
-    image_data_url_len: imageDataUrl.length,
-    readback_backend: "chrome.debugger.Page.captureScreenshot+chrome.tabs.get",
-    capture_attempt_count: capture.attempts.length,
-    capture_attempts: capture.attempts,
-    target_candidate_count: selected.targetCandidateCount,
-    target_selection_reason: selected.selectionReason
-  };
-}
-
-async function capturePageScreenshotWithRetry(selected) {
-  const attempts = [];
-  let lastError = null;
-  for (let attempt = 1; attempt <= CAPTURE_SCREENSHOT_MAX_ATTEMPTS; attempt += 1) {
-    const startedAt = Date.now();
-    try {
-      const screenshot = await capturePageScreenshotAttempt(selected.tabId);
-      attempts.push({
-        attempt,
-        ok: true,
-        elapsed_ms: elapsedSince(startedAt)
-      });
-      return { screenshot, attempts };
-    } catch (error) {
-      const detail = errorMessage(error);
-      lastError = error;
-      attempts.push({
-        attempt,
-        ok: false,
-        elapsed_ms: elapsedSince(startedAt),
-        error_detail: detail,
-        retryable: isCapturePageScreenshotRetryableError(error)
-      });
-      if (
-        attempt >= CAPTURE_SCREENSHOT_MAX_ATTEMPTS ||
-        !isCapturePageScreenshotRetryableError(error)
-      ) {
-        break;
-      }
-      await delay(CAPTURE_SCREENSHOT_RETRY_DELAY_MS);
-    }
-  }
-  throw bridgeError(
-    ERROR_AXTREE_FAILED,
-    `capturePageScreenshot failed for target ${selected.target.id} after ${attempts.length} attempts: ` +
-      `${formatCaptureAttempts(attempts)}; last_error=${errorMessage(lastError)}`
-  );
-}
-
-async function capturePageScreenshotAttempt(tabId) {
-  const debuggee = { tabId };
-  let attached = false;
-  let screenshot;
-  let primaryError = null;
-  let detachError = null;
-  try {
-    await withTimeout(
-      chrome.debugger.attach(debuggee, "1.3"),
-      CAPTURE_SCREENSHOT_ATTACH_TIMEOUT_MS,
-      `chrome.debugger.attach(tabId=${tabId})`
-    );
-    attached = true;
-    await withTimeout(
-      chrome.debugger.sendCommand(debuggee, "Page.enable", {}),
-      CAPTURE_SCREENSHOT_ATTACH_TIMEOUT_MS,
-      `chrome.debugger.sendCommand(Page.enable, tabId=${tabId})`
-    );
-    screenshot = await withTimeout(
-      chrome.debugger.sendCommand(debuggee, "Page.captureScreenshot", {
-        format: "png",
-        fromSurface: true
-      }),
-      CAPTURE_SCREENSHOT_COMMAND_TIMEOUT_MS,
-      `chrome.debugger.sendCommand(Page.captureScreenshot, tabId=${tabId})`
-    );
-  } catch (error) {
-    primaryError = error;
-  } finally {
-    if (attached) {
-      try {
-        await withTimeout(
-          chrome.debugger.detach(debuggee),
-          CAPTURE_SCREENSHOT_ATTACH_TIMEOUT_MS,
-          `chrome.debugger.detach(tabId=${tabId})`
-        );
-      } catch (error) {
-        detachError = errorMessage(error);
-      }
-    }
-  }
-  if (detachError) {
-    const detail = primaryError
-      ? `${errorMessage(primaryError)}; detach failed: ${detachError}`
-      : `debugger detach failed: ${detachError}`;
-    throw new Error(detail);
-  }
-  if (primaryError) {
-    throw primaryError;
-  }
-  return screenshot;
-}
-
-function isCapturePageScreenshotRetryableError(error) {
-  const message = errorMessage(error);
-  return message.includes("Page.captureScreenshot") && message.includes("timed out after");
-}
-
-function formatCaptureAttempts(attempts) {
-  return attempts
-    .map((attempt) => {
-      if (attempt.ok) {
-        return `attempt ${attempt.attempt} ok elapsed_ms=${attempt.elapsed_ms}`;
-      }
-      return `attempt ${attempt.attempt} error retryable=${attempt.retryable} ` +
-        `elapsed_ms=${attempt.elapsed_ms} detail=${attempt.error_detail}`;
-    })
-    .join("; ");
-}
-
-async function handleEvaluateScript(params) {
-  const selected = await selectTabTarget(params, { requireTargetId: true });
-  const expression = String(params.expression ?? "");
-  const args = Array.isArray(params.args) ? params.args : [];
-  const awaitPromise = params.awaitPromise !== false;
-  const returnByValue = params.returnByValue !== false;
-  if (!expression.trim()) {
-    throw bridgeError(ERROR_ATTACH_FAILED, "evaluateScript requires a non-empty expression");
-  }
-  const before = await tabPageState(selected.tabId, selected.target);
-  const windowId = before.chrome_window_id || selected.target.chromeWindowId;
-  if (!Number.isInteger(windowId)) {
-    throw bridgeError(
-      ERROR_CHROME_SCRIPTING_EXECUTE_FAILED,
-      `evaluateScript could not resolve chrome window id for target ${JSON.stringify(selected.target.id)}`
-    );
-  }
-  if (!chrome.debugger || typeof chrome.debugger.attach !== "function" || typeof chrome.debugger.sendCommand !== "function") {
-    throw bridgeError(
-      ERROR_CHROME_SCRIPTING_EXECUTE_FAILED,
-      "chrome.debugger unavailable; extension is missing debugger permission for Runtime.evaluate"
-    );
-  }
-  let runtimeExpression;
-  try {
-    runtimeExpression = runtimeEvaluateExpression(expression, args);
-  } catch (error) {
-    throw bridgeError(
-      ERROR_CHROME_SCRIPTING_EXECUTE_FAILED,
-      `evaluateScript parameter serialization failed: ${errorMessage(error)}`
-    );
-  }
-  const debuggee = { tabId: selected.tabId };
-  let attached = false;
-  let evaluated;
-  let detachError = null;
-  try {
-    await withTimeout(
-      chrome.debugger.attach(debuggee, "1.3"),
-      5000,
-      `chrome.debugger.attach(tabId=${selected.tabId})`
-    );
-    attached = true;
-    await withTimeout(
-      chrome.debugger.sendCommand(debuggee, "Runtime.enable", {}),
-      5000,
-      `chrome.debugger.sendCommand(Runtime.enable, tabId=${selected.tabId})`
-    );
-    evaluated = await withTimeout(
-      chrome.debugger.sendCommand(debuggee, "Runtime.evaluate", {
-        expression: `${runtimeExpression}\n//# sourceURL=synapse://browser_evaluate`,
-        objectGroup: "synapse_browser_evaluate",
-        awaitPromise,
-        returnByValue,
-        allowUnsafeEvalBlockedByCSP: true
-      }),
-      15000,
-      `chrome.debugger.sendCommand(Runtime.evaluate, tabId=${selected.tabId})`
-    );
-  } catch (error) {
-    throw bridgeError(
-      ERROR_CHROME_SCRIPTING_EXECUTE_FAILED,
-      `Runtime.evaluate failed for target ${selected.target.id}: ${errorMessage(error)}`
-    );
-  } finally {
-    if (attached) {
-      try {
-        await withTimeout(
-          chrome.debugger.detach(debuggee),
-          5000,
-          `chrome.debugger.detach(tabId=${selected.tabId})`
-        );
-      } catch (error) {
-        detachError = errorMessage(error);
-      }
-    }
-  }
-  if (detachError) {
-    throw bridgeError(
-      ERROR_CHROME_SCRIPTING_EXECUTE_FAILED,
-      `Runtime.evaluate completed for target ${selected.target.id} but failed to detach debugger from tab ${selected.tabId}: ${detachError}`
-    );
-  }
-  if (evaluated?.exceptionDetails) {
-    throw bridgeError(
-      ERROR_CHROME_SCRIPTING_EXECUTE_FAILED,
-      `Runtime.evaluate threw for target ${selected.target.id}: ${formatRuntimeException(evaluated.exceptionDetails)}`
-    );
-  }
-  if (!evaluated?.result || typeof evaluated.result !== "object") {
-    throw bridgeError(
-      ERROR_CHROME_SCRIPTING_EXECUTE_FAILED,
-      "Runtime.evaluate returned no remote object result"
-    );
-  }
-  const state = await tabPageState(selected.tabId, selected.target);
-  return {
-    extension_id: chrome.runtime.id,
-    target_id: state.target_id || selected.target.id,
-    tab_id: selected.tabId,
-    chrome_window_id: state.chrome_window_id,
-    url: state.url || "",
-    title: state.title || "",
-    ready_state: state.ready_state || "",
-    scope: "page",
-    readback_backend: "chrome.debugger.Runtime.evaluate+chrome.tabs.get",
-    target_candidate_count: selected.targetCandidateCount,
-    target_selection_reason: selected.selectionReason,
-    ...runtimeRemoteObjectResult(evaluated.result, returnByValue)
-  };
+  return rejectAttachCommand("capturePageScreenshot", params);
 }
 
 async function handleTypeActiveElement(params) {
@@ -1829,64 +1539,6 @@ function readPageVitalsInPage() {
       error_detail: error && error.message ? String(error.message) : String(error)
     };
   }
-}
-
-function runtimeEvaluateExpression(expression, args) {
-  if (args.length === 0) {
-    return expression;
-  }
-  const serializedArgs = JSON.stringify(args);
-  if (serializedArgs === undefined) {
-    throw new Error("evaluateScript args could not be serialized to JSON");
-  }
-  return `((__synapseFn, __synapseArgs) => {
-  if (typeof __synapseFn !== "function") {
-    throw new TypeError("evaluateScript with args requires expression to evaluate to a function");
-  }
-  return __synapseFn(...__synapseArgs);
-})((${expression}), ${serializedArgs})`;
-}
-
-function runtimeRemoteObjectResult(remote, returnByValue) {
-  const resultType = String(remote.type || "");
-  const resultSubtype = typeof remote.subtype === "string" ? remote.subtype : null;
-  const description = typeof remote.description === "string"
-    ? remote.description
-    : remote.value === undefined
-      ? resultType || "undefined"
-      : String(remote.value);
-  return {
-    ok: true,
-    result_type: resultType,
-    result_subtype: resultSubtype,
-    returned_by_value: Boolean(returnByValue),
-    value: remote.value === undefined ? null : remote.value,
-    description,
-    unserializable_value: typeof remote.unserializableValue === "string"
-      ? remote.unserializableValue
-      : null
-  };
-}
-
-function formatRuntimeException(details) {
-  const parts = [];
-  if (typeof details.text === "string" && details.text) {
-    parts.push(details.text);
-  }
-  const exception = details.exception;
-  if (exception && typeof exception === "object") {
-    if (typeof exception.description === "string" && exception.description) {
-      parts.push(exception.description);
-    } else if (exception.value !== undefined) {
-      parts.push(String(exception.value));
-    }
-  }
-  const line = Number.isInteger(details.lineNumber) ? details.lineNumber : null;
-  const column = Number.isInteger(details.columnNumber) ? details.columnNumber : null;
-  if (line !== null || column !== null) {
-    parts.push(`line=${line ?? "?"} column=${column ?? "?"}`);
-  }
-  return parts.length > 0 ? parts.join(" | ") : JSON.stringify(details);
 }
 
 function readActiveElementInPage() {

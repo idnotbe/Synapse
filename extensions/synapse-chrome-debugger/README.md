@@ -4,14 +4,15 @@ This unpacked MV3 extension lets the Synapse daemon inspect and control the
 user's normal Chrome profile through a direct localhost WebSocket from the
 extension service worker to the Synapse daemon. The normal end-user bridge is
 tabs-first: background tab open/close/navigation use `chrome.tabs` APIs and the
-extension does not require `nativeMessaging`. It declares `debugger` only for
-the guarded `capturePageScreenshot` and page-scoped `evaluateScript` commands,
-which attach to a session-owned tab long enough to call `Page.captureScreenshot`
-or `Runtime.evaluate` and then detach. It does require `chrome.alarms` so Chrome
-can wake the MV3 service worker after the daemon restarts or the worker is
-suspended. If the daemon is unavailable or the live Chrome profile is unsafe,
-the failure is logged with the exact daemon error code and the bridge retries
-with bounded backoff while remaining fail-closed to browser commands.
+extension does not require `debugger` or `nativeMessaging`. Page-scoped
+evaluation uses `chrome.scripting.executeScript`; screenshot or deep CDP work
+must use raw CDP from a dedicated Synapse-launched automation profile started
+with `--silent-debugger-extension-api`, or fail closed before touching the
+normal browser. It does require `chrome.alarms` so Chrome can wake the MV3
+service worker after the daemon restarts or the worker is suspended. If the
+daemon is unavailable or the live Chrome profile is unsafe, the failure is
+logged with the exact daemon error code and the bridge retries with bounded
+backoff while remaining fail-closed to browser commands.
 
 Stable extension ID: `leoocgnkjnplbfdbklajepahofecgfbk`
 
@@ -77,36 +78,34 @@ backoff. This keeps the failure visible while preventing any browser command
 from queueing on an unsafe end-user Chrome profile.
 
 Background tab commands (`openTab`, `closeTab`, `navigateTab`, `activateTab`,
-`capturePageScreenshot`, `targetInfoPageText`, `evaluateScript`, `pageVitals`,
-and `typeActiveElement`) use `chrome.windows.getAll`, `chrome.tabs.create`,
-`chrome.tabs.remove`, `chrome.tabs.update`, `chrome.tabs.reload`,
-`chrome.tabs.goBack`, `chrome.tabs.goForward`, `chrome.scripting.executeScript`,
-and guarded `chrome.debugger` commands against the selected tab. When the daemon
-gives the normal bridge an OS HWND hint, the extension cannot see HWNDs
+`targetInfoPageText`, `pageVitals`, `domAction`, `setFieldValue`, and
+`typeActiveElement`) use `chrome.windows.getAll`,
+`chrome.tabs.create`, `chrome.tabs.remove`, `chrome.tabs.update`,
+`chrome.tabs.reload`, `chrome.tabs.goBack`, `chrome.tabs.goForward`, and
+`chrome.scripting.executeScript`. When the daemon gives the normal bridge an OS
+HWND hint, the extension cannot see HWNDs
 directly, so `openTab` uses exactly one existing non-focused Chrome window when
 available; if the profile exposes only the focused human Chrome window, it
 creates only an inactive background tab in that existing window and returns the
 actual `chrome_window_id` plus active/highlighted readback. It never creates a
 helper Chrome window. Multiple non-focused windows are ambiguous and fail
-closed. `capturePageScreenshot` attaches the debugger only to the requested
-synthetic `chrome-tab:<id>` target, verifies the Chrome window/target readback,
-calls `Page.captureScreenshot`, and detaches in a `finally` path. It does not
-refuse a session-owned target merely because that target is active/highlighted
-in a focused Chrome window. `evaluateScript` attaches only to the requested
-session-owned `chrome-tab:<id>` target, calls `Runtime.evaluate` with the Chrome
-DevTools Protocol CSP bypass flag, and detaches in a `finally` path so
-CSP-hardened pages do not require `unsafe-eval`. It does not refuse a target
-merely because that owned target is active/highlighted in a focused Chrome
-window.
-`evaluateScript` is page-scoped only and returns CDP-like value metadata;
+closed. `capturePageScreenshot` is not a normal-bridge capability; the daemon
+refuses it before queueing any Chrome command because Chrome's debugger infobar
+changes viewport/layout and breaks coordinate truth. `evaluateScript` is also
+not a normal-bridge capability: arbitrary string evaluation needs raw CDP
+Runtime.evaluate, while `chrome.scripting.executeScript` can safely provide only
+typed, precompiled DOM helpers under normal page/extension CSP. Use
+`targetInfoPageText`, `pageVitals`, `domAction`, `setFieldValue`, and
+`typeActiveElement` for popup-free normal-profile read/action work, and use raw
+CDP in a dedicated silent automation profile for arbitrary JavaScript eval.
 `pageVitals` and `targetInfoPageText` read the page Performance Timeline for LCP
-plus document visibility state. Other commands do not call
-`chrome.debugger.getTargets` or `chrome.debugger.attach`; target IDs returned by
-this path are synthetic `chrome-tab:<tabId>` IDs backed by `chrome.tabs`
-readback. The daemon refuses these normal-profile commands before queueing them
-whenever the live Chrome profile/process Source of Truth still contains any
-external `debugger` or `nativeMessaging` surface, because even a tab event can
-wake another extension's debugger/native-host popup on an unsafe host.
+plus document visibility state. No command calls `chrome.debugger.getTargets` or
+`chrome.debugger.attach`; target IDs returned by this path are synthetic
+`chrome-tab:<tabId>` IDs backed by `chrome.tabs` readback. The daemon refuses
+these normal-profile commands before queueing them whenever the live Chrome
+profile/process Source of Truth still contains any external `debugger` or
+`nativeMessaging` surface, because even a tab event can wake another extension's
+debugger/native-host popup on an unsafe host.
 
 The lifecycle command `reloadSelf` is limited to self-reload. It validates the
 expected extension ID and expected build ID, acknowledges the request to the
@@ -116,17 +115,15 @@ and the full required capability set.
 
 Attach-capable DOM commands (`snapshot`, `clickNode`, `typeNode`, and
 `nodeValue`) are unavailable in the normal end-user install. The normal service
-worker rejects them immediately. The only `chrome.debugger` use in this bridge is
-`capturePageScreenshot` and page-scoped `evaluateScript`, and the daemon queues
-them only for session-owned targets. DOM attach requires raw CDP on a dedicated
+worker rejects them immediately. The bridge contains no `chrome.debugger` use;
+DOM attach and debugger-backed screenshots require raw CDP on a dedicated
 Synapse-launched automation profile.
 
 The install verifier also observes (for diagnostics only) whether the live
 Chrome profile contains an active external extension with the `debugger`
 permission, or a live external native-messaging wrapper process. Those are
 separate browser surfaces that can produce an end-user popup/window even though
-Synapse's bridge uses only tabs plus guarded session-owned
-`capturePageScreenshot` / `evaluateScript`. The verifier names the extension
+Synapse's bridge uses only tabs plus scripting. The verifier names the extension
 ID, profile, and process SoT, but Synapse never disables those extensions or
 modifies Chrome policy; deep CDP work runs in a dedicated Synapse-launched
 automation profile started with `--silent-debugger-extension-api` instead.
@@ -166,8 +163,7 @@ That removes only Synapse-authored blockers (matched by the
 `blocked_install_message` marker) from HKCU and HKLM and reports a per-hive
 result; admin- or user-authored `ExtensionSettings` entries are left untouched.
 Popup-free background automation is achieved on Synapse's own side: the bundled
-bridge is tabs-first over localhost WebSocket with no `nativeMessaging`
-permission, debugger use is limited to session-owned `capturePageScreenshot` and
-page-scoped `evaluateScript`, helper Chrome windows are never created, and
+bridge is tabs-first over localhost WebSocket with no `debugger` or
+`nativeMessaging` permission, helper Chrome windows are never created, and
 deeper DOM/action CDP runs in a dedicated Synapse-launched automation profile
 started with `--silent-debugger-extension-api`.

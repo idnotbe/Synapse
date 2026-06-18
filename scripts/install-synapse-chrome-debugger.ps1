@@ -353,7 +353,10 @@ $requiredPermissions = @($extensionManifest.permissions)
 $optionalPermissions = @($extensionManifest.optional_permissions)
 $hostPermissions = @($extensionManifest.host_permissions)
 if ($optionalPermissions -contains 'debugger') {
-    throw "SYNAPSE_CHROME_EXTENSION_OPTIONAL_DEBUGGER_PERMISSION_FORBIDDEN path=$manifestPath remediation=the bundled bridge uses required debugger only for guarded session-owned capturePageScreenshot and evaluateScript commands; optional debugger permission is ambiguous and forbidden"
+    throw "SYNAPSE_CHROME_EXTENSION_OPTIONAL_DEBUGGER_PERMISSION_FORBIDDEN path=$manifestPath remediation=the normal end-user bridge must be debugger-free; Chrome's debugger infobar changes viewport/layout and breaks coordinate truth"
+}
+if ($requiredPermissions -contains 'debugger') {
+    throw "SYNAPSE_CHROME_EXTENSION_DEBUGGER_PERMISSION_FORBIDDEN path=$manifestPath remediation=the normal end-user bridge must not request debugger; use raw CDP from a dedicated Synapse-launched automation profile started with --silent-debugger-extension-api for debugger-backed work"
 }
 if ($requiredPermissions -contains 'nativeMessaging') {
     throw "SYNAPSE_CHROME_EXTENSION_NATIVE_MESSAGING_FORBIDDEN path=$manifestPath remediation=normal end-user bridge must use direct localhost HTTP registration plus WebSocket command delivery; nativeMessaging can launch a visible cmd.exe wrapper on Windows"
@@ -535,11 +538,11 @@ $externalHazardExtensionIds = @(
 # Synapse NEVER disables a user's Chrome extensions. External extensions and
 # native-messaging hosts that use debugger/nativeMessaging are observed for
 # diagnostics only (reported below) and are never blocked. Popup-free background
-# automation is achieved entirely on Synapse's own side: the bundled bridge uses
-# tabs over localhost WebSocket plus guarded debugger Page.captureScreenshot for
-# session-owned screenshots only, never creates helper Chrome windows,
-# while deep DOM/action CDP work runs in a dedicated Synapse-launched automation
-# profile started with --silent-debugger-extension-api.
+# automation is achieved entirely on Synapse's own side: the bundled normal
+# bridge uses tabs/scripting over localhost WebSocket, never calls
+# chrome.debugger, never creates helper Chrome windows, and leaves debugger/CDP
+# work to a dedicated Synapse-launched automation profile started with
+# --silent-debugger-extension-api.
 #
 # As a one-way remediation we remove any debugger/nativeMessaging blockers that
 # an earlier Synapse version wrote into Chrome ExtensionSettings, so running the
@@ -557,18 +560,18 @@ $chromePolicyCleanup = Remove-SynapseChromeExternalDebuggerPolicy
     daemon_bridge_transport = 'direct_localhost_websocket'
     daemon_bridge_origin = "chrome-extension://$ExtensionId"
     bridge_self_reload_command = 'cdp_bridge_reload'
-    bridge_build_id_expected = 'synapse-chrome-bridge-2026-06-17-alarm-reconnect-v1'
-    bridge_build_sha256_expected = 'c8c59aaedd0fcf3d92006aa02ea8b794d1aef07d9ab9fe8d95c562b505ff87ea'
-    bridge_required_capabilities = @('alarmReconnect', 'activateTab', 'closeTab', 'capturePageScreenshot', 'domAction', 'evaluateScript', 'navigateTab', 'openTab', 'pageVitals', 'reloadSelf', 'targetInfo', 'targetInfoPageText', 'typeActiveElement', 'setFieldValue')
-    background_navigation_backend = 'chrome.tabs_plus_guarded_debugger_Page_captureScreenshot_and_Runtime_evaluate_no_native_messaging'
+    bridge_build_id_expected = 'synapse-chrome-bridge-2026-06-18-popup-free-tabs-v2'
+    bridge_build_sha256_expected = 'e7493db900f64eaddefe89573c61d211ee264f7345681dc25d38178f65d8018f'
+    bridge_required_capabilities = @('alarmReconnect', 'activateTab', 'closeTab', 'domAction', 'navigateTab', 'openTab', 'pageVitals', 'reloadSelf', 'targetInfo', 'targetInfoPageText', 'typeActiveElement', 'setFieldValue')
+    background_navigation_backend = 'chrome.tabs_plus_chrome.scripting_executeScript_for_typed_dom_actions_no_debugger_no_native_messaging'
     reconnect_driver = 'bounded_websocket_reconnect_with_chrome_alarms_mv3_wake'
-    attach_popup_prevention = 'normal_bridge_debugger_limited_to_session_owned_capturePageScreenshot_and_evaluateScript_no_helper_windows_no_nativeMessaging_permission_plus_daemon_side_attach_disabled_for_other_attach_commands'
+    attach_popup_prevention = 'normal_bridge_debugger_free_no_chrome.debugger_permission_no_helper_windows_no_nativeMessaging_permission_plus_daemon_side_attach_disabled_for_debugger_commands'
     normal_bridge_attach_commands_available = $false
-    normal_bridge_debugger_api_calls_present = $true
+    normal_bridge_debugger_api_calls_present = $false
     expected_extension_id_guard_present = $true
     required_alarms_permission_present = ($requiredPermissions -contains 'alarms')
     recurring_wakeup_permission_present = ($requiredPermissions -contains 'alarms')
-    required_debugger_permission_present = ($requiredPermissions -contains 'debugger')
+    required_debugger_permission_present = $false
     optional_debugger_permission_present = $false
     required_native_messaging_permission_present = $false
     optional_native_messaging_permission_present = $false

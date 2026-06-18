@@ -38,16 +38,14 @@ const NATIVE_HOST_NAME: &str = "com.synapse.chrome_debugger";
 const EXTENSION_ORIGIN: &str = "chrome-extension://leoocgnkjnplbfdbklajepahofecgfbk";
 const BRIDGE_TOKEN_HEADER: &str = "x-synapse-bridge-token";
 const BRIDGE_PROTOCOL_VERSION: u32 = 1;
-const EXPECTED_EXTENSION_BUILD_ID: &str = "synapse-chrome-bridge-2026-06-17-alarm-reconnect-v1";
+const EXPECTED_EXTENSION_BUILD_ID: &str = "synapse-chrome-bridge-2026-06-18-popup-free-tabs-v2";
 const EXPECTED_EXTENSION_BUILD_SHA256: &str =
-    "c8c59aaedd0fcf3d92006aa02ea8b794d1aef07d9ab9fe8d95c562b505ff87ea";
+    "e7493db900f64eaddefe89573c61d211ee264f7345681dc25d38178f65d8018f";
 const REQUIRED_DIRECT_HTTP_CAPABILITIES: &[&str] = &[
     "alarmReconnect",
     "activateTab",
     "closeTab",
-    "capturePageScreenshot",
     "domAction",
-    "evaluateScript",
     "navigateTab",
     "openTab",
     "pageVitals",
@@ -69,7 +67,7 @@ const NATIVE_DAEMON_RECONNECT_DELAY: Duration = Duration::from_secs(1);
 const MAX_NATIVE_MESSAGE_FROM_CHROME: usize = 64 * 1024 * 1024;
 const MAX_NATIVE_MESSAGE_TO_CHROME: usize = 1024 * 1024;
 const UNKNOWN_NATIVE_HOST_ID_FRAGMENT: &str = "unknown chrome debugger native host_id";
-const INSTALL_GUIDANCE: &str = "install the bundled Synapse Chrome extension from extensions\\synapse-chrome-debugger with scripts\\install-synapse-chrome-debugger.ps1; the normal end-user bridge uses chrome.tabs over direct localhost WebSocket plus chrome.alarms MV3 reconnect wake without nativeMessaging, never creates helper Chrome windows, and chrome.debugger is limited to session-owned capturePageScreenshot and evaluateScript Runtime.evaluate; other attach-capable debugger commands are disabled in the normal bridge; expected extension_id=leoocgnkjnplbfdbklajepahofecgfbk";
+const INSTALL_GUIDANCE: &str = "install the bundled Synapse Chrome extension from extensions\\synapse-chrome-debugger with scripts\\install-synapse-chrome-debugger.ps1; the normal end-user bridge is debugger-free and uses chrome.tabs/chrome.scripting over direct localhost WebSocket plus chrome.alarms MV3 reconnect wake without nativeMessaging, never creates helper Chrome windows, and refuses attach-capable debugger commands and arbitrary page eval before queueing any Chrome command; expected extension_id=leoocgnkjnplbfdbklajepahofecgfbk";
 const NO_ACTIVE_HOST_REPAIR_GUIDANCE: &str = "no_active_host_repair=use the already-open authenticated Chrome profile only; do not launch a second Chrome process/profile; wait for the installed bridge worker alarmReconnect registration and re-read health; if an active stale host appears call cdp_bridge_reload; if no host registers, run scripts\\install-synapse-chrome-debugger.ps1 and reload the bundled extension in the existing Chrome profile";
 const TOKEN_ENV: &str = "SYNAPSE_BEARER_TOKEN";
 const APPDATA_ENV: &str = "APPDATA";
@@ -230,7 +228,7 @@ impl ChromeDebuggerBridgeError {
         Self {
             code: error_codes::A11Y_CDP_DEBUGGER_WARNING_UNSUPPRESSED,
             detail: format!(
-                "normal Synapse Chrome Bridge refused attach-capable command {command_kind:?} before queueing any Chrome command; hwnd={hwnd} reason=the normal end-user bridge exposes chrome.debugger only for guarded session-owned capturePageScreenshot and evaluateScript Runtime.evaluate and contains no daemon-side DOM/action attach transport{external_surface_hint} remediation=use raw CDP from a dedicated Synapse-launched automation profile started with --silent-debugger-extension-api for DOM/action CDP; Synapse never modifies Chrome policy or disables the user's extensions, so the user's normal Chrome profile is left untouched"
+                "normal Synapse Chrome Bridge refused attach-capable command {command_kind:?} before queueing any Chrome command; hwnd={hwnd} reason=the normal end-user bridge is debugger-free and cannot call chrome.debugger, because Chrome's debugger infobar changes browser layout and breaks coordinate truth{external_surface_hint} remediation=use raw CDP from a dedicated Synapse-launched automation profile started with --silent-debugger-extension-api for DOM/action CDP or screenshots; Synapse never modifies Chrome policy or disables the user's extensions, so the user's normal Chrome profile is left untouched"
             ),
         }
     }
@@ -2392,25 +2390,13 @@ pub(crate) async fn target_info(
 
 pub(crate) async fn capture_visible_tab(
     hwnd: i64,
-    target_id: &str,
-    expected_chrome_window_id: Option<i64>,
+    _target_id: &str,
+    _expected_chrome_window_id: Option<i64>,
 ) -> Result<ChromeDebuggerCaptureVisibleTabResult, ChromeDebuggerBridgeError> {
-    ensure_normal_bridge_popup_safe(hwnd, "capturePageScreenshot")?;
-    let result = bridge()
-        .send_command(
-            "capturePageScreenshot",
-            json!({
-                "hwnd": hwnd,
-                "targetIdHint": target_id,
-                "expectedChromeWindowId": expected_chrome_window_id,
-            }),
-        )
-        .await?;
-    serde_json::from_value::<ChromeDebuggerCaptureVisibleTabResult>(result).map_err(|error| {
-        ChromeDebuggerBridgeError::protocol(format!(
-            "decode Chrome debugger capturePageScreenshot response: {error}"
-        ))
-    })
+    Err(ChromeDebuggerBridgeError::normal_bridge_attach_disabled(
+        hwnd,
+        "capturePageScreenshot",
+    ))
 }
 
 pub(crate) async fn type_active_element(
@@ -2530,31 +2516,16 @@ pub(crate) async fn activate_tab(
 
 pub(crate) async fn evaluate_script(
     hwnd: i64,
-    target_id: &str,
-    expression: &str,
-    args: &[Value],
-    await_promise: bool,
-    return_by_value: bool,
+    _target_id: &str,
+    _expression: &str,
+    _args: &[Value],
+    _await_promise: bool,
+    _return_by_value: bool,
 ) -> Result<ChromeDebuggerEvaluateScriptResult, ChromeDebuggerBridgeError> {
-    ensure_normal_bridge_popup_safe(hwnd, "evaluateScript")?;
-    let result = bridge()
-        .send_command(
-            "evaluateScript",
-            json!({
-                "hwnd": hwnd,
-                "targetIdHint": target_id,
-                "expression": expression,
-                "args": args,
-                "awaitPromise": await_promise,
-                "returnByValue": return_by_value,
-            }),
-        )
-        .await?;
-    serde_json::from_value::<ChromeDebuggerEvaluateScriptResult>(result).map_err(|error| {
-        ChromeDebuggerBridgeError::protocol(format!(
-            "decode Chrome debugger evaluateScript response: {error}"
-        ))
-    })
+    Err(ChromeDebuggerBridgeError::normal_bridge_attach_disabled(
+        hwnd,
+        "evaluateScript",
+    ))
 }
 
 pub(crate) struct ChromeDebuggerDomActionRequest<'a> {
@@ -3781,8 +3752,9 @@ mod tests {
         assert!(
             error
                 .detail()
-                .contains("guarded session-owned capturePageScreenshot")
+                .contains("normal end-user bridge is debugger-free")
         );
+        assert!(error.detail().contains("coordinate truth"));
         assert!(error.detail().contains("raw CDP"));
         assert!(error.detail().contains("--silent-debugger-extension-api"));
         assert!(!error.detail().contains("blocked_permissions"));

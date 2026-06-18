@@ -174,14 +174,16 @@ Chrome session, the supported attach path is:
    `scripts\install-synapse-chrome-debugger.ps1` and reload the bundled
    extension in that existing profile. Never launch a second Chrome profile as
    the repair path.
-9. The normal end-user extension is structurally tabs-only: it does not request
+9. The normal end-user extension is structurally tabs/scripting-only: it does not request
    `debugger`, does not call `chrome.debugger`, and rejects attach-capable
    commands before any browser debugger startup. The daemon also refuses those
    commands before queueing anything to Chrome. Chrome intentionally shows a
    "`started debugging this browser`" warning UI when an extension calls
    `chrome.debugger.attach` without `--silent-debugger-extension-api`; Synapse's
-   normal bridge therefore cannot use that API. DOM attach for a normal Chrome
-   profile requires raw CDP on a dedicated Synapse-launched automation profile.
+   normal bridge therefore cannot use that API. DOM attach, debugger-backed
+   screenshots, and arbitrary JavaScript evaluation for a normal Chrome profile
+   require raw CDP on a dedicated Synapse-launched automation profile. The
+   popup-free normal bridge keeps typed DOM/readback helpers only.
 10. The verifier observes (for diagnostics only) whether the live Chrome profile
    has another active extension with the `debugger` permission, or whether Chrome
    is running an external native-messaging wrapper process. Those surfaces can
@@ -190,7 +192,7 @@ Chrome session, the supported attach path is:
    Chrome `ExtensionSettings` policy: that policy governs the user's own
    extensions, and blocking an installed extension's permissions disables it,
    which is unacceptable end-user behavior. Popup-free background automation is
-   achieved entirely on Synapse's own side — the bundled bridge is tabs-only, and
+   achieved entirely on Synapse's own side — the bundled bridge is tabs/scripting-only, and
    deep CDP runs in a dedicated Synapse-launched automation profile started with
    `--silent-debugger-extension-api`.
    Windows setup (`scripts\synapse-setup.ps1`) and the standalone verifier
