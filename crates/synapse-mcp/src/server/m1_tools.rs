@@ -2390,6 +2390,13 @@ impl SynapseService {
                 ),
             ));
         }
+        if self.dead_spawned_child_owner_close_allowed(
+            &requester,
+            persisted_owner_registry_read.as_ref(),
+            persisted,
+        )? {
+            return Ok(());
+        }
         if requester.agent_kind == "unknown"
             || persisted.owner_agent_kind == "unknown"
             || requester.agent_kind != persisted.owner_agent_kind
@@ -2423,6 +2430,98 @@ impl SynapseService {
             ));
         }
         Ok(())
+    }
+
+    fn dead_spawned_child_owner_close_allowed(
+        &self,
+        requester: &super::session_registry::SessionRegistryRead,
+        owner_read: Option<&super::session_registry::SessionRegistryRead>,
+        persisted: &PersistedCdpTargetOwner,
+    ) -> Result<bool, ErrorData> {
+        let Some(owner_read) = owner_read else {
+            return Ok(false);
+        };
+        let Some(spawned) = owner_read.spawned_agent.as_ref() else {
+            return Ok(false);
+        };
+        if spawned.started_by_session_id.as_deref() != Some(requester.session_id.as_str()) {
+            return Ok(false);
+        }
+
+        let mut probe_pids = Vec::new();
+        if let Some(agent_pid) = spawned.agent_process_id
+            && agent_pid != 0
+        {
+            probe_pids.push(agent_pid);
+        }
+        if spawned.launcher_process_id != 0 && !probe_pids.contains(&spawned.launcher_process_id) {
+            probe_pids.push(spawned.launcher_process_id);
+        }
+        if probe_pids.is_empty() {
+            return Err(mcp_error(
+                error_codes::ACTION_TARGET_INVALID,
+                format!(
+                    "cdp_close_tab refused recovered target {:?}: spawned child owner has no recorded process ids for lineage cleanup",
+                    persisted.owner.cdp_target_id
+                ),
+            ));
+        }
+        let live_pids = probe_pids
+            .iter()
+            .copied()
+            .filter(|pid| crate::m4::process_exists(*pid))
+            .collect::<Vec<_>>();
+        if !live_pids.is_empty() {
+            return Err(mcp_error(
+                error_codes::ACTION_TARGET_INVALID,
+                format!(
+                    "cdp_close_tab refused recovered target {:?}: spawned child owner is still live; live_process_ids={live_pids:?}",
+                    persisted.owner.cdp_target_id
+                ),
+            ));
+        }
+        let owner_in_flight = match crate::daemon_lifecycle::in_flight_tool_calls_for_session(
+            &persisted.owner_session_id,
+        ) {
+            Ok(calls) => calls,
+            #[cfg(test)]
+            Err(error) if error.to_string().contains("ledger is not configured") => Vec::new(),
+            Err(error) => {
+                return Err(mcp_error(
+                    error_codes::TOOL_INTERNAL_ERROR,
+                    format!("read daemon lifecycle in-flight tool calls: {error:#}"),
+                ));
+            }
+        };
+        if !owner_in_flight.is_empty() {
+            return Err(mcp_error(
+                error_codes::ACTION_TARGET_INVALID,
+                format!(
+                    "cdp_close_tab refused recovered target {:?}: spawned child owner has in-flight tool calls",
+                    persisted.owner.cdp_target_id
+                ),
+            ));
+        }
+        let lease_status = synapse_action::lease::status();
+        if lease_status.owner_session_id.as_deref() == Some(persisted.owner_session_id.as_str()) {
+            return Err(mcp_error(
+                error_codes::ACTION_TARGET_INVALID,
+                format!(
+                    "cdp_close_tab refused recovered target {:?}: spawned child owner holds the foreground input lease",
+                    persisted.owner.cdp_target_id
+                ),
+            ));
+        }
+        tracing::info!(
+            code = "CDP_TARGET_OWNER_DEAD_SPAWNED_CHILD_RECOVERY_ALLOWED",
+            session_id = %requester.session_id,
+            owner_session_id = %persisted.owner_session_id,
+            spawn_id = %spawned.spawn_id,
+            owner_lifecycle = %owner_read.lifecycle,
+            probe_pids = ?probe_pids,
+            "readback=session_registry+process_table edge=dead_spawned_child_lineage"
+        );
+        Ok(true)
     }
 
     fn current_session_registry_read(
@@ -7995,6 +8094,109 @@ mod tests {
     }
 
     #[test]
+    fn cdp_close_recovery_allows_parent_cleanup_of_dead_spawned_child() -> anyhow::Result<()> {
+        let dir = TempDir::new()?;
+        let service = service_with_temp_db(dir.path())?;
+        let parent_session = "issue1247-parent-codex-session";
+        let child_session = "issue1247-child-codex-session";
+        let target_id = "chrome-tab:issue1247-dead-child";
+        let now = crate::server::session_registry::unix_time_ms_now();
+        seed_session_client(&service, parent_session, "codex-mcp-client", now)?;
+        seed_session_client(
+            &service,
+            child_session,
+            "codex-mcp-client",
+            now.saturating_add(1_000),
+        )?;
+        seed_spawned_child(
+            &service,
+            child_session,
+            parent_session,
+            "agent-spawn-issue1247-dead",
+            u32::MAX,
+            Some(u32::MAX - 1),
+            dir.path(),
+            now.saturating_add(1_000),
+        )?;
+        close_session_registry_row(&service, child_session, now.saturating_add(2_000))?;
+        let owner_key = service.register_cdp_target_owner(CdpTargetOwner {
+            session_id: child_session.to_owned(),
+            window_hwnd: 0x1247,
+            endpoint: "chrome-extension://test/chrome.tabs".to_owned(),
+            chrome_window_id: None,
+            capture_window_hwnd: None,
+            cdp_target_id: target_id.to_owned(),
+            requested_url: "about:blank#dead-child".to_owned(),
+            target_url: "about:blank#dead-child".to_owned(),
+            created_at_unix_ms: now.saturating_add(1_500),
+        })?;
+        service.cdp_target_owners_ref().lock().unwrap().clear();
+        insert_test_target_claim(&service, parent_session, 0x1247, target_id)?;
+
+        let (recovered_key, recovered_owner) =
+            service.cdp_target_owner_for_close(parent_session, target_id)?;
+        assert_eq!(recovered_key, owner_key);
+        assert_eq!(recovered_owner.session_id, parent_session);
+        assert_eq!(recovered_owner.window_hwnd, 0x1247);
+
+        let rows = service.read_persisted_cdp_target_owners_for_target_id(target_id)?;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].1.owner_session_id, parent_session);
+        Ok(())
+    }
+
+    #[test]
+    fn cdp_close_recovery_refuses_parent_cleanup_of_live_spawned_child() -> anyhow::Result<()> {
+        let dir = TempDir::new()?;
+        let service = service_with_temp_db(dir.path())?;
+        let parent_session = "issue1247-parent-live-child-session";
+        let child_session = "issue1247-live-child-session";
+        let target_id = "chrome-tab:issue1247-live-child";
+        let now = crate::server::session_registry::unix_time_ms_now();
+        seed_session_client(&service, parent_session, "codex-mcp-client", now)?;
+        seed_session_client(
+            &service,
+            child_session,
+            "codex-mcp-client",
+            now.saturating_add(1_000),
+        )?;
+        seed_spawned_child(
+            &service,
+            child_session,
+            parent_session,
+            "agent-spawn-issue1247-live",
+            std::process::id(),
+            None,
+            dir.path(),
+            now.saturating_add(1_000),
+        )?;
+        close_session_registry_row(&service, child_session, now.saturating_add(2_000))?;
+        service.register_cdp_target_owner(CdpTargetOwner {
+            session_id: child_session.to_owned(),
+            window_hwnd: 0x1248,
+            endpoint: "chrome-extension://test/chrome.tabs".to_owned(),
+            chrome_window_id: None,
+            capture_window_hwnd: None,
+            cdp_target_id: target_id.to_owned(),
+            requested_url: "about:blank#live-child".to_owned(),
+            target_url: "about:blank#live-child".to_owned(),
+            created_at_unix_ms: now.saturating_add(1_500),
+        })?;
+        service.cdp_target_owners_ref().lock().unwrap().clear();
+        insert_test_target_claim(&service, parent_session, 0x1248, target_id)?;
+
+        let error = service
+            .cdp_target_owner_for_close(parent_session, target_id)
+            .expect_err("parent cleanup must not steal a still-live spawned child's tab");
+        assert_eq!(
+            error.data.as_ref().and_then(|data| data.get("code")),
+            Some(&serde_json::json!(error_codes::ACTION_TARGET_INVALID))
+        );
+        assert!(error.message.contains("still live"));
+        Ok(())
+    }
+
+    #[test]
     fn cdp_close_claim_cleanup_releases_current_session_claim() -> anyhow::Result<()> {
         let dir = TempDir::new()?;
         let service = service_with_temp_db(dir.path())?;
@@ -8039,6 +8241,40 @@ mod tests {
             ),
             M4ServiceConfig::default(),
         )
+    }
+
+    fn seed_spawned_child(
+        service: &SynapseService,
+        child_session_id: &str,
+        parent_session_id: &str,
+        spawn_id: &str,
+        launcher_process_id: u32,
+        agent_process_id: Option<u32>,
+        log_root: &Path,
+        now_unix_ms: u64,
+    ) -> anyhow::Result<()> {
+        service
+            .session_registry_ref()
+            .lock()
+            .unwrap()
+            .record_spawned_agent(
+                child_session_id,
+                crate::server::session_registry::SpawnedAgentRead {
+                    spawn_id: spawn_id.to_owned(),
+                    cli: "codex".to_owned(),
+                    launcher_process_id,
+                    agent_process_id,
+                    started_by_session_id: Some(parent_session_id.to_owned()),
+                    launched_at_unix_ms: now_unix_ms,
+                    launch_target: "test".to_owned(),
+                    log_dir: log_root.join(spawn_id).display().to_string(),
+                    template_id: None,
+                    template_version: None,
+                    control: None,
+                },
+                now_unix_ms,
+            );
+        Ok(())
     }
 
     fn seed_session_client(
