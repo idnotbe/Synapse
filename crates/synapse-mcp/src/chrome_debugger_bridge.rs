@@ -70,6 +70,7 @@ const MAX_NATIVE_MESSAGE_FROM_CHROME: usize = 64 * 1024 * 1024;
 const MAX_NATIVE_MESSAGE_TO_CHROME: usize = 1024 * 1024;
 const UNKNOWN_NATIVE_HOST_ID_FRAGMENT: &str = "unknown chrome debugger native host_id";
 const INSTALL_GUIDANCE: &str = "install the bundled Synapse Chrome extension from extensions\\synapse-chrome-debugger with scripts\\install-synapse-chrome-debugger.ps1; the normal end-user bridge uses chrome.tabs over direct localhost WebSocket plus chrome.alarms MV3 reconnect wake without nativeMessaging, never creates helper Chrome windows, and chrome.debugger is limited to session-owned capturePageScreenshot and evaluateScript Runtime.evaluate; other attach-capable debugger commands are disabled in the normal bridge; expected extension_id=leoocgnkjnplbfdbklajepahofecgfbk";
+const NO_ACTIVE_HOST_REPAIR_GUIDANCE: &str = "no_active_host_repair=use the already-open authenticated Chrome profile only; do not launch a second Chrome process/profile; wait for the installed bridge worker alarmReconnect registration and re-read health; if an active stale host appears call cdp_bridge_reload; if no host registers, run scripts\\install-synapse-chrome-debugger.ps1 and reload the bundled extension in the existing Chrome profile";
 const TOKEN_ENV: &str = "SYNAPSE_BEARER_TOKEN";
 const APPDATA_ENV: &str = "APPDATA";
 
@@ -132,7 +133,7 @@ impl ChromeDebuggerBridgeError {
         Self {
             code: error_codes::A11Y_CDP_EXTENSION_UNAVAILABLE,
             detail: format!(
-                "Chrome debugger extension bridge is not connected; {INSTALL_GUIDANCE}"
+                "Chrome debugger extension bridge is not connected; reason=no_active_chrome_bridge_host; repair_guidance={NO_ACTIVE_HOST_REPAIR_GUIDANCE}; {INSTALL_GUIDANCE}"
             ),
         }
     }
@@ -2073,12 +2074,13 @@ fn chrome_bridge_health_from_snapshot(
         return SubsystemHealth {
             status: "unavailable".to_owned(),
             detail: Some(format!(
-                "tab_control_available=false reason=no_active_chrome_bridge_host host_count={} queued_count={} pending_count={} expected_extension_id={} endpoint={} install_guidance={}",
+                "tab_control_available=false reason=no_active_chrome_bridge_host host_count={} queued_count={} pending_count={} expected_extension_id={} endpoint={} repair_guidance={} install_guidance={}",
                 host_count,
                 queued_count,
                 pending_count,
                 EXTENSION_ID,
                 chrome_debugger_health_endpoint(EXTENSION_ID),
+                NO_ACTIVE_HOST_REPAIR_GUIDANCE,
                 INSTALL_GUIDANCE
             )),
             ..SubsystemHealth::default()
@@ -3567,6 +3569,12 @@ mod tests {
                 .detail()
                 .contains("install the bundled Synapse Chrome extension")
         );
+        assert!(error.detail().contains("no_active_host_repair="));
+        assert!(
+            error
+                .detail()
+                .contains("do not launch a second Chrome process/profile")
+        );
     }
 
     #[test]
@@ -3578,6 +3586,10 @@ mod tests {
         assert!(detail.contains("tab_control_available=false"));
         assert!(detail.contains("reason=no_active_chrome_bridge_host"));
         assert!(detail.contains("expected_extension_id=leoocgnkjnplbfdbklajepahofecgfbk"));
+        assert!(detail.contains("repair_guidance=no_active_host_repair="));
+        assert!(detail.contains("already-open authenticated Chrome profile"));
+        assert!(detail.contains("do not launch a second Chrome process/profile"));
+        assert!(detail.contains("cdp_bridge_reload"));
         assert!(detail.contains("scripts\\install-synapse-chrome-debugger.ps1"));
     }
 

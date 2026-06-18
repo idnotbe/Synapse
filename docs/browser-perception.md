@@ -167,6 +167,13 @@ Chrome session, the supported attach path is:
    not open `chrome://extensions` or activate Chrome. A worker that predates
    `reloadSelf` is a fail-closed stale-worker condition, not permission to click
    the foreground extension UI.
+   If health reports `reason=no_active_chrome_bridge_host`, repair stays in the
+   already-open authenticated Chrome profile: wait for the bridge worker's
+   `alarmReconnect` registration and re-read health; if a stale active host is
+   present use `cdp_bridge_reload`; if no host registers, run
+   `scripts\install-synapse-chrome-debugger.ps1` and reload the bundled
+   extension in that existing profile. Never launch a second Chrome profile as
+   the repair path.
 9. The normal end-user extension is structurally tabs-only: it does not request
    `debugger`, does not call `chrome.debugger`, and rejects attach-capable
    commands before any browser debugger startup. The daemon also refuses those
