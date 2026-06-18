@@ -60,6 +60,7 @@ tracing-*.log
 
 # Scratch / investigation working state — never part of the repo.
 /tmp/
+/manual-fsv-tmp/
 
 # synapse-update.ps1 keep-current workflow: run it daily (pull -> rebuild ->
 # reconnect). The script writes its build/run logs off-tree

@@ -2,10 +2,13 @@ param(
     [string]$SynapseNativeHostExe = "$env:USERPROFILE\.cargo\bin\synapse-chrome-native-host.exe",
     [string]$ExtensionId = "leoocgnkjnplbfdbklajepahofecgfbk",
     # Maintenance/self-heal entry point: run ONLY the one-way removal of any
-    # debugger/nativeMessaging blockers a previous Synapse version wrote into the
-    # Chrome ExtensionSettings policy, print the result, and exit. Synapse never
-    # writes such blockers anymore; it must never disable a user's extensions.
-    [switch]$RemoveExternalDebuggerPolicyOnly
+    # debugger/nativeMessaging blockers Synapse wrote into the Chrome
+    # ExtensionSettings policy, print the result, and exit.
+    [switch]$RemoveExternalDebuggerPolicyOnly,
+    # Emergency/operator opt-out. Default behavior shields the normal Chrome
+    # profile from layout-shifting debugger/native-host popups by adding
+    # Synapse-authored blocked_permissions entries for detected hazards.
+    [switch]$PreserveExternalDebuggerExtensions
 )
 
 $ErrorActionPreference = 'Stop'
@@ -121,12 +124,19 @@ function Read-ChromeExtensionSettingsPolicy {
 $script:SynapseChromeBlockedInstallMessage = 'Synapse blocked this extension on this host because debugger/nativeMessaging permissions can surface Chrome debugger or native-host popups during background automation.'
 
 function Remove-SynapseChromeExternalDebuggerPolicy {
-    # One-way self-heal. Synapse NEVER disables a user's Chrome extensions. This
-    # only undoes the debugger/nativeMessaging blockers that earlier Synapse
-    # versions wrote into Chrome ExtensionSettings, identified strictly by the
-    # Synapse blocked_install_message marker. Entries Synapse did not author are
-    # left byte-for-byte untouched. Best-effort per hive: a hive we cannot write
-    # is reported with ACL evidence, never silently swallowed, and never fatal.
+    param(
+        [string[]]$PreserveExtensionIds = @()
+    )
+
+    # Reversible self-heal. This only undoes debugger/nativeMessaging blockers
+    # that Synapse wrote into Chrome ExtensionSettings, identified strictly by
+    # the Synapse blocked_install_message marker. Entries Synapse did not author
+    # are left byte-for-byte untouched. Best-effort per hive: a hive we cannot
+    # write is reported with ACL evidence, never silently swallowed, and never
+    # fatal.
+    $preserveIds = @($PreserveExtensionIds | Where-Object {
+        $_ -match '^[a-p]{32}$'
+    } | Sort-Object -Unique)
     $results = @()
     foreach ($hive in (Get-ChromePolicyHiveCandidates -Hive 'Auto')) {
         $policyRoot = Get-ChromePolicyRoot -Hive $hive
@@ -151,6 +161,7 @@ function Remove-SynapseChromeExternalDebuggerPolicy {
         $cleaned = [ordered]@{}
         $removedEntries = @()
         $strippedEntries = @()
+        $preservedEntries = @()
         foreach ($name in @($settings.Keys)) {
             $entry = $settings[$name]
             $isSynapseAuthored = ($entry -is [System.Collections.Specialized.OrderedDictionary]) -and
@@ -158,6 +169,11 @@ function Remove-SynapseChromeExternalDebuggerPolicy {
                 ([string]$entry['blocked_install_message'] -eq $script:SynapseChromeBlockedInstallMessage)
             if (-not $isSynapseAuthored) {
                 $cleaned[$name] = $entry
+                continue
+            }
+            if ($preserveIds -contains $name) {
+                $cleaned[$name] = $entry
+                $preservedEntries += $name
                 continue
             }
             $changed = $true
@@ -181,7 +197,18 @@ function Remove-SynapseChromeExternalDebuggerPolicy {
             }
         }
         if (-not $changed) {
-            $results += [pscustomobject]@{ hive = $hive; path = $policyRoot; changed = $false; reason = 'no_synapse_authored_blocks' }
+            $reason = if ($preservedEntries.Count -gt 0) {
+                'only_current_synapse_popup_shields_present'
+            } else {
+                'no_synapse_authored_blocks'
+            }
+            $results += [pscustomobject]@{
+                hive = $hive
+                path = $policyRoot
+                changed = $false
+                reason = $reason
+                preserved_entries = @($preservedEntries)
+            }
             continue
         }
         try {
@@ -198,6 +225,7 @@ function Remove-SynapseChromeExternalDebuggerPolicy {
                 reason = 'removed_synapse_authored_blocks'
                 removed_entries = @($removedEntries)
                 stripped_entries = @($strippedEntries)
+                preserved_entries = @($preservedEntries)
                 extension_settings_remaining = ($cleaned.Keys.Count -gt 0)
             }
         } catch {
@@ -211,6 +239,107 @@ function Remove-SynapseChromeExternalDebuggerPolicy {
         }
     }
     return @($results)
+}
+
+function Set-SynapseChromeExternalDebuggerPolicy {
+    param(
+        [object[]]$Extensions
+    )
+
+    $hazards = @($Extensions | Where-Object {
+        $id = [string]$_.extension_id
+        $id -match '^[a-p]{32}$' -and $id -ne $ExtensionId
+    } | Sort-Object extension_id -Unique)
+
+    $policyRoot = Get-ChromePolicyRoot -Hive 'HKCU'
+    if ($hazards.Count -eq 0) {
+        return [pscustomobject]@{
+            hive = 'HKCU'
+            path = $policyRoot
+            changed = $false
+            reason = 'no_external_debugger_or_native_hazards'
+            shielded_entries = @()
+            unchanged_entries = @()
+        }
+    }
+
+    try {
+        if (-not (Test-Path -LiteralPath $policyRoot)) {
+            New-Item -Path $policyRoot -Force | Out-Null
+        }
+        $settings = Read-ChromeExtensionSettingsPolicy -Hive 'HKCU'
+    } catch {
+        $acl = Get-RegistryAclDiagnostic -Path $policyRoot
+        throw "SYNAPSE_CHROME_POLICY_POPUP_SHIELD_WRITE_DENIED hive=HKCU path=$policyRoot phase=read_or_create error=$($_.Exception.Message) acl=$acl remediation=run scripts\install-synapse-chrome-debugger.ps1 from an elevated PowerShell, or repair HKCU\Software\Policies\Google\Chrome ACL so the current user can write ExtensionSettings; until this succeeds Synapse must treat this normal Chrome profile as not popup-free"
+    }
+    $changed = $false
+    $shieldedEntries = @()
+    $unchangedEntries = @()
+
+    foreach ($hazard in $hazards) {
+        $id = [string]$hazard.extension_id
+        $existing = $null
+        if ($settings.Contains($id)) {
+            $existing = $settings[$id]
+        }
+        if (-not ($existing -is [System.Collections.Specialized.OrderedDictionary])) {
+            $existing = [ordered]@{}
+        }
+
+        $blocked = @()
+        if ($existing.Contains('blocked_permissions')) {
+            $blocked = @($existing['blocked_permissions'])
+        }
+        $nextBlocked = @($blocked + @('debugger', 'nativeMessaging') | Where-Object {
+            -not [string]::IsNullOrWhiteSpace([string]$_)
+        } | Sort-Object -Unique)
+
+        $beforeBlocked = @($blocked | Sort-Object -Unique)
+        $beforeMessage = $null
+        if ($existing.Contains('blocked_install_message')) {
+            $beforeMessage = [string]$existing['blocked_install_message']
+        }
+
+        $existing['blocked_permissions'] = $nextBlocked
+        $existing['blocked_install_message'] = $script:SynapseChromeBlockedInstallMessage
+        $settings[$id] = $existing
+
+        if ((($beforeBlocked -join ',') -ne ($nextBlocked -join ',')) -or
+            ($beforeMessage -ne $script:SynapseChromeBlockedInstallMessage)) {
+            $changed = $true
+            $shieldedEntries += [pscustomobject]@{
+                extension_id = $id
+                name = [string]$hazard.name
+                active_api = @($hazard.active_api)
+                granted_api = @($hazard.granted_api)
+                manifest_api = @($hazard.manifest_api)
+                hazard_api = @($hazard.hazard_api)
+                runtime_enabled = [bool]$hazard.runtime_enabled
+                source = [string]$hazard.source
+            }
+        } else {
+            $unchangedEntries += $id
+        }
+    }
+
+    if ($changed) {
+        $json = ConvertTo-CompressedJson -Value $settings
+        try {
+            New-ItemProperty -LiteralPath $policyRoot -Name ExtensionSettings -PropertyType String -Value $json -Force | Out-Null
+        } catch {
+            $acl = Get-RegistryAclDiagnostic -Path $policyRoot
+            throw "SYNAPSE_CHROME_POLICY_POPUP_SHIELD_WRITE_DENIED hive=HKCU path=$policyRoot phase=write_extension_settings error=$($_.Exception.Message) acl=$acl remediation=run scripts\install-synapse-chrome-debugger.ps1 from an elevated PowerShell, or repair HKCU\Software\Policies\Google\Chrome ACL so the current user can write ExtensionSettings; until this succeeds Synapse must treat this normal Chrome profile as not popup-free"
+        }
+    }
+
+    [pscustomobject]@{
+        hive = 'HKCU'
+        path = $policyRoot
+        changed = $changed
+        reason = if ($changed) { 'synapse_authored_popup_shield_applied' } else { 'synapse_authored_popup_shield_already_present' }
+        shielded_entries = @($shieldedEntries)
+        unchanged_entries = @($unchangedEntries)
+    }
 }
 
 if ($RemoveExternalDebuggerPolicyOnly) {
@@ -470,6 +599,12 @@ if (Test-Path -LiteralPath $chromeUserDataRoot -PathType Container) {
                 if ($setting.granted_permissions -and $setting.granted_permissions.api) {
                     $grantedApi = @($setting.granted_permissions.api)
                 }
+                $manifestApi = @()
+                if ($setting.manifest -and $setting.manifest.permissions) {
+                    $manifestApi = @($setting.manifest.permissions | Where-Object {
+                        $_ -is [string]
+                    })
+                }
                 if ($extensionProperty.Name -eq $ExtensionId) {
                     $row = [pscustomobject]@{
                         profile = $profileDir.Name
@@ -478,6 +613,7 @@ if (Test-Path -LiteralPath $chromeUserDataRoot -PathType Container) {
                         manifest_path = $setting.path
                         active_api = $activeApi
                         granted_api = $grantedApi
+                        manifest_api = $manifestApi
                         active_bit = $runtimeState.active_bit
                         disable_reasons = $runtimeState.disable_reasons
                         runtime_enabled = $runtimeState.runtime_enabled
@@ -486,7 +622,17 @@ if (Test-Path -LiteralPath $chromeUserDataRoot -PathType Container) {
                     if ($activeApi -contains 'nativeMessaging') {
                         $staleSynapseActivePermissions += $row
                     }
-                } elseif ($activeApi -contains 'debugger' -or $activeApi -contains 'nativeMessaging') {
+                } else {
+                    $hazardApi = @(
+                        @($activeApi)
+                        @($grantedApi)
+                        @($manifestApi)
+                    ) | Where-Object {
+                        $_ -eq 'debugger' -or $_ -eq 'nativeMessaging'
+                    } | Sort-Object -Unique
+                    if ($hazardApi.Count -eq 0) {
+                        continue
+                    }
                     $externalRow = [pscustomobject]@{
                         profile = $profileDir.Name
                         pref_file = $prefFileName
@@ -495,13 +641,16 @@ if (Test-Path -LiteralPath $chromeUserDataRoot -PathType Container) {
                         location = $setting.location
                         manifest_path = $setting.path
                         active_api = $activeApi
+                        granted_api = $grantedApi
+                        manifest_api = $manifestApi
+                        hazard_api = $hazardApi
                         active_bit = $runtimeState.active_bit
                         disable_reasons = $runtimeState.disable_reasons
                         runtime_enabled = $runtimeState.runtime_enabled
                     }
                     if ($runtimeState.runtime_enabled) {
                         $externalDebuggerOrNativeExtensions += $externalRow
-                        if ($activeApi -contains 'debugger') {
+                        if ($hazardApi -contains 'debugger') {
                             $externalDebuggerExtensions += $externalRow
                         }
                     } else {
@@ -530,24 +679,59 @@ $externalNativeMessagingProcesses = @(Get-CimInstance Win32_Process -ErrorAction
             }
         }})
 
+$externalNativeMessagingProcessRows = @($externalNativeMessagingProcesses | ForEach-Object {
+    if ($_.ExtensionId -match '^[a-p]{32}$') {
+        [pscustomobject]@{
+            profile = 'process'
+            pref_file = 'process'
+            extension_id = $_.ExtensionId
+            name = 'external nativeMessaging process'
+            location = $null
+            manifest_path = $null
+            active_api = @('nativeMessaging')
+            active_bit = $null
+            disable_reasons = @()
+            runtime_enabled = $true
+            source = 'native_messaging_process'
+        }
+    }
+})
+$allExternalDebuggerOrNativeExtensions = @(
+    @($externalDebuggerOrNativeExtensions | ForEach-Object {
+        $_ | Add-Member -NotePropertyName source -NotePropertyValue 'chrome_profile_active' -Force -PassThru
+    })
+    @($externalDisabledDebuggerOrNativeExtensions | ForEach-Object {
+        $_ | Add-Member -NotePropertyName source -NotePropertyValue 'chrome_profile_disabled_or_inactive' -Force -PassThru
+    })
+    @($externalNativeMessagingProcessRows)
+)
 $externalHazardExtensionIds = @(
-    @($externalDebuggerOrNativeExtensions | ForEach-Object { $_.extension_id })
+    @($allExternalDebuggerOrNativeExtensions | ForEach-Object { $_.extension_id })
     @($externalNativeMessagingProcesses | ForEach-Object { $_.ExtensionId })
 ) | Where-Object { $_ -match '^[a-p]{32}$' } | Sort-Object -Unique
 
-# Synapse NEVER disables a user's Chrome extensions. External extensions and
-# native-messaging hosts that use debugger/nativeMessaging are observed for
-# diagnostics only (reported below) and are never blocked. Popup-free background
-# automation is achieved entirely on Synapse's own side: the bundled normal
-# bridge uses tabs/scripting over localhost WebSocket, never calls
-# chrome.debugger, never creates helper Chrome windows, and leaves debugger/CDP
-# work to a dedicated Synapse-launched automation profile started with
-# --silent-debugger-extension-api.
+# External extensions and native-messaging hosts that use debugger/nativeMessaging
+# can surface layout-changing Chrome popups independently of Synapse's tabs-only
+# bridge. Setup therefore applies a reversible HKCU ExtensionSettings shield for
+# those permissions by default. The marker is Synapse-authored and can be removed
+# with -RemoveExternalDebuggerPolicyOnly.
 #
 # As a one-way remediation we remove any debugger/nativeMessaging blockers that
 # an earlier Synapse version wrote into Chrome ExtensionSettings, so running the
 # latest build self-heals previously-affected machines.
-$chromePolicyCleanup = Remove-SynapseChromeExternalDebuggerPolicy
+$chromePolicyCleanup = Remove-SynapseChromeExternalDebuggerPolicy -PreserveExtensionIds $externalHazardExtensionIds
+$chromePolicyPopupShield = if ($PreserveExternalDebuggerExtensions) {
+    [pscustomobject]@{
+        hive = 'HKCU'
+        path = (Get-ChromePolicyRoot -Hive 'HKCU')
+        changed = $false
+        reason = 'preserve_external_debugger_extensions_requested'
+        shielded_entries = @()
+        unchanged_entries = @()
+    }
+} else {
+    Set-SynapseChromeExternalDebuggerPolicy -Extensions $allExternalDebuggerOrNativeExtensions
+}
 
 [pscustomobject]@{
     ok = $true
@@ -584,6 +768,7 @@ $chromePolicyCleanup = Remove-SynapseChromeExternalDebuggerPolicy
     silent_debugger_switch = $null
     current_chrome_processes = $chromeProcesses
     chrome_policy_cleanup = $chromePolicyCleanup
+    chrome_policy_popup_shield = $chromePolicyPopupShield
     synapse_chrome_profile_readback = $synapseChromeProfileReadback
     external_hazard_extension_ids = $externalHazardExtensionIds
     external_debugger_or_native_extensions = $externalDebuggerOrNativeExtensions

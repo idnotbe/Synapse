@@ -61,15 +61,14 @@
   does not install or launch native messaging because Chrome may create a
   visible cmd.exe wrapper for native hosts.
 
-  Synapse never modifies the Chrome ExtensionSettings policy and never disables
-  the user's Chrome extensions. Popup-free background automation is achieved
-  entirely on Synapse's own side: the bundled bridge is tabs-only over localhost
-  WebSocket (no debugger/nativeMessaging permission), and deep CDP work runs in a
-  dedicated Synapse-launched automation profile started with
-  --silent-debugger-extension-api. The Chrome bridge verifier also performs a
-  one-way self-heal that removes any debugger/nativeMessaging blockers a prior
-  Synapse version wrote into ExtensionSettings, so running the latest build
-  restores extensions (including the Claude extension) on affected machines.
+  Synapse applies a reversible HKCU Chrome ExtensionSettings popup shield for
+  external debugger/nativeMessaging hazards by default, identified by a
+  Synapse-authored blocked_install_message marker. It also removes stale
+  Synapse-authored blockers from prior builds before reapplying the current
+  shield. Popup-free background automation is still achieved on Synapse's own
+  side: the bundled bridge is tabs-only over localhost WebSocket (no
+  debugger/nativeMessaging permission), and deep CDP work runs in a dedicated
+  Synapse-launched automation profile started with --silent-debugger-extension-api.
 
 .PARAMETER MaintenanceLockPath
   File-lock Source of Truth that serializes setup/remove across multiple
@@ -2748,12 +2747,13 @@ $chromeBridgeInstaller = Join-Path $PSScriptRoot 'install-synapse-chrome-debugge
 $chromeBridgePreflight = Invoke-SynapseChromeBridgeVerifier `
     -InstallerPath $chromeBridgeInstaller `
     -NativeHostExePath $ChromeNativeHostExePath
-Info ("Chrome direct bridge preflight accepted transport={0} extension_id={1} native_host_registry_present={2} native_host_manifest_present={3} policy_cleanup={4}" -f `
+Info ("Chrome direct bridge preflight accepted transport={0} extension_id={1} native_host_registry_present={2} native_host_manifest_present={3} policy_cleanup={4} popup_shield={5}" -f `
     $chromeBridgePreflight.daemon_bridge_transport, `
     $chromeBridgePreflight.extension_id, `
     $chromeBridgePreflight.native_host_registry_present, `
     $chromeBridgePreflight.native_host_manifest_present, `
-    (($chromeBridgePreflight.chrome_policy_cleanup | ForEach-Object { "$($_.hive):$($_.reason)" }) -join ','))
+    (($chromeBridgePreflight.chrome_policy_cleanup | ForEach-Object { "$($_.hive):$($_.reason)" }) -join ','), `
+    (($chromeBridgePreflight.chrome_policy_popup_shield | ForEach-Object { "$($_.hive):$($_.reason)" }) -join ','))
 
 # ---------------------------------------------------------------------------
 # 5. Drain the running daemon, then install the proven binary
@@ -2797,12 +2797,13 @@ Step "Verifying Chrome direct localhost bridge"
 $chromeBridgeReadback = Invoke-SynapseChromeBridgeVerifier `
     -InstallerPath $chromeBridgeInstaller `
     -NativeHostExePath $ChromeNativeHostExePath
-Info ("Chrome direct bridge verified transport={0} extension_id={1} native_host_registry_present={2} native_host_manifest_present={3} policy_cleanup={4}" -f `
+Info ("Chrome direct bridge verified transport={0} extension_id={1} native_host_registry_present={2} native_host_manifest_present={3} policy_cleanup={4} popup_shield={5}" -f `
     $chromeBridgeReadback.daemon_bridge_transport, `
     $chromeBridgeReadback.extension_id, `
     $chromeBridgeReadback.native_host_registry_present, `
     $chromeBridgeReadback.native_host_manifest_present, `
-    (($chromeBridgeReadback.chrome_policy_cleanup | ForEach-Object { "$($_.hive):$($_.reason)" }) -join ','))
+    (($chromeBridgeReadback.chrome_policy_cleanup | ForEach-Object { "$($_.hive):$($_.reason)" }) -join ','), `
+    (($chromeBridgeReadback.chrome_policy_popup_shield | ForEach-Object { "$($_.hive):$($_.reason)" }) -join ','))
 
 # ---------------------------------------------------------------------------
 # 6. Deploy bundled profiles next to the exe (executable-relative lookup) +
