@@ -7,11 +7,11 @@ tabs-first: background tab open/close/navigation use `chrome.tabs` APIs and the
 extension does not require `nativeMessaging`. It declares `debugger` only for
 the guarded `capturePageScreenshot` and page-scoped `evaluateScript` commands,
 which attach to a session-owned tab long enough to call `Page.captureScreenshot`
-or `Runtime.evaluate` and then detach. It also does not
-require `chrome.alarms` or any recurring wakeup permission. If the daemon is
-unavailable or the live Chrome profile is unsafe, the failure is logged with the
-exact daemon error code and the bridge retries with bounded backoff while
-remaining fail-closed to browser commands.
+or `Runtime.evaluate` and then detach. It does require `chrome.alarms` so Chrome
+can wake the MV3 service worker after the daemon restarts or the worker is
+suspended. If the daemon is unavailable or the live Chrome profile is unsafe,
+the failure is logged with the exact daemon error code and the bridge retries
+with bounded backoff while remaining fail-closed to browser commands.
 
 Stable extension ID: `leoocgnkjnplbfdbklajepahofecgfbk`
 
@@ -54,9 +54,8 @@ keepalive. Commands execute only after the daemon asks through the fixed
 extension origin and daemon-issued bridge token. If registration, message post,
 or WebSocket keepalive fails, the bridge closes the stale token, logs the code
 and reconnect delay, and re-registers with bounded WebSocket reconnect. While
-disconnected it performs only a low-frequency `chrome.runtime.getPlatformInfo()`
-heartbeat to keep the MV3 worker available for reconnect; it does not request
-`chrome.alarms`.
+disconnected it keeps a 30s `chrome.alarms` wake registered so a suspended MV3
+worker can re-register with the daemon without foreground Chrome automation.
 The normal bridge does not call `runtime.connectNative()`, so Chrome does not
 create a native-host `cmd.exe` wrapper on end-user systems.
 The verifier also removes stale Synapse native-host registration from every
@@ -65,7 +64,7 @@ the before/after registry readback. If any Synapse native-host key remains, the
 verifier fails closed with the exact hive/path/ACL evidence instead of
 certifying the host.
 The verifier also reads Chrome profile permissions for the live Synapse
-extension ID and fails closed if an older load still has `alarms` or
+extension ID and fails closed if an older load still has unexpected
 `nativeMessaging` active.
 
 Registration is also fail-closed. If the daemon sees any live Chrome

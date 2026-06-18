@@ -361,8 +361,11 @@ if ($requiredPermissions -contains 'nativeMessaging') {
 if ($optionalPermissions -contains 'nativeMessaging') {
     throw "SYNAPSE_CHROME_EXTENSION_OPTIONAL_NATIVE_MESSAGING_FORBIDDEN path=$manifestPath remediation=normal end-user bridge must not request nativeMessaging"
 }
-if ($requiredPermissions -contains 'alarms' -or $optionalPermissions -contains 'alarms') {
-    throw "SYNAPSE_CHROME_EXTENSION_ALARMS_PERMISSION_FORBIDDEN path=$manifestPath remediation=normal end-user bridge must not use chrome.alarms or recurring wakeups; daemon disconnects must be handled by bounded WebSocket reconnect plus a low-frequency runtime keepalive while disconnected"
+if (-not ($requiredPermissions -contains 'alarms')) {
+    throw "SYNAPSE_CHROME_EXTENSION_ALARMS_PERMISSION_MISSING path=$manifestPath remediation=normal end-user bridge requires chrome.alarms so an MV3 service worker suspended after daemon restart can wake and re-register without foreground Chrome automation"
+}
+if ($optionalPermissions -contains 'alarms') {
+    throw "SYNAPSE_CHROME_EXTENSION_OPTIONAL_ALARMS_PERMISSION_FORBIDDEN path=$manifestPath remediation=alarms must be a required permission for deterministic bridge wake/readback, not an optional runtime prompt"
 }
 if ($hostPermissions -notcontains 'http://127.0.0.1:7700/*') {
     throw "SYNAPSE_CHROME_EXTENSION_LOCALHOST_PERMISSION_MISSING path=$manifestPath remediation=normal bridge requires host_permissions http://127.0.0.1:7700/* for direct daemon registration and message posting"
@@ -396,7 +399,6 @@ $chromeProcesses = @(Get-CimInstance Win32_Process -Filter "Name='chrome.exe'" -
 $chromeUserDataRoot = Join-Path $env:LOCALAPPDATA 'Google\Chrome\User Data'
 $synapseChromeProfileReadback = @()
 $staleSynapseActivePermissions = @()
-$staleSynapseRecurringWakePermissions = @()
 $externalDebuggerOrNativeExtensions = @()
 $externalDisabledDebuggerOrNativeExtensions = @()
 $externalDebuggerExtensions = @()
@@ -481,9 +483,6 @@ if (Test-Path -LiteralPath $chromeUserDataRoot -PathType Container) {
                     if ($activeApi -contains 'nativeMessaging') {
                         $staleSynapseActivePermissions += $row
                     }
-                    if ($activeApi -contains 'alarms') {
-                        $staleSynapseRecurringWakePermissions += $row
-                    }
                 } elseif ($activeApi -contains 'debugger' -or $activeApi -contains 'nativeMessaging') {
                     $externalRow = [pscustomobject]@{
                         profile = $profileDir.Name
@@ -514,11 +513,6 @@ if ($staleSynapseActivePermissions.Count -gt 0) {
     $detail = $staleSynapseActivePermissions | ConvertTo-Json -Depth 6 -Compress
     throw "SYNAPSE_CHROME_EXTENSION_STALE_ACTIVE_DEBUGGER_PERMISSION extension_id=$ExtensionId detail=$detail remediation=if daemon health shows the live bridge advertises reloadSelf, call cdp_bridge_reload through the real Synapse MCP tool; if the loaded worker predates reloadSelf, fail closed and let Chrome reload/restart the extension out-of-band instead of automating chrome://extensions foreground UI; the normal bridge must be active with tabs only before setup can pass"
 }
-if ($staleSynapseRecurringWakePermissions.Count -gt 0) {
-    $detail = $staleSynapseRecurringWakePermissions | ConvertTo-Json -Depth 6 -Compress
-    throw "SYNAPSE_CHROME_EXTENSION_STALE_ALARMS_PERMISSION extension_id=$ExtensionId detail=$detail remediation=if daemon health shows the live bridge advertises reloadSelf, call cdp_bridge_reload through the real Synapse MCP tool; if the loaded worker predates reloadSelf, fail closed and let Chrome reload/restart the extension out-of-band instead of automating chrome://extensions foreground UI; the normal bridge must be active with tabs only and no recurring wake permission before setup can certify popup-free behavior"
-}
-
 $externalNativeMessagingProcesses = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
     Where-Object {
         $_.CommandLine -match 'chrome\.nativeMessaging' -and
@@ -563,17 +557,17 @@ $chromePolicyCleanup = Remove-SynapseChromeExternalDebuggerPolicy
     daemon_bridge_transport = 'direct_localhost_websocket'
     daemon_bridge_origin = "chrome-extension://$ExtensionId"
     bridge_self_reload_command = 'cdp_bridge_reload'
-    bridge_build_id_expected = 'synapse-chrome-bridge-2026-06-17-screenshot-retry-v1'
-    bridge_build_sha256_expected = '196f108467bbaf4d40a1768a09eb5cdc838f4b5b12d425d63beb6c139ed67adf'
-    bridge_required_capabilities = @('activateTab', 'closeTab', 'capturePageScreenshot', 'domAction', 'evaluateScript', 'navigateTab', 'openTab', 'pageVitals', 'reloadSelf', 'targetInfo', 'targetInfoPageText', 'typeActiveElement', 'setFieldValue')
+    bridge_build_id_expected = 'synapse-chrome-bridge-2026-06-17-alarm-reconnect-v1'
+    bridge_build_sha256_expected = 'c8c59aaedd0fcf3d92006aa02ea8b794d1aef07d9ab9fe8d95c562b505ff87ea'
+    bridge_required_capabilities = @('alarmReconnect', 'activateTab', 'closeTab', 'capturePageScreenshot', 'domAction', 'evaluateScript', 'navigateTab', 'openTab', 'pageVitals', 'reloadSelf', 'targetInfo', 'targetInfoPageText', 'typeActiveElement', 'setFieldValue')
     background_navigation_backend = 'chrome.tabs_plus_guarded_debugger_Page_captureScreenshot_and_Runtime_evaluate_no_native_messaging'
-    reconnect_driver = 'bounded_websocket_reconnect_with_disconnected_extension_keepalive_no_alarms'
+    reconnect_driver = 'bounded_websocket_reconnect_with_chrome_alarms_mv3_wake'
     attach_popup_prevention = 'normal_bridge_debugger_limited_to_session_owned_capturePageScreenshot_and_evaluateScript_no_helper_windows_no_nativeMessaging_permission_plus_daemon_side_attach_disabled_for_other_attach_commands'
     normal_bridge_attach_commands_available = $false
     normal_bridge_debugger_api_calls_present = $true
     expected_extension_id_guard_present = $true
-    required_alarms_permission_present = $false
-    recurring_wakeup_permission_present = $false
+    required_alarms_permission_present = ($requiredPermissions -contains 'alarms')
+    recurring_wakeup_permission_present = ($requiredPermissions -contains 'alarms')
     required_debugger_permission_present = ($requiredPermissions -contains 'debugger')
     optional_debugger_permission_present = $false
     required_native_messaging_permission_present = $false

@@ -2904,6 +2904,7 @@ impl SynapseService {
                 .await;
         }
 
+        let human_os_foreground_before_hwnd = current_human_os_foreground_hwnd();
         let opened = crate::chrome_debugger_bridge::open_tab(
             window_hwnd,
             requested_url,
@@ -2927,6 +2928,7 @@ impl SynapseService {
             .unwrap_or_else(chrome_debugger_default_endpoint);
         let cdp_target_id = opened.target_id.clone();
         let chrome_window_id = opened.chrome_window_id;
+        let human_os_foreground_after_hwnd = current_human_os_foreground_hwnd();
         if chrome_window_id.is_none() {
             let _ = crate::chrome_debugger_bridge::close_tab(window_hwnd, &cdp_target_id).await;
             return Err(mcp_error(
@@ -2936,16 +2938,32 @@ impl SynapseService {
                 ),
             ));
         }
-        let requested_window_is_human_foreground = synapse_a11y::current_foreground_context()
-            .map(|foreground| foreground.hwnd == window_hwnd)
-            .unwrap_or(false);
-        if opened.chrome_window_focused == Some(true) && !requested_window_is_human_foreground {
+        let requested_window_was_human_foreground =
+            human_os_foreground_before_hwnd == Some(window_hwnd);
+        let requested_window_is_human_foreground =
+            human_os_foreground_after_hwnd == Some(window_hwnd);
+        if !requested_window_was_human_foreground
+            && requested_window_is_human_foreground
+            && human_os_foreground_after_hwnd != human_os_foreground_before_hwnd
+        {
             let _ = crate::chrome_debugger_bridge::close_tab(window_hwnd, &cdp_target_id).await;
             return Err(mcp_error(
                 error_codes::ACTION_POSTCONDITION_FAILED,
                 format!(
-                    "cdp_open_tab refused target {cdp_target_id:?}: Chrome bridge selected focused Chrome window {:?} while requested HWND {window_hwnd:#x} is not the human foreground; OS HWND cannot be mapped inside the normal extension bridge",
-                    chrome_window_id
+                    "cdp_open_tab refused target {cdp_target_id:?}: Chrome bridge changed the human OS foreground from {:?} to requested HWND {window_hwnd:#x} while required_foreground=false",
+                    human_os_foreground_before_hwnd
+                ),
+            ));
+        }
+        if opened.chrome_window_focused == Some(true) && !requested_window_was_human_foreground {
+            let _ = crate::chrome_debugger_bridge::close_tab(window_hwnd, &cdp_target_id).await;
+            return Err(mcp_error(
+                error_codes::ACTION_POSTCONDITION_FAILED,
+                format!(
+                    "cdp_open_tab refused target {cdp_target_id:?}: Chrome bridge selected focused Chrome window {:?} while requested HWND {window_hwnd:#x} was not the human foreground before the call; before_hwnd={:?} after_hwnd={:?}",
+                    chrome_window_id,
+                    human_os_foreground_before_hwnd,
+                    human_os_foreground_after_hwnd
                 ),
             ));
         }
@@ -3042,6 +3060,8 @@ impl SynapseService {
             } else {
                 Some(opened.chrome_window_state)
             },
+            human_os_foreground_before_hwnd,
+            human_os_foreground_after_hwnd,
             target_active: opened.target_active,
             target_highlighted: opened.target_highlighted,
             requested_url: requested_url.to_owned(),
@@ -3703,6 +3723,7 @@ impl SynapseService {
         window_title: &str,
         process_name: &str,
     ) -> Result<CdpOpenTabResponse, ErrorData> {
+        let human_os_foreground_before_hwnd = current_human_os_foreground_hwnd();
         let opened = synapse_a11y::cdp_open_background_tab(endpoint, requested_url)
             .await
             .map_err(|error| {
@@ -3711,6 +3732,7 @@ impl SynapseService {
                     format!("cdp_open_tab Target.createTarget/readback failed: {error}"),
                 )
             })?;
+        let human_os_foreground_after_hwnd = current_human_os_foreground_hwnd();
         let cdp_target_id = opened.target.target_id.clone();
         let owner_key = self.register_cdp_target_owner(CdpTargetOwner {
             session_id: session_id.to_owned(),
@@ -3780,6 +3802,8 @@ impl SynapseService {
             capture_window_hwnd: None,
             chrome_window_focused: None,
             chrome_window_state: None,
+            human_os_foreground_before_hwnd,
+            human_os_foreground_after_hwnd,
             target_active: false,
             target_highlighted: false,
             requested_url: requested_url.to_owned(),
@@ -4866,6 +4890,13 @@ fn unix_ms_now() -> u64 {
         .map_or(0, |duration| {
             u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
         })
+}
+
+#[cfg(windows)]
+fn current_human_os_foreground_hwnd() -> Option<i64> {
+    synapse_a11y::current_foreground_context()
+        .ok()
+        .map(|context| context.hwnd)
 }
 
 /// Validates a `set_target` window HWND is live and snapshottable, returning its

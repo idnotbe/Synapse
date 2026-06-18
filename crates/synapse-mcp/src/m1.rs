@@ -611,6 +611,10 @@ pub struct CdpOpenTabResponse {
     pub chrome_window_focused: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chrome_window_state: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub human_os_foreground_before_hwnd: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub human_os_foreground_after_hwnd: Option<i64>,
     pub target_active: bool,
     pub target_highlighted: bool,
     pub requested_url: String,

@@ -1,7 +1,8 @@
 const PROTOCOL_VERSION = 1;
-const BRIDGE_BUILD_ID = "synapse-chrome-bridge-2026-06-17-screenshot-retry-v1";
-const BRIDGE_BUILD_SHA256 = "196f108467bbaf4d40a1768a09eb5cdc838f4b5b12d425d63beb6c139ed67adf";
+const BRIDGE_BUILD_ID = "synapse-chrome-bridge-2026-06-17-alarm-reconnect-v1";
+const BRIDGE_BUILD_SHA256 = "c8c59aaedd0fcf3d92006aa02ea8b794d1aef07d9ab9fe8d95c562b505ff87ea";
 const COMMAND_CAPABILITIES = Object.freeze([
+  "alarmReconnect",
   "openTab",
   "closeTab",
   "capturePageScreenshot",
@@ -39,6 +40,9 @@ const WEBSOCKET_KEEPALIVE_MS = 20000;
 const RECONNECT_INITIAL_MS = 1000;
 const RECONNECT_MAX_MS = 30000;
 const DISCONNECTED_KEEPALIVE_MS = 20000;
+const RECONNECT_WAKE_ALARM_NAME = "synapse-daemon-bridge-reconnect";
+const RECONNECT_WAKE_ALARM_DELAY_MINUTES = 0.5;
+const RECONNECT_WAKE_ALARM_PERIOD_MINUTES = 0.5;
 const AGENT_NAVIGATION_CLAIM_TTL_MS = 30000;
 const MAX_RECENT_NAVIGATION_KEYS = 128;
 const MAX_PAGE_TEXT_CHARS = 4096;
@@ -70,6 +74,7 @@ function startBridge() {
     );
     return;
   }
+  ensureReconnectWakeAlarm();
   connectDaemon();
 }
 
@@ -191,6 +196,7 @@ function resetReconnectState() {
   reconnectAttempt = 0;
   clearReconnectTimer();
   stopDisconnectedKeepAlive();
+  ensureReconnectWakeAlarm();
 }
 
 function connectWebSocket() {
@@ -279,6 +285,7 @@ function stopWebSocketKeepAlive() {
 }
 
 function startDisconnectedKeepAlive() {
+  ensureReconnectWakeAlarm();
   if (disconnectedKeepAliveTimer) {
     return;
   }
@@ -309,6 +316,36 @@ function stopDisconnectedKeepAlive() {
   }
 }
 
+function ensureReconnectWakeAlarm() {
+  if (!chrome.alarms?.create) {
+    console.error(
+      "Synapse daemon bridge cannot register reconnect wake alarm; " +
+        "manifest must include required chrome.alarms permission"
+    );
+    return;
+  }
+  try {
+    const created = chrome.alarms.create(RECONNECT_WAKE_ALARM_NAME, {
+      delayInMinutes: RECONNECT_WAKE_ALARM_DELAY_MINUTES,
+      periodInMinutes: RECONNECT_WAKE_ALARM_PERIOD_MINUTES
+    });
+    if (created && typeof created.catch === "function") {
+      created.catch((error) => {
+        console.warn(`Synapse reconnect wake alarm setup failed: ${errorMessage(error)}`);
+      });
+    }
+  } catch (error) {
+    console.warn(`Synapse reconnect wake alarm setup threw: ${errorMessage(error)}`);
+  }
+}
+
+function handleReconnectWakeAlarm(alarm) {
+  if (alarm?.name !== RECONNECT_WAKE_ALARM_NAME || permanentlyDisabled) {
+    return;
+  }
+  connectDaemon();
+}
+
 function closeWebSocket() {
   stopWebSocketKeepAlive();
   const socket = webSocket;
@@ -324,6 +361,9 @@ function closeWebSocket() {
 
 chrome.runtime.onInstalled.addListener(startBridge);
 chrome.runtime.onStartup.addListener(startBridge);
+if (chrome.alarms?.onAlarm?.addListener) {
+  chrome.alarms.onAlarm.addListener(handleReconnectWakeAlarm);
+}
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   if (!changeInfo?.url && !changeInfo?.title && changeInfo?.status !== "complete") {
     return;
@@ -2942,7 +2982,7 @@ async function postDaemonMessage(message) {
       }
     });
   } catch (error) {
-    disableBridgePermanently(
+    scheduleReconnect(
       `direct daemon message failed: ${errorMessage(error)}`,
       ERROR_DAEMON_UNAVAILABLE
     );
