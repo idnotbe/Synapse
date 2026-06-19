@@ -358,7 +358,7 @@ fn synapse_chrome_self_active_popup_risks(rows: &[String]) -> Vec<String> {
         .collect()
 }
 
-fn synapse_chrome_self_permission_warning(rows: &[String]) -> String {
+fn synapse_chrome_self_permission_warning(rows: &[String], policy_shield_present: bool) -> String {
     if rows.is_empty() {
         return "synapse_chrome_bridge_permission_warning=false self_risk_count=0".to_owned();
     }
@@ -372,6 +372,13 @@ fn synapse_chrome_self_permission_warning(rows: &[String]) -> String {
             formatted
         );
     }
+    if !policy_shield_present {
+        return format!(
+            "synapse_chrome_bridge_permission_blocking=true self_risk_scope=granted_only_stale_permissions_without_self_policy_shield self_risk_count={} synapse_chrome_bridge_permission_risk={} remediation=normal bridge commands fail closed while stale Synapse debugger/nativeMessaging profile residue exists without a physical HKCU ExtensionSettings self-shield; rerun scripts\\install-synapse-chrome-debugger.ps1 and repair the HKCU\\Software\\Policies\\Google\\Chrome ACL/write path until synapse_chrome_self_policy_shield_present=true, or clear the stale Chrome profile residue by reloading/removing the old extension state",
+            rows.len(),
+            formatted
+        );
+    }
     format!(
         "synapse_chrome_bridge_permission_warning=true self_risk_scope=granted_only_stale_permissions self_risk_count={} synapse_chrome_bridge_permission_risk={} remediation=granted-only profile residue is warning-only once the loaded bridge identity is current and debugger-free; read synapse_chrome_self_policy_shield_* in this health detail to confirm whether setup physically wrote the HKCU ExtensionSettings self-shield",
         rows.len(),
@@ -379,24 +386,42 @@ fn synapse_chrome_self_permission_warning(rows: &[String]) -> String {
     )
 }
 
+#[derive(Clone, Debug)]
+struct SynapseChromeSelfPolicyShieldStatus {
+    present: bool,
+    detail: String,
+}
+
 #[cfg(windows)]
-fn synapse_chrome_self_policy_shield_readback() -> String {
+fn synapse_chrome_self_policy_shield_status() -> SynapseChromeSelfPolicyShieldStatus {
     let Some(raw) =
         read_hkcu_registry_string(r"Software\Policies\Google\Chrome", "ExtensionSettings")
     else {
-        return "synapse_chrome_self_policy_shield_present=false policy_hive=HKCU policy_path=Software\\Policies\\Google\\Chrome value=ExtensionSettings reason=value_missing_or_unreadable".to_owned();
+        return SynapseChromeSelfPolicyShieldStatus {
+            present: false,
+            detail: "synapse_chrome_self_policy_shield_present=false policy_hive=HKCU policy_path=Software\\Policies\\Google\\Chrome value=ExtensionSettings reason=value_missing_or_unreadable".to_owned(),
+        };
     };
     if raw.trim().is_empty() {
-        return "synapse_chrome_self_policy_shield_present=false policy_hive=HKCU policy_path=Software\\Policies\\Google\\Chrome value=ExtensionSettings reason=value_empty".to_owned();
+        return SynapseChromeSelfPolicyShieldStatus {
+            present: false,
+            detail: "synapse_chrome_self_policy_shield_present=false policy_hive=HKCU policy_path=Software\\Policies\\Google\\Chrome value=ExtensionSettings reason=value_empty".to_owned(),
+        };
     }
     let Ok(parsed) = serde_json::from_str::<Value>(&raw) else {
-        return format!(
-            "synapse_chrome_self_policy_shield_present=false policy_hive=HKCU policy_path=Software\\Policies\\Google\\Chrome value=ExtensionSettings reason=parse_error raw_len={}",
-            raw.len()
-        );
+        return SynapseChromeSelfPolicyShieldStatus {
+            present: false,
+            detail: format!(
+                "synapse_chrome_self_policy_shield_present=false policy_hive=HKCU policy_path=Software\\Policies\\Google\\Chrome value=ExtensionSettings reason=parse_error raw_len={}",
+                raw.len()
+            ),
+        };
     };
     let Some(entry) = parsed.get(EXTENSION_ID) else {
-        return "synapse_chrome_self_policy_shield_present=false policy_hive=HKCU policy_path=Software\\Policies\\Google\\Chrome value=ExtensionSettings reason=self_entry_missing".to_owned();
+        return SynapseChromeSelfPolicyShieldStatus {
+            present: false,
+            detail: "synapse_chrome_self_policy_shield_present=false policy_hive=HKCU policy_path=Software\\Policies\\Google\\Chrome value=ExtensionSettings reason=self_entry_missing".to_owned(),
+        };
     };
     let blocked = entry
         .get("blocked_permissions")
@@ -416,26 +441,32 @@ fn synapse_chrome_self_policy_shield_readback() -> String {
     let marker_matches = entry.get("blocked_install_message").and_then(Value::as_str)
         == Some(SYNAPSE_CHROME_BLOCKED_INSTALL_MESSAGE);
     let present = has_debugger && has_native_messaging && marker_matches;
-    format!(
-        "synapse_chrome_self_policy_shield_present={} policy_hive=HKCU policy_path=Software\\Policies\\Google\\Chrome value=ExtensionSettings blocked_permissions={} marker_matches={} reason={}",
+    SynapseChromeSelfPolicyShieldStatus {
         present,
-        if blocked.is_empty() {
-            "<none>".to_owned()
-        } else {
-            blocked.join(",")
-        },
-        marker_matches,
-        if present {
-            "self_shield_active"
-        } else {
-            "self_entry_incomplete"
-        }
-    )
+        detail: format!(
+            "synapse_chrome_self_policy_shield_present={} policy_hive=HKCU policy_path=Software\\Policies\\Google\\Chrome value=ExtensionSettings blocked_permissions={} marker_matches={} reason={}",
+            present,
+            if blocked.is_empty() {
+                "<none>".to_owned()
+            } else {
+                blocked.join(",")
+            },
+            marker_matches,
+            if present {
+                "self_shield_active"
+            } else {
+                "self_entry_incomplete"
+            }
+        ),
+    }
 }
 
 #[cfg(not(windows))]
-fn synapse_chrome_self_policy_shield_readback() -> String {
-    "synapse_chrome_self_policy_shield_present=false reason=non_windows".to_owned()
+fn synapse_chrome_self_policy_shield_status() -> SynapseChromeSelfPolicyShieldStatus {
+    SynapseChromeSelfPolicyShieldStatus {
+        present: false,
+        detail: "synapse_chrome_self_policy_shield_present=false reason=non_windows".to_owned(),
+    }
 }
 
 #[cfg(windows)]
@@ -580,6 +611,7 @@ fn ensure_normal_bridge_external_popup_suppressed(
 ) -> Result<(), ChromeDebuggerBridgeError> {
     let self_risks = synapse_chrome_self_profile_surfaces();
     let self_active_risks = synapse_chrome_self_active_popup_risks(&self_risks);
+    let self_policy_shield = synapse_chrome_self_policy_shield_status();
     if !self_active_risks.is_empty() {
         tracing::error!(
             code = "CHROME_SELF_POPUP_RISK_WARNING",
@@ -594,6 +626,25 @@ fn ensure_normal_bridge_external_popup_suppressed(
             detail: format!(
                 "normal Synapse Chrome Bridge refused command {command_kind:?} before queueing any Chrome tabs/scripting command; hwnd={hwnd} reason=Synapse Chrome Bridge profile still exposes active debugger/nativeMessaging permission synapse_chrome_bridge_permission_risk={} remediation=rerun scripts\\install-synapse-chrome-debugger.ps1 so the HKCU ExtensionSettings self-shield blocks debugger/nativeMessaging for the Synapse extension ID, then reload the existing bridge through cdp_bridge_reload or keep commands failed closed until Chrome reloads it",
                 format_external_chrome_popup_risks(&self_active_risks)
+            ),
+        });
+    }
+    if !self_risks.is_empty() && !self_policy_shield.present {
+        tracing::error!(
+            code = "CHROME_SELF_POLICY_SHIELD_MISSING",
+            hwnd,
+            command_kind,
+            risk_count = self_risks.len(),
+            synapse_chrome_bridge_permission_risk = %format_external_chrome_popup_risks(&self_risks),
+            synapse_chrome_self_policy_shield = %self_policy_shield.detail,
+            "normal Chrome bridge refusing tabs/scripting command while stale Synapse debugger/nativeMessaging permission residue exists without a physical self policy shield"
+        );
+        return Err(ChromeDebuggerBridgeError {
+            code: error_codes::A11Y_CDP_DEBUGGER_WARNING_UNSUPPRESSED,
+            detail: format!(
+                "normal Synapse Chrome Bridge refused command {command_kind:?} before queueing any Chrome tabs/scripting command; hwnd={hwnd} reason=stale Synapse debugger/nativeMessaging profile residue exists without physical HKCU ExtensionSettings self-shield synapse_chrome_bridge_permission_risk={} {} remediation=rerun scripts\\install-synapse-chrome-debugger.ps1 and repair HKCU\\Software\\Policies\\Google\\Chrome ACL/write access until synapse_chrome_self_policy_shield_present=true, or clear the stale Chrome profile residue by reloading/removing the old extension state; commands stay failed closed to prevent the 'Synapse Chrome Bridge started debugging this browser' layout infobar",
+                format_external_chrome_popup_risks(&self_risks),
+                self_policy_shield.detail
             ),
         });
     }
@@ -2673,11 +2724,36 @@ fn chrome_bridge_health_from_snapshot(
     self_profile_risks: &[String],
     layout_infobar_risks: &[String],
 ) -> SubsystemHealth {
+    let self_policy_shield = synapse_chrome_self_policy_shield_status();
+    chrome_bridge_health_from_snapshot_with_self_policy(
+        active_host,
+        host_count,
+        queued_count,
+        pending_count,
+        popup_risks,
+        self_profile_risks,
+        layout_infobar_risks,
+        &self_policy_shield,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn chrome_bridge_health_from_snapshot_with_self_policy(
+    active_host: Option<&ChromeBridgeHealthRecord>,
+    host_count: usize,
+    queued_count: usize,
+    pending_count: usize,
+    popup_risks: &[String],
+    self_profile_risks: &[String],
+    layout_infobar_risks: &[String],
+    self_policy_shield: &SynapseChromeSelfPolicyShieldStatus,
+) -> SubsystemHealth {
     let layout_warning = external_chrome_layout_infobar_warning(layout_infobar_risks);
-    let self_permission_warning = synapse_chrome_self_permission_warning(self_profile_risks);
-    let self_policy_shield = synapse_chrome_self_policy_shield_readback();
-    let self_permission_blocking =
-        !synapse_chrome_self_active_popup_risks(self_profile_risks).is_empty();
+    let self_permission_warning =
+        synapse_chrome_self_permission_warning(self_profile_risks, self_policy_shield.present);
+    let self_permission_blocking = !synapse_chrome_self_active_popup_risks(self_profile_risks)
+        .is_empty()
+        || (!self_profile_risks.is_empty() && !self_policy_shield.present);
 
     let Some(host) = active_host else {
         let risk_warning = external_chrome_popup_risk_warning(popup_risks, false);
@@ -2693,7 +2769,7 @@ fn chrome_bridge_health_from_snapshot(
                 NO_ACTIVE_HOST_REPAIR_GUIDANCE,
                 risk_warning,
                 self_permission_warning,
-                self_policy_shield,
+                self_policy_shield.detail,
                 layout_warning,
                 INSTALL_GUIDANCE
             )),
@@ -2790,7 +2866,7 @@ fn chrome_bridge_health_from_snapshot(
             popup_risk_suppression,
             risk_warning,
             self_permission_warning,
-            self_policy_shield,
+            self_policy_shield.detail,
             layout_warning,
             INSTALL_GUIDANCE
         )),
@@ -4505,7 +4581,7 @@ mod tests {
     }
 
     #[test]
-    fn chrome_bridge_health_warns_on_self_granted_only_residue() {
+    fn chrome_bridge_health_blocks_self_granted_only_residue_without_policy_shield() {
         let host = ChromeBridgeHealthRecord {
             host_id: "chrome-native-test".to_owned(),
             origin: "chrome-extension://leoocgnkjnplbfdbklajepahofecgfbk/".to_owned(),
@@ -4543,13 +4619,90 @@ mod tests {
         let self_rows = [format!(
             "profile=Default pref=Secure Preferences extension_id={EXTENSION_ID} name=\"Synapse Chrome Bridge\" active_api=alarms,tabs manifest_api=alarms,tabs granted_hazard_api=debugger,nativeMessaging synapse_self_popup_risk=true risk_basis=granted_only_stale state=<absent> active_bit=<absent> disable_reasons=[]"
         )];
-        let health = chrome_bridge_health_from_snapshot(Some(&host), 1, 0, 0, &[], &self_rows, &[]);
+        let missing_policy_shield = SynapseChromeSelfPolicyShieldStatus {
+            present: false,
+            detail: "synapse_chrome_self_policy_shield_present=false reason=test_missing"
+                .to_owned(),
+        };
+        let health = chrome_bridge_health_from_snapshot_with_self_policy(
+            Some(&host),
+            1,
+            0,
+            0,
+            &[],
+            &self_rows,
+            &[],
+            &missing_policy_shield,
+        );
+
+        assert_eq!(health.status, "unsafe_profile");
+        let detail = health.detail.as_deref().expect("health detail");
+        assert!(detail.contains("tab_control_available=false"));
+        assert!(detail.contains("synapse_chrome_bridge_permission_blocking=true"));
+        assert!(detail.contains("granted_only_stale_permissions_without_self_policy_shield"));
+        assert!(detail.contains("synapse_chrome_self_policy_shield_present=false"));
+    }
+
+    #[test]
+    fn chrome_bridge_health_warns_on_self_granted_only_residue_with_policy_shield() {
+        let host = ChromeBridgeHealthRecord {
+            host_id: "chrome-native-test".to_owned(),
+            origin: "chrome-extension://leoocgnkjnplbfdbklajepahofecgfbk/".to_owned(),
+            extension_id: Some("leoocgnkjnplbfdbklajepahofecgfbk".to_owned()),
+            extension_version: Some("0.1.0".to_owned()),
+            extension_protocol_version: Some(BRIDGE_PROTOCOL_VERSION),
+            extension_build_id: Some(EXPECTED_EXTENSION_BUILD_ID.to_owned()),
+            extension_build_sha256: Some(EXPECTED_EXTENSION_BUILD_SHA256.to_owned()),
+            extension_capabilities: REQUIRED_DIRECT_HTTP_CAPABILITIES
+                .iter()
+                .map(|capability| (*capability).to_owned())
+                .collect(),
+            extension_user_agent: Some("Chrome test".to_owned()),
+            extension_debugger_api_available: Some(false),
+            extension_popup_risk_suppression: Some(json!({
+                "ok": true,
+                "status": "clear",
+                "management_available": true,
+                "hazard_count": 0,
+                "disabled_count": 0,
+                "remaining_hazard_count": 0,
+                "failure_count": 0,
+                "remaining_hazards": [],
+                "failures": []
+            })),
+            pid: 42,
+            parent_window: None,
+            transport: Some("direct_http".to_owned()),
+            registered_unix_ms: 1000,
+            last_seen_unix_ms: 2000,
+            last_disconnect_detail: None,
+            last_detach_reason: None,
+        };
+
+        let self_rows = [format!(
+            "profile=Default pref=Secure Preferences extension_id={EXTENSION_ID} name=\"Synapse Chrome Bridge\" active_api=alarms,tabs manifest_api=alarms,tabs granted_hazard_api=debugger,nativeMessaging synapse_self_popup_risk=true risk_basis=granted_only_stale state=<absent> active_bit=<absent> disable_reasons=[]"
+        )];
+        let present_policy_shield = SynapseChromeSelfPolicyShieldStatus {
+            present: true,
+            detail: "synapse_chrome_self_policy_shield_present=true reason=test_present".to_owned(),
+        };
+        let health = chrome_bridge_health_from_snapshot_with_self_policy(
+            Some(&host),
+            1,
+            0,
+            0,
+            &[],
+            &self_rows,
+            &[],
+            &present_policy_shield,
+        );
 
         assert_eq!(health.status, "ok");
         let detail = health.detail.as_deref().expect("health detail");
         assert!(detail.contains("tab_control_available=true"));
         assert!(detail.contains("synapse_chrome_bridge_permission_warning=true"));
         assert!(detail.contains("granted_only_stale_permissions"));
+        assert!(detail.contains("synapse_chrome_self_policy_shield_present=true"));
     }
 
     #[test]
