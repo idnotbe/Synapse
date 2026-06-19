@@ -1,6 +1,6 @@
 const PROTOCOL_VERSION = 1;
-const BRIDGE_BUILD_ID = "synapse-chrome-bridge-2026-06-19-runtime-debugger-api-shield-v1";
-const BRIDGE_BUILD_SHA256 = "4c7056621f8e40db2e539f22cc335fec12b69ccbdb2ccfa110e81f05021c14b3";
+const BRIDGE_BUILD_ID = "synapse-chrome-bridge-2026-06-19-coordinate-click-v1";
+const BRIDGE_BUILD_SHA256 = "e19c124aef46209f35ce20d79be8b11d8426136962ef63a40851554c097d69b8";
 const COMMAND_CAPABILITIES = Object.freeze([
   "alarmReconnect",
   "externalPopupRiskSuppression",
@@ -12,6 +12,7 @@ const COMMAND_CAPABILITIES = Object.freeze([
   "activateTab",
   "pageVitals",
   "domAction",
+  "coordinateClick",
   "reloadSelf",
   "typeActiveElement",
   "setFieldValue"
@@ -705,6 +706,8 @@ async function handleCommand(command) {
       result = await handleActivateTab(params);
     } else if (kind === "domAction") {
       result = await handleDomAction(params);
+    } else if (kind === "coordinateClick") {
+      result = await handleCoordinateClick(params);
     } else if (kind === "reloadSelf") {
       result = handleReloadSelf(params);
       reloadAfterResponse = true;
@@ -1261,6 +1264,74 @@ async function selectTabTarget(params, options = {}) {
     }
   }
   return selectedPage(tabs[0], tabs.length, "fallback_first_tab");
+}
+
+async function handleCoordinateClick(params) {
+  const selected = await selectTabTarget(params, { requireTargetId: true });
+  const waitTimeoutMs = normalizeWaitTimeout(params.waitTimeoutMs);
+  if (!chrome.scripting || typeof chrome.scripting.executeScript !== "function") {
+    throw bridgeError(
+      ERROR_CHROME_SCRIPTING_EXECUTE_FAILED,
+      "chrome.scripting.executeScript unavailable; extension is missing scripting permission"
+    );
+  }
+
+  const before = await tabPageState(selected.tabId, selected.target);
+  const beforePageText = await tabPageTextState(selected.tabId);
+  let injected;
+  try {
+    injected = await chrome.scripting.executeScript({
+      target: { tabId: selected.tabId },
+      func: performCoordinateClickInPage,
+      args: [{
+        x: normalizeCoordinateValue(params.x, "x"),
+        y: normalizeCoordinateValue(params.y, "y"),
+        coordinateSpace: normalizeCoordinateSpace(params.coordinateSpace),
+        clicks: normalizeClickCount(params.clicks),
+        maxPageTextChars: MAX_PAGE_TEXT_CHARS
+      }]
+    });
+  } catch (error) {
+    throw bridgeError(
+      ERROR_CHROME_SCRIPTING_EXECUTE_FAILED,
+      `chrome.scripting.executeScript coordinateClick(${selected.tabId}) failed: ${errorMessage(error)}`
+    );
+  }
+
+  const first = Array.isArray(injected) ? injected[0] : null;
+  const clickResult = first?.result;
+  if (!clickResult || typeof clickResult !== "object") {
+    throw bridgeError(
+      ERROR_CHROME_SCRIPTING_EXECUTE_FAILED,
+      "chrome.scripting.executeScript coordinateClick returned no structured result"
+    );
+  }
+  if (!clickResult.ok) {
+    throw bridgeError(
+      String(clickResult.error_code || ERROR_AXTREE_FAILED),
+      `coordinateClick failed: ${String(clickResult.error_detail || "")}`
+    );
+  }
+
+  const after = await waitForTabPageState(selected.tabId, selected.target, waitTimeoutMs);
+  const afterPageText = await tabPageTextState(selected.tabId);
+  const activeElement = await tabActiveElementState(selected.tabId);
+  return {
+    extension_id: chrome.runtime.id,
+    target_id: after.target_id || selected.target.id,
+    tab_id: selected.tabId,
+    chrome_window_id: after.chrome_window_id,
+    before_page: before,
+    after_page: after,
+    before_page_text: beforePageText,
+    after_page_text: afterPageText,
+    active_element: activeElement,
+    readback_backend: "chrome.scripting.executeScript+chrome.tabs.get",
+    required_foreground: false,
+    target_candidate_count: selected.targetCandidateCount,
+    target_selection_reason: selected.selectionReason,
+    ...clickResult
+  };
 }
 
 async function selectOpenWindowForHwndHint(params) {
@@ -2031,7 +2102,7 @@ function readActiveElementInPage() {
 
 function typeActiveElementInPage(text) {
   const element = document.activeElement;
-  const before = readActiveElementInPage();
+  const before = readActiveElementLocal();
   if (!element || !before.has_active_element) {
     return {
       ok: false,
@@ -2051,7 +2122,7 @@ function typeActiveElementInPage(text) {
 
   const inputText = String(text ?? "");
   const eventsDispatched = [];
-  const beforeInput = dispatchSyntheticInputEvent(element, "beforeinput", inputText, true);
+  const beforeInput = dispatchSyntheticInputEventLocal(element, "beforeinput", inputText, true);
   eventsDispatched.push("beforeinput");
   if (!beforeInput) {
     return {
@@ -2063,13 +2134,13 @@ function typeActiveElementInPage(text) {
     };
   }
 
-  const expectedValue = applyTextToEditable(element, inputText);
-  dispatchSyntheticInputEvent(element, "input", inputText, false);
+  const expectedValue = applyTextToEditableLocal(element, inputText);
+  dispatchSyntheticInputEventLocal(element, "input", inputText, false);
   eventsDispatched.push("input");
   element.dispatchEvent(new Event("change", { bubbles: true }));
   eventsDispatched.push("change");
 
-  const after = readActiveElementInPage();
+  const after = readActiveElementLocal();
   const afterValue = after.value === null || after.value === undefined ? "" : String(after.value);
   if (afterValue !== expectedValue) {
     return {
@@ -2090,6 +2161,111 @@ function typeActiveElementInPage(text) {
     expected_value: expectedValue,
     events_dispatched: eventsDispatched
   };
+
+  function readActiveElementLocal() {
+    const active = document.activeElement;
+    if (!active) {
+      return {
+        has_active_element: false,
+        is_editable: false,
+        tag_name: "",
+        id: "",
+        name: "",
+        value: null,
+        selected_text: null
+      };
+    }
+    const tagName = String(active.tagName || "");
+    const lowerTag = tagName.toLowerCase();
+    const contentEditable =
+      active.isContentEditable ||
+      String(active.getAttribute?.("contenteditable") || "").toLowerCase() === "true";
+    const valueCapable = "value" in active;
+    const isEditable =
+      contentEditable ||
+      lowerTag === "textarea" ||
+      lowerTag === "select" ||
+      (lowerTag === "input" && !["button", "checkbox", "color", "file", "hidden", "image", "radio", "range", "reset", "submit"].includes(String(active.type || "").toLowerCase()));
+    let value = null;
+    if (valueCapable) {
+      value = String(active.value ?? "");
+    } else if (contentEditable) {
+      value = String(active.innerText || active.textContent || "");
+    }
+    let selectedText = null;
+    try {
+      if (typeof active.selectionStart === "number" && typeof active.selectionEnd === "number" && value !== null) {
+        selectedText = String(value).slice(active.selectionStart, active.selectionEnd);
+      } else {
+        const selection = document.getSelection?.();
+        if (selection && selection.rangeCount > 0) {
+          selectedText = String(selection.toString() || "");
+        }
+      }
+    } catch (_) {
+      selectedText = null;
+    }
+    return {
+      has_active_element: true,
+      is_editable: Boolean(isEditable),
+      tag_name: tagName,
+      id: String(active.id || ""),
+      name: String(active.getAttribute?.("name") || ""),
+      value,
+      selected_text: selectedText
+    };
+  }
+
+  function applyTextToEditableLocal(active, inputText) {
+    const tagName = String(active.tagName || "").toLowerCase();
+    const contentEditable =
+      active.isContentEditable ||
+      String(active.getAttribute?.("contenteditable") || "").toLowerCase() === "true";
+    if ((tagName === "input" || tagName === "textarea") && "value" in active) {
+      const beforeValue = String(active.value ?? "");
+      const start = typeof active.selectionStart === "number" ? active.selectionStart : beforeValue.length;
+      const end = typeof active.selectionEnd === "number" ? active.selectionEnd : start;
+      const expected = beforeValue.slice(0, start) + inputText + beforeValue.slice(end);
+      active.value = expected;
+      if (typeof active.setSelectionRange === "function") {
+        const caret = start + inputText.length;
+        active.setSelectionRange(caret, caret);
+      }
+      return expected;
+    }
+    if (contentEditable) {
+      const selection = document.getSelection?.();
+      if (selection && selection.rangeCount > 0 && active.contains(selection.anchorNode)) {
+        const range = selection.getRangeAt(0);
+        range.deleteContents();
+        const textNode = document.createTextNode(inputText);
+        range.insertNode(textNode);
+        range.setStartAfter(textNode);
+        range.setEndAfter(textNode);
+        selection.removeAllRanges();
+        selection.addRange(range);
+      } else {
+        active.appendChild(document.createTextNode(inputText));
+      }
+      return String(active.innerText || active.textContent || "");
+    }
+    throw new Error(`active element ${tagName || "unknown"} is not text editable`);
+  }
+
+  function dispatchSyntheticInputEventLocal(active, type, inputText, cancelable) {
+    let event;
+    try {
+      event = new InputEvent(type, {
+        bubbles: true,
+        cancelable,
+        data: inputText,
+        inputType: "insertText"
+      });
+    } catch (_) {
+      event = new Event(type, { bubbles: true, cancelable });
+    }
+    return active.dispatchEvent(event);
+  }
 }
 
 function applyTextToEditable(element, text) {
@@ -2419,6 +2595,28 @@ function normalizeClickCount(value) {
     );
   }
   return clicks;
+}
+
+function normalizeCoordinateValue(value, fieldName) {
+  const coordinate = Number(value);
+  if (!Number.isSafeInteger(coordinate)) {
+    throw bridgeError(
+      ERROR_CHROME_DOM_ACTION_UNSUPPORTED,
+      `coordinateClick ${fieldName} must be a safe integer; got ${JSON.stringify(value)}`
+    );
+  }
+  return coordinate;
+}
+
+function normalizeCoordinateSpace(value) {
+  const normalized = String(value || "screen").trim().toLowerCase();
+  if (["screen", "window", "viewport"].includes(normalized)) {
+    return normalized;
+  }
+  throw bridgeError(
+    ERROR_CHROME_DOM_ACTION_UNSUPPORTED,
+    `coordinateClick coordinateSpace must be one of screen, window, viewport; got ${JSON.stringify(value)}`
+  );
 }
 
 function performDomActionInPage(request) {
@@ -2880,6 +3078,379 @@ function performDomActionInPage(request) {
 
   function errorMessageLocal(error) {
     return error && error.message ? String(error.message) : String(error);
+  }
+
+  function fail(errorCode, errorDetail, extra = {}) {
+    return {
+      ok: false,
+      error_code: errorCode,
+      error_detail: errorDetail,
+      ...extra
+    };
+  }
+}
+
+function performCoordinateClickInPage(request) {
+  const ERROR_ELEMENT_NOT_FOUND = "CHROME_DOM_ELEMENT_NOT_FOUND";
+  const ERROR_ELEMENT_NOT_ACTIONABLE = "CHROME_DOM_ELEMENT_NOT_ACTIONABLE";
+  const ERROR_ACTION_UNSUPPORTED = "CHROME_DOM_ACTION_UNSUPPORTED";
+
+  const x = Number(request?.x);
+  const y = Number(request?.y);
+  const coordinateSpace = String(request?.coordinateSpace || "screen").toLowerCase();
+  const clicks = Number.isSafeInteger(request?.clicks) ? Math.min(Math.max(request.clicks, 1), 3) : 1;
+  const maxPageTextChars = Number.isSafeInteger(request?.maxPageTextChars)
+    ? Math.min(Math.max(request.maxPageTextChars, 0), 65536)
+    : 4096;
+
+  if (!Number.isSafeInteger(x) || !Number.isSafeInteger(y)) {
+    return fail(ERROR_ACTION_UNSUPPORTED, `coordinateClick requires integer x/y, got (${JSON.stringify(request?.x)}, ${JSON.stringify(request?.y)})`);
+  }
+  if (!["screen", "window", "viewport"].includes(coordinateSpace)) {
+    return fail(ERROR_ACTION_UNSUPPORTED, `unsupported coordinate space ${JSON.stringify(coordinateSpace)}`);
+  }
+
+  const beforeUrl = String(location.href || "");
+  const beforePageText = readPageTextLocal(maxPageTextChars);
+  const beforeActiveElement = readActiveElementLocal();
+  const viewportPoint = toViewportPoint(x, y, coordinateSpace);
+  const viewportReadback = {
+    inner_width: Math.trunc(window.innerWidth || 0),
+    inner_height: Math.trunc(window.innerHeight || 0),
+    outer_width: Math.trunc(window.outerWidth || 0),
+    outer_height: Math.trunc(window.outerHeight || 0),
+    screen_x: Math.trunc(window.screenX || 0),
+    screen_y: Math.trunc(window.screenY || 0),
+    device_pixel_ratio: Number(window.devicePixelRatio || 1),
+    visual_viewport_offset_left: Number(window.visualViewport?.offsetLeft || 0),
+    visual_viewport_offset_top: Number(window.visualViewport?.offsetTop || 0),
+    visual_viewport_scale: Number(window.visualViewport?.scale || 1)
+  };
+
+  if (
+    viewportPoint.client_x < 0 ||
+    viewportPoint.client_y < 0 ||
+    viewportPoint.client_x >= window.innerWidth ||
+    viewportPoint.client_y >= window.innerHeight
+  ) {
+    return fail(
+      ERROR_ELEMENT_NOT_FOUND,
+      `coordinate (${x}, ${y}) in ${coordinateSpace} space maps outside viewport (${viewportPoint.client_x}, ${viewportPoint.client_y}) for inner size ${window.innerWidth}x${window.innerHeight}`,
+      {
+        coordinate_space: coordinateSpace,
+        input_coordinate: { x, y },
+        viewport_coordinate: viewportPoint,
+        viewport_readback: viewportReadback,
+        before_active_element: beforeActiveElement,
+        in_page_before_text: beforePageText
+      }
+    );
+  }
+
+  const element = document.elementFromPoint(viewportPoint.client_x, viewportPoint.client_y);
+  if (!(element instanceof Element)) {
+    return fail(ERROR_ELEMENT_NOT_FOUND, "document.elementFromPoint returned no element at the requested coordinate", {
+      coordinate_space: coordinateSpace,
+      input_coordinate: { x, y },
+      viewport_coordinate: viewportPoint,
+      viewport_readback: viewportReadback,
+      before_active_element: beforeActiveElement,
+      in_page_before_text: beforePageText
+    });
+  }
+
+  const beforeElement = elementSummary(element);
+  if (!isElementEnabled(element)) {
+    return fail(ERROR_ELEMENT_NOT_ACTIONABLE, "coordinate resolved to a disabled or aria-disabled element", {
+      coordinate_space: coordinateSpace,
+      input_coordinate: { x, y },
+      viewport_coordinate: viewportPoint,
+      viewport_readback: viewportReadback,
+      before_element: beforeElement,
+      before_active_element: beforeActiveElement,
+      in_page_before_text: beforePageText
+    });
+  }
+  if (!isElementVisible(element)) {
+    return fail(ERROR_ELEMENT_NOT_ACTIONABLE, "coordinate resolved to a non-visible element", {
+      coordinate_space: coordinateSpace,
+      input_coordinate: { x, y },
+      viewport_coordinate: viewportPoint,
+      viewport_readback: viewportReadback,
+      before_element: beforeElement,
+      before_active_element: beforeActiveElement,
+      in_page_before_text: beforePageText
+    });
+  }
+
+  const eventsDispatched = [];
+  try {
+    if (typeof element.focus === "function") {
+      element.focus({ preventScroll: true });
+      eventsDispatched.push("focus");
+    }
+  } catch (_) {
+    // Some elements reject focus; the click event may still be actionable.
+  }
+  for (let index = 0; index < clicks; index += 1) {
+    dispatchPointerLikeEvent(element, "pointerdown", viewportPoint);
+    eventsDispatched.push("pointerdown");
+    dispatchMouseLikeEvent(element, "mousedown", viewportPoint);
+    eventsDispatched.push("mousedown");
+    dispatchPointerLikeEvent(element, "pointerup", viewportPoint);
+    eventsDispatched.push("pointerup");
+    dispatchMouseLikeEvent(element, "mouseup", viewportPoint);
+    eventsDispatched.push("mouseup");
+    dispatchMouseLikeEvent(element, "click", viewportPoint);
+    eventsDispatched.push("click");
+  }
+
+  const afterElement = element.isConnected ? elementSummary(element) : null;
+  const afterActiveElement = readActiveElementLocal();
+  const afterPageText = readPageTextLocal(maxPageTextChars);
+  return {
+    ok: true,
+    action: "coordinate_click",
+    coordinate_space: coordinateSpace,
+    input_coordinate: { x, y },
+    viewport_coordinate: viewportPoint,
+    viewport_readback: viewportReadback,
+    click_count: clicks,
+    before_element: beforeElement,
+    after_element: afterElement,
+    before_active_element: beforeActiveElement,
+    after_active_element: afterActiveElement,
+    events_dispatched: eventsDispatched,
+    in_page_before_url: beforeUrl,
+    in_page_after_url: String(location.href || ""),
+    in_page_title: String(document.title || ""),
+    in_page_ready_state: String(document.readyState || ""),
+    in_page_before_text: beforePageText,
+    in_page_after_text: afterPageText
+  };
+
+  function toViewportPoint(inputX, inputY, space) {
+    if (space === "viewport") {
+      return {
+        client_x: inputX,
+        client_y: inputY,
+        conversion: "identity_viewport"
+      };
+    }
+    const horizontalChrome = Math.max(0, (Number(window.outerWidth || 0) - Number(window.innerWidth || 0)) / 2);
+    const verticalChrome = Math.max(0, Number(window.outerHeight || 0) - Number(window.innerHeight || 0) - horizontalChrome);
+    if (space === "window") {
+      return {
+        client_x: Math.round(inputX - horizontalChrome),
+        client_y: Math.round(inputY - verticalChrome),
+        conversion: "window_outer_to_viewport",
+        horizontal_chrome_px: horizontalChrome,
+        vertical_chrome_px: verticalChrome
+      };
+    }
+    return {
+      client_x: Math.round(inputX - Number(window.screenX || 0) - horizontalChrome),
+      client_y: Math.round(inputY - Number(window.screenY || 0) - verticalChrome),
+      conversion: "screen_to_viewport",
+      horizontal_chrome_px: horizontalChrome,
+      vertical_chrome_px: verticalChrome
+    };
+  }
+
+  function dispatchPointerLikeEvent(element, eventType, point) {
+    if (typeof PointerEvent === "function") {
+      element.dispatchEvent(new PointerEvent(eventType, pointerEventInit(point)));
+      return;
+    }
+    dispatchMouseLikeEvent(element, eventType.replace(/^pointer/, "mouse"), point);
+  }
+
+  function dispatchMouseLikeEvent(element, eventType, point) {
+    element.dispatchEvent(new MouseEvent(eventType, mouseEventInit(point)));
+  }
+
+  function pointerEventInit(point) {
+    return {
+      ...mouseEventInit(point),
+      pointerId: 1,
+      pointerType: "mouse",
+      isPrimary: true,
+      width: 1,
+      height: 1,
+      pressure: eventPressure(point)
+    };
+  }
+
+  function mouseEventInit(point) {
+    return {
+      bubbles: true,
+      cancelable: true,
+      composed: true,
+      view: window,
+      detail: clicks,
+      button: 0,
+      buttons: 1,
+      clientX: point.client_x,
+      clientY: point.client_y,
+      screenX: coordinateSpace === "screen" ? x : Math.round(Number(window.screenX || 0) + point.client_x),
+      screenY: coordinateSpace === "screen" ? y : Math.round(Number(window.screenY || 0) + point.client_y)
+    };
+  }
+
+  function eventPressure() {
+    return 0.5;
+  }
+
+  function elementSummary(element) {
+    if (!(element instanceof Element)) {
+      return null;
+    }
+    const lower = tag(element);
+    const value = "value" in element ? String(element.value ?? "") : "";
+    const rect = element.getBoundingClientRect();
+    return {
+      tag_name: lower,
+      role: inferRole(element),
+      id: String(element.id || ""),
+      name_attr: String(element.getAttribute("name") || ""),
+      type_attr: String(element.getAttribute("type") || ""),
+      accessible_name: trimForReadback(accessibleName(element), 160),
+      text: trimForReadback(element.textContent, 160),
+      value_len: value.length,
+      checked: "checked" in element ? Boolean(element.checked) : null,
+      selected_index: lower === "select" ? element.selectedIndex : null,
+      visible: isElementVisible(element),
+      enabled: isElementEnabled(element),
+      bbox: {
+        x: Math.round(rect.x),
+        y: Math.round(rect.y),
+        w: Math.round(rect.width),
+        h: Math.round(rect.height)
+      }
+    };
+  }
+
+  function readActiveElementLocal() {
+    return elementSummary(document.activeElement);
+  }
+
+  function readPageTextLocal(maxChars) {
+    const source = document.body?.innerText || document.documentElement?.innerText || "";
+    return trimForReadback(source, maxChars);
+  }
+
+  function isElementEnabled(element) {
+    if (Boolean(element.disabled)) {
+      return false;
+    }
+    return String(element.getAttribute("aria-disabled") || "").toLowerCase() !== "true";
+  }
+
+  function isElementVisible(element) {
+    if (!(element instanceof Element) || !element.isConnected) {
+      return false;
+    }
+    const style = window.getComputedStyle(element);
+    if (!style || style.display === "none" || style.visibility === "hidden" || style.visibility === "collapse") {
+      return false;
+    }
+    if (Number(style.opacity) === 0) {
+      return false;
+    }
+    const rects = element.getClientRects();
+    return rects && rects.length > 0 && Array.from(rects).some((rect) => rect.width > 0 && rect.height > 0);
+  }
+
+  function accessibleName(element) {
+    const labelledBy = stringOrEmpty(element.getAttribute("aria-labelledby"));
+    if (labelledBy) {
+      const text = labelledBy
+        .split(/\s+/)
+        .map((id) => document.getElementById(id)?.textContent || "")
+        .join(" ")
+        .trim();
+      if (text) {
+        return text;
+      }
+    }
+    for (const attr of ["aria-label", "alt", "title", "placeholder", "value"]) {
+      const value = stringOrEmpty(element.getAttribute(attr));
+      if (value) {
+        return value;
+      }
+    }
+    if (element.id) {
+      const label = document.querySelector(`label[for="${cssEscapeLocal(element.id)}"]`);
+      if (label?.textContent?.trim()) {
+        return label.textContent;
+      }
+    }
+    const wrappingLabel = element.closest?.("label");
+    if (wrappingLabel?.textContent?.trim()) {
+      return wrappingLabel.textContent;
+    }
+    return element.textContent || "";
+  }
+
+  function inferRole(element) {
+    const explicit = stringOrEmpty(element.getAttribute("role")).toLowerCase();
+    if (explicit) {
+      return explicit;
+    }
+    const lower = tag(element);
+    if (lower === "a" && element.hasAttribute("href")) {
+      return "link";
+    }
+    if (lower === "button") {
+      return "button";
+    }
+    if (lower === "select") {
+      return "combobox";
+    }
+    if (lower === "form") {
+      return "form";
+    }
+    if (lower === "textarea") {
+      return "textbox";
+    }
+    if (lower === "input") {
+      const type = String(element.getAttribute("type") || "text").toLowerCase();
+      if (["button", "submit", "reset", "image"].includes(type)) {
+        return "button";
+      }
+      if (type === "checkbox") {
+        return "checkbox";
+      }
+      if (type === "radio") {
+        return "radio";
+      }
+      return "textbox";
+    }
+    return lower || "element";
+  }
+
+  function normalizeText(value) {
+    return String(value || "").replace(/\s+/g, " ").trim().toLowerCase();
+  }
+
+  function stringOrEmpty(value) {
+    return value === null || value === undefined ? "" : String(value).trim();
+  }
+
+  function trimForReadback(value, maxChars) {
+    const text = String(value || "").replace(/\s+/g, " ").trim();
+    return [...text].slice(0, maxChars).join("");
+  }
+
+  function tag(element) {
+    return String(element?.tagName || "").toLowerCase();
+  }
+
+  function cssEscapeLocal(value) {
+    if (typeof CSS !== "undefined" && typeof CSS.escape === "function") {
+      return CSS.escape(value);
+    }
+    return String(value).replace(/["\\]/g, "\\$&");
   }
 
   function fail(errorCode, errorDetail, extra = {}) {

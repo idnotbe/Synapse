@@ -40,15 +40,15 @@ const NATIVE_HOST_NAME: &str = "com.synapse.chrome_debugger";
 const EXTENSION_ORIGIN: &str = "chrome-extension://leoocgnkjnplbfdbklajepahofecgfbk";
 const BRIDGE_TOKEN_HEADER: &str = "x-synapse-bridge-token";
 const BRIDGE_PROTOCOL_VERSION: u32 = 1;
-const EXPECTED_EXTENSION_BUILD_ID: &str =
-    "synapse-chrome-bridge-2026-06-19-runtime-debugger-api-shield-v1";
+const EXPECTED_EXTENSION_BUILD_ID: &str = "synapse-chrome-bridge-2026-06-19-coordinate-click-v1";
 const EXPECTED_EXTENSION_BUILD_SHA256: &str =
-    "4c7056621f8e40db2e539f22cc335fec12b69ccbdb2ccfa110e81f05021c14b3";
+    "e19c124aef46209f35ce20d79be8b11d8426136962ef63a40851554c097d69b8";
 const SYNAPSE_CHROME_BLOCKED_INSTALL_MESSAGE: &str = "Synapse blocked this extension on this host because debugger/nativeMessaging permissions can surface Chrome debugger or native-host popups during background automation.";
 const REQUIRED_DIRECT_HTTP_CAPABILITIES: &[&str] = &[
     "alarmReconnect",
     "activateTab",
     "closeTab",
+    "coordinateClick",
     "domAction",
     "externalPopupRiskSuppression",
     "navigateTab",
@@ -3259,6 +3259,36 @@ pub(crate) async fn dom_action(
         .await
 }
 
+pub(crate) struct ChromeDebuggerCoordinateClickRequest<'a> {
+    pub hwnd: i64,
+    pub target_id: &'a str,
+    pub x: i32,
+    pub y: i32,
+    pub coordinate_space: &'a str,
+    pub clicks: u8,
+    pub wait_timeout_ms: u64,
+}
+
+pub(crate) async fn coordinate_click(
+    request: ChromeDebuggerCoordinateClickRequest<'_>,
+) -> Result<Value, ChromeDebuggerBridgeError> {
+    ensure_normal_bridge_external_popup_suppressed(request.hwnd, "coordinateClick")?;
+    bridge()
+        .send_command(
+            "coordinateClick",
+            json!({
+                "hwnd": request.hwnd,
+                "targetIdHint": request.target_id,
+                "x": request.x,
+                "y": request.y,
+                "coordinateSpace": request.coordinate_space,
+                "clicks": request.clicks,
+                "waitTimeoutMs": request.wait_timeout_ms,
+            }),
+        )
+        .await
+}
+
 pub(crate) fn validate_reload_wait_timeout(
     value: Option<u64>,
 ) -> Result<u64, ChromeDebuggerBridgeError> {
@@ -4041,6 +4071,21 @@ fn chrome_response_readback_summary(kind: &str, result: Option<&Value>) -> Optio
             "resolved_by": result.get("resolved_by"),
             "match_count": result.get("match_count"),
             "tag_name": result.get("tag_name"),
+            "readback_backend": result.get("readback_backend"),
+            "target_candidate_count": result.get("target_candidate_count"),
+            "target_selection_reason": result.get("target_selection_reason"),
+            "extension_id": result.get("extension_id"),
+        }),
+        "coordinateClick" => json!({
+            "target_id": result.get("target_id"),
+            "tab_id": result.get("tab_id"),
+            "coordinate_space": result.get("coordinate_space"),
+            "input_coordinate": result.get("input_coordinate"),
+            "viewport_coordinate": result.get("viewport_coordinate"),
+            "click_count": result.get("click_count"),
+            "before_element": result.get("before_element"),
+            "after_element": result.get("after_element"),
+            "active_element": result.get("active_element"),
             "readback_backend": result.get("readback_backend"),
             "target_candidate_count": result.get("target_candidate_count"),
             "target_selection_reason": result.get("target_selection_reason"),

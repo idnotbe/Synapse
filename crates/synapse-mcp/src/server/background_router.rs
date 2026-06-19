@@ -19,7 +19,8 @@ use crate::m1::{
     CdpTargetInfoParams, ObserveParams, mcp_error,
 };
 use crate::m2::{
-    ActClickParams, ActFocusWindowParams, ActSetFieldTextParams, default_verify_timeout_ms,
+    ActClickParams, ActFocusWindowParams, ActSetFieldTextParams, ActTypeParams,
+    default_verify_timeout_ms,
 };
 use crate::m4::{ActRunShellExecutionMode, ActRunShellParams};
 use rmcp::schemars::JsonSchema;
@@ -27,7 +28,7 @@ use rmcp::{RoleServer, service::RequestContext};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
-use synapse_core::{ElementId, error_codes};
+use synapse_core::{ElementId, Point, Rect, error_codes};
 
 const DEFAULT_TARGET_ACT_SHELL_TIMEOUT_MS: u64 = 30_000;
 const DEFAULT_TARGET_ACT_FOCUS_STABLE_MS: u32 = 75;
@@ -35,8 +36,7 @@ const TARGET_ACT_STATUS_OK: &str = "ok";
 const TARGET_ACT_STATUS_VERIFY_NEEDED: &str = "verify_needed";
 const TARGET_ACT_STATUS_REFUSED: &str = "refused";
 const TARGET_ACT_STATUS_ERROR: &str = "error";
-const TARGET_ACT_KNOWN_VERBS: &str =
-    "read, screenshot, navigate, set_field, click, press, select, submit, run_shell, focus_window";
+const TARGET_ACT_KNOWN_VERBS: &str = "read, screenshot, navigate, set_field, click, type, press, select, submit, run_shell, focus_window";
 
 #[derive(Clone, Debug, JsonSchema)]
 #[schemars(transparent)]
@@ -97,6 +97,18 @@ pub struct TargetActParams {
     /// `click`: click count for target element clicks. Defaults to 1; valid range is 1..=3.
     #[serde(default)]
     pub clicks: Option<u8>,
+    /// `click` / `type`: coordinate X for target-owned coordinate fallback.
+    /// Defaults to screen coordinates; set coordinate_space for viewport/window-relative input.
+    #[serde(default)]
+    pub x: Option<i32>,
+    /// `click` / `type`: coordinate Y for target-owned coordinate fallback.
+    /// Defaults to screen coordinates; set coordinate_space for viewport/window-relative input.
+    #[serde(default)]
+    pub y: Option<i32>,
+    /// `click` / `type`: coordinate space for x/y. `screen` uses desktop pixels,
+    /// `window` uses the target outer-window origin, and `viewport` uses page client pixels.
+    #[serde(default)]
+    pub coordinate_space: Option<TargetActCoordinateSpace>,
     /// Browser DOM action readback wait budget (ms). Defaults to the browser
     /// bridge command budget and is capped by the daemon command timeout.
     #[serde(default)]
@@ -113,6 +125,31 @@ pub struct TargetActParams {
     /// `run_shell`: inline wait budget (ms). Defaults to 30000.
     #[serde(default)]
     pub timeout_ms: Option<u64>,
+}
+
+#[derive(Copy, Clone, Debug, Deserialize, JsonSchema, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum TargetActCoordinateSpace {
+    Screen,
+    Window,
+    Viewport,
+}
+
+impl TargetActCoordinateSpace {
+    const fn as_bridge_str(self) -> &'static str {
+        match self {
+            Self::Screen => "screen",
+            Self::Window => "window",
+            Self::Viewport => "viewport",
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+struct TargetActCoordinate {
+    x: i32,
+    y: i32,
+    space: TargetActCoordinateSpace,
 }
 
 #[derive(Clone, Debug, Serialize, JsonSchema)]
@@ -133,7 +170,7 @@ pub struct TargetActResponse {
 #[tool_router(router = background_router_tool_router, vis = "pub(super)")]
 impl SynapseService {
     #[tool(
-        description = "High-level capability-preserving computer-use router (#1005/#1033/#1207/#1219/#1261). One verb, routed to the correct session-targeted primitive: background/target-scoped when sufficient, agent_logical_foreground/foreground_lane when foreground-equivalent semantics are required, and never implicit fallback to the human OS foreground. verb=read observes the target; verb=screenshot captures it; verb=navigate drives the owned browser target (Chrome bridge/CDP); verb=set_field replaces a web/UIA field's text by element id via target-capable tiers or by CSS selector through the safe normal-Chrome bridge; verb=click clicks a target element by observed element_id or, with selector/role/name, by target-tab DOM action; verb=press presses a named button/link in the session-owned tab; verb=select chooses a native dropdown option; verb=submit calls HTMLFormElement.requestSubmit() for a matched form/submitter; verb=run_shell runs a command in the session workspace; verb=focus_window intentionally activates the session target's top-level HWND only after the session is already break_glass/full_capability and holds the foreground input lease, so Codex clients can use an existing target_act schema when they cannot hot-add act_focus_window after tools/list_changed. Prefer this over raw act_* primitives: it inherits target resolution, action audit, lane/lease guards, and structured refusals, so a normal session can keep valid foreground-equivalent capability without seizing the human foreground. Mutating failures are returned as ok=false with status=verify_needed/refused/error and the original structured error in result; no optimistic success. Bind a target first with set_target (discover one with window_list/cdp_open_tab)."
+        description = "High-level capability-preserving computer-use router (#1005/#1033/#1207/#1219/#1261/#1267). One verb, routed to the correct session-targeted primitive: background/target-scoped when sufficient, agent_logical_foreground/foreground_lane when foreground-equivalent semantics are required, and never implicit fallback to the human OS foreground. verb=read observes the target; verb=screenshot captures it; verb=navigate drives the owned browser target (Chrome bridge/CDP); verb=set_field replaces a web/UIA field's text by element id via target-capable tiers or by CSS selector through the safe normal-Chrome bridge; verb=click clicks a target element by observed element_id, selector/role/name DOM action, or x/y coordinate fallback on the owned target; verb=type optionally focuses x/y then types text into the session-owned browser active element or leased foreground target; verb=press presses a named button/link in the session-owned tab; verb=select chooses a native dropdown option; verb=submit calls HTMLFormElement.requestSubmit() for a matched form/submitter; verb=run_shell runs a command in the session workspace; verb=focus_window intentionally activates the session target's top-level HWND only after the session is already break_glass/full_capability and holds the foreground input lease, so Codex clients can use an existing target_act schema when they cannot hot-add act_focus_window after tools/list_changed. Prefer this over raw act_* primitives: it inherits target resolution, action audit, lane/lease guards, and structured refusals, so a normal session can keep valid foreground-equivalent capability without seizing the human foreground. Mutating failures are returned as ok=false with status=verify_needed/refused/error and the original structured error in result; no optimistic success. Bind a target first with set_target (discover one with window_list/cdp_open_tab)."
     )]
     pub async fn target_act(
         &self,
@@ -287,6 +324,12 @@ impl SynapseService {
                 )
             }
             "set_field" => {
+                if target_act_coordinate(&params)?.is_some() {
+                    return Err(mcp_error(
+                        error_codes::TOOL_PARAMS_INVALID,
+                        "target_act verb=set_field does not accept x/y because set_field is a replacement operation; use verb=type with x/y for coordinate focus + keyboard text",
+                    ));
+                }
                 if let Some(selector) = params.selector.filter(|value| !value.trim().is_empty()) {
                     // Background-safe web field replace in the user's normal Chrome
                     // via the safe bridge (no foreground, no DOM/action debugger attach, no UIA) — the
@@ -326,7 +369,15 @@ impl SynapseService {
                 }
             }
             "click" => {
-                if target_act_has_dom_locator(&params) {
+                if target_act_coordinate(&params)?.is_some() {
+                    if target_act_has_any_locator(&params) {
+                        return Err(mcp_error(
+                            error_codes::TOOL_PARAMS_INVALID,
+                            "target_act verb=click accepts either x/y coordinates or an element/DOM locator, not both",
+                        ));
+                    }
+                    target_act_coordinate_click(self, &params, &request_context).await?
+                } else if target_act_has_dom_locator(&params) {
                     target_act_browser_dom_action(self, "click", &params, &request_context).await?
                 } else {
                     let element_id =
@@ -342,6 +393,52 @@ impl SynapseService {
                         target_act_browser_dom_action(self, "click", &params, &request_context)
                             .await?
                     }
+                }
+            }
+            "type" => {
+                if target_act_has_any_locator(&params) {
+                    return Err(mcp_error(
+                        error_codes::TOOL_PARAMS_INVALID,
+                        "target_act verb=type accepts text plus optional x/y coordinate; use verb=set_field/click for element, selector, role, name, value, or option locators",
+                    ));
+                }
+                let text = require_param(params.text.clone(), "type", "text")?;
+                let coordinate_result = if target_act_coordinate(&params)?.is_some() {
+                    let (delegated_tool, ok, status, result) =
+                        target_act_coordinate_click(self, &params, &request_context).await?;
+                    if !ok {
+                        return Ok(Json(TargetActResponse {
+                            verb: verb.as_str().to_owned(),
+                            ok,
+                            status: status.to_owned(),
+                            delegated_tool: delegated_tool.to_owned(),
+                            routing: target_act_routing_description(),
+                            result,
+                        }));
+                    }
+                    Some((delegated_tool, result))
+                } else {
+                    None
+                };
+                let type_params = target_act_type_params(text, params.wait_timeout_ms)?;
+                let response = self
+                    .act_type(Parameters(type_params), request_context)
+                    .await;
+                let (_delegated_tool, ok, status, type_result) =
+                    target_act_delegate_response("act_type", response)?;
+                if let Some((coordinate_tool, coordinate_result)) = coordinate_result {
+                    (
+                        "chrome_debugger_bridge.coordinateClick+act_type",
+                        ok,
+                        status,
+                        json!({
+                            "coordinate_delegated_tool": coordinate_tool,
+                            "coordinate_click": coordinate_result,
+                            "type": type_result,
+                        }),
+                    )
+                } else {
+                    ("act_type", ok, status, type_result)
                 }
             }
             "press" => {
@@ -503,6 +600,14 @@ async fn target_act_browser_dom_action(
     request_context: &RequestContext<RoleServer>,
 ) -> Result<(&'static str, bool, &'static str, Value), ErrorData> {
     let session_id = target_act_session_id(request_context, action)?;
+    if target_act_coordinate(params)?.is_some() {
+        return Err(mcp_error(
+            error_codes::TOOL_PARAMS_INVALID,
+            format!(
+                "target_act verb={action} does not accept x/y; use verb=click or verb=type for coordinate fallback"
+            ),
+        ));
+    }
     target_act_validate_dom_locator(action, params)?;
     let wait_timeout_ms = target_act_dom_wait_timeout(params.wait_timeout_ms)?;
     let request_details = json!({
@@ -608,6 +713,166 @@ async fn target_act_browser_dom_action(
     }
 }
 
+async fn target_act_coordinate_click(
+    service: &SynapseService,
+    params: &TargetActParams,
+    request_context: &RequestContext<RoleServer>,
+) -> Result<(&'static str, bool, &'static str, Value), ErrorData> {
+    let session_id = target_act_session_id(request_context, "coordinate_click")?;
+    let coordinate = target_act_coordinate(params)?.ok_or_else(|| {
+        mcp_error(
+            error_codes::TOOL_PARAMS_INVALID,
+            "target_act coordinate click requires both x and y",
+        )
+    })?;
+    let clicks = target_act_click_count(params.clicks)?;
+    let wait_timeout_ms = target_act_dom_wait_timeout(params.wait_timeout_ms)?;
+    let request_details = json!({
+        "session_id": &session_id,
+        "verb": "coordinate_click",
+        "x": coordinate.x,
+        "y": coordinate.y,
+        "coordinate_space": coordinate.space.as_bridge_str(),
+        "clicks": clicks,
+        "wait_timeout_ms": wait_timeout_ms,
+        "requires_session_target": true,
+        "no_human_os_foreground_fallback": true,
+    });
+    let Some(target) = service.session_target(Some(&session_id))? else {
+        let error = mcp_error(
+            error_codes::TARGET_NOT_SET,
+            "target_act coordinate click requires this MCP session to own an agent_logical_foreground/foreground_lane target; bind a target with set_target or cdp_open_tab first",
+        );
+        service.audit_action_denied_with_details_for_session(
+            "target_act",
+            &error,
+            &request_details,
+            &session_id,
+        );
+        return Ok((
+            "target_act",
+            false,
+            target_act_error_status(&error),
+            target_act_error_result("target_act", error),
+        ));
+    };
+    if let Err(error) =
+        service.ensure_target_claim_allows_session("target_act", &session_id, &target)
+    {
+        service.audit_action_denied_with_details_for_session(
+            "target_act",
+            &error,
+            &request_details,
+            &session_id,
+        );
+        return Ok((
+            "target_act",
+            false,
+            target_act_error_status(&error),
+            target_act_error_result("target_act", error),
+        ));
+    }
+    match target {
+        SessionTarget::Cdp {
+            window_hwnd,
+            cdp_target_id,
+        } => {
+            let request_details = json!({
+                "session_id": &session_id,
+                "verb": "coordinate_click",
+                "delegated_tool": "chrome_debugger_bridge.coordinateClick",
+                "window_hwnd": window_hwnd,
+                "cdp_target_id": &cdp_target_id,
+                "x": coordinate.x,
+                "y": coordinate.y,
+                "coordinate_space": coordinate.space.as_bridge_str(),
+                "clicks": clicks,
+                "wait_timeout_ms": wait_timeout_ms,
+                "required_foreground": false,
+            });
+            service.audit_action_started_with_details_for_session(
+                "target_act",
+                &request_details,
+                &session_id,
+            )?;
+            let result = crate::chrome_debugger_bridge::coordinate_click(
+                crate::chrome_debugger_bridge::ChromeDebuggerCoordinateClickRequest {
+                    hwnd: window_hwnd,
+                    target_id: &cdp_target_id,
+                    x: coordinate.x,
+                    y: coordinate.y,
+                    coordinate_space: coordinate.space.as_bridge_str(),
+                    clicks,
+                    wait_timeout_ms,
+                },
+            )
+            .await
+            .map_err(|error| mcp_error(error.code(), error.detail().to_owned()));
+            service.audit_action_result_for_session("target_act", &result, &session_id)?;
+            match result {
+                Ok(value) => Ok((
+                    "chrome_debugger_bridge.coordinateClick",
+                    true,
+                    TARGET_ACT_STATUS_OK,
+                    value,
+                )),
+                Err(error) => Ok((
+                    "chrome_debugger_bridge.coordinateClick",
+                    false,
+                    target_act_error_status(&error),
+                    target_act_error_result("chrome_debugger_bridge.coordinateClick", error),
+                )),
+            }
+        }
+        SessionTarget::Window { hwnd } => {
+            let point = match target_act_window_coordinate_to_screen_point(hwnd, coordinate) {
+                Ok(point) => point,
+                Err(error) => {
+                    service.audit_action_denied_with_details_for_session(
+                        "target_act",
+                        &error,
+                        &request_details,
+                        &session_id,
+                    );
+                    return Ok((
+                        "act_click",
+                        false,
+                        target_act_error_status(&error),
+                        target_act_error_result("act_click", error),
+                    ));
+                }
+            };
+            if let Err(error) = target_act_window_coordinate_foreground_preflight(hwnd) {
+                service.audit_action_denied_with_details_for_session(
+                    "target_act",
+                    &error,
+                    &request_details,
+                    &session_id,
+                );
+                return Ok((
+                    "act_click",
+                    false,
+                    target_act_error_status(&error),
+                    target_act_error_result("act_click", error),
+                ));
+            }
+            let click_params = target_act_click_point_params(point, clicks)?;
+            let response = service
+                .act_click(Parameters(click_params), request_context.clone())
+                .await;
+            target_act_delegate_response("act_click", response)
+        }
+    }
+}
+
+fn target_act_has_any_locator(params: &TargetActParams) -> bool {
+    params
+        .element_id
+        .as_ref()
+        .is_some_and(|value| !value.trim().is_empty())
+        || target_act_has_dom_locator(params)
+}
+
 fn target_act_has_dom_locator(params: &TargetActParams) -> bool {
     params
         .selector
@@ -629,6 +894,33 @@ fn target_act_has_dom_locator(params: &TargetActParams) -> bool {
             .option
             .as_ref()
             .is_some_and(|value| !value.trim().is_empty())
+}
+
+fn target_act_coordinate(
+    params: &TargetActParams,
+) -> Result<Option<TargetActCoordinate>, ErrorData> {
+    match (params.x, params.y) {
+        (Some(x), Some(y)) => Ok(Some(TargetActCoordinate {
+            x,
+            y,
+            space: params
+                .coordinate_space
+                .unwrap_or(TargetActCoordinateSpace::Screen),
+        })),
+        (None, None) => {
+            if params.coordinate_space.is_some() {
+                return Err(mcp_error(
+                    error_codes::TOOL_PARAMS_INVALID,
+                    "target_act coordinate_space requires both x and y",
+                ));
+            }
+            Ok(None)
+        }
+        _ => Err(mcp_error(
+            error_codes::TOOL_PARAMS_INVALID,
+            "target_act coordinate fallback requires both x and y; one coordinate was missing",
+        )),
+    }
 }
 
 fn target_act_legacy_click_element_id(value: &str) -> Result<Option<ElementId>, ErrorData> {
@@ -858,6 +1150,140 @@ fn target_act_click_params(element_id: ElementId, clicks: u8) -> Result<ActClick
     })
 }
 
+fn target_act_click_point_params(point: Point, clicks: u8) -> Result<ActClickParams, ErrorData> {
+    serde_json::from_value(json!({
+        "target": {
+            "x": point.x,
+            "y": point.y
+        },
+        "clicks": clicks,
+        "verify_delta": true,
+        "verify_timeout_ms": default_verify_timeout_ms()
+    }))
+    .map_err(|error| {
+        mcp_error(
+            error_codes::TOOL_INTERNAL_ERROR,
+            format!("target_act failed to construct coordinate act_click params: {error}"),
+        )
+    })
+}
+
+fn target_act_type_params(
+    text: String,
+    wait_timeout_ms: Option<u64>,
+) -> Result<ActTypeParams, ErrorData> {
+    let verify_timeout_ms = target_act_type_verify_timeout(wait_timeout_ms)?;
+    serde_json::from_value(json!({
+        "text": text,
+        "verify_delta": true,
+        "verify_timeout_ms": verify_timeout_ms
+    }))
+    .map_err(|error| {
+        mcp_error(
+            error_codes::TOOL_INTERNAL_ERROR,
+            format!("target_act failed to construct act_type params: {error}"),
+        )
+    })
+}
+
+fn target_act_type_verify_timeout(value: Option<u64>) -> Result<u32, ErrorData> {
+    let wait_timeout_ms = value.unwrap_or_else(|| u64::from(default_verify_timeout_ms()));
+    if !(50..=5000).contains(&wait_timeout_ms) {
+        return Err(mcp_error(
+            error_codes::TOOL_PARAMS_INVALID,
+            format!(
+                "target_act verb=type wait_timeout_ms must be 50..=5000, got {wait_timeout_ms}"
+            ),
+        ));
+    }
+    Ok(wait_timeout_ms as u32)
+}
+
+fn target_act_window_coordinate_to_screen_point(
+    hwnd: i64,
+    coordinate: TargetActCoordinate,
+) -> Result<Point, ErrorData> {
+    if coordinate.space == TargetActCoordinateSpace::Viewport {
+        return Err(mcp_error(
+            error_codes::TOOL_PARAMS_INVALID,
+            "target_act native/window coordinate click does not support coordinate_space=viewport; use screen or window coordinates, or bind a Chrome CDP target for viewport coordinates",
+        ));
+    }
+    let context = synapse_a11y::foreground_context(hwnd).map_err(|error| {
+        mcp_error(
+            error.code(),
+            format!(
+                "target_act coordinate click target window HWND 0x{hwnd:x} bounds readback failed: {error}"
+            ),
+        )
+    })?;
+    let bounds = context.window_bounds;
+    let point = match coordinate.space {
+        TargetActCoordinateSpace::Screen => Point {
+            x: coordinate.x,
+            y: coordinate.y,
+        },
+        TargetActCoordinateSpace::Window => Point {
+            x: bounds.x.saturating_add(coordinate.x),
+            y: bounds.y.saturating_add(coordinate.y),
+        },
+        TargetActCoordinateSpace::Viewport => unreachable!("viewport rejected above"),
+    };
+    if !target_act_rect_contains_point(bounds, point) {
+        return Err(mcp_error(
+            error_codes::ACTION_TARGET_INVALID,
+            format!(
+                "target_act coordinate click point ({}, {}) is outside target window 0x{hwnd:x} bounds ({}, {}, {}x{})",
+                point.x, point.y, bounds.x, bounds.y, bounds.w, bounds.h
+            ),
+        ));
+    }
+    Ok(point)
+}
+
+fn target_act_window_coordinate_foreground_preflight(hwnd: i64) -> Result<(), ErrorData> {
+    let target_root = synapse_a11y::top_level_root_hwnd(hwnd).map_err(|error| {
+        mcp_error(
+            error.code(),
+            format!(
+                "target_act coordinate click target HWND 0x{hwnd:x} root readback failed: {error}"
+            ),
+        )
+    })?;
+    let foreground = synapse_a11y::current_foreground_context().map_err(|error| {
+        mcp_error(
+            error.code(),
+            format!("target_act coordinate click foreground readback failed: {error}"),
+        )
+    })?;
+    let foreground_root = synapse_a11y::top_level_root_hwnd(foreground.hwnd).map_err(|error| {
+        mcp_error(
+            error.code(),
+            format!(
+                "target_act coordinate click foreground HWND 0x{:x} root readback failed: {error}",
+                foreground.hwnd
+            ),
+        )
+    })?;
+    if foreground_root != target_root {
+        return Err(mcp_error(
+            error_codes::FOREGROUND_ACTIVATION_REFUSED,
+            format!(
+                "target_act native/window coordinate click requires the session target 0x{target_root:x} to already be the real OS foreground before using screen coordinates; current human_os_foreground root=0x{foreground_root:x} process={} title={:?}. Acquire the foreground input lease and call target_act verb=focus_window explicitly before this fallback, or use a Chrome CDP target coordinate route.",
+                foreground.process_name, foreground.window_title
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn target_act_rect_contains_point(rect: Rect, point: Point) -> bool {
+    point.x >= rect.x
+        && point.y >= rect.y
+        && point.x < rect.x.saturating_add(rect.w)
+        && point.y < rect.y.saturating_add(rect.h)
+}
+
 fn target_act_error_result(delegated_tool: &'static str, error: ErrorData) -> Value {
     let code = target_act_error_code(&error)
         .unwrap_or(error_codes::TOOL_INTERNAL_ERROR)
@@ -952,19 +1378,20 @@ mod tests {
     fn target_act_verb_schema_is_forward_compatible_string() {
         let schema = serde_json::to_value(schema_for!(TargetActParams))
             .unwrap_or_else(|error| panic!("target_act params schema should serialize: {error}"));
-        let schema_text = schema.to_string();
+        let verb_schema = schema
+            .pointer("/properties/verb")
+            .unwrap_or_else(|| panic!("target_act schema must include verb: {schema}"));
 
         assert!(
-            schema_text.contains("\"verb\""),
-            "target_act schema must include verb: {schema_text}"
+            verb_schema
+                .pointer("/type")
+                .and_then(Value::as_str)
+                .is_some_and(|value| value == "string"),
+            "target_act verb schema must be an open string: {verb_schema}"
         );
         assert!(
-            schema_text.contains("\"type\":\"string\""),
-            "target_act verb schema must be an open string: {schema_text}"
-        );
-        assert!(
-            !schema_text.contains("\"enum\""),
-            "target_act verb schema must not be a closed enum: {schema_text}"
+            verb_schema.pointer("/enum").is_none(),
+            "target_act verb schema must not be a closed enum: {verb_schema}"
         );
     }
 
@@ -1067,6 +1494,96 @@ mod tests {
     }
 
     #[test]
+    fn target_act_coordinate_click_deserializes() {
+        let params: TargetActParams = serde_json::from_value(json!({
+            "verb": "click",
+            "x": 42,
+            "y": 77,
+            "coordinate_space": "viewport",
+            "clicks": 3
+        }))
+        .expect("coordinate click params should deserialize");
+        let coordinate = target_act_coordinate(&params)
+            .expect("coordinate should validate")
+            .expect("coordinate should be present");
+
+        assert_eq!(params.verb.as_str(), "click");
+        assert_eq!(coordinate.x, 42);
+        assert_eq!(coordinate.y, 77);
+        assert_eq!(coordinate.space, TargetActCoordinateSpace::Viewport);
+        assert_eq!(coordinate.space.as_bridge_str(), "viewport");
+        assert_eq!(target_act_click_count(params.clicks).unwrap(), 3);
+    }
+
+    #[test]
+    fn target_act_coordinate_defaults_to_screen_space() {
+        let params: TargetActParams = serde_json::from_value(json!({
+            "verb": "click",
+            "x": 12,
+            "y": 34
+        }))
+        .expect("coordinate click params should deserialize");
+        let coordinate = target_act_coordinate(&params)
+            .expect("coordinate should validate")
+            .expect("coordinate should be present");
+
+        assert_eq!(coordinate.space, TargetActCoordinateSpace::Screen);
+        assert_eq!(coordinate.space.as_bridge_str(), "screen");
+    }
+
+    #[test]
+    fn target_act_coordinate_requires_x_y_pair() {
+        let params: TargetActParams = serde_json::from_value(json!({
+            "verb": "click",
+            "x": 42
+        }))
+        .expect("partial coordinate params should deserialize");
+        let error = target_act_coordinate(&params).expect_err("missing y must fail closed");
+
+        assert_eq!(
+            target_act_error_code(&error),
+            Some(error_codes::TOOL_PARAMS_INVALID)
+        );
+    }
+
+    #[test]
+    fn target_act_coordinate_space_requires_coordinates() {
+        let params: TargetActParams = serde_json::from_value(json!({
+            "verb": "click",
+            "coordinate_space": "viewport"
+        }))
+        .expect("coordinate-space-only params should deserialize");
+        let error = target_act_coordinate(&params)
+            .expect_err("coordinate_space without coordinates must fail closed");
+
+        assert_eq!(
+            target_act_error_code(&error),
+            Some(error_codes::TOOL_PARAMS_INVALID)
+        );
+    }
+
+    #[test]
+    fn target_act_coordinate_rejects_locator_mix_before_routing() {
+        let params: TargetActParams = serde_json::from_value(json!({
+            "verb": "click",
+            "selector": "#submit",
+            "x": 42,
+            "y": 77
+        }))
+        .expect("mixed coordinate and selector params should deserialize");
+
+        assert!(
+            target_act_coordinate(&params)
+                .expect("coordinate pair should validate")
+                .is_some()
+        );
+        assert!(
+            target_act_has_any_locator(&params),
+            "mixed selector/coordinate input must be detected before routing"
+        );
+    }
+
+    #[test]
     fn target_act_dom_verbs_deserialize_and_validate() {
         let press: TargetActParams = serde_json::from_value(json!({
             "verb": "press",
@@ -1109,6 +1626,49 @@ mod tests {
             target_act_error_code(&error),
             Some(error_codes::TOOL_PARAMS_INVALID)
         );
+    }
+
+    #[test]
+    fn target_act_type_params_constructs_act_type_request() {
+        let params = target_act_type_params("issue-1267".to_owned(), Some(750))
+            .expect("target_act type params should construct act_type params");
+
+        assert_eq!(params.text, "issue-1267");
+        assert_eq!(params.verify_timeout_ms, 750);
+        assert!(params.verify_delta);
+        assert!(params.into_element.is_none());
+    }
+
+    #[test]
+    fn target_act_type_wait_timeout_is_bounded() {
+        let error = target_act_type_params("issue-1267".to_owned(), Some(30_000))
+            .expect_err("type wait timeout must be bounded");
+
+        assert_eq!(
+            target_act_error_code(&error),
+            Some(error_codes::TOOL_PARAMS_INVALID)
+        );
+    }
+
+    #[test]
+    fn target_act_rect_contains_point_uses_exclusive_bottom_right() {
+        let rect = Rect {
+            x: 10,
+            y: 20,
+            w: 30,
+            h: 40,
+        };
+
+        assert!(target_act_rect_contains_point(rect, Point { x: 10, y: 20 }));
+        assert!(target_act_rect_contains_point(rect, Point { x: 39, y: 59 }));
+        assert!(!target_act_rect_contains_point(
+            rect,
+            Point { x: 40, y: 59 }
+        ));
+        assert!(!target_act_rect_contains_point(
+            rect,
+            Point { x: 39, y: 60 }
+        ));
     }
 
     #[test]
