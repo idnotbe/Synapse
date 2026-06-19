@@ -274,13 +274,13 @@ function Set-SynapseChromeExternalDebuggerPolicy {
             hive = 'HKCU'
             path = $policyRoot
             changed = $false
-            reason = 'external_popup_shield_write_denied_warning'
+            reason = 'external_popup_shield_write_denied_requires_bridge_management'
             warning_code = 'SYNAPSE_CHROME_POLICY_POPUP_SHIELD_WRITE_DENIED'
-            blocking = $false
+            blocking = $true
             phase = 'read_or_create'
             error = $_.Exception.Message
             acl = $acl
-            remediation = 'repair HKCU\Software\Policies\Google\Chrome ACL or run from elevated PowerShell if you want Synapse to apply the external debugger/nativeMessaging popup shield; Synapse keeps its debugger-free chrome.tabs/chrome.scripting bridge available and continues to refuse attach-capable debugger commands'
+            remediation = 'repair HKCU\Software\Policies\Google\Chrome ACL or run from elevated PowerShell so Synapse can apply the external debugger/nativeMessaging popup shield; otherwise the installed Synapse Chrome Bridge must suppress the hazard through chrome.management or normal bridge commands fail closed before touching Chrome'
             shielded_entries = @()
             unchanged_entries = @()
         }
@@ -345,13 +345,13 @@ function Set-SynapseChromeExternalDebuggerPolicy {
                 hive = 'HKCU'
                 path = $policyRoot
                 changed = $false
-                reason = 'external_popup_shield_write_denied_warning'
+                reason = 'external_popup_shield_write_denied_requires_bridge_management'
                 warning_code = 'SYNAPSE_CHROME_POLICY_POPUP_SHIELD_WRITE_DENIED'
-                blocking = $false
+                blocking = $true
                 phase = 'write_extension_settings'
                 error = $_.Exception.Message
                 acl = $acl
-                remediation = 'repair HKCU\Software\Policies\Google\Chrome ACL or run from elevated PowerShell if you want Synapse to apply the external debugger/nativeMessaging popup shield; Synapse keeps its debugger-free chrome.tabs/chrome.scripting bridge available and continues to refuse attach-capable debugger commands'
+                remediation = 'repair HKCU\Software\Policies\Google\Chrome ACL or run from elevated PowerShell so Synapse can apply the external debugger/nativeMessaging popup shield; otherwise the installed Synapse Chrome Bridge must suppress the hazard through chrome.management or normal bridge commands fail closed before touching Chrome'
                 shielded_entries = @($shieldedEntries)
                 unchanged_entries = @($unchangedEntries)
             }
@@ -518,6 +518,9 @@ if ($requiredPermissions -contains 'nativeMessaging') {
 }
 if ($optionalPermissions -contains 'nativeMessaging') {
     throw "SYNAPSE_CHROME_EXTENSION_OPTIONAL_NATIVE_MESSAGING_FORBIDDEN path=$manifestPath remediation=normal end-user bridge must not request nativeMessaging"
+}
+if (-not ($requiredPermissions -contains 'management')) {
+    throw "SYNAPSE_CHROME_EXTENSION_MANAGEMENT_PERMISSION_REQUIRED path=$manifestPath remediation=normal end-user bridge must request chrome.management so it can disable external debugger/nativeMessaging extensions or fail closed with exact readback before any browser command"
 }
 if (-not ($requiredPermissions -contains 'alarms')) {
     throw "SYNAPSE_CHROME_EXTENSION_ALARMS_PERMISSION_MISSING path=$manifestPath remediation=normal end-user bridge requires chrome.alarms so an MV3 service worker suspended after daemon restart can wake and re-register without foreground Chrome automation"
@@ -790,10 +793,9 @@ $externalHazardExtensionIds = @(
 # External extensions and native-messaging hosts that use debugger/nativeMessaging
 # can surface layout-changing Chrome popups independently of Synapse's tabs-only
 # bridge. Setup tries to apply a reversible HKCU ExtensionSettings shield for
-# those permissions by default. Failure to write the external shield is reported
-# with ACL/readback detail, but it does not block Synapse's own debugger-free
-# tabs/scripting bridge. The bridge still refuses attach-capable debugger
-# commands before queueing any Chrome command.
+# those permissions by default. If this host denies that policy write, the
+# installed bridge must suppress the hazards through chrome.management or normal
+# tabs/scripting commands fail closed before queueing any Chrome command.
 #
 # As a one-way remediation we remove any debugger/nativeMessaging blockers that
 # an earlier Synapse version wrote into Chrome ExtensionSettings, so running the
@@ -823,10 +825,10 @@ $chromePolicyPopupShield = if ($PreserveExternalDebuggerExtensions) {
     daemon_bridge_transport = 'direct_localhost_websocket'
     daemon_bridge_origin = "chrome-extension://$ExtensionId"
     bridge_self_reload_command = 'cdp_bridge_reload'
-    bridge_build_id_expected = 'synapse-chrome-bridge-2026-06-18-strict-hwnd-target-v1'
-    bridge_build_sha256_expected = '97441613be8ff1883e9c24a22c231bfd23f14b505e0bff54a7a8282281d3f55d'
-    bridge_required_capabilities = @('alarmReconnect', 'activateTab', 'closeTab', 'domAction', 'navigateTab', 'openTab', 'pageVitals', 'reloadSelf', 'targetInfo', 'targetInfoPageText', 'typeActiveElement', 'setFieldValue')
-    background_navigation_backend = 'chrome.tabs_plus_chrome.scripting_executeScript_for_typed_dom_actions_no_debugger_no_native_messaging'
+    bridge_build_id_expected = 'synapse-chrome-bridge-2026-06-19-managed-popup-shield-v1'
+    bridge_build_sha256_expected = '6a9168f4c16ef0c52d2ce61c39c610808d374b526b214199258312cf1f569ca1'
+    bridge_required_capabilities = @('alarmReconnect', 'activateTab', 'closeTab', 'domAction', 'externalPopupRiskSuppression', 'navigateTab', 'openTab', 'pageVitals', 'reloadSelf', 'targetInfo', 'targetInfoPageText', 'typeActiveElement', 'setFieldValue')
+    background_navigation_backend = 'chrome.tabs_plus_chrome.scripting_executeScript_for_typed_dom_actions_no_debugger_no_native_messaging_plus_chrome.management_external_popup_suppression'
     reconnect_driver = 'bounded_websocket_reconnect_with_chrome_alarms_mv3_wake'
     attach_popup_prevention = 'normal_bridge_debugger_free_no_chrome.debugger_permission_no_helper_windows_no_nativeMessaging_permission_plus_daemon_side_attach_disabled_for_debugger_commands'
     normal_bridge_attach_commands_available = $false
@@ -836,6 +838,7 @@ $chromePolicyPopupShield = if ($PreserveExternalDebuggerExtensions) {
     recurring_wakeup_permission_present = ($requiredPermissions -contains 'alarms')
     required_debugger_permission_present = $false
     optional_debugger_permission_present = $false
+    required_management_permission_present = ($requiredPermissions -contains 'management')
     required_native_messaging_permission_present = $false
     optional_native_messaging_permission_present = $false
     localhost_host_permission_present = $true
@@ -848,9 +851,11 @@ $chromePolicyPopupShield = if ($PreserveExternalDebuggerExtensions) {
     current_chrome_processes = $chromeProcesses
     chrome_policy_cleanup = $chromePolicyCleanup
     chrome_policy_popup_shield = $chromePolicyPopupShield
-    external_popup_risk_blocks_popup_free_commands = $false
-    external_popup_risk_scope = 'reported_for_operator_attribution_and_policy_shield_only'
-    external_popup_risk_block_reason = 'none'
+    external_popup_risk_blocks_popup_free_commands = ($allExternalDebuggerOrNativeExtensions.Count -gt 0)
+    external_popup_risk_scope = 'runtime_bridge_management_suppression_or_fail_closed'
+    external_popup_risk_block_reason = if ($allExternalDebuggerOrNativeExtensions.Count -gt 0) { 'external_debugger_or_native_hazards_require_chrome_management_suppression_or_policy_shield' } else { 'none' }
+    external_popup_risk_bridge_management_required = ($allExternalDebuggerOrNativeExtensions.Count -gt 0)
+    external_popup_risk_bridge_management_permission_present = ($requiredPermissions -contains 'management')
     synapse_chrome_profile_readback = $synapseChromeProfileReadback
     synapse_stale_granted_permission_warning = [pscustomobject]@{
         warning = ($staleSynapseGrantedPermissions.Count -gt 0)

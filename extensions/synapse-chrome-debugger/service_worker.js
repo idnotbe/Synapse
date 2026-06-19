@@ -1,8 +1,9 @@
 const PROTOCOL_VERSION = 1;
-const BRIDGE_BUILD_ID = "synapse-chrome-bridge-2026-06-18-strict-hwnd-target-v1";
-const BRIDGE_BUILD_SHA256 = "97441613be8ff1883e9c24a22c231bfd23f14b505e0bff54a7a8282281d3f55d";
+const BRIDGE_BUILD_ID = "synapse-chrome-bridge-2026-06-19-managed-popup-shield-v1";
+const BRIDGE_BUILD_SHA256 = "6a9168f4c16ef0c52d2ce61c39c610808d374b526b214199258312cf1f569ca1";
 const COMMAND_CAPABILITIES = Object.freeze([
   "alarmReconnect",
+  "externalPopupRiskSuppression",
   "openTab",
   "closeTab",
   "targetInfo",
@@ -46,6 +47,8 @@ const AGENT_NAVIGATION_CLAIM_TTL_MS = 30000;
 const MAX_RECENT_NAVIGATION_KEYS = 128;
 const MAX_PAGE_TEXT_CHARS = 4096;
 const OPEN_WINDOW_BOUNDS_TOLERANCE_PX = 96;
+const EXTERNAL_POPUP_RISK_PERMISSIONS = Object.freeze(["debugger", "nativeMessaging"]);
+const POPUP_RISK_SUPPRESSION_RECHECK_MS = 60000;
 
 let hostId = null;
 let bridgeToken = null;
@@ -58,8 +61,24 @@ let disconnectedKeepAliveTimer = null;
 let permanentlyDisabled = false;
 const agentNavigationClaims = new Map();
 const recentNavigationKeys = [];
+let popupRiskSuppressionInFlight = null;
+let popupRiskSuppressionState = {
+  ok: false,
+  status: "not_checked",
+  reason: "not_checked",
+  checked_at_unix_ms: 0,
+  hazard_count: 0,
+  remaining_hazard_count: 0,
+  disabled_count: 0,
+  failure_count: 0,
+  management_available: Boolean(chrome.management?.getAll),
+  hazards: [],
+  disabled: [],
+  remaining_hazards: [],
+  failures: []
+};
 
-function startBridge() {
+async function startBridge() {
   if (chrome.runtime.id !== EXPECTED_EXTENSION_ID) {
     disableBridgePermanently(
       `extension id mismatch: actual=${chrome.runtime.id} expected=${EXPECTED_EXTENSION_ID}; ` +
@@ -70,7 +89,15 @@ function startBridge() {
     return;
   }
   ensureReconnectWakeAlarm();
+  await ensureExternalPopupRiskSuppression("startup");
   connectDaemon();
+}
+
+function startBridgeFromEvent() {
+  startBridge().catch((error) => {
+    console.error(`Synapse daemon bridge startup failed: ${errorMessage(error)}`);
+    connectDaemon();
+  });
 }
 
 function connectDaemon() {
@@ -91,7 +118,8 @@ function connectDaemon() {
     return;
   }
   clearReconnectTimer();
-  connectInFlight = registerDaemon()
+  connectInFlight = ensureExternalPopupRiskSuppression("connectDaemon")
+    .then(() => registerDaemon())
     .catch((error) => {
       if (error?.code === ERROR_DEBUGGER_WARNING_UNSUPPRESSED) {
         scheduleReconnect(
@@ -192,6 +220,228 @@ function resetReconnectState() {
   clearReconnectTimer();
   stopDisconnectedKeepAlive();
   ensureReconnectWakeAlarm();
+}
+
+async function ensureExternalPopupRiskSuppression(reason) {
+  const now = Date.now();
+  if (
+    popupRiskSuppressionState.status !== "not_checked" &&
+    now - popupRiskSuppressionState.checked_at_unix_ms < POPUP_RISK_SUPPRESSION_RECHECK_MS
+  ) {
+    return popupRiskSuppressionState;
+  }
+  if (popupRiskSuppressionInFlight) {
+    return popupRiskSuppressionInFlight;
+  }
+  popupRiskSuppressionInFlight = refreshExternalPopupRiskSuppression(reason)
+    .catch((error) => {
+      popupRiskSuppressionState = {
+        ok: false,
+        status: "suppression_error",
+        reason,
+        checked_at_unix_ms: Date.now(),
+        hazard_count: 0,
+        remaining_hazard_count: 0,
+        disabled_count: 0,
+        failure_count: 1,
+        management_available: Boolean(chrome.management?.getAll),
+        hazards: [],
+        disabled: [],
+        remaining_hazards: [],
+        failures: [{
+          id: "<suppression_scan>",
+          name: "suppression_scan",
+          error: errorMessage(error)
+        }]
+      };
+      return popupRiskSuppressionState;
+    })
+    .finally(() => {
+      popupRiskSuppressionInFlight = null;
+    });
+  return popupRiskSuppressionInFlight;
+}
+
+async function requireExternalPopupRisksSuppressed(commandKind, params) {
+  if (!commandRequiresExternalPopupSuppression(commandKind)) {
+    return;
+  }
+  const state = await ensureExternalPopupRiskSuppression(`command:${String(commandKind)}`);
+  if (state.ok && state.remaining_hazard_count === 0) {
+    return;
+  }
+  throw bridgeError(
+    ERROR_DEBUGGER_WARNING_UNSUPPRESSED,
+    `normal Synapse Chrome Bridge refused ${String(commandKind)} before queueing a Chrome ` +
+      `tabs/scripting command because external debugger/nativeMessaging popup risk remains ` +
+      `unsuppressed; hwnd=${String(params?.hwnd ?? "unknown")} ` +
+      formatPopupRiskSuppressionForError(state)
+  );
+}
+
+function commandRequiresExternalPopupSuppression(kind) {
+  return [
+    "openTab",
+    "closeTab",
+    "targetInfo",
+    "targetInfoPageText",
+    "typeActiveElement",
+    "setFieldValue",
+    "pageVitals",
+    "navigateTab",
+    "activateTab",
+    "domAction"
+  ].includes(kind);
+}
+
+async function refreshExternalPopupRiskSuppression(reason) {
+  const checkedAt = Date.now();
+  const managementAvailable = Boolean(chrome.management?.getAll);
+  if (!managementAvailable) {
+    popupRiskSuppressionState = {
+      ok: false,
+      status: "management_unavailable",
+      reason,
+      checked_at_unix_ms: checkedAt,
+      hazard_count: 0,
+      remaining_hazard_count: 0,
+      disabled_count: 0,
+      failure_count: 1,
+      management_available: false,
+      hazards: [],
+      disabled: [],
+      remaining_hazards: [],
+      failures: [{
+        id: "<chrome.management>",
+        name: "chrome.management",
+        error: "management permission/API unavailable"
+      }]
+    };
+    return popupRiskSuppressionState;
+  }
+
+  const before = await chrome.management.getAll();
+  const hazards = enabledExternalPopupRiskExtensions(before);
+  const disabled = [];
+  const failures = [];
+
+  for (const hazard of hazards) {
+    if (hazard.may_disable === false) {
+      failures.push({
+        ...hazard,
+        error: "chrome.management reports mayDisable=false"
+      });
+      continue;
+    }
+    try {
+      await chrome.management.setEnabled(hazard.id, false);
+      disabled.push(hazard);
+    } catch (error) {
+      failures.push({
+        ...hazard,
+        error: errorMessage(error)
+      });
+    }
+  }
+
+  const after = disabled.length > 0 ? await chrome.management.getAll() : before;
+  const remaining = enabledExternalPopupRiskExtensions(after);
+  const remainingIds = new Set(remaining.map((entry) => entry.id));
+  for (const entry of disabled) {
+    if (remainingIds.has(entry.id)) {
+      failures.push({
+        ...entry,
+        error: "chrome.management.setEnabled returned but extension remained enabled"
+      });
+    }
+  }
+
+  const ok = remaining.length === 0 && failures.length === 0;
+  popupRiskSuppressionState = {
+    ok,
+    status: ok ? (hazards.length > 0 ? "suppressed" : "clear") : "unsuppressed",
+    reason,
+    checked_at_unix_ms: checkedAt,
+    hazard_count: hazards.length,
+    remaining_hazard_count: remaining.length,
+    disabled_count: disabled.length,
+    failure_count: failures.length,
+    management_available: true,
+    hazards,
+    disabled,
+    remaining_hazards: remaining,
+    failures
+  };
+  if (!ok) {
+    console.warn(
+      `Synapse external popup risk suppression incomplete: ` +
+        formatPopupRiskSuppressionForError(popupRiskSuppressionState)
+    );
+  } else if (disabled.length > 0) {
+    console.warn(
+      `Synapse disabled ${disabled.length} external debugger/nativeMessaging extension(s): ` +
+        disabled.map((entry) => `${entry.id}:${entry.name}`).join(" | ")
+    );
+  }
+  return popupRiskSuppressionState;
+}
+
+function enabledExternalPopupRiskExtensions(items) {
+  return (Array.isArray(items) ? items : [])
+    .filter((info) => info?.id && info.id !== chrome.runtime.id && info.enabled === true)
+    .map((info) => {
+      const permissions = Array.isArray(info.permissions) ? info.permissions : [];
+      const hazardPermissions = permissions
+        .filter((permission) => EXTERNAL_POPUP_RISK_PERMISSIONS.includes(permission))
+        .sort();
+      return {
+        id: String(info.id),
+        name: String(info.name || ""),
+        type: String(info.type || ""),
+        install_type: String(info.installType || ""),
+        may_disable: info.mayDisable !== false,
+        permissions: permissions.map(String).sort(),
+        hazard_permissions: [...new Set(hazardPermissions)],
+        enabled: info.enabled === true,
+        disabled_reason: info.disabledReason ? String(info.disabledReason) : ""
+      };
+    })
+    .filter((info) => info.hazard_permissions.length > 0)
+    .sort((a, b) => a.id.localeCompare(b.id));
+}
+
+function popupRiskSuppressionSnapshot() {
+  return JSON.parse(JSON.stringify(popupRiskSuppressionState));
+}
+
+function formatPopupRiskSuppressionForError(state) {
+  const remaining = Array.isArray(state?.remaining_hazards) ? state.remaining_hazards : [];
+  const failures = Array.isArray(state?.failures) ? state.failures : [];
+  const remainingText = remaining.length > 0
+    ? remaining
+        .slice(0, 8)
+        .map((entry) => `${entry.id}:${entry.name}:${entry.hazard_permissions.join(",")}`)
+        .join(" | ")
+    : "<none>";
+  const failureText = failures.length > 0
+    ? failures
+        .slice(0, 8)
+        .map((entry) => `${entry.id}:${entry.name}:${entry.error || "unknown"}`)
+        .join(" | ")
+    : "<none>";
+  return (
+    `suppression_status=${String(state?.status || "unknown")} ` +
+    `suppression_reason=${String(state?.reason || "unknown")} ` +
+    `management_available=${Boolean(state?.management_available)} ` +
+    `hazard_count=${Number(state?.hazard_count || 0)} ` +
+    `disabled_count=${Number(state?.disabled_count || 0)} ` +
+    `remaining_hazard_count=${Number(state?.remaining_hazard_count || 0)} ` +
+    `failure_count=${Number(state?.failure_count || 0)} ` +
+    `remaining_hazards=${remainingText} failures=${failureText} ` +
+    `remediation=disable the named extension IDs in Chrome or repair ` +
+    `HKCU\\Software\\Policies\\Google\\Chrome ACL so Synapse can apply ` +
+    `ExtensionSettings blocked_permissions for debugger/nativeMessaging`
+  );
 }
 
 function connectWebSocket() {
@@ -338,7 +588,23 @@ function handleReconnectWakeAlarm(alarm) {
   if (alarm?.name !== RECONNECT_WAKE_ALARM_NAME || permanentlyDisabled) {
     return;
   }
-  connectDaemon();
+  startBridgeFromEvent();
+}
+
+function handleManagementStateChanged(info) {
+  if (!info || info.id === chrome.runtime.id) {
+    return;
+  }
+  popupRiskSuppressionState = {
+    ...popupRiskSuppressionState,
+    ok: false,
+    status: "stale",
+    reason: "chrome.management event",
+    checked_at_unix_ms: 0
+  };
+  ensureExternalPopupRiskSuppression("chrome.management event").catch((error) => {
+    console.warn(`Synapse popup risk suppression refresh failed: ${errorMessage(error)}`);
+  });
 }
 
 function closeWebSocket() {
@@ -354,10 +620,19 @@ function closeWebSocket() {
   }
 }
 
-chrome.runtime.onInstalled.addListener(startBridge);
-chrome.runtime.onStartup.addListener(startBridge);
+chrome.runtime.onInstalled.addListener(startBridgeFromEvent);
+chrome.runtime.onStartup.addListener(startBridgeFromEvent);
 if (chrome.alarms?.onAlarm?.addListener) {
   chrome.alarms.onAlarm.addListener(handleReconnectWakeAlarm);
+}
+if (chrome.management?.onEnabled?.addListener) {
+  chrome.management.onEnabled.addListener(handleManagementStateChanged);
+}
+if (chrome.management?.onInstalled?.addListener) {
+  chrome.management.onInstalled.addListener(handleManagementStateChanged);
+}
+if (chrome.management?.onDisabled?.addListener) {
+  chrome.management.onDisabled.addListener(handleManagementStateChanged);
 }
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   if (!changeInfo?.url && !changeInfo?.title && changeInfo?.status !== "complete") {
@@ -375,7 +650,7 @@ chrome.tabs.onActivated.addListener((activeInfo) => {
     });
 });
 
-startBridge();
+startBridgeFromEvent();
 
 async function handleCommand(command) {
   if (!command || typeof command !== "object") {
@@ -388,6 +663,7 @@ async function handleCommand(command) {
   try {
     let result;
     let reloadAfterResponse = false;
+    await requireExternalPopupRisksSuppressed(kind, params);
     if (kind === "snapshot") {
       result = rejectAttachCommand(kind, params);
     } else if (kind === "clickNode") {
@@ -445,7 +721,8 @@ function bridgeIdentity() {
     buildId: BRIDGE_BUILD_ID,
     buildSha256: BRIDGE_BUILD_SHA256,
     capabilities: [...COMMAND_CAPABILITIES],
-    commandCapabilities: [...COMMAND_CAPABILITIES]
+    commandCapabilities: [...COMMAND_CAPABILITIES],
+    popupRiskSuppression: popupRiskSuppressionSnapshot()
   };
 }
 

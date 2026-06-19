@@ -38,14 +38,16 @@ const NATIVE_HOST_NAME: &str = "com.synapse.chrome_debugger";
 const EXTENSION_ORIGIN: &str = "chrome-extension://leoocgnkjnplbfdbklajepahofecgfbk";
 const BRIDGE_TOKEN_HEADER: &str = "x-synapse-bridge-token";
 const BRIDGE_PROTOCOL_VERSION: u32 = 1;
-const EXPECTED_EXTENSION_BUILD_ID: &str = "synapse-chrome-bridge-2026-06-18-strict-hwnd-target-v1";
+const EXPECTED_EXTENSION_BUILD_ID: &str =
+    "synapse-chrome-bridge-2026-06-19-managed-popup-shield-v1";
 const EXPECTED_EXTENSION_BUILD_SHA256: &str =
-    "97441613be8ff1883e9c24a22c231bfd23f14b505e0bff54a7a8282281d3f55d";
+    "6a9168f4c16ef0c52d2ce61c39c610808d374b526b214199258312cf1f569ca1";
 const REQUIRED_DIRECT_HTTP_CAPABILITIES: &[&str] = &[
     "alarmReconnect",
     "activateTab",
     "closeTab",
     "domAction",
+    "externalPopupRiskSuppression",
     "navigateTab",
     "openTab",
     "pageVitals",
@@ -264,12 +266,19 @@ fn format_external_chrome_popup_risks(rows: &[String]) -> String {
     format!("{shown}{suffix}")
 }
 
-fn external_chrome_popup_risk_warning(rows: &[String]) -> String {
+fn external_chrome_popup_risk_warning(rows: &[String], suppression_ok: bool) -> String {
     if rows.is_empty() {
         return "external_chrome_popup_risk_warning=false risk_count=0".to_owned();
     }
+    if suppression_ok {
+        return format!(
+            "external_chrome_popup_risk_warning=true external_chrome_popup_risk_scope=suppressed_by_bridge_management risk_count={} external_chrome_popup_risk={} remediation=profile scan still names debugger/nativeMessaging rows, but live Chrome management readback from the installed Synapse bridge reported remaining_hazard_count=0; continue monitoring health and fail closed if suppression changes",
+            rows.len(),
+            format_external_chrome_popup_risks(rows)
+        );
+    }
     format!(
-        "external_chrome_popup_risk_warning=true external_chrome_popup_risk_scope=external_attribution_policy_shield_warning_only risk_count={} external_chrome_popup_risk={} remediation=run scripts\\install-synapse-chrome-debugger.ps1 to apply the reversible HKCU ExtensionSettings popup shield; if policy write is denied, Synapse still allows its debugger-free chrome.tabs/chrome.scripting bridge and continues to refuse attach-capable debugger commands",
+        "external_chrome_popup_risk_blocking=true external_chrome_popup_risk_scope=external_suppression_required risk_count={} external_chrome_popup_risk={} remediation=let the installed Synapse Chrome Bridge management fallback disable the named external debugger/nativeMessaging extensions, or repair HKCU\\Software\\Policies\\Google\\Chrome ACL and rerun scripts\\install-synapse-chrome-debugger.ps1 so ExtensionSettings blocks debugger/nativeMessaging; normal bridge commands fail closed while this risk remains unsuppressed",
         rows.len(),
         format_external_chrome_popup_risks(rows)
     )
@@ -286,19 +295,72 @@ fn external_chrome_layout_infobar_warning(rows: &[String]) -> String {
     )
 }
 
-fn note_normal_bridge_external_popup_risk(hwnd: i64, command_kind: &'static str) {
+fn active_host_popup_risk_suppression_covers(profile_risk_count: usize) -> bool {
+    let Ok(inner) = bridge().inner.lock() else {
+        return false;
+    };
+    inner
+        .active_host_id
+        .as_ref()
+        .and_then(|host_id| inner.hosts.get(host_id))
+        .is_some_and(|host| {
+            popup_risk_suppression_covers_profile_risks(
+                host.extension_popup_risk_suppression.as_ref(),
+                profile_risk_count,
+            )
+        })
+}
+
+fn active_host_popup_risk_suppression_summary() -> String {
+    let Ok(inner) = bridge().inner.lock() else {
+        return "state_lock_poisoned".to_owned();
+    };
+    inner
+        .active_host_id
+        .as_ref()
+        .and_then(|host_id| inner.hosts.get(host_id))
+        .map(|host| popup_risk_suppression_summary(&host.extension_popup_risk_suppression))
+        .unwrap_or_else(|| "not_reported".to_owned())
+}
+
+fn ensure_normal_bridge_external_popup_suppressed(
+    hwnd: i64,
+    command_kind: &'static str,
+) -> Result<(), ChromeDebuggerBridgeError> {
     let risks = external_chrome_popup_risks();
     if risks.is_empty() {
-        return;
+        return Ok(());
     }
-    tracing::warn!(
+    let suppression_summary = active_host_popup_risk_suppression_summary();
+    if active_host_popup_risk_suppression_covers(risks.len()) {
+        tracing::warn!(
+            code = "CHROME_EXTERNAL_POPUP_RISK_SUPPRESSED_BY_BRIDGE",
+            hwnd,
+            command_kind,
+            risk_count = risks.len(),
+            external_chrome_popup_risk = %format_external_chrome_popup_risks(&risks),
+            bridge_popup_risk_suppression = %suppression_summary,
+            "normal Chrome bridge continuing because Chrome management readback reported external popup risks suppressed"
+        );
+        return Ok(());
+    }
+    tracing::error!(
         code = "CHROME_EXTERNAL_POPUP_RISK_WARNING",
         hwnd,
         command_kind,
         risk_count = risks.len(),
         external_chrome_popup_risk = %format_external_chrome_popup_risks(&risks),
-        "normal Chrome bridge continuing debugger-free tabs/scripting command while reporting external debugger/nativeMessaging risk"
+        bridge_popup_risk_suppression = %suppression_summary,
+        "normal Chrome bridge refusing tabs/scripting command while external debugger/nativeMessaging risk remains unsuppressed"
     );
+    Err(ChromeDebuggerBridgeError {
+        code: error_codes::A11Y_CDP_DEBUGGER_WARNING_UNSUPPRESSED,
+        detail: format!(
+            "normal Synapse Chrome Bridge refused command {command_kind:?} before queueing any Chrome tabs/scripting command; hwnd={hwnd} reason=external debugger/nativeMessaging popup risk remains unsuppressed external_chrome_popup_risk={} bridge_popup_risk_suppression={} remediation=let the installed Synapse Chrome Bridge management fallback disable the named extension IDs, disable them in Chrome, or repair HKCU\\Software\\Policies\\Google\\Chrome ACL so scripts\\install-synapse-chrome-debugger.ps1 can apply ExtensionSettings blocked_permissions for debugger/nativeMessaging",
+            format_external_chrome_popup_risks(&risks),
+            suppression_summary
+        ),
+    })
 }
 
 fn note_normal_bridge_registration_external_popup_risk() {
@@ -310,8 +372,123 @@ fn note_normal_bridge_registration_external_popup_risk() {
         code = "CHROME_EXTERNAL_POPUP_RISK_WARNING",
         risk_count = risks.len(),
         external_chrome_popup_risk = %format_external_chrome_popup_risks(&risks),
-        "normal Chrome bridge accepting direct registration while reporting external debugger/nativeMessaging risk"
+        "normal Chrome bridge accepting direct registration so the extension can report management suppression state for external debugger/nativeMessaging risk"
     );
+}
+
+fn popup_risk_suppression_covers_profile_risks(
+    value: Option<&Value>,
+    profile_risk_count: usize,
+) -> bool {
+    let Some(value) = value else {
+        return false;
+    };
+    if value.get("ok").and_then(Value::as_bool) != Some(true) {
+        return false;
+    }
+    if value
+        .get("remaining_hazard_count")
+        .and_then(Value::as_u64)
+        .unwrap_or(1)
+        != 0
+    {
+        return false;
+    }
+    if profile_risk_count == 0 {
+        return true;
+    }
+    let hazard_count = value
+        .get("hazard_count")
+        .and_then(Value::as_u64)
+        .unwrap_or_default() as usize;
+    let disabled_count = value
+        .get("disabled_count")
+        .and_then(Value::as_u64)
+        .unwrap_or_default() as usize;
+    hazard_count >= profile_risk_count && disabled_count >= profile_risk_count
+}
+
+fn popup_risk_suppression_summary(value: &Option<Value>) -> String {
+    let Some(value) = value else {
+        return "not_reported".to_owned();
+    };
+    let status = value
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let ok = value.get("ok").and_then(Value::as_bool).unwrap_or(false);
+    let management_available = value
+        .get("management_available")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let hazard_count = value
+        .get("hazard_count")
+        .and_then(Value::as_u64)
+        .unwrap_or_default();
+    let disabled_count = value
+        .get("disabled_count")
+        .and_then(Value::as_u64)
+        .unwrap_or_default();
+    let remaining_hazard_count = value
+        .get("remaining_hazard_count")
+        .and_then(Value::as_u64)
+        .unwrap_or_default();
+    let failure_count = value
+        .get("failure_count")
+        .and_then(Value::as_u64)
+        .unwrap_or_default();
+    let remaining = compact_popup_risk_entries(value.get("remaining_hazards"));
+    let failures = compact_popup_risk_entries(value.get("failures"));
+    format!(
+        "status={status} ok={ok} management_available={management_available} hazard_count={hazard_count} disabled_count={disabled_count} remaining_hazard_count={remaining_hazard_count} failure_count={failure_count} remaining={remaining} failures={failures}"
+    )
+}
+
+fn compact_popup_risk_entries(value: Option<&Value>) -> String {
+    let Some(entries) = value.and_then(Value::as_array) else {
+        return "<none>".to_owned();
+    };
+    if entries.is_empty() {
+        return "<none>".to_owned();
+    }
+    let shown = entries
+        .iter()
+        .take(8)
+        .map(|entry| {
+            let id = entry
+                .get("id")
+                .and_then(Value::as_str)
+                .unwrap_or("<unknown>");
+            let name = entry
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or("<unnamed>");
+            let permissions = entry
+                .get("hazard_permissions")
+                .and_then(Value::as_array)
+                .map(|values| {
+                    values
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .collect::<Vec<_>>()
+                        .join(",")
+                })
+                .unwrap_or_default();
+            let error = entry.get("error").and_then(Value::as_str).unwrap_or("");
+            if error.is_empty() {
+                format!("{id}:{name}:{permissions}")
+            } else {
+                format!("{id}:{name}:{permissions}:error={error}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("|");
+    let extra = entries.len().saturating_sub(8);
+    if extra == 0 {
+        shown
+    } else {
+        format!("{shown}|+{extra} more")
+    }
 }
 
 fn external_chrome_profile_surfaces() -> Vec<String> {
@@ -999,6 +1176,7 @@ pub(crate) struct ChromeBridgeHostSnapshot {
     pub extension_build_sha256: Option<String>,
     pub extension_capabilities: Vec<String>,
     pub extension_user_agent: Option<String>,
+    pub extension_popup_risk_suppression: Option<Value>,
     pub pid: u32,
     pub parent_window: Option<String>,
     pub transport: Option<String>,
@@ -1166,6 +1344,7 @@ struct HostRecord {
     extension_build_sha256: Option<String>,
     extension_capabilities: BTreeSet<String>,
     extension_user_agent: Option<String>,
+    extension_popup_risk_suppression: Option<Value>,
     pid: u32,
     parent_window: Option<String>,
     transport: Option<String>,
@@ -1187,6 +1366,7 @@ struct ChromeBridgeHealthRecord {
     extension_build_sha256: Option<String>,
     extension_capabilities: BTreeSet<String>,
     extension_user_agent: Option<String>,
+    extension_popup_risk_suppression: Option<Value>,
     pid: u32,
     parent_window: Option<String>,
     transport: Option<String>,
@@ -1350,6 +1530,7 @@ fn host_record_to_health_record(host_id: &str, host: &HostRecord) -> ChromeBridg
         extension_build_sha256: host.extension_build_sha256.clone(),
         extension_capabilities: host.extension_capabilities.clone(),
         extension_user_agent: host.extension_user_agent.clone(),
+        extension_popup_risk_suppression: host.extension_popup_risk_suppression.clone(),
         pid: host.pid,
         parent_window: host.parent_window.clone(),
         transport: host.transport.clone(),
@@ -1372,6 +1553,7 @@ fn health_record_to_host_snapshot(host: &ChromeBridgeHealthRecord) -> ChromeBrid
         extension_build_sha256: host.extension_build_sha256.clone(),
         extension_capabilities: host.extension_capabilities.iter().cloned().collect(),
         extension_user_agent: host.extension_user_agent.clone(),
+        extension_popup_risk_suppression: host.extension_popup_risk_suppression.clone(),
         pid: host.pid,
         parent_window: host.parent_window.clone(),
         transport: host.transport.clone(),
@@ -1417,6 +1599,7 @@ impl ChromeDebuggerBridge {
             extension_build_sha256: None,
             extension_capabilities: BTreeSet::new(),
             extension_user_agent: None,
+            extension_popup_risk_suppression: None,
             pid: request.pid,
             parent_window: request.parent_window,
             transport: request.transport,
@@ -1509,6 +1692,10 @@ impl ChromeDebuggerBridge {
                     .and_then(Value::as_str)
                     .map(ToOwned::to_owned);
                 host.extension_capabilities = string_set_field(&request.message, "capabilities");
+                host.extension_popup_risk_suppression =
+                    request.message.get("popupRiskSuppression").cloned();
+                let popup_risk_suppression =
+                    popup_risk_suppression_summary(&host.extension_popup_risk_suppression);
                 tracing::info!(
                     code = "CHROME_DEBUGGER_EXTENSION_HELLO",
                     host_id = %request.host_id,
@@ -1519,6 +1706,7 @@ impl ChromeDebuggerBridge {
                     extension_build_id = host.extension_build_id.as_deref().unwrap_or_default(),
                     extension_build_sha256 = host.extension_build_sha256.as_deref().unwrap_or_default(),
                     capabilities = %format_capabilities(&host.extension_capabilities),
+                    popup_risk_suppression = %popup_risk_suppression,
                     pid = host.pid,
                     parent_window = host.parent_window.as_deref().unwrap_or_default(),
                     transport = host.transport.as_deref().unwrap_or("native_messaging"),
@@ -2075,6 +2263,7 @@ pub(crate) fn health_subsystem() -> SubsystemHealth {
                     extension_build_sha256: host.extension_build_sha256.clone(),
                     extension_capabilities: host.extension_capabilities.clone(),
                     extension_user_agent: host.extension_user_agent.clone(),
+                    extension_popup_risk_suppression: host.extension_popup_risk_suppression.clone(),
                     pid: host.pid,
                     parent_window: host.parent_window.clone(),
                     transport: host.transport.clone(),
@@ -2118,10 +2307,10 @@ fn chrome_bridge_health_from_snapshot(
     popup_risks: &[String],
     layout_infobar_risks: &[String],
 ) -> SubsystemHealth {
-    let risk_warning = external_chrome_popup_risk_warning(popup_risks);
     let layout_warning = external_chrome_layout_infobar_warning(layout_infobar_risks);
 
     let Some(host) = active_host else {
+        let risk_warning = external_chrome_popup_risk_warning(popup_risks, false);
         return SubsystemHealth {
             status: "unavailable".to_owned(),
             detail: Some(format!(
@@ -2156,6 +2345,13 @@ fn chrome_bridge_health_from_snapshot(
         .unwrap_or("not_seen_yet");
     let extension_capabilities = format_capabilities(&host.extension_capabilities);
     let extension_user_agent = host.extension_user_agent.as_deref().unwrap_or("");
+    let popup_risk_suppression =
+        popup_risk_suppression_summary(&host.extension_popup_risk_suppression);
+    let popup_risk_suppression_ok = popup_risk_suppression_covers_profile_risks(
+        host.extension_popup_risk_suppression.as_ref(),
+        popup_risks.len(),
+    );
+    let risk_warning = external_chrome_popup_risk_warning(popup_risks, popup_risk_suppression_ok);
     let stale_reasons = bridge_identity_stale_reasons(host);
     let extension_stale = !stale_reasons.is_empty();
     let extension_stale_reasons = if stale_reasons.is_empty() {
@@ -2163,10 +2359,14 @@ fn chrome_bridge_health_from_snapshot(
     } else {
         stale_reasons.join("|")
     };
-    let tab_control_available =
-        extension_id == EXTENSION_ID && host.last_disconnect_detail.is_none();
+    let popup_risk_blocking = !popup_risks.is_empty() && !popup_risk_suppression_ok;
+    let tab_control_available = extension_id == EXTENSION_ID
+        && host.last_disconnect_detail.is_none()
+        && !popup_risk_blocking;
     let status = if tab_control_available {
         if extension_stale { "stale" } else { "ok" }
+    } else if popup_risk_blocking {
+        "unsafe_profile"
     } else if host.last_disconnect_detail.is_some() {
         "unavailable"
     } else {
@@ -2178,7 +2378,7 @@ fn chrome_bridge_health_from_snapshot(
     SubsystemHealth {
         status: status.to_owned(),
         detail: Some(format!(
-            "tab_control_available={} extension_stale={} extension_stale_reasons={} active_host_id={} host_count={} origin={} extension_id={} expected_extension_id={} extension_version={} extension_protocol_version={} extension_build_id={} expected_extension_build_id={} extension_build_sha256={} expected_extension_build_sha256={} extension_capabilities={} required_extension_capabilities={} endpoint={} transport={} pid={} parent_window={} registered_unix_ms={} last_seen_unix_ms={} queued_count={} pending_count={} last_disconnect_detail={} last_detach_reason={} extension_user_agent={} {} {} install_guidance={}",
+            "tab_control_available={} extension_stale={} extension_stale_reasons={} active_host_id={} host_count={} origin={} extension_id={} expected_extension_id={} extension_version={} extension_protocol_version={} extension_build_id={} expected_extension_build_id={} extension_build_sha256={} expected_extension_build_sha256={} extension_capabilities={} required_extension_capabilities={} endpoint={} transport={} pid={} parent_window={} registered_unix_ms={} last_seen_unix_ms={} queued_count={} pending_count={} last_disconnect_detail={} last_detach_reason={} extension_user_agent={} bridge_popup_risk_suppression={} {} {} install_guidance={}",
             tab_control_available,
             extension_stale,
             extension_stale_reasons,
@@ -2206,6 +2406,7 @@ fn chrome_bridge_health_from_snapshot(
             disconnect_detail,
             detach_reason,
             extension_user_agent,
+            popup_risk_suppression,
             risk_warning,
             layout_warning,
             INSTALL_GUIDANCE
@@ -2380,7 +2581,7 @@ pub(crate) async fn open_tab(
     expected_window_bounds: Option<Rect>,
     expected_window_title: Option<&str>,
 ) -> Result<ChromeDebuggerOpenTabResult, ChromeDebuggerBridgeError> {
-    note_normal_bridge_external_popup_risk(hwnd, "openTab");
+    ensure_normal_bridge_external_popup_suppressed(hwnd, "openTab")?;
     let result = bridge()
         .send_command(
             "openTab",
@@ -2409,7 +2610,7 @@ pub(crate) async fn close_tab(
     hwnd: i64,
     target_id: &str,
 ) -> Result<ChromeDebuggerCloseTabResult, ChromeDebuggerBridgeError> {
-    note_normal_bridge_external_popup_risk(hwnd, "closeTab");
+    ensure_normal_bridge_external_popup_suppressed(hwnd, "closeTab")?;
     let result = bridge()
         .send_command(
             "closeTab",
@@ -2433,7 +2634,7 @@ pub(crate) async fn target_info(
     expected_window_bounds: Option<Rect>,
     expected_window_title: Option<&str>,
 ) -> Result<ChromeDebuggerTargetInfo, ChromeDebuggerBridgeError> {
-    note_normal_bridge_external_popup_risk(hwnd, "targetInfoPageText");
+    ensure_normal_bridge_external_popup_suppressed(hwnd, "targetInfoPageText")?;
     let result = bridge()
         .send_command(
             "targetInfoPageText",
@@ -2474,7 +2675,7 @@ pub(crate) async fn type_active_element(
     target_id: &str,
     text: &str,
 ) -> Result<ChromeDebuggerTypeActiveElementResult, ChromeDebuggerBridgeError> {
-    note_normal_bridge_external_popup_risk(hwnd, "typeActiveElement");
+    ensure_normal_bridge_external_popup_suppressed(hwnd, "typeActiveElement")?;
     let result = bridge()
         .send_command(
             "typeActiveElement",
@@ -2505,7 +2706,7 @@ pub(crate) async fn set_field_value(
     active_element: bool,
     text: &str,
 ) -> Result<ChromeDebuggerSetFieldValueResult, ChromeDebuggerBridgeError> {
-    note_normal_bridge_external_popup_risk(hwnd, "setFieldValue");
+    ensure_normal_bridge_external_popup_suppressed(hwnd, "setFieldValue")?;
     let result = bridge()
         .send_command(
             "setFieldValue",
@@ -2534,7 +2735,7 @@ pub(crate) async fn navigate_tab(
     ignore_cache: bool,
     agent_session_id: Option<&str>,
 ) -> Result<ChromeDebuggerNavigateResult, ChromeDebuggerBridgeError> {
-    note_normal_bridge_external_popup_risk(hwnd, "navigateTab");
+    ensure_normal_bridge_external_popup_suppressed(hwnd, "navigateTab")?;
     let result = bridge()
         .send_command(
             "navigateTab",
@@ -2558,14 +2759,14 @@ pub(crate) async fn navigate_tab(
 
 /// Background-safe tab activation (#1189): selects `target_id` as the active
 /// tab in its own Chrome window via `chrome.tabs.update({active:true})` without
-/// taking the OS foreground. External debugger/nativeMessaging risks are
-/// reported separately, but this popup-free tabs command does not block on them.
+/// taking the OS foreground. External debugger/nativeMessaging risks must be
+/// suppressed by policy or the bridge management fallback before this queues.
 pub(crate) async fn activate_tab(
     hwnd: i64,
     target_id: &str,
     wait_timeout_ms: u64,
 ) -> Result<ChromeDebuggerActivateTabResult, ChromeDebuggerBridgeError> {
-    note_normal_bridge_external_popup_risk(hwnd, "activateTab");
+    ensure_normal_bridge_external_popup_suppressed(hwnd, "activateTab")?;
     let result = bridge()
         .send_command(
             "activateTab",
@@ -2614,7 +2815,7 @@ pub(crate) struct ChromeDebuggerDomActionRequest<'a> {
 pub(crate) async fn dom_action(
     request: ChromeDebuggerDomActionRequest<'_>,
 ) -> Result<Value, ChromeDebuggerBridgeError> {
-    note_normal_bridge_external_popup_risk(request.hwnd, "domAction");
+    ensure_normal_bridge_external_popup_suppressed(request.hwnd, "domAction")?;
     bridge()
         .send_command(
             "domAction",
@@ -3638,6 +3839,17 @@ mod tests {
                 .map(|capability| (*capability).to_owned())
                 .collect(),
             extension_user_agent: Some("Chrome test".to_owned()),
+            extension_popup_risk_suppression: Some(json!({
+                "ok": true,
+                "status": "clear",
+                "management_available": true,
+                "hazard_count": 0,
+                "disabled_count": 0,
+                "remaining_hazard_count": 0,
+                "failure_count": 0,
+                "remaining_hazards": [],
+                "failures": []
+            })),
             pid: 42,
             parent_window: Some("1001".to_owned()),
             transport: Some("direct_http".to_owned()),
@@ -3663,7 +3875,7 @@ mod tests {
     }
 
     #[test]
-    fn chrome_bridge_health_reports_external_popup_risk_as_non_blocking_warning() {
+    fn chrome_bridge_health_blocks_external_popup_risk_until_suppressed() {
         let host = ChromeBridgeHealthRecord {
             host_id: "chrome-native-test".to_owned(),
             origin: "chrome-extension://leoocgnkjnplbfdbklajepahofecgfbk/".to_owned(),
@@ -3677,6 +3889,59 @@ mod tests {
                 .map(|capability| (*capability).to_owned())
                 .collect(),
             extension_user_agent: Some("Chrome test".to_owned()),
+            extension_popup_risk_suppression: None,
+            pid: 42,
+            parent_window: None,
+            transport: Some("direct_http".to_owned()),
+            registered_unix_ms: 1000,
+            last_seen_unix_ms: 2000,
+            last_disconnect_detail: None,
+            last_detach_reason: None,
+        };
+
+        let health = chrome_bridge_health_from_snapshot(
+            Some(&host),
+            1,
+            0,
+            0,
+            &["profile=Default extension_id=external active_api=debugger".to_owned()],
+            &[],
+        );
+
+        assert_eq!(health.status, "unsafe_profile");
+        let detail = health.detail.as_deref().expect("health detail");
+        assert!(detail.contains("tab_control_available=false"));
+        assert!(detail.contains("external_chrome_popup_risk_blocking=true"));
+        assert!(detail.contains("external_chrome_popup_risk_scope=external_suppression_required"));
+        assert!(detail.contains("extension_id=external"));
+    }
+
+    #[test]
+    fn chrome_bridge_health_allows_external_popup_risk_when_bridge_management_suppressed() {
+        let host = ChromeBridgeHealthRecord {
+            host_id: "chrome-native-test".to_owned(),
+            origin: "chrome-extension://leoocgnkjnplbfdbklajepahofecgfbk/".to_owned(),
+            extension_id: Some("leoocgnkjnplbfdbklajepahofecgfbk".to_owned()),
+            extension_version: Some("0.1.0".to_owned()),
+            extension_protocol_version: Some(BRIDGE_PROTOCOL_VERSION),
+            extension_build_id: Some(EXPECTED_EXTENSION_BUILD_ID.to_owned()),
+            extension_build_sha256: Some(EXPECTED_EXTENSION_BUILD_SHA256.to_owned()),
+            extension_capabilities: REQUIRED_DIRECT_HTTP_CAPABILITIES
+                .iter()
+                .map(|capability| (*capability).to_owned())
+                .collect(),
+            extension_user_agent: Some("Chrome test".to_owned()),
+            extension_popup_risk_suppression: Some(json!({
+                "ok": true,
+                "status": "suppressed",
+                "management_available": true,
+                "hazard_count": 1,
+                "disabled_count": 1,
+                "remaining_hazard_count": 0,
+                "failure_count": 0,
+                "remaining_hazards": [],
+                "failures": []
+            })),
             pid: 42,
             parent_window: None,
             transport: Some("direct_http".to_owned()),
@@ -3699,10 +3964,10 @@ mod tests {
         let detail = health.detail.as_deref().expect("health detail");
         assert!(detail.contains("tab_control_available=true"));
         assert!(detail.contains("external_chrome_popup_risk_warning=true"));
-        assert!(detail.contains(
-            "external_chrome_popup_risk_scope=external_attribution_policy_shield_warning_only"
-        ));
-        assert!(detail.contains("extension_id=external"));
+        assert!(
+            detail.contains("external_chrome_popup_risk_scope=suppressed_by_bridge_management")
+        );
+        assert!(detail.contains("bridge_popup_risk_suppression=status=suppressed"));
     }
 
     #[test]
@@ -3720,6 +3985,17 @@ mod tests {
                 .map(|capability| (*capability).to_owned())
                 .collect(),
             extension_user_agent: Some("Chrome test".to_owned()),
+            extension_popup_risk_suppression: Some(json!({
+                "ok": true,
+                "status": "clear",
+                "management_available": true,
+                "hazard_count": 0,
+                "disabled_count": 0,
+                "remaining_hazard_count": 0,
+                "failure_count": 0,
+                "remaining_hazards": [],
+                "failures": []
+            })),
             pid: 42,
             parent_window: None,
             transport: Some("direct_http".to_owned()),
@@ -3760,6 +4036,7 @@ mod tests {
             extension_build_sha256: None,
             extension_capabilities: BTreeSet::new(),
             extension_user_agent: None,
+            extension_popup_risk_suppression: None,
             pid: 42,
             parent_window: None,
             transport: Some("direct_http".to_owned()),
@@ -3804,6 +4081,7 @@ mod tests {
             extension_build_sha256: Some("old-sha".to_owned()),
             extension_capabilities: vec!["reloadSelf".to_owned()],
             extension_user_agent: Some("Chrome test".to_owned()),
+            extension_popup_risk_suppression: None,
             pid: 0,
             parent_window: None,
             transport: Some("direct_http".to_owned()),
@@ -3874,20 +4152,24 @@ mod tests {
     }
 
     #[test]
-    fn external_popup_risk_warning_is_not_a_normal_bridge_refusal() {
+    fn external_popup_risk_warning_blocks_until_suppressed() {
         let risks = vec![
             "profile=Profile 5 pref=Secure Preferences extension_id=fcoeoabgfenejglbffodgkkbkcdhcgfn name=\"Claude\" active_api=debugger,nativeMessaging".to_owned(),
             "native_messaging_process pid=26616 name=cmd.exe extension_id=fcoeoabgfenejglbffodgkkbkcdhcgfn".to_owned(),
         ];
 
-        let warning = external_chrome_popup_risk_warning(&risks);
+        let warning = external_chrome_popup_risk_warning(&risks, false);
 
-        assert!(warning.contains("external_chrome_popup_risk_warning=true"));
-        assert!(warning.contains("external_attribution_policy_shield_warning_only"));
+        assert!(warning.contains("external_chrome_popup_risk_blocking=true"));
+        assert!(warning.contains("external_suppression_required"));
         assert!(warning.contains("risk_count=2"));
         assert!(warning.contains("fcoeoabgfenejglbffodgkkbkcdhcgfn"));
-        assert!(!warning.contains("tab_control_available=false"));
-        assert!(!warning.contains("refused"));
+        assert!(warning.contains("fail closed"));
+
+        let suppressed_warning = external_chrome_popup_risk_warning(&risks, true);
+        assert!(suppressed_warning.contains("external_chrome_popup_risk_warning=true"));
+        assert!(suppressed_warning.contains("suppressed_by_bridge_management"));
+        assert!(suppressed_warning.contains("remaining_hazard_count=0"));
     }
 
     #[test]
