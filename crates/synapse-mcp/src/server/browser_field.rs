@@ -200,7 +200,16 @@ impl SynapseService {
 
         // SoT #2: a SEPARATE chrome.tabs active-element readback (the field is
         // focused by setFieldValue) must independently equal the requested text.
-        let info = crate::chrome_debugger_bridge::target_info(window_hwnd, cdp_target_id)
+        let expected_context = synapse_a11y::foreground_context(window_hwnd).ok();
+        let info = crate::chrome_debugger_bridge::target_info(
+            window_hwnd,
+            cdp_target_id,
+            None,
+            expected_context.as_ref().map(|context| context.window_bounds),
+            expected_context
+                .as_ref()
+                .map(|context| context.window_title.as_str()),
+        )
             .await
             .map_err(|error| {
                 mcp_error(

@@ -2905,8 +2905,19 @@ impl SynapseService {
             }
             return Ok(None);
         }
-        let info = match crate::chrome_debugger_bridge::target_info(window_hwnd, &cdp_target_id)
-            .await
+        let expected_context = synapse_a11y::foreground_context(window_hwnd).ok();
+        let info = match crate::chrome_debugger_bridge::target_info(
+            window_hwnd,
+            &cdp_target_id,
+            None,
+            expected_context
+                .as_ref()
+                .map(|context| context.window_bounds),
+            expected_context
+                .as_ref()
+                .map(|context| context.window_title.as_str()),
+        )
+        .await
         {
             Ok(info) => info,
             Err(error) => {

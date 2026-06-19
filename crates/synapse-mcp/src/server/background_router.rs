@@ -15,7 +15,8 @@
 use super::browser_field::BrowserSetValueParams;
 use super::{ErrorData, Json, Parameters, SessionTarget, SynapseService, tool, tool_router};
 use crate::m1::{
-    CaptureScreenshotParams, CdpNavigateAction, CdpNavigateTabParams, ObserveParams, mcp_error,
+    CaptureScreenshotParams, CdpNavigateAction, CdpNavigateTabParams, CdpTargetInfoParams,
+    ObserveParams, mcp_error,
 };
 use crate::m2::{ActClickParams, ActSetFieldTextParams, default_verify_timeout_ms};
 use crate::m4::{ActRunShellExecutionMode, ActRunShellParams};
@@ -147,15 +148,35 @@ impl SynapseService {
 
         let (delegated_tool, ok, status, result) = match verb.as_str() {
             "read" => {
-                let response = self
-                    .observe(Parameters(ObserveParams::default()), request_context)
-                    .await?;
-                (
-                    "observe",
-                    true,
-                    TARGET_ACT_STATUS_OK,
-                    target_act_result(&response.0)?,
-                )
+                let session_id = target_act_session_id(&request_context, "read")?;
+                let target = self.session_target(Some(&session_id))?;
+                if target_act_read_delegated_tool(target.as_ref()) == "cdp_target_info" {
+                    let response = self
+                        .cdp_target_info(
+                            Parameters(CdpTargetInfoParams {
+                                window_hwnd: None,
+                                cdp_target_id: None,
+                            }),
+                            request_context,
+                        )
+                        .await?;
+                    (
+                        "cdp_target_info",
+                        true,
+                        TARGET_ACT_STATUS_OK,
+                        target_act_result(&response.0)?,
+                    )
+                } else {
+                    let response = self
+                        .observe(Parameters(ObserveParams::default()), request_context)
+                        .await?;
+                    (
+                        "observe",
+                        true,
+                        TARGET_ACT_STATUS_OK,
+                        target_act_result(&response.0)?,
+                    )
+                }
             }
             "screenshot" => {
                 let path = require_param(params.path, "screenshot", "path")?;
@@ -585,6 +606,13 @@ fn target_act_unknown_verb_error(verb: &str) -> ErrorData {
     )
 }
 
+fn target_act_read_delegated_tool(target: Option<&SessionTarget>) -> &'static str {
+    match target {
+        Some(SessionTarget::Cdp { .. }) => "cdp_target_info",
+        Some(SessionTarget::Window { .. }) | None => "observe",
+    }
+}
+
 fn target_act_result<T: Serialize>(value: &T) -> Result<Value, ErrorData> {
     serde_json::to_value(value).map_err(|error| {
         mcp_error(
@@ -770,6 +798,27 @@ mod tests {
             "unknown verb error should name the rejected verb: {}",
             error.message
         );
+    }
+
+    #[test]
+    fn target_act_read_routes_cdp_targets_to_target_info() {
+        let target = SessionTarget::Cdp {
+            window_hwnd: 0x1234,
+            cdp_target_id: "chrome-tab:42".to_owned(),
+        };
+
+        assert_eq!(
+            target_act_read_delegated_tool(Some(&target)),
+            "cdp_target_info"
+        );
+    }
+
+    #[test]
+    fn target_act_read_routes_window_and_unset_targets_to_observe() {
+        let target = SessionTarget::Window { hwnd: 0x1234 };
+
+        assert_eq!(target_act_read_delegated_tool(Some(&target)), "observe");
+        assert_eq!(target_act_read_delegated_tool(None), "observe");
     }
 
     #[test]

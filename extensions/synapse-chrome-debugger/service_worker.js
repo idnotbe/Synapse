@@ -1,6 +1,6 @@
 const PROTOCOL_VERSION = 1;
-const BRIDGE_BUILD_ID = "synapse-chrome-bridge-2026-06-18-popup-free-tabs-v4";
-const BRIDGE_BUILD_SHA256 = "9a977c14087e4ecaf5c4807be7c164083366c2c7f30969f308caaf4fe43ed6f4";
+const BRIDGE_BUILD_ID = "synapse-chrome-bridge-2026-06-18-strict-hwnd-target-v1";
+const BRIDGE_BUILD_SHA256 = "97441613be8ff1883e9c24a22c231bfd23f14b505e0bff54a7a8282281d3f55d";
 const COMMAND_CAPABILITIES = Object.freeze([
   "alarmReconnect",
   "openTab",
@@ -886,7 +886,17 @@ async function selectTabTarget(params, options = {}) {
     throw bridgeError(ERROR_AXTREE_FAILED, "chrome.tabs.query returned no tab targets");
   }
   const targetIdHint = String(params.targetIdHint || "").trim();
-  const expectedWindowId = optionalInteger(params.expectedChromeWindowId);
+  let expectedWindowId = optionalInteger(params.expectedChromeWindowId);
+  const expectedWindow = await expectedChromeWindowForHwndHint(params);
+  if (Number.isInteger(expectedWindow?.windowId)) {
+    if (Number.isInteger(expectedWindowId) && expectedWindowId !== expectedWindow.windowId) {
+      throw bridgeError(
+        ERROR_AXTREE_FAILED,
+        `expectedChromeWindowId ${expectedWindowId} disagrees with hwnd ${String(params.hwnd)} mapping ${expectedWindow.windowId}`
+      );
+    }
+    expectedWindowId = expectedWindow.windowId;
+  }
   const tabIdHint = tabIdFromTargetId(targetIdHint);
   if (Number.isInteger(tabIdHint)) {
     const selectedById = tabs.find((target) => target.tabId === tabIdHint);
@@ -991,7 +1001,7 @@ async function selectOpenWindowForHwndHint(params) {
     if (boundsMatches.length > 1) {
       throw bridgeError(
         ERROR_AXTREE_FAILED,
-        `openTab refused hwnd hint ${String(params.hwnd)}: expected_window_bounds matched ${boundsMatches.length} Chrome windows within ${OPEN_WINDOW_BOUNDS_TOLERANCE_PX}px`
+        `Chrome window mapping refused hwnd hint ${String(params.hwnd)}: expected_window_bounds matched ${boundsMatches.length} Chrome windows within ${OPEN_WINDOW_BOUNDS_TOLERANCE_PX}px`
       );
     }
   }
@@ -1014,9 +1024,16 @@ async function selectOpenWindowForHwndHint(params) {
     if (titleMatches.length > 1) {
       throw bridgeError(
         ERROR_AXTREE_FAILED,
-        `openTab refused hwnd hint ${String(params.hwnd)}: expected_window_title matched ${titleMatches.length} Chrome windows`
+        `Chrome window mapping refused hwnd hint ${String(params.hwnd)}: expected_window_title matched ${titleMatches.length} Chrome windows`
       );
     }
+  }
+  if (expectedBounds || expectedTitle) {
+    throw bridgeError(
+      ERROR_AXTREE_FAILED,
+      `Chrome window mapping refused hwnd hint ${String(params.hwnd)}: expected_window_bounds/title did not identify a Chrome window; ` +
+        `candidate_count=${candidates.length} candidates=[${chromeWindowCandidateSummary(candidates, expectedBounds)}]`
+    );
   }
   const nonFocused = candidates.filter((windowInfo) => !windowInfo.focused);
   const nonFocusedNonMinimized = nonFocused.filter((windowInfo) => windowInfo.state !== "minimized");
@@ -1052,18 +1069,22 @@ async function selectOpenWindowForHwndHint(params) {
     };
   }
   const candidateSummary = candidates
-    .map((windowInfo) => {
-      const score = expectedBounds
-        ? windowBoundsDeltaScore(windowInfo.bounds, expectedBounds)
-        : Number.POSITIVE_INFINITY;
-      const scoreText = Number.isFinite(score) ? String(score) : "na";
-      return `id=${windowInfo.id}/focused=${windowInfo.focused}/state=${windowInfo.state || "unknown"}/score=${scoreText}`;
-    })
+    .map((windowInfo) => chromeWindowCandidateSummaryItem(windowInfo, expectedBounds))
     .join(",");
   throw bridgeError(
     ERROR_AXTREE_FAILED,
-    `openTab refused hwnd hint ${String(params.hwnd)}: candidate_count=${candidates.length} non_focused_count=${nonFocused.length} non_focused_non_minimized_count=${nonFocusedNonMinimized.length} candidates=[${candidateSummary}]; OS HWND cannot be mapped inside the normal extension bridge`
+    `Chrome window mapping refused hwnd hint ${String(params.hwnd)}: candidate_count=${candidates.length} non_focused_count=${nonFocused.length} non_focused_non_minimized_count=${nonFocusedNonMinimized.length} candidates=[${candidateSummary}]; OS HWND cannot be mapped inside the normal extension bridge`
   );
+}
+
+async function expectedChromeWindowForHwndHint(params) {
+  if (params.hwnd === undefined || params.hwnd === null) {
+    return null;
+  }
+  if (!normalizeExpectedWindowBounds(params.expectedWindowBounds) && !normalizeExpectedWindowTitle(params.expectedWindowTitle)) {
+    return null;
+  }
+  return selectOpenWindowForHwndHint(params);
 }
 
 async function activeTabForWindow(windowId) {
@@ -1127,6 +1148,21 @@ function chromeWindowTitleMatches(activeTabTitle, expectedWindowTitle) {
     }
   }
   return false;
+}
+
+function chromeWindowCandidateSummary(candidates, expectedBounds) {
+  return candidates
+    .map((windowInfo) => chromeWindowCandidateSummaryItem(windowInfo, expectedBounds))
+    .join(",");
+}
+
+function chromeWindowCandidateSummaryItem(windowInfo, expectedBounds) {
+  const score = expectedBounds
+    ? windowBoundsDeltaScore(windowInfo.bounds, expectedBounds)
+    : Number.POSITIVE_INFINITY;
+  const scoreText = Number.isFinite(score) ? String(score) : "na";
+  const title = String(windowInfo.activeTabTitle || "").replace(/\s+/g, " ").trim().slice(0, 80);
+  return `id=${windowInfo.id}/focused=${windowInfo.focused}/state=${windowInfo.state || "unknown"}/score=${scoreText}/title=${JSON.stringify(title)}`;
 }
 
 function chromeWindowBounds(windowInfo) {

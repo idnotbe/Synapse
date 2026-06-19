@@ -2880,17 +2880,28 @@ impl SynapseService {
                 }
             }
         }
-        crate::chrome_debugger_bridge::target_info(window_hwnd, cdp_target_id)
-            .await
-            .map_err(|error| {
-                mcp_error(
-                    error.code(),
-                    format!(
-                        "set_target Chrome debugger target readback failed: {}",
-                        error.detail()
-                    ),
-                )
-            })?;
+        let expected_context = validate_target_window_context(window_hwnd).ok();
+        crate::chrome_debugger_bridge::target_info(
+            window_hwnd,
+            cdp_target_id,
+            None,
+            expected_context
+                .as_ref()
+                .map(|context| context.window_bounds),
+            expected_context
+                .as_ref()
+                .map(|context| context.window_title.as_str()),
+        )
+        .await
+        .map_err(|error| {
+            mcp_error(
+                error.code(),
+                format!(
+                    "set_target Chrome debugger target readback failed: {}",
+                    error.detail()
+                ),
+            )
+        })?;
         Ok(())
     }
 
@@ -3242,22 +3253,47 @@ impl SynapseService {
             });
         }
 
-        let info = crate::chrome_debugger_bridge::target_info(window_hwnd, cdp_target_id)
-            .await
-            .map_err(|error| {
-                mcp_error(
-                    error.code(),
-                    format!(
-                        "cdp_target_info Chrome bridge chrome.tabs.get/readback failed: {}",
-                        error.detail()
-                    ),
-                )
-            })?;
+        let owner =
+            self.cdp_target_owner_for_readback("cdp_target_info", session_id, cdp_target_id)?;
+        let expected_chrome_window_id = owner.as_ref().and_then(|owner| owner.chrome_window_id);
+        let expected_context = validate_target_window_context(window_hwnd).ok();
+        let info = crate::chrome_debugger_bridge::target_info(
+            window_hwnd,
+            cdp_target_id,
+            expected_chrome_window_id,
+            expected_context
+                .as_ref()
+                .map(|context| context.window_bounds),
+            expected_context
+                .as_ref()
+                .map(|context| context.window_title.as_str()),
+        )
+        .await
+        .map_err(|error| {
+            mcp_error(
+                error.code(),
+                format!(
+                    "cdp_target_info Chrome bridge chrome.tabs.get/readback failed: {}",
+                    error.detail()
+                ),
+            )
+        })?;
         let endpoint = info
             .extension_id
             .as_deref()
             .map(chrome_debugger_endpoint)
             .unwrap_or_else(chrome_debugger_default_endpoint);
+        if let Some(expected_window_id) = expected_chrome_window_id
+            && info.chrome_window_id != Some(expected_window_id)
+        {
+            return Err(mcp_error(
+                error_codes::ACTION_POSTCONDITION_FAILED,
+                format!(
+                    "cdp_target_info Chrome bridge returned Chrome window {:?} for requested target {:?}, expected Chrome window {}",
+                    info.chrome_window_id, cdp_target_id, expected_window_id
+                ),
+            ));
+        }
         tracing::info!(
             code = "CDP_TARGET_INFO_READ",
             session_id = %session_id,
