@@ -519,7 +519,7 @@ impl SynapseService {
         );
         let session_id = require_claim_session_id(&request_context)?;
         let target = self.resolve_target_claim_target(&session_id, params.0.target)?;
-        validate_claim_target(&target)?;
+        validate_claim_target_shape(&target)?;
         let target_key = target_key(&target);
         let now = unix_time_ms_now();
         let live_sessions = self.live_target_claim_sessions(now, Some(&session_id))?;
@@ -1230,23 +1230,44 @@ fn target_param_to_session_target(
 }
 
 fn validate_claim_target(target: &SessionTarget) -> Result<(), ErrorData> {
+    validate_claim_target_shape(target)?;
     match target {
         SessionTarget::Window { hwnd }
         | SessionTarget::Cdp {
             window_hwnd: hwnd, ..
         } => {
-            if *hwnd == 0 {
-                return Err(mcp_error(
-                    error_codes::TOOL_PARAMS_INVALID,
-                    "target claim window_hwnd must be non-zero",
-                ));
-            }
             synapse_a11y::foreground_context(*hwnd).map_err(|error| {
                 mcp_error(
                     error_codes::TARGET_WINDOW_NOT_FOUND,
                     format!("target claim window_hwnd 0x{hwnd:x} is not live: {error}"),
                 )
             })?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_claim_target_shape(target: &SessionTarget) -> Result<(), ErrorData> {
+    match target {
+        SessionTarget::Window { hwnd } => {
+            if *hwnd == 0 {
+                return Err(mcp_error(
+                    error_codes::TOOL_PARAMS_INVALID,
+                    "target claim window_hwnd must be non-zero",
+                ));
+            }
+        }
+        SessionTarget::Cdp {
+            window_hwnd,
+            cdp_target_id,
+        } => {
+            if *window_hwnd == 0 {
+                return Err(mcp_error(
+                    error_codes::TOOL_PARAMS_INVALID,
+                    "target claim window_hwnd must be non-zero",
+                ));
+            }
+            validate_cdp_target_id(cdp_target_id)?;
         }
     }
     Ok(())
@@ -1514,5 +1535,30 @@ mod tests {
         assert_eq!(renewed.generation, first.generation);
         assert!(reclaimed.generation > renewed.generation);
         assert_eq!(reclaimed.owner_session_id, "b");
+    }
+
+    #[test]
+    fn target_release_shape_validation_accepts_dead_nonzero_window_key() {
+        let target = SessionTarget::Window { hwnd: 0xd17ee };
+
+        validate_claim_target_shape(&target)
+            .expect("release cleanup should not require HWND liveness for a non-zero claim key");
+    }
+
+    #[test]
+    fn target_release_shape_validation_rejects_zero_window_key() {
+        let target = SessionTarget::Window { hwnd: 0 };
+
+        let error = validate_claim_target_shape(&target)
+            .expect_err("zero HWND still has no valid claim key shape");
+
+        assert_eq!(
+            error
+                .data
+                .as_ref()
+                .and_then(|data| data.get("code"))
+                .and_then(|code| code.as_str()),
+            Some(error_codes::TOOL_PARAMS_INVALID)
+        );
     }
 }

@@ -19,7 +19,8 @@ use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use synapse_core::{
-    Action, Backend, ComboInput, ComboStep, ForegroundContext, Key, error_codes, new_reflex_id,
+    Action, Backend, ComboInput, ComboStep, ForegroundContext, Key, Rect, error_codes,
+    new_reflex_id,
 };
 use synapse_reflex::{ComboParams, ReflexRuntime, ScheduledReflex};
 use synapse_storage::{decode_json, encode_json};
@@ -2990,11 +2991,6 @@ pub(crate) async fn launch_for_session(
             })
         })
         .transpose()?;
-    let excluded_hwnds = if wait_regex.is_some() {
-        snapshot_visible_window_hwnds()
-    } else {
-        HashSet::new()
-    };
     // #684: make a CDP debug port reachable for Synapse-launched Chromium so
     // observe/find can read the page DOM without manual flags. Augment the spawn
     // command only (policy already matched the original command above).
@@ -3006,8 +3002,9 @@ pub(crate) async fn launch_for_session(
         force_renderer_accessibility,
     );
     let launch_target_name = launch_target_file_name(&params.target);
-    refuse_shared_tabbed_app_visible_reuse(&params, &launch_target_name)?;
     let launch_desktop = prepare_launch_desktop(params.desktop.as_deref(), session_id)?;
+    refuse_shared_tabbed_app_visible_reuse(&params, &launch_target_name, launch_desktop.as_ref())?;
+    let excluded_hwnds = excluded_launch_wait_hwnds(wait_regex.as_ref(), launch_desktop.as_ref())?;
     let desktop_readback = launch_desktop
         .as_ref()
         .map(PreparedLaunchDesktop::to_response);
@@ -3021,15 +3018,29 @@ pub(crate) async fn launch_for_session(
     let cdp_target =
         verify_launched_chromium_url(&params, cdp_launch.as_ref(), &cdp, params.timeout_ms).await?;
     let window = if let Some(regex) = wait_regex {
-        wait_for_launch_window(
-            pid,
-            &regex,
-            params.timeout_ms,
-            &excluded_hwnds,
-            &launch_target_name,
-            &params.args,
-        )
-        .await?
+        if let Some(desktop_lease) = spawned.desktop_lease.as_ref() {
+            wait_for_launch_desktop_window(
+                pid,
+                &regex,
+                params.timeout_ms,
+                &excluded_hwnds,
+                &launch_target_name,
+                &params.args,
+                desktop_lease.name().to_owned(),
+                desktop_lease.raw_handle_value(),
+            )
+            .await?
+        } else {
+            wait_for_launch_window(
+                pid,
+                &regex,
+                params.timeout_ms,
+                &excluded_hwnds,
+                &launch_target_name,
+                &params.args,
+            )
+            .await?
+        }
     } else {
         WindowWaitResult::not_requested()
     };
@@ -3872,18 +3883,6 @@ fn validate_launch_desktop_option(params: &ActLaunchParams) -> Result<(), ErrorD
     let Some(desktop) = params.desktop.as_deref() else {
         return Ok(());
     };
-    if params.wait_for_window_title_regex.is_some() {
-        return Err(launch_tool_error(
-            error_codes::TOOL_PARAMS_INVALID,
-            "act_launch desktop routing cannot be combined with wait_for_window_title_regex until hidden-desktop window enumeration is the verified wait source",
-            json!({
-                "code": error_codes::TOOL_PARAMS_INVALID,
-                "reason": "desktop_window_wait_not_supported",
-                "desktop": desktop,
-                "wait_for_window_title_regex": params.wait_for_window_title_regex,
-            }),
-        ));
-    }
     validate_launch_desktop_request(desktop)
 }
 
@@ -4651,6 +4650,29 @@ impl PreparedLaunchDesktop {
         &self.startup_desktop
     }
 
+    fn is_agent_session(&self) -> bool {
+        self.scope == "agent_session"
+    }
+
+    fn launch_wait_excluded_hwnds(&self) -> Result<HashSet<i64>, ErrorData> {
+        self.lease.window_hwnds().map_err(|error| {
+            launch_tool_error(
+                error_codes::ACTION_TARGET_INVALID,
+                format!(
+                    "act_launch could not read hidden desktop '{}' before launch: {error}",
+                    self.name
+                ),
+                json!({
+                    "code": error_codes::ACTION_TARGET_INVALID,
+                    "reason": "desktop_window_readback_unavailable",
+                    "desktop": self.requested,
+                    "desktop_name": self.name,
+                    "source_error": error,
+                }),
+            )
+        })
+    }
+
     fn to_response(&self) -> ActLaunchDesktopReadback {
         ActLaunchDesktopReadback {
             requested: self.requested.clone(),
@@ -4696,6 +4718,31 @@ impl LaunchDesktopLease {
 
     pub(crate) const fn is_session_owned(&self) -> bool {
         self.terminate_windows_on_close
+    }
+
+    #[cfg(windows)]
+    fn window_hwnds(&self) -> Result<HashSet<i64>, String> {
+        let Some(handle) = self.handle else {
+            return Ok(HashSet::new());
+        };
+        desktop_window_hwnds(handle).map(|hwnds| hwnds.into_iter().collect::<HashSet<i64>>())
+    }
+
+    #[cfg(not(windows))]
+    fn window_hwnds(&self) -> Result<HashSet<i64>, String> {
+        let _ = self;
+        Ok(HashSet::new())
+    }
+
+    #[cfg(windows)]
+    fn raw_handle_value(&self) -> Option<isize> {
+        self.handle.map(|handle| handle.0 as isize)
+    }
+
+    #[cfg(not(windows))]
+    const fn raw_handle_value(&self) -> Option<isize> {
+        let _ = self;
+        None
     }
 }
 
@@ -5037,11 +5084,181 @@ fn desktop_window_process_ids(
 }
 
 #[cfg(windows)]
+fn desktop_window_hwnds(
+    handle: windows::Win32::System::StationsAndDesktops::HDESK,
+) -> Result<Vec<i64>, String> {
+    use windows::Win32::{
+        Foundation::{LPARAM, SetLastError, WIN32_ERROR},
+        System::StationsAndDesktops::EnumDesktopWindows,
+    };
+    use windows::core::BOOL;
+
+    struct Search {
+        hwnds: Vec<i64>,
+    }
+
+    unsafe extern "system" fn enum_window(
+        hwnd: windows::Win32::Foundation::HWND,
+        lparam: LPARAM,
+    ) -> BOOL {
+        let search = unsafe { &mut *(lparam.0 as *mut Search) };
+        search.hwnds.push(hwnd.0 as isize as i64);
+        BOOL(1)
+    }
+
+    let mut search = Search { hwnds: Vec::new() };
+    unsafe {
+        SetLastError(WIN32_ERROR(0));
+    }
+    let result = unsafe {
+        EnumDesktopWindows(
+            Some(handle),
+            Some(enum_window),
+            LPARAM((&raw mut search).cast::<core::ffi::c_void>() as isize),
+        )
+    };
+    if let Err(error) = result {
+        if desktop_window_enum_error_means_empty(&error) {
+            return Ok(Vec::new());
+        }
+        return Err(format!(
+            "EnumDesktopWindows failed for hidden desktop: {error}"
+        ));
+    }
+    search.hwnds.sort_unstable();
+    search.hwnds.dedup();
+    Ok(search.hwnds)
+}
+
+#[cfg(windows)]
+fn desktop_window_contexts(
+    handle: windows::Win32::System::StationsAndDesktops::HDESK,
+) -> Result<Vec<ForegroundContext>, String> {
+    Ok(desktop_window_hwnds(handle)?
+        .into_iter()
+        .filter_map(|hwnd| hidden_desktop_window_context(hwnd))
+        .filter(|context| !context.window_title.is_empty())
+        .collect())
+}
+
+#[cfg(windows)]
+fn desktop_window_contexts_from_handle_value(
+    handle: Option<isize>,
+) -> Result<Vec<ForegroundContext>, String> {
+    use windows::Win32::System::StationsAndDesktops::HDESK;
+
+    let Some(handle) = handle else {
+        return Ok(Vec::new());
+    };
+    desktop_window_contexts(HDESK(handle as *mut core::ffi::c_void))
+}
+
+#[cfg(not(windows))]
+fn desktop_window_contexts_from_handle_value(
+    _handle: Option<isize>,
+) -> Result<Vec<ForegroundContext>, String> {
+    Ok(Vec::new())
+}
+
+#[cfg(windows)]
+fn hidden_desktop_window_context(hwnd: i64) -> Option<ForegroundContext> {
+    use windows::Win32::{
+        Foundation::{HWND, RECT},
+        UI::WindowsAndMessaging::{GetWindowRect, GetWindowTextW, GetWindowThreadProcessId},
+    };
+
+    let hwnd = HWND(hwnd as isize as *mut core::ffi::c_void);
+    let mut pid = 0_u32;
+    unsafe {
+        GetWindowThreadProcessId(hwnd, Some(&raw mut pid));
+    }
+    if pid == 0 {
+        return None;
+    }
+    let mut title_buffer = vec![0_u16; 512];
+    let title_len = unsafe { GetWindowTextW(hwnd, &mut title_buffer) };
+    let window_title =
+        String::from_utf16_lossy(&title_buffer[..usize::try_from(title_len).unwrap_or(0)]);
+    let process_path = hidden_desktop_process_path(pid).unwrap_or_default();
+    let process_name = Path::new(&process_path).file_name().map_or_else(
+        || format!("pid-{pid}"),
+        |name| name.to_string_lossy().into_owned(),
+    );
+    let mut rect = RECT::default();
+    let window_bounds = unsafe { GetWindowRect(hwnd, &raw mut rect) }.map_or(
+        Rect {
+            x: 0,
+            y: 0,
+            w: 0,
+            h: 0,
+        },
+        |()| Rect {
+            x: rect.left,
+            y: rect.top,
+            w: rect.right.saturating_sub(rect.left),
+            h: rect.bottom.saturating_sub(rect.top),
+        },
+    );
+
+    Some(ForegroundContext {
+        hwnd: hwnd.0 as isize as i64,
+        pid,
+        process_name,
+        process_path,
+        window_title,
+        window_bounds,
+        monitor_index: 0,
+        dpi_scale: 1.0,
+        profile_id: None,
+        steam_appid: None,
+        is_fullscreen: false,
+        is_dwm_composed: true,
+    })
+}
+
+#[cfg(windows)]
+fn hidden_desktop_process_path(pid: u32) -> Option<String> {
+    use windows::{
+        Win32::{
+            Foundation::CloseHandle,
+            System::Threading::{
+                OpenProcess, PROCESS_NAME_FORMAT, PROCESS_QUERY_LIMITED_INFORMATION,
+                QueryFullProcessImageNameW,
+            },
+        },
+        core::PWSTR,
+    };
+
+    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }.ok()?;
+    let mut buffer = vec![0_u16; 32_768];
+    let mut len = u32::try_from(buffer.len()).ok()?;
+    let result = unsafe {
+        QueryFullProcessImageNameW(
+            handle,
+            PROCESS_NAME_FORMAT(0),
+            PWSTR(buffer.as_mut_ptr()),
+            &raw mut len,
+        )
+    };
+    let _ = unsafe { CloseHandle(handle) };
+    result.ok()?;
+    Some(String::from_utf16_lossy(
+        &buffer[..usize::try_from(len).ok()?],
+    ))
+}
+
+#[cfg(windows)]
 fn desktop_window_enum_error_means_empty(error: &windows::core::Error) -> bool {
-    use windows::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_NO_MORE_FILES};
+    use windows::Win32::Foundation::{
+        ERROR_ENVVAR_NOT_FOUND, ERROR_FILE_NOT_FOUND, ERROR_INVALID_HANDLE, ERROR_NO_MORE_FILES,
+    };
 
     let code = error.code();
-    code == ERROR_FILE_NOT_FOUND.to_hresult() || code == ERROR_NO_MORE_FILES.to_hresult()
+    code.0 == 0
+        || code == ERROR_FILE_NOT_FOUND.to_hresult()
+        || code == ERROR_NO_MORE_FILES.to_hresult()
+        || code == ERROR_INVALID_HANDLE.to_hresult()
+        || code == ERROR_ENVVAR_NOT_FOUND.to_hresult()
 }
 
 #[cfg(windows)]
@@ -5704,6 +5921,19 @@ impl WindowWaitResult {
     }
 }
 
+fn excluded_launch_wait_hwnds(
+    wait_regex: Option<&regex::Regex>,
+    launch_desktop: Option<&PreparedLaunchDesktop>,
+) -> Result<HashSet<i64>, ErrorData> {
+    if wait_regex.is_none() {
+        return Ok(HashSet::new());
+    }
+    if let Some(desktop) = launch_desktop {
+        return desktop.launch_wait_excluded_hwnds();
+    }
+    Ok(snapshot_visible_window_hwnds())
+}
+
 async fn wait_for_launch_window(
     pid: u32,
     title_regex: &regex::Regex,
@@ -5781,6 +6011,72 @@ async fn wait_for_launch_window(
     }
 }
 
+async fn wait_for_launch_desktop_window(
+    pid: u32,
+    title_regex: &regex::Regex,
+    timeout_ms: u64,
+    excluded_hwnds: &HashSet<i64>,
+    launch_target_name: &str,
+    launch_args: &[String],
+    desktop_name: String,
+    desktop_handle: Option<isize>,
+) -> Result<WindowWaitResult, ErrorData> {
+    let started = Instant::now();
+    let timeout = Duration::from_millis(timeout_ms);
+    let mut last_error: Option<String>;
+    let mut last_windows = Vec::new();
+    loop {
+        match desktop_window_contexts_from_handle_value(desktop_handle) {
+            Ok(contexts) => {
+                last_windows = window_context_summaries(&contexts);
+                if let Some(context) = select_launch_desktop_window(
+                    &contexts,
+                    pid,
+                    title_regex,
+                    excluded_hwnds,
+                    launch_target_name,
+                    launch_args,
+                ) {
+                    tracing::info!(
+                        code = "M4_ACT_LAUNCH_DESKTOP_WINDOW_MATCHED",
+                        hwnd = context.hwnd,
+                        pid = context.pid,
+                        title = %context.window_title,
+                        desktop = %desktop_name,
+                        "act_launch matched the requested launched hidden-desktop window without activating the human foreground"
+                    );
+                    return Ok(WindowWaitResult::matched(context.clone()));
+                }
+                last_error = None;
+            }
+            Err(error) => {
+                last_error = Some(error);
+            }
+        }
+
+        if started.elapsed() >= timeout {
+            tracing::warn!(
+                code = "M4_ACT_LAUNCH_DESKTOP_WINDOW_WAIT_TIMEOUT",
+                pid,
+                desktop = %desktop_name,
+                title_regex = title_regex.as_str(),
+                ?excluded_hwnds,
+                last_error,
+                "act_launch hidden-desktop window title wait timed out"
+            );
+            return Err(launch_window_error(
+                "desktop_no_match_within_timeout",
+                pid,
+                title_regex.as_str(),
+                timeout_ms,
+                last_error,
+                &last_windows,
+            ));
+        }
+        tokio::time::sleep(Duration::from_millis(LAUNCH_WINDOW_POLL_INTERVAL_MS)).await;
+    }
+}
+
 fn window_context_summaries(contexts: &[ForegroundContext]) -> Vec<serde_json::Value> {
     contexts
         .iter()
@@ -5799,6 +6095,7 @@ fn window_context_summaries(contexts: &[ForegroundContext]) -> Vec<serde_json::V
 fn refuse_shared_tabbed_app_visible_reuse(
     params: &ActLaunchParams,
     launch_target_name: &str,
+    launch_desktop: Option<&PreparedLaunchDesktop>,
 ) -> Result<(), ErrorData> {
     let Some(risk_family) = shared_tabbed_app_family(launch_target_name) else {
         return Ok(());
@@ -5807,6 +6104,7 @@ fn refuse_shared_tabbed_app_visible_reuse(
     #[cfg(not(windows))]
     {
         let _ = params;
+        let _ = launch_desktop;
         let _ = risk_family;
         return Ok(());
     }
@@ -5839,6 +6137,37 @@ fn refuse_shared_tabbed_app_visible_reuse(
             .collect::<Vec<_>>();
         if risky_windows.is_empty() {
             return Ok(());
+        }
+        if let Some(desktop) = launch_desktop {
+            if desktop.is_agent_session() && params.wait_for_window_title_regex.is_some() {
+                tracing::info!(
+                    code = "M4_ACT_LAUNCH_SHARED_TABBED_DESKTOP_ROUTE_ALLOWED",
+                    target = %params.target,
+                    launch_target_name,
+                    desktop = %desktop.name,
+                    existing_window_count = risky_windows.len(),
+                    "act_launch allowing shared-tabbed app launch because session-owned hidden desktop plus window wait will prove the owned target"
+                );
+                return Ok(());
+            }
+            return Err(launch_tool_error(
+                error_codes::ACTION_TARGET_INVALID,
+                format!(
+                    "act_launch refused {launch_target_name} on desktop route because an existing visible shared tabbed app window is already open and this desktop route cannot prove a new session-owned target"
+                ),
+                json!({
+                    "code": error_codes::ACTION_TARGET_INVALID,
+                    "reason": "shared_tabbed_app_desktop_wait_required",
+                    "target": params.target,
+                    "args": params.args,
+                    "desktop": params.desktop,
+                    "launch_target_name": launch_target_name,
+                    "risk_family": risk_family,
+                    "existing_window_count": risky_windows.len(),
+                    "observed_windows": window_context_summaries(&risky_windows),
+                    "resolution": "use desktop=agent:session with wait_for_window_title_regex so hidden-desktop enumeration can prove the owned target",
+                }),
+            ));
         }
         Err(launch_tool_error(
             error_codes::ACTION_TARGET_INVALID,
@@ -5933,6 +6262,40 @@ fn select_launch_window<'a>(
                     && title_regex.is_match(&context.window_title)
             })
         })
+}
+
+fn select_launch_desktop_window<'a>(
+    contexts: &'a [ForegroundContext],
+    pid: u32,
+    title_regex: &regex::Regex,
+    excluded_hwnds: &HashSet<i64>,
+    launch_target_name: &str,
+    launch_args: &[String],
+) -> Option<&'a ForegroundContext> {
+    select_launch_window(
+        contexts,
+        pid,
+        title_regex,
+        excluded_hwnds,
+        launch_target_name,
+        launch_args,
+    )
+    .or_else(|| {
+        contexts.iter().find(|context| {
+            !excluded_hwnds.contains(&context.hwnd)
+                && launch_target_matches_hidden_desktop_spawn_window(launch_target_name, context)
+                && title_regex.is_match(&context.window_title)
+        })
+    })
+}
+
+fn launch_target_matches_hidden_desktop_spawn_window(
+    target_name: &str,
+    context: &ForegroundContext,
+) -> bool {
+    let target_name = target_name.to_ascii_lowercase();
+    let process_name = context.process_name.to_ascii_lowercase();
+    shared_tabbed_app_family(&target_name).is_some() && target_name == process_name
 }
 
 fn launch_target_matches_brokered_window(
@@ -10545,26 +10908,13 @@ mod tests {
     }
 
     #[test]
-    fn launch_desktop_option_refuses_visible_window_wait() {
+    fn launch_desktop_option_accepts_window_wait_for_hidden_desktop_readback() {
         let mut params = launch_params("notepad.exe", Vec::new(), 10_000);
         params.desktop = Some("agent:session".to_owned());
-        params.wait_for_window_title_regex = Some(".*".to_owned());
+        params.wait_for_window_title_regex = Some("^owned-hidden-notepad$".to_owned());
 
-        let error = validate_launch_params(&params)
-            .expect_err("desktop launch should not use visible-desktop window wait");
-
-        println!(
-            "readback=act_launch_desktop_validation edge=wait_refused before=desktop:{:?},wait:{:?} after={:?}",
-            params.desktop, params.wait_for_window_title_regex, error.data
-        );
-        assert_eq!(
-            error
-                .data
-                .as_ref()
-                .and_then(|data| data.get("reason"))
-                .and_then(|reason| reason.as_str()),
-            Some("desktop_window_wait_not_supported")
-        );
+        validate_launch_params(&params)
+            .expect("desktop launch waits are supported through hidden-desktop enumeration");
     }
 
     #[test]
@@ -13026,6 +13376,58 @@ mod tests {
         assert!(
             selected.is_none(),
             "a matching title from an unrelated PID must not satisfy launch wait"
+        );
+    }
+
+    #[test]
+    fn launch_desktop_window_selection_accepts_new_tabbed_notepad_with_broker_pid() {
+        let contexts = vec![foreground_for_launch_selection(
+            11,
+            39016,
+            "Notepad.exe",
+            "Untitled - Notepad",
+        )];
+        let excluded = HashSet::new();
+        let title_regex =
+            regex::Regex::new("^Untitled - Notepad$").expect("synthetic regex compiles");
+
+        let selected = select_launch_desktop_window(
+            &contexts,
+            51028,
+            &title_regex,
+            &excluded,
+            "notepad.exe",
+            &[],
+        )
+        .expect("new hidden-desktop Notepad window should satisfy launch wait despite broker PID");
+
+        assert_eq!(selected.hwnd, 11);
+    }
+
+    #[test]
+    fn launch_desktop_window_selection_rejects_excluded_tabbed_notepad() {
+        let contexts = vec![foreground_for_launch_selection(
+            10,
+            39016,
+            "Notepad.exe",
+            "Untitled - Notepad",
+        )];
+        let excluded = HashSet::from([10]);
+        let title_regex =
+            regex::Regex::new("^Untitled - Notepad$").expect("synthetic regex compiles");
+
+        let selected = select_launch_desktop_window(
+            &contexts,
+            51028,
+            &title_regex,
+            &excluded,
+            "notepad.exe",
+            &[],
+        );
+
+        assert!(
+            selected.is_none(),
+            "pre-existing hidden-desktop Notepad windows must not become owned launch targets"
         );
     }
 
