@@ -59,6 +59,8 @@ fn build_spawn_manifest(spawn_id: &str, params: &ActSpawnAgentParams) -> Result<
         "kind": agent_kind.as_str(),
         "model": params.model_for_spawn_manifest(agent_kind),
         "model_ref": params.local_model_ref(),
+        "require_approval_gate": params.require_approval_gate,
+        "local_model_trusted_unattended_exact_contract": agent_kind.is_local_model() && !params.require_approval_gate,
         // Spawn-template provenance (#909): the exact template version + config
         // hash this spawn was rendered from, or null for a direct spawn. The
         // manifest is the physical source of truth for run reproducibility.
@@ -4320,6 +4322,11 @@ $prompt | & claude @claudeArgs 1> {stdout_path} 2> {stderr_path}\n\
             } else {
                 local_args = format!("$localArgs = {local_args}", local_args = local_args);
             }
+            if !params.require_approval_gate {
+                local_args.push_str(
+                    "\n$localArgs += @('--local-agent-trusted-unattended-exact-contract')",
+                );
+            }
             format!(
                 "{local_args}\n& {exe} @localArgs 1> {stdout_path} 2> {stderr_path}\n",
                 local_args = local_args,
@@ -6202,6 +6209,7 @@ mod tests {
         assert!(script.contains("--local-agent-task-file"));
         assert!(script.contains("--local-agent-spawn-id"));
         assert!(script.contains("--local-agent-log-dir"));
+        assert!(!script.contains("--local-agent-trusted-unattended-exact-contract"));
         assert!(!script.contains("& codex"));
         assert!(!script.contains("& claude"));
 
@@ -6211,6 +6219,23 @@ mod tests {
         assert_eq!(manifest["kind"], "local-model");
         assert_eq!(manifest["model"], "ollama-gemma4-e4b");
         assert_eq!(manifest["model_ref"], "ollama-gemma4-e4b");
+        assert_eq!(manifest["require_approval_gate"], true);
+        assert_eq!(
+            manifest["local_model_trusted_unattended_exact_contract"],
+            false
+        );
+
+        params.require_approval_gate = false;
+        let trusted_script =
+            agent_spawn_powershell_script(&params, &files, dir.path()).expect("trusted script");
+        assert!(trusted_script.contains("--local-agent-trusted-unattended-exact-contract"));
+        let trusted_manifest =
+            build_spawn_manifest("agent-spawn-manifest-local", &params).expect("manifest");
+        assert_eq!(trusted_manifest["require_approval_gate"], false);
+        assert_eq!(
+            trusted_manifest["local_model_trusted_unattended_exact_contract"],
+            true
+        );
     }
 
     #[test]

@@ -973,13 +973,14 @@ pub struct ActSpawnAgentParams {
     #[schemars(default = "default_agent_spawn_hold_open_ms", range(min = 0))]
     pub hold_open_ms: u64,
     /// Gate the spawned agent's risky tool calls through the human Approvals
-    /// inbox (#927). When true (the default) a Claude agent is launched with
-    /// `--permission-mode default --permission-prompt-tool
-    /// mcp__synapse__approval_gate`, so destructive/mutating/network actions
-    /// pause for a human decision instead of auto-running. Set false only for
-    /// trusted unattended automation that should keep the legacy
-    /// `bypassPermissions` behavior. No effect on Codex/local-model spawns,
-    /// which lack an equivalent prompt-tool hook.
+    /// inbox (#927). When true (the default) Claude uses
+    /// `mcp__synapse__approval_gate`, and local-model workers gate risky tools
+    /// after exact-contract prevalidation. Set false only for trusted
+    /// unattended automation: Claude uses `bypassPermissions`; local-model
+    /// workers may bypass approval only for exact-contract tool calls whose
+    /// tool name/order/arguments match the inferred contract and whose tool is
+    /// not a raw foreground, approval-control, operator-control, or fleet
+    /// control primitive.
     #[serde(default = "default_require_approval_gate")]
     #[schemars(default = "default_require_approval_gate")]
     pub require_approval_gate: bool,

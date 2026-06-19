@@ -246,6 +246,8 @@ struct Cli {
     local_agent_no_stream: bool,
     #[arg(long, env = "SYNAPSE_LOCAL_AGENT_ALLOW_NON_LOOPBACK")]
     local_agent_allow_non_loopback: bool,
+    #[arg(long, env = "SYNAPSE_LOCAL_AGENT_TRUSTED_UNATTENDED_EXACT_CONTRACT")]
+    local_agent_trusted_unattended_exact_contract: bool,
 }
 
 impl Cli {
@@ -381,6 +383,7 @@ async fn run() -> anyhow::Result<ExitCode> {
             tool_parse_retry_limit: cli.local_agent_tool_parse_retry_limit,
             no_stream: cli.local_agent_no_stream,
             allow_non_loopback: cli.local_agent_allow_non_loopback,
+            trusted_unattended_exact_contract: cli.local_agent_trusted_unattended_exact_contract,
         })
         .await;
         drop(telemetry_guard);

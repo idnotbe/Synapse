@@ -45,6 +45,7 @@ pub(crate) struct LocalAgentCli {
     pub tool_parse_retry_limit: u32,
     pub no_stream: bool,
     pub allow_non_loopback: bool,
+    pub trusted_unattended_exact_contract: bool,
 }
 
 type LocalMcpClient = RunningService<RoleClient, ClientInfo>;
@@ -1221,6 +1222,37 @@ impl Runner {
             return Ok(ToolGate::Allow(args));
         }
 
+        if self.cli.trusted_unattended_exact_contract
+            && local_agent_exact_contract_gate_bypass_allowed(
+                tool_name,
+                &args,
+                self.task_tool_contract.as_ref(),
+            )
+        {
+            self.write_line(json!({
+                "type": "local.tool_call.gate_bypassed",
+                "conversation_id": self.conversation_id,
+                "model": self.registry.model_id,
+                "turn_index": self.turn_count,
+                "tool_name": tool_name,
+                "tool_call_id": tool_use_id,
+                "reason_code": "trusted_unattended_exact_contract",
+            }))?;
+            self.post_event(json!({
+                "event": "state_changed",
+                "session_id": self.mcp_session_id,
+                "conversation_id": self.conversation_id,
+                "model": self.registry.model_id,
+                "registry_name": self.registry.name,
+                "state_to": "live",
+                "reason_code": "local_tool_gate_bypassed_exact_contract",
+                "tool_name": tool_name,
+                "tool_call_id": tool_use_id,
+            }))
+            .await?;
+            return Ok(ToolGate::Allow(args));
+        }
+
         // The agent is now waiting on a human — surface it to the fleet inbox /
         // escalation pipeline via the state machine.
         self.post_event(json!({
@@ -2135,6 +2167,85 @@ fn model_tool_call_pre_gate_rejection(
         }
         _ => None,
     }
+}
+
+fn local_agent_exact_contract_gate_bypass_allowed(
+    tool_name: &str,
+    args: &JsonObject,
+    task_tool_contract: Option<&TaskToolContract>,
+) -> bool {
+    let Some(contract) = task_tool_contract else {
+        return false;
+    };
+    if !contract.allowed_tools.contains(tool_name) {
+        return false;
+    }
+    if crate::server::permission_policy::classify(
+        &gate_tool_label(tool_name),
+        &Value::Object(args.clone()),
+    )
+    .destructive()
+    {
+        return false;
+    }
+    if local_agent_exact_contract_gate_bypass_denied_tool(tool_name) {
+        return false;
+    }
+    match contract.argument_templates.get(tool_name) {
+        Some(expected) => expected == args,
+        None => false,
+    }
+}
+
+fn local_agent_exact_contract_gate_bypass_denied_tool(tool_name: &str) -> bool {
+    matches!(
+        tool_name,
+        "approval_decide"
+            | "approval_request"
+            | "approval_gate"
+            | "act_run_shell"
+            | "act_run_shell_cancel"
+            | "act_run_shell_start"
+            | "act_spawn_agent"
+            | "agent_send"
+            | "agent_send_broadcast"
+            | "agent_interrupt"
+            | "agent_kill"
+            | "agent_pause"
+            | "agent_respawn"
+            | "agent_resume"
+            | "agent_steer"
+            | "agent_template_delete"
+            | "agent_template_put"
+            | "act_click"
+            | "act_clipboard"
+            | "act_combo"
+            | "act_focus_window"
+            | "act_keymap"
+            | "act_launch"
+            | "act_pad"
+            | "act_press"
+            | "act_scroll"
+            | "act_set_field_text"
+            | "act_set_value"
+            | "act_stroke"
+            | "act_type"
+            | "control_lease_acquire"
+            | "control_lease_handoff"
+            | "control_lease_release"
+            | "fleet_stop"
+            | "local_model_probe"
+            | "local_model_register"
+            | "local_model_remove"
+            | "local_model_update"
+            | "task_cancel"
+            | "task_claim"
+            | "task_create"
+            | "task_dispatch_once"
+            | "task_reconcile"
+            | "task_update"
+            | "tool_profile_set"
+    )
 }
 
 fn task_contract_argument_rejection(
@@ -4199,6 +4310,139 @@ cdp_open_tab, target_claim, target_act, browser_evaluate, workspace_put.";
         )
         .expect("changed exact value must fail before approval");
         assert!(rejection.reason.contains("changed_keys=[value]"));
+        Ok(())
+    }
+
+    #[test]
+    fn exact_contract_gate_bypass_requires_exact_template_match() -> anyhow::Result<()> {
+        let tools = tools_named([
+            "cdp_open_tab",
+            "target_claim",
+            "browser_set_value",
+            "target_act",
+            "cdp_target_info",
+            "workspace_put",
+        ]);
+        let task = "Use exactly these real Synapse tools in this exact order:\n\
+1. cdp_open_tab {\"url\":\"http://127.0.0.1:8896/fixture.html\",\"window_hwnd\":2427400}\n\
+2. target_claim {\"ttl_ms\":120000}\n\
+3. browser_set_value {\"selector\":\"#lane-value\",\"text\":\"issue1263\"}\n\
+4. target_act {\"selector\":\"#mark\",\"verb\":\"click\",\"wait_timeout_ms\":10000}\n\
+5. cdp_target_info {}\n\
+6. workspace_put {\"run_id\":\"issue1263\",\"key\":\"browser-target\",\"value\":{\"ok\":true}}";
+        let contract = infer_task_tool_contract(task, &tools).expect("exact contract");
+        let exact_set: JsonObject = serde_json::from_value(json!({
+            "selector": "#lane-value",
+            "text": "issue1263"
+        }))?;
+        assert!(local_agent_exact_contract_gate_bypass_allowed(
+            "browser_set_value",
+            &exact_set,
+            Some(&contract)
+        ));
+        assert!(!local_agent_exact_contract_gate_bypass_allowed(
+            "browser_set_value",
+            &exact_set,
+            None
+        ));
+
+        let changed_set: JsonObject = serde_json::from_value(json!({
+            "selector": "#lane-value",
+            "text": "different"
+        }))?;
+        assert!(!local_agent_exact_contract_gate_bypass_allowed(
+            "browser_set_value",
+            &changed_set,
+            Some(&contract)
+        ));
+
+        let exact_info = Map::new();
+        assert!(local_agent_exact_contract_gate_bypass_allowed(
+            "cdp_target_info",
+            &exact_info,
+            Some(&contract)
+        ));
+        let extra_info: JsonObject = serde_json::from_value(json!({"include": []}))?;
+        assert!(!local_agent_exact_contract_gate_bypass_allowed(
+            "cdp_target_info",
+            &extra_info,
+            Some(&contract)
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn exact_contract_gate_bypass_denies_raw_foreground_tools() -> anyhow::Result<()> {
+        let tools = tools_named(["act_type"]);
+        let task = "Use exactly these real Synapse tools in this exact order:\n\
+1. act_type {\"text\":\"do-not-bypass\",\"verify_delta\":true}";
+        let contract = infer_task_tool_contract(task, &tools).expect("exact contract");
+        let args: JsonObject = serde_json::from_value(json!({
+            "text": "do-not-bypass",
+            "verify_delta": true
+        }))?;
+
+        assert!(
+            model_tool_call_pre_gate_rejection("act_type", &args, true, Some(&contract)).is_none()
+        );
+        assert!(!local_agent_exact_contract_gate_bypass_allowed(
+            "act_type",
+            &args,
+            Some(&contract)
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn exact_contract_gate_bypass_denies_shell_and_operator_control() -> anyhow::Result<()> {
+        let tools = tools_named([
+            "act_run_shell",
+            "act_spawn_agent",
+            "agent_kill",
+            "approval_request",
+            "local_model_update",
+        ]);
+        let task = "Use exactly these real Synapse tools in this exact order:\n\
+1. act_run_shell {\"command\":\"powershell.exe\",\"args\":[\"-NoLogo\",\"-Command\",\"Remove-Item -LiteralPath C:\\\\temp\\\\x -Recurse\"],\"execution_mode\":\"inline\"}\n\
+2. act_spawn_agent {\"prompt\":\"spawn nested\",\"cli\":\"local_model\",\"model_ref\":\"qwen8v2-tool-live\"}\n\
+3. agent_kill {\"target_id\":\"agent-spawn-danger\"}\n\
+4. approval_request {\"summary\":\"do not bypass\"}\n\
+5. local_model_update {\"name\":\"qwen8v2-tool-live\",\"enabled\":false}";
+        let contract = infer_task_tool_contract(task, &tools).expect("exact contract");
+        for (tool_name, args) in [
+            (
+                "act_run_shell",
+                json!({
+                    "command": "powershell.exe",
+                    "args": ["-NoLogo", "-Command", "Remove-Item -LiteralPath C:\\temp\\x -Recurse"],
+                    "execution_mode": "inline"
+                }),
+            ),
+            (
+                "act_spawn_agent",
+                json!({
+                    "prompt": "spawn nested",
+                    "cli": "local_model",
+                    "model_ref": "qwen8v2-tool-live"
+                }),
+            ),
+            ("agent_kill", json!({"target_id": "agent-spawn-danger"})),
+            ("approval_request", json!({"summary": "do not bypass"})),
+            (
+                "local_model_update",
+                json!({"name": "qwen8v2-tool-live", "enabled": false}),
+            ),
+        ] {
+            let object = args.as_object().cloned().expect("test args object");
+            assert!(
+                !local_agent_exact_contract_gate_bypass_allowed(
+                    tool_name,
+                    &object,
+                    Some(&contract)
+                ),
+                "{tool_name} must never bypass approval"
+            );
+        }
         Ok(())
     }
 
