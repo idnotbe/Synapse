@@ -405,7 +405,7 @@ pub struct ActComboResponse {
 #[serde(deny_unknown_fields)]
 pub struct ActRunShellParams {
     #[schemars(
-        description = "Executable path or program name only. Do not include arguments, quotes, pipes, redirection, or other shell syntax here; pass arguments in args. For shell syntax, set command to an explicit shell executable such as powershell.exe or cmd.exe and put the shell flags/snippet in args."
+        description = "Executable path or program name only. Do not include arguments, quotes, pipes, redirection, or other shell syntax here; pass arguments in args. For shell syntax, set command to an explicit shell executable such as powershell.exe or cmd.exe and put the shell flags/snippet in args. Headed Playwright/Chromium automation launches are refused here because they can surface Chrome debugger/automation banners that shift browser layout; use existing authenticated Chrome via cdp_* / target_act / browser_* tools or act_launch with Synapse-injected isolated CDP flags."
     )]
     pub command: String,
     #[serde(default)]
@@ -505,7 +505,7 @@ pub struct ActRunShellResponse {
 #[serde(deny_unknown_fields)]
 pub struct ActRunShellStartParams {
     #[schemars(
-        description = "Executable path or program name only. Do not include arguments, quotes, pipes, redirection, or other shell syntax here; pass arguments in args. For shell syntax, set command to an explicit shell executable such as powershell.exe or cmd.exe and put the shell flags/snippet in args."
+        description = "Executable path or program name only. Do not include arguments, quotes, pipes, redirection, or other shell syntax here; pass arguments in args. For shell syntax, set command to an explicit shell executable such as powershell.exe or cmd.exe and put the shell flags/snippet in args. Headed Playwright/Chromium automation launches are refused here because they can surface Chrome debugger/automation banners that shift browser layout; use existing authenticated Chrome via cdp_* / target_act / browser_* tools or act_launch with Synapse-injected isolated CDP flags."
     )]
     pub command: String,
     #[serde(default)]
@@ -3632,6 +3632,7 @@ fn validate_run_shell_params(params: &ActRunShellParams) -> Result<(), ErrorData
     }
     validate_run_shell_environment(&params.env)?;
     validate_run_shell_command_shape(params, command)?;
+    validate_run_shell_chromium_debug_policy(params)?;
     if let Some(marker) = detect_shell_global_input(&shell_command_line(params)) {
         return Err(shell_tool_error(
             error_codes::SAFETY_SHELL_GLOBAL_INPUT_DENIED,
@@ -3966,27 +3967,70 @@ fn validate_chromium_debug_launch_policy(params: &ActLaunchParams) -> Result<(),
     if !is_chromium && params.cdp_debug != Some(true) {
         return Ok(());
     }
-    if !has_remote_debugging_arg(&params.args) {
+    let Some(violation) = chromium_debug_args_policy_violation(
+        &params.args,
+        "chromium_remote_debugging_not_popup_safe",
+    ) else {
         return Ok(());
+    };
+
+    Err(launch_tool_error(
+        error_codes::A11Y_CDP_DEBUGGER_WARNING_UNSUPPRESSED,
+        "act_launch refused a Chromium remote-debugging launch that could surface Chrome debugger/native-host UI on an end-user profile",
+        json!({
+            "code": error_codes::A11Y_CDP_DEBUGGER_WARNING_UNSUPPRESSED,
+            "reason": violation.reason,
+            "target": params.target,
+            "args": params.args,
+            "user_data_dir": violation.user_data_dir,
+            "user_data_dir_state": violation.user_data_dir_state.as_str(),
+            "has_silent_debugger_extension_api": violation.silent_debugger,
+            "has_disable_extensions": violation.disable_extensions,
+            "has_extension_loading_flags": violation.loads_extensions,
+            "has_layout_shifting_infobar_flags": !violation.layout_infobar_flags.is_empty(),
+            "layout_shifting_infobar_flags": violation.layout_infobar_flags,
+            "required_invariant": CHROMIUM_DEBUG_LAUNCH_REQUIRED_INVARIANT,
+            "remediation": "omit caller-supplied remote-debugging/profile flags so Synapse injects its isolated automation profile, or pass the required flags against a non-default automation profile; never debug the user's normal Chrome profile",
+        }),
+    ))
+}
+
+const CHROMIUM_DEBUG_LAUNCH_REQUIRED_INVARIANT: &str = "remote-debugging Chromium launches must use a non-default dedicated user-data-dir, --silent-debugger-extension-api, --disable-extensions, no extension-loading flags, and no known layout-shifting Chrome warning flags such as --disable-blink-features=AutomationControlled";
+
+#[derive(Debug)]
+struct ChromiumDebugPolicyViolation {
+    reason: &'static str,
+    user_data_dir: Option<String>,
+    user_data_dir_state: ChromiumUserDataDirSafety,
+    silent_debugger: bool,
+    disable_extensions: bool,
+    loads_extensions: bool,
+    layout_infobar_flags: Vec<String>,
+}
+
+fn chromium_debug_args_policy_violation(
+    args: &[String],
+    reason: &'static str,
+) -> Option<ChromiumDebugPolicyViolation> {
+    if !has_remote_debugging_arg(args) {
+        return None;
     }
 
-    let user_data_dir = user_data_dir_arg(&params.args);
+    let user_data_dir = user_data_dir_arg(args);
     let user_data_dir_state = user_data_dir
         .as_deref()
         .map(chromium_user_data_dir_safety)
         .unwrap_or(ChromiumUserDataDirSafety::Missing);
-    let silent_debugger = params
-        .args
+    let silent_debugger = args
         .iter()
         .any(|arg| is_switch_arg(arg, "--silent-debugger-extension-api"));
-    let disable_extensions = params
-        .args
+    let disable_extensions = args
         .iter()
         .any(|arg| is_switch_arg(arg, "--disable-extensions"));
-    let loads_extensions = params.args.iter().any(|arg| {
+    let loads_extensions = args.iter().any(|arg| {
         is_switch_arg(arg, "--load-extension") || is_switch_arg(arg, "--disable-extensions-except")
     });
-    let layout_infobar_flags = chromium_layout_infobar_flags(&params.args);
+    let layout_infobar_flags = chromium_layout_infobar_flags(args);
 
     if silent_debugger
         && disable_extensions
@@ -3994,28 +4038,278 @@ fn validate_chromium_debug_launch_policy(params: &ActLaunchParams) -> Result<(),
         && layout_infobar_flags.is_empty()
         && matches!(user_data_dir_state, ChromiumUserDataDirSafety::Dedicated)
     {
-        return Ok(());
+        return None;
     }
 
-    Err(launch_tool_error(
+    Some(ChromiumDebugPolicyViolation {
+        reason,
+        user_data_dir,
+        user_data_dir_state,
+        silent_debugger,
+        disable_extensions,
+        loads_extensions,
+        layout_infobar_flags,
+    })
+}
+
+fn validate_run_shell_chromium_debug_policy(params: &ActRunShellParams) -> Result<(), ErrorData> {
+    let command_name = launch_target_file_name(&params.command);
+    if synapse_a11y::is_chromium_family(&command_name)
+        && let Some(violation) = chromium_debug_args_policy_violation(
+            &params.args,
+            "chromium_remote_debugging_not_popup_safe",
+        )
+    {
+        return Err(run_shell_chromium_debug_error(
+            params,
+            "act_run_shell refused a direct Chromium remote-debugging launch that could surface Chrome debugger/native-host UI or a layout-shifting automation banner",
+            violation.reason,
+            Some(violation),
+            Vec::new(),
+        ));
+    }
+
+    let command_line = shell_command_line(params);
+    if let Some(violation) =
+        shell_wrapped_chromium_debug_policy_violation(&command_name, &command_line)
+    {
+        return Err(run_shell_chromium_debug_error(
+            params,
+            "act_run_shell refused a shell-wrapped Chromium/Playwright launch that could surface Chrome debugger/native-host UI or a layout-shifting automation banner",
+            violation.reason,
+            None,
+            violation.markers,
+        ));
+    }
+
+    Ok(())
+}
+
+#[derive(Debug)]
+struct ShellChromiumDebugPolicyViolation {
+    reason: &'static str,
+    markers: Vec<&'static str>,
+}
+
+fn shell_wrapped_chromium_debug_policy_violation(
+    command_name: &str,
+    command_line: &str,
+) -> Option<ShellChromiumDebugPolicyViolation> {
+    let lower = command_line.to_ascii_lowercase();
+    let launcher_line = lower.replace(['"', '\''], "").replace('\\', "/");
+    let known_playwright_mcp_launcher = launcher_line.contains("npx @playwright/mcp")
+        || launcher_line.contains("npx.cmd @playwright/mcp")
+        || launcher_line.contains("npx.exe @playwright/mcp")
+        || launcher_line.contains("npm exec @playwright/mcp")
+        || launcher_line.contains("pnpm dlx @playwright/mcp")
+        || launcher_line.contains("yarn dlx @playwright/mcp")
+        || (matches!(
+            command_name,
+            "npx" | "npx.cmd" | "npx.exe" | "npm" | "npm.cmd" | "npm.exe"
+        ) && launcher_line.contains("@playwright/mcp"));
+    if known_playwright_mcp_launcher && shell_command_can_launch_browser_helper(command_name) {
+        return Some(ShellChromiumDebugPolicyViolation {
+            reason: "known_playwright_mcp_browser_launcher_denied",
+            markers: vec!["playwright_mcp"],
+        });
+    }
+
+    if !shell_command_can_launch_browser_helper(command_name) {
+        return None;
+    }
+    if shell_command_is_read_only_process_inspection(command_name, &lower) {
+        return None;
+    }
+
+    let mentions_chromium = lower.contains("chrome.exe")
+        || lower.contains("chrome ")
+        || lower.contains("msedge.exe")
+        || lower.contains("msedge ")
+        || lower.contains("chromium.exe")
+        || lower.contains("chromium ");
+    let remote_debugging =
+        lower.contains("--remote-debugging-pipe") || lower.contains("--remote-debugging-port");
+    if !mentions_chromium || !remote_debugging {
+        return None;
+    }
+
+    let has_silent = lower.contains("--silent-debugger-extension-api");
+    let has_disable_extensions =
+        lower.contains("--disable-extensions") && !lower.contains("--disable-extensions-except");
+    let loads_extensions =
+        lower.contains("--load-extension") || lower.contains("--disable-extensions-except");
+    let has_user_data_dir = lower.contains("--user-data-dir");
+    let default_profile =
+        lower.contains("\\google\\chrome\\user data") || lower.contains("/google/chrome/user data");
+    let dedicated_profile = has_user_data_dir && !default_profile;
+    let has_layout_flag =
+        lower.contains("--disable-blink-features") && lower.contains("automationcontrolled");
+
+    if has_silent
+        && has_disable_extensions
+        && !loads_extensions
+        && dedicated_profile
+        && !has_layout_flag
+    {
+        return None;
+    }
+
+    let mut markers = vec!["remote_debugging_chromium_shell"];
+    if !has_silent {
+        markers.push("missing_silent_debugger_extension_api");
+    }
+    if !has_disable_extensions {
+        markers.push("missing_disable_extensions");
+    }
+    if loads_extensions {
+        markers.push("extension_loading_flags");
+    }
+    if !dedicated_profile {
+        markers.push("missing_dedicated_user_data_dir");
+    }
+    if has_layout_flag {
+        markers.push("layout_flag_automationcontrolled");
+    }
+
+    Some(ShellChromiumDebugPolicyViolation {
+        reason: "shell_wrapped_chromium_remote_debugging_not_popup_safe",
+        markers,
+    })
+}
+
+fn shell_command_can_launch_browser_helper(command_name: &str) -> bool {
+    matches!(
+        command_name,
+        "cmd"
+            | "cmd.exe"
+            | "powershell"
+            | "powershell.exe"
+            | "pwsh"
+            | "pwsh.exe"
+            | "node.exe"
+            | "node"
+            | "npm.cmd"
+            | "npm.exe"
+            | "npm"
+            | "npx.cmd"
+            | "npx.exe"
+            | "npx"
+            | "pnpm.cmd"
+            | "pnpm.exe"
+            | "pnpm"
+            | "yarn.cmd"
+            | "yarn.exe"
+            | "yarn"
+    )
+}
+
+fn shell_command_is_read_only_process_inspection(
+    command_name: &str,
+    lower_command_line: &str,
+) -> bool {
+    if !matches!(
+        command_name,
+        "powershell" | "powershell.exe" | "pwsh" | "pwsh.exe"
+    ) {
+        return false;
+    }
+    let reads_process_state = lower_command_line.contains("get-ciminstance win32_process")
+        || lower_command_line.contains("get-wmiobject win32_process")
+        || lower_command_line.contains("get-process");
+    if !reads_process_state {
+        return false;
+    }
+
+    let mutating_tokens = [
+        "start-process",
+        "stop-process",
+        "invoke-expression",
+        "iex ",
+        "new-object",
+        "start-job",
+        "remove-item",
+        "move-item",
+        "set-item",
+        "set-content",
+        "out-file",
+        "chrome.exe --",
+        "msedge.exe --",
+        "chromium.exe --",
+        "npx @playwright/mcp",
+        "npm exec @playwright/mcp",
+        "pnpm dlx @playwright/mcp",
+        "yarn dlx @playwright/mcp",
+    ];
+    !mutating_tokens
+        .iter()
+        .any(|token| lower_command_line.contains(token))
+}
+
+fn run_shell_chromium_debug_error(
+    params: &ActRunShellParams,
+    message: &'static str,
+    reason: &'static str,
+    direct_violation: Option<ChromiumDebugPolicyViolation>,
+    shell_markers: Vec<&'static str>,
+) -> ErrorData {
+    let command_metadata = shell_command_metadata(&params.command, &params.args);
+    let (
+        user_data_dir,
+        user_data_dir_state,
+        silent_debugger,
+        disable_extensions,
+        loads_extensions,
+        layout_infobar_flags,
+    ) = if let Some(violation) = direct_violation {
+        (
+            violation.user_data_dir,
+            violation.user_data_dir_state.as_str().to_owned(),
+            Some(violation.silent_debugger),
+            Some(violation.disable_extensions),
+            Some(violation.loads_extensions),
+            violation.layout_infobar_flags,
+        )
+    } else {
+        (
+            None,
+            "unknown_shell_wrapped".to_owned(),
+            None,
+            None,
+            None,
+            Vec::new(),
+        )
+    };
+
+    shell_tool_error(
         error_codes::A11Y_CDP_DEBUGGER_WARNING_UNSUPPRESSED,
-        "act_launch refused a Chromium remote-debugging launch that could surface Chrome debugger/native-host UI on an end-user profile",
+        message,
         json!({
             "code": error_codes::A11Y_CDP_DEBUGGER_WARNING_UNSUPPRESSED,
-            "reason": "chromium_remote_debugging_not_popup_safe",
-            "target": params.target,
-            "args": params.args,
+            "reason": reason,
+            "command": params.command,
+            "command_metadata_policy": SHELL_COMMAND_METADATA_POLICY,
+            "args": command_metadata.args,
+            "args_redacted": command_metadata.args_redacted,
+            "args_original_count": command_metadata.args_original_count,
+            "args_original_bytes": command_metadata.args_original_bytes,
+            "args_sha256": command_metadata.args_sha256,
+            "command_line": command_metadata.command_line,
+            "command_line_redacted": command_metadata.command_line_redacted,
+            "command_line_original_bytes": command_metadata.command_line_original_bytes,
+            "command_line_sha256": command_metadata.command_line_sha256,
+            "working_dir": params.working_dir,
+            "shell_markers": shell_markers,
             "user_data_dir": user_data_dir,
-            "user_data_dir_state": user_data_dir_state.as_str(),
+            "user_data_dir_state": user_data_dir_state,
             "has_silent_debugger_extension_api": silent_debugger,
             "has_disable_extensions": disable_extensions,
             "has_extension_loading_flags": loads_extensions,
             "has_layout_shifting_infobar_flags": !layout_infobar_flags.is_empty(),
             "layout_shifting_infobar_flags": layout_infobar_flags,
-            "required_invariant": "remote-debugging Chromium launches must use a non-default dedicated user-data-dir, --silent-debugger-extension-api, --disable-extensions, no extension-loading flags, and no known layout-shifting Chrome warning flags such as --disable-blink-features=AutomationControlled",
-            "remediation": "omit caller-supplied remote-debugging/profile flags so Synapse injects its isolated automation profile, or pass the required flags against a non-default automation profile; never debug the user's normal Chrome profile",
+            "required_invariant": CHROMIUM_DEBUG_LAUNCH_REQUIRED_INVARIANT,
+            "remediation": "use the existing authenticated Chrome through Synapse cdp_* / target_act / browser_* tools, or use act_launch with Synapse-injected isolated CDP flags; do not start headed Playwright/Chromium automation from act_run_shell",
         }),
-    ))
+    )
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -12156,6 +12450,241 @@ mod tests {
             Some(error_codes::ACTION_REMOTE_PROCESS_CLEANUP_UNVERIFIED)
         );
         assert!(!status.remote_process_scope.remote_cleanup_verified);
+    }
+
+    #[test]
+    fn shell_rejects_direct_chromium_remote_debugging_without_popup_safe_flags() {
+        let params = shell_params(
+            "chrome.exe",
+            vec!["--remote-debugging-port=9222", "about:blank"],
+            30_000,
+        );
+
+        let error = validate_run_shell_params(&params)
+            .expect_err("direct unsafe Chrome remote-debugging shell launch must fail closed");
+
+        println!(
+            "readback=act_run_shell_chromium_policy edge=direct_unsafe before=args:{:?} after={:?}",
+            params.args, error.data
+        );
+        assert_eq!(
+            extract_error_code(&error),
+            error_codes::A11Y_CDP_DEBUGGER_WARNING_UNSUPPRESSED
+        );
+        assert_eq!(
+            error
+                .data
+                .as_ref()
+                .and_then(|data| data.get("reason"))
+                .and_then(|reason| reason.as_str()),
+            Some("chromium_remote_debugging_not_popup_safe")
+        );
+        assert!(
+            error
+                .data
+                .as_ref()
+                .and_then(|data| data.get("required_invariant"))
+                .and_then(|value| value.as_str())
+                .is_some_and(|value| value.contains("--silent-debugger-extension-api"))
+        );
+    }
+
+    #[test]
+    fn shell_allows_direct_chromium_remote_debugging_with_popup_safe_flags() {
+        let safe_profile = cdp_automation_profile_dir();
+        let safe_profile_arg = format!("--user-data-dir={}", safe_profile.display());
+        let params = shell_params(
+            "chrome.exe",
+            vec![
+                "--remote-debugging-port=0",
+                safe_profile_arg.as_str(),
+                "--silent-debugger-extension-api",
+                "--disable-extensions",
+                "about:blank",
+            ],
+            30_000,
+        );
+
+        println!(
+            "readback=act_run_shell_chromium_policy edge=direct_safe before=args:{:?}",
+            params.args
+        );
+        validate_run_shell_params(&params).unwrap_or_else(|error| {
+            panic!("popup-safe direct Chrome shell launch rejected: {error}")
+        });
+    }
+
+    #[test]
+    fn shell_rejects_direct_chromium_layout_infobar_flag_even_when_silent() {
+        let safe_profile = cdp_automation_profile_dir();
+        let safe_profile_arg = format!("--user-data-dir={}", safe_profile.display());
+        let params = shell_params(
+            "chrome.exe",
+            vec![
+                "--remote-debugging-pipe",
+                safe_profile_arg.as_str(),
+                "--silent-debugger-extension-api",
+                "--disable-extensions",
+                "--disable-blink-features=AutomationControlled",
+                "about:blank",
+            ],
+            30_000,
+        );
+
+        let error = validate_run_shell_params(&params)
+            .expect_err("layout-shifting Chrome flags must fail closed even with silent debugger");
+
+        println!(
+            "readback=act_run_shell_chromium_policy edge=direct_layout_flag before=args:{:?} after={:?}",
+            params.args, error.data
+        );
+        assert_eq!(
+            extract_error_code(&error),
+            error_codes::A11Y_CDP_DEBUGGER_WARNING_UNSUPPRESSED
+        );
+        let error_text = format!("{error:?}");
+        assert!(error_text.contains("has_layout_shifting_infobar_flags"));
+        assert!(error_text.contains("AutomationControlled"));
+    }
+
+    #[test]
+    fn shell_rejects_wrapped_chromium_layout_infobar_launch() {
+        let snippet = r#"& "C:\Program Files\Google\Chrome\Application\chrome.exe" --remote-debugging-pipe --user-data-dir="$env:LOCALAPPDATA\ms-playwright-mcp\mcp-chrome-issue1260" --disable-blink-features=AutomationControlled about:blank"#;
+        let params = shell_params(
+            "powershell.exe",
+            vec!["-NoProfile", "-Command", snippet],
+            30_000,
+        );
+
+        let error = validate_run_shell_params(&params)
+            .expect_err("shell-wrapped layout-shifting Chrome launch must fail closed");
+
+        println!(
+            "readback=act_run_shell_chromium_policy edge=wrapped_layout_flag before=args:{:?} after={:?}",
+            params.args, error.data
+        );
+        assert_eq!(
+            extract_error_code(&error),
+            error_codes::A11Y_CDP_DEBUGGER_WARNING_UNSUPPRESSED
+        );
+        assert_eq!(
+            error
+                .data
+                .as_ref()
+                .and_then(|data| data.get("reason"))
+                .and_then(|reason| reason.as_str()),
+            Some("shell_wrapped_chromium_remote_debugging_not_popup_safe")
+        );
+        assert!(
+            error
+                .data
+                .as_ref()
+                .and_then(|data| data.get("shell_markers"))
+                .and_then(|markers| markers.as_array())
+                .is_some_and(|markers| markers
+                    .iter()
+                    .any(|marker| marker == "layout_flag_automationcontrolled"))
+        );
+    }
+
+    #[test]
+    fn shell_rejects_known_playwright_mcp_launcher_but_allows_text_search() {
+        let launcher = shell_params(
+            "cmd.exe",
+            vec!["/c", "npx @playwright/mcp --browser chrome"],
+            30_000,
+        );
+
+        let error = validate_run_shell_params(&launcher)
+            .expect_err("known Playwright MCP browser launcher must fail closed");
+        println!(
+            "readback=act_run_shell_chromium_policy edge=playwright_mcp before=args:{:?} after={:?}",
+            launcher.args, error.data
+        );
+        assert_eq!(
+            extract_error_code(&error),
+            error_codes::A11Y_CDP_DEBUGGER_WARNING_UNSUPPRESSED
+        );
+
+        let search = shell_params("rg", vec!["@playwright/mcp"], 30_000);
+        validate_run_shell_params(&search).unwrap_or_else(|error| {
+            panic!("text search mentioning Playwright MCP rejected: {error}")
+        });
+
+        let search_remote_debug = shell_params(
+            "rg",
+            vec!["chrome.exe --remote-debugging-pipe @playwright/mcp"],
+            30_000,
+        );
+        validate_run_shell_params(&search_remote_debug).unwrap_or_else(|error| {
+            panic!("text search mentioning remote debugging rejected: {error}")
+        });
+    }
+
+    #[test]
+    fn shell_rejects_known_playwright_mcp_launcher_from_bare_shell_names() {
+        for command in ["cmd", "powershell", "pwsh"] {
+            let params = shell_params(
+                command,
+                vec!["/c", "npx @playwright/mcp --browser chrome"],
+                30_000,
+            );
+
+            let error = validate_run_shell_params(&params)
+                .expect_err("bare shell names must not bypass Playwright MCP launch guard");
+            println!(
+                "readback=act_run_shell_chromium_policy edge=bare_shell command={command} before=args:{:?} after={:?}",
+                params.args, error.data
+            );
+            assert_eq!(
+                extract_error_code(&error),
+                error_codes::A11Y_CDP_DEBUGGER_WARNING_UNSUPPRESSED
+            );
+            assert_eq!(
+                error
+                    .data
+                    .as_ref()
+                    .and_then(|data| data.get("reason"))
+                    .and_then(|reason| reason.as_str()),
+                Some("known_playwright_mcp_browser_launcher_denied")
+            );
+        }
+    }
+
+    #[test]
+    fn shell_allows_read_only_process_query_mentioning_playwright_mcp() {
+        let snippet = "$rows = Get-CimInstance Win32_Process | Where-Object { $_.Name -match '^(chrome|node|cmd)\\.exe$' -and (($_.CommandLine -like '*ms-playwright-mcp*') -or ($_.CommandLine -like '*@playwright/mcp*')) }; $rows | ConvertTo-Json";
+        let params = shell_params(
+            "powershell.exe",
+            vec!["-NoProfile", "-Command", snippet],
+            30_000,
+        );
+
+        println!(
+            "readback=act_run_shell_chromium_policy edge=readonly_process_query before=args:{:?}",
+            params.args
+        );
+        validate_run_shell_params(&params).unwrap_or_else(|error| {
+            panic!("read-only process query mentioning Playwright MCP rejected: {error}")
+        });
+    }
+
+    #[test]
+    fn shell_allows_read_only_process_query_mentioning_remote_debugging() {
+        let snippet = "$rows = Get-CimInstance Win32_Process | Where-Object { $_.Name -eq 'chrome.exe' -and $_.CommandLine -like '*--remote-debugging-port=9222*' } | Select-Object ProcessId,CommandLine; $rows | ConvertTo-Json";
+        let params = shell_params(
+            "powershell.exe",
+            vec!["-NoProfile", "-Command", snippet],
+            30_000,
+        );
+
+        println!(
+            "readback=act_run_shell_chromium_policy edge=readonly_remote_debugging_query before=args:{:?}",
+            params.args
+        );
+        validate_run_shell_params(&params).unwrap_or_else(|error| {
+            panic!("read-only process query mentioning remote debugging rejected: {error}")
+        });
     }
 
     #[test]

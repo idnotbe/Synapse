@@ -270,7 +270,7 @@ impl SynapseService {
     }
 
     #[tool(
-        description = "Run an allowlisted executable child process. command is an executable path/name only; pass flags and shell snippets in args, using an explicit shell executable when shell syntax is required. execution_mode controls routing: auto preserves compatibility and backgrounds when timeout_ms exceeds the inline await limit, inline waits only while timeout_ms fits inside the MCP client-call budget and otherwise returns a durable job handle, durable returns a job handle immediately. durable_timeout_ms is an explicit durable job lifetime cap only when a durable/background job is created; it is ignored when execution completes inline. Omit it for an unbounded durable job. Poll act_run_shell_status and cancel with act_run_shell_cancel."
+        description = "Run an allowlisted executable child process. command is an executable path/name only; pass flags and shell snippets in args, using an explicit shell executable when shell syntax is required. Do not use this to launch headed Playwright/Chromium automation: Synapse refuses direct or shell-wrapped Chrome/Playwright remote-debugging launches that can surface Chrome debugger/automation banners and shift browser layout. Use the existing authenticated Chrome through cdp_* / target_act / browser_* tools, or act_launch with Synapse-injected isolated CDP flags. execution_mode controls routing: auto preserves compatibility and backgrounds when timeout_ms exceeds the inline await limit, inline waits only while timeout_ms fits inside the MCP client-call budget and otherwise returns a durable job handle, durable returns a job handle immediately. durable_timeout_ms is an explicit durable job lifetime cap only when a durable/background job is created; it is ignored when execution completes inline. Omit it for an unbounded durable job. Poll act_run_shell_status and cancel with act_run_shell_cancel."
     )]
     pub async fn act_run_shell(
         &self,
@@ -363,7 +363,7 @@ impl SynapseService {
     }
 
     #[tool(
-        description = "Start an allowlisted executable as a durable background shell job. Returns immediately with a job id plus status/stdout/stderr file paths. Omitting timeout_ms leaves the durable job unbounded until normal exit, explicit act_run_shell_cancel, or session cleanup; providing timeout_ms is an explicit lifetime cap for that job only."
+        description = "Start an allowlisted executable as a durable background shell job. Do not use this to launch headed Playwright/Chromium automation: Synapse refuses direct or shell-wrapped Chrome/Playwright remote-debugging launches that can surface Chrome debugger/automation banners and shift browser layout. Use existing authenticated Chrome via cdp_* / target_act / browser_* tools, or act_launch with Synapse-injected isolated CDP flags. Returns immediately with a job id plus status/stdout/stderr file paths. Omitting timeout_ms leaves the durable job unbounded until normal exit, explicit act_run_shell_cancel, or session cleanup; providing timeout_ms is an explicit lifetime cap for that job only."
     )]
     pub async fn act_run_shell_start(
         &self,
