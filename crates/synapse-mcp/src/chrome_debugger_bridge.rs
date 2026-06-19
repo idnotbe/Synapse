@@ -275,7 +275,7 @@ fn external_chrome_popup_risk_warning(rows: &[String], suppression_ok: bool) -> 
     }
     if suppression_ok {
         return format!(
-            "external_chrome_popup_risk_warning=true external_chrome_popup_risk_scope=suppressed_by_bridge_management risk_count={} external_chrome_popup_risk={} remediation=profile scan still names debugger/nativeMessaging rows, but live Chrome management readback from the installed Synapse bridge reported remaining_hazard_count=0; continue monitoring health and fail closed if suppression changes",
+            "external_chrome_popup_risk_warning=true external_chrome_popup_risk_scope=covered_by_live_bridge_management risk_count={} external_chrome_popup_risk={} remediation=profile scan still names debugger/nativeMessaging rows, but live Chrome management readback from the installed Synapse bridge reported remaining_hazard_count=0 and failure_count=0 for the active Chrome profile; continue monitoring health and fail closed if suppression changes",
             rows.len(),
             format_external_chrome_popup_risks(rows)
         );
@@ -400,15 +400,24 @@ fn popup_risk_suppression_covers_profile_risks(
     if profile_risk_count == 0 {
         return true;
     }
-    let hazard_count = value
-        .get("hazard_count")
+    if value
+        .get("failure_count")
         .and_then(Value::as_u64)
-        .unwrap_or_default() as usize;
-    let disabled_count = value
-        .get("disabled_count")
-        .and_then(Value::as_u64)
-        .unwrap_or_default() as usize;
-    hazard_count >= profile_risk_count && disabled_count >= profile_risk_count
+        .unwrap_or(1)
+        != 0
+    {
+        return false;
+    }
+    if value.get("management_available").and_then(Value::as_bool) != Some(true) {
+        return false;
+    }
+    matches!(
+        value
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown"),
+        "clear" | "suppressed"
+    )
 }
 
 fn popup_risk_suppression_summary(value: &Option<Value>) -> String {
@@ -3937,9 +3946,67 @@ mod tests {
         assert!(detail.contains("tab_control_available=true"));
         assert!(detail.contains("external_chrome_popup_risk_warning=true"));
         assert!(
-            detail.contains("external_chrome_popup_risk_scope=suppressed_by_bridge_management")
+            detail.contains("external_chrome_popup_risk_scope=covered_by_live_bridge_management")
         );
         assert!(detail.contains("bridge_popup_risk_suppression=status=suppressed"));
+    }
+
+    #[test]
+    fn chrome_bridge_health_allows_physical_profile_risk_when_live_management_is_clear() {
+        let host = ChromeBridgeHealthRecord {
+            host_id: "chrome-native-test".to_owned(),
+            origin: "chrome-extension://leoocgnkjnplbfdbklajepahofecgfbk/".to_owned(),
+            extension_id: Some("leoocgnkjnplbfdbklajepahofecgfbk".to_owned()),
+            extension_version: Some("0.1.0".to_owned()),
+            extension_protocol_version: Some(BRIDGE_PROTOCOL_VERSION),
+            extension_build_id: Some(EXPECTED_EXTENSION_BUILD_ID.to_owned()),
+            extension_build_sha256: Some(EXPECTED_EXTENSION_BUILD_SHA256.to_owned()),
+            extension_capabilities: REQUIRED_DIRECT_HTTP_CAPABILITIES
+                .iter()
+                .map(|capability| (*capability).to_owned())
+                .collect(),
+            extension_user_agent: Some("Chrome test".to_owned()),
+            extension_popup_risk_suppression: Some(json!({
+                "ok": true,
+                "status": "clear",
+                "management_available": true,
+                "hazard_count": 0,
+                "disabled_count": 0,
+                "remaining_hazard_count": 0,
+                "failure_count": 0,
+                "remaining_hazards": [],
+                "failures": []
+            })),
+            pid: 42,
+            parent_window: None,
+            transport: Some("direct_http".to_owned()),
+            registered_unix_ms: 1000,
+            last_seen_unix_ms: 2000,
+            last_disconnect_detail: None,
+            last_detach_reason: None,
+        };
+
+        let health = chrome_bridge_health_from_snapshot(
+            Some(&host),
+            1,
+            0,
+            0,
+            &["profile=Profile 5 extension_id=fcoeoabgfenejglbffodgkkbkcdhcgfn active_api=debugger,nativeMessaging popup_risk=true".to_owned()],
+            &[],
+        );
+
+        assert_eq!(health.status, "ok");
+        let detail = health.detail.as_deref().expect("health detail");
+        println!(
+            "readback=chrome_bridge_health edge=live_management_clear_over_physical_profile_risk detail={detail}"
+        );
+        assert!(detail.contains("tab_control_available=true"));
+        assert!(detail.contains("external_chrome_popup_risk_warning=true"));
+        assert!(
+            detail.contains("external_chrome_popup_risk_scope=covered_by_live_bridge_management")
+        );
+        assert!(detail.contains("bridge_popup_risk_suppression=status=clear"));
+        assert!(!detail.contains("external_chrome_popup_risk_blocking=true"));
     }
 
     #[test]
@@ -4140,7 +4207,7 @@ mod tests {
 
         let suppressed_warning = external_chrome_popup_risk_warning(&risks, true);
         assert!(suppressed_warning.contains("external_chrome_popup_risk_warning=true"));
-        assert!(suppressed_warning.contains("suppressed_by_bridge_management"));
+        assert!(suppressed_warning.contains("covered_by_live_bridge_management"));
         assert!(suppressed_warning.contains("remaining_hazard_count=0"));
     }
 
