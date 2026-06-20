@@ -347,6 +347,11 @@ impl AgentEntry {
     }
 }
 
+fn late_exit_reconciles_process_probe_death(entry: &AgentEntry, record: &AgentEventRecord) -> bool {
+    record.kind == AgentEventKind::Exited
+        && entry.reason_code.as_deref() == Some("process_gone_without_exit_event")
+}
+
 fn newest_spawn_artifact_activity(entry: &AgentEntry) -> Option<AgentArtifactActivity> {
     let log_dir = Path::new(entry.log_dir.as_deref()?);
     [
@@ -484,7 +489,9 @@ impl AgentStateTracker {
         };
 
         // A dead agent stays dead for straggler exits/hooks — a kill or late
-        // exit must never resurrect it. The ONE exception is a fresh
+        // exit must never resurrect it. A late explicit `Exited` row may still
+        // reconcile a provisional process-probe terminal reason without
+        // changing the terminal state. The ONE state-changing exception is a fresh
         // re-registration (`SpawnRequested`): an observed/ambient session that
         // was reaped for dormancy resumes by appending to the same transcript,
         // and the ingester re-registers it. Re-binding to the same anchor
@@ -493,6 +500,7 @@ impl AgentStateTracker {
         // `reduce`, which maps `SpawnRequested` → `Spawning`.
         if entry.state == AgentLifecycleState::Dead
             && !matches!(record.kind, AgentEventKind::SpawnRequested)
+            && !late_exit_reconciles_process_probe_death(entry, record)
         {
             if !matches!(record.kind, AgentEventKind::Exited | AgentEventKind::Killed) {
                 tracing::warn!(
@@ -1534,6 +1542,46 @@ mod tests {
             AgentLifecycleState::Dead,
             "agent must stay dead"
         );
+    }
+
+    #[test]
+    fn late_exited_reconciles_provisional_process_gone_death() {
+        let mut tracker = AgentStateTracker::default();
+        let spawn = "agent-spawn-ut-exit-race";
+        let session = "session-ut-exit-race";
+        let mut ready = event(AgentEventKind::SpawnReady, Some(spawn), Some(session));
+        ready.payload = json!({
+            "agent_process_id": 99,
+        });
+        tracker.apply_event(&ready);
+
+        let now = unix_time_ns_now() / 1_000_000;
+        let transitions = tracker.sweep(
+            now,
+            DEFAULT_STUCK_AFTER_MS,
+            DEFAULT_UNPROBEABLE_DEAD_AFTER_MS,
+            &|pid| pid != 99,
+        );
+        assert_eq!(transitions.len(), 1, "{transitions:?}");
+        assert_eq!(transitions[0].state_to, AgentLifecycleState::Dead);
+        assert_eq!(
+            transitions[0].reason_code,
+            "process_gone_without_exit_event"
+        );
+
+        let mut exited = event(AgentEventKind::Exited, None, Some(session));
+        exited.reason_code = Some("spawn_completed".to_owned());
+        assert!(
+            tracker.apply_event(&exited).is_none(),
+            "late exit updates same terminal state without a new transition"
+        );
+        let read = tracker
+            .read_for_session(session, now)
+            .expect("session read after late exit");
+        assert_eq!(read.state, AgentLifecycleState::Dead);
+        assert_eq!(read.reason_code.as_deref(), Some("spawn_completed"));
+        assert_eq!(read.attention_class, AgentAttentionClass::None);
+        assert_eq!(read.last_event_kind, AgentEventKind::Exited);
     }
 
     #[test]

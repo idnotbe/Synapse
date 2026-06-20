@@ -912,15 +912,17 @@ impl SessionLifecycleState {
         report.target_claims = self.cleanup_target_claims(session_id);
         report.shell = cleanup_shell_jobs(session_id, reason);
         report.processes = self.cleanup_owned_processes(session_id, options);
+        let registry_reason = reconciled_teardown_exit_reason(reason, &report.processes);
+        report.reason.clone_from(&registry_reason);
         report.subscriptions = self.cleanup_subscriptions(session_id);
         report.session_store = self.delete_session_store_row(session_id);
-        report.registry = self.record_registry_closed(session_id, reason);
+        report.registry = self.record_registry_closed(session_id, &registry_reason);
         report.finalize();
         if report.failure_count == 0 {
             tracing::info!(
                 code = "MCP_SESSION_TEARDOWN_COMPLETED",
                 session_id,
-                reason,
+                reason = %report.reason,
                 report = ?report,
                 "readback=session_lifecycle after=all_owned_resources_reclaimed"
             );
@@ -928,7 +930,7 @@ impl SessionLifecycleState {
             tracing::error!(
                 code = "MCP_SESSION_TEARDOWN_FAILED",
                 session_id,
-                reason,
+                reason = %report.reason,
                 failure_count = report.failure_count,
                 report = ?report,
                 "session lifecycle teardown encountered cleanup failures"
@@ -2116,8 +2118,35 @@ fn spawned_agent_exit_reason(read: &super::session_registry::SessionRegistryRead
     }
 }
 
+fn reconciled_teardown_exit_reason(
+    reason: &str,
+    processes: &SessionProcessCleanupReport,
+) -> String {
+    if reason == SPAWNED_AGENT_PROCESS_EXITED_REASON && cleanup_observed_ok_completion(processes) {
+        SPAWN_COMPLETED_REASON.to_owned()
+    } else {
+        reason.to_owned()
+    }
+}
+
+fn cleanup_observed_ok_completion(processes: &SessionProcessCleanupReport) -> bool {
+    processes.items.iter().any(|item| {
+        item.tool == ACT_SPAWN_AGENT_TOOL_NAME
+            && item
+                .completion_status_path
+                .as_deref()
+                .and_then(|path| completion_status_from_file(Path::new(path)))
+                .as_deref()
+                == Some("ok")
+    })
+}
+
 fn spawned_agent_completion_status(log_dir: &str) -> Option<String> {
-    let bytes = fs::read(Path::new(log_dir).join("completion-status.json")).ok()?;
+    completion_status_from_file(&Path::new(log_dir).join("completion-status.json"))
+}
+
+fn completion_status_from_file(path: &Path) -> Option<String> {
+    let bytes = fs::read(path).ok()?;
     let status = serde_json::from_slice::<serde_json::Value>(&bytes).ok()?;
     status
         .get("status")
@@ -2431,6 +2460,64 @@ mod tests {
         let invalid_read = spawned_read_with_log_dir("invalid", invalid.path());
         assert_eq!(
             spawned_agent_exit_reason(&invalid_read),
+            SPAWNED_AGENT_PROCESS_EXITED_REASON
+        );
+    }
+
+    fn process_cleanup_with_completion_status_path(path: &Path) -> SessionProcessCleanupReport {
+        SessionProcessCleanupReport {
+            owned_before: 1,
+            terminated: 1,
+            items: vec![SessionProcessCleanupItem {
+                tool: ACT_SPAWN_AGENT_TOOL_NAME.to_owned(),
+                pid: 42,
+                resource_id: Some("agent-spawn-ut-reconcile".to_owned()),
+                launch_target: "codex".to_owned(),
+                agent_cli: Some("codex".to_owned()),
+                registered_at_unix_ms: 1_000,
+                process_ids_before: Vec::new(),
+                live_process_ids_before: Vec::new(),
+                job_handle_dropped: false,
+                natural_exit_wait_ms: 0,
+                force_termination_status: None,
+                completion_status_path: Some(path.display().to_string()),
+                completion_status_before_cleanup: None,
+                completion_artifact_cleanup_status: None,
+                completion_artifact_cleanup_error: None,
+                desktop_name: None,
+                desktop_close_attempted: false,
+                desktop_close_succeeded: None,
+                desktop_close_error: None,
+                desktop_window_process_ids_before: Vec::new(),
+                desktop_window_termination_attempted: false,
+                desktop_window_termination_status: None,
+                desktop_window_process_ids_after: Vec::new(),
+                remaining_process_ids_after: Vec::new(),
+            }],
+            ..SessionProcessCleanupReport::default()
+        }
+    }
+
+    #[test]
+    fn teardown_exit_reason_reconciles_after_cleanup_observes_ok_completion() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let status_path = temp.path().join("completion-status.json");
+        fs::write(&status_path, r#"{"status":"ok"}"#).expect("write completion status");
+        let processes = process_cleanup_with_completion_status_path(&status_path);
+
+        assert_eq!(
+            reconciled_teardown_exit_reason(SPAWNED_AGENT_PROCESS_EXITED_REASON, &processes),
+            SPAWN_COMPLETED_REASON
+        );
+        assert_eq!(
+            reconciled_teardown_exit_reason(HTTP_STALE_REASON, &processes),
+            HTTP_STALE_REASON
+        );
+
+        fs::write(&status_path, r#"{"status":"error"}"#).expect("write error status");
+        let processes = process_cleanup_with_completion_status_path(&status_path);
+        assert_eq!(
+            reconciled_teardown_exit_reason(SPAWNED_AGENT_PROCESS_EXITED_REASON, &processes),
             SPAWNED_AGENT_PROCESS_EXITED_REASON
         );
     }
