@@ -4794,6 +4794,7 @@ $spawnTerminalStatus = 'wrapper_error'\n\
 $spawnErrorMessage = $null\n\
 $spawnFinalMessageSource = $null\n\
 $spawnRecoveredFinalMessageWritten = $false\n\
+$spawnRecoveredFinalMessageSource = $null\n\
 \n\
 function Get-SpawnFileLength([string]$Path) {{\n\
     if (Test-Path -LiteralPath $Path) {{ return [int64](Get-Item -LiteralPath $Path).Length }}\n\
@@ -4826,18 +4827,36 @@ function Get-SpawnFinalAssistantTextFromStdout([string]$Path) {{\n\
                 $event = $line | ConvertFrom-Json -ErrorAction Stop\n\
                 if ($null -ne $event.item -and $event.item.type -eq 'agent_message' -and $null -ne $event.item.text) {{\n\
                     $finalText = [string]$event.item.text\n\
+                    $script:spawnRecoveredFinalMessageSource = 'stdout_jsonl_agent_message'\n\
                 }} elseif ($event.type -eq 'agent_message' -and $null -ne $event.text) {{\n\
                     $finalText = [string]$event.text\n\
+                    $script:spawnRecoveredFinalMessageSource = 'stdout_jsonl_agent_message'\n\
                 }} elseif ($event.type -eq 'message' -and $event.role -eq 'assistant' -and $null -ne $event.content) {{\n\
                     if ($event.content -is [string]) {{\n\
                         $finalText = [string]$event.content\n\
+                        $script:spawnRecoveredFinalMessageSource = 'stdout_jsonl_message'\n\
                     }} else {{\n\
                         $parts = @()\n\
                         foreach ($part in $event.content) {{\n\
                             if ($null -ne $part.text) {{ $parts += [string]$part.text }}\n\
                         }}\n\
-                        if ($parts.Count -gt 0) {{ $finalText = [string]::Join(\"`n\", $parts) }}\n\
+                        if ($parts.Count -gt 0) {{\n\
+                            $finalText = [string]::Join(\"`n\", $parts)\n\
+                            $script:spawnRecoveredFinalMessageSource = 'stdout_jsonl_message'\n\
+                        }}\n\
                     }}\n\
+                }} elseif ($event.type -eq 'assistant' -and $null -ne $event.message -and $event.message.role -eq 'assistant' -and $null -ne $event.message.content) {{\n\
+                    $parts = @()\n\
+                    foreach ($part in $event.message.content) {{\n\
+                        if ($null -ne $part.text) {{ $parts += [string]$part.text }}\n\
+                    }}\n\
+                    if ($parts.Count -gt 0) {{\n\
+                        $finalText = [string]::Join(\"`n\", $parts)\n\
+                        $script:spawnRecoveredFinalMessageSource = 'stdout_jsonl_claude_assistant_message'\n\
+                    }}\n\
+                }} elseif ($event.type -eq 'result' -and $null -ne $event.result) {{\n\
+                    $finalText = [string]$event.result\n\
+                    $script:spawnRecoveredFinalMessageSource = 'stdout_jsonl_result'\n\
                 }}\n\
             }} catch {{}}\n\
         }}\n\
@@ -4847,7 +4866,11 @@ function Get-SpawnFinalAssistantTextFromStdout([string]$Path) {{\n\
 \n\
 function Write-SpawnRecoveredFinalMessage([string]$Text) {{\n\
     Set-Content -LiteralPath $spawnFinalMessagePath -Value $Text -Encoding UTF8\n\
-    $script:spawnFinalMessageSource = 'stdout_jsonl_agent_message'\n\
+    if ([string]::IsNullOrWhiteSpace($script:spawnRecoveredFinalMessageSource)) {{\n\
+        $script:spawnFinalMessageSource = 'stdout_jsonl_recovered_final_text'\n\
+    }} else {{\n\
+        $script:spawnFinalMessageSource = $script:spawnRecoveredFinalMessageSource\n\
+    }}\n\
     $script:spawnRecoveredFinalMessageWritten = $true\n\
 }}\n\
 \n\
@@ -6490,6 +6513,14 @@ mod tests {
             "wrapper must enforce hold_open before writing terminal status: {script}"
         );
         assert!(script.contains("Get-Content -Raw -LiteralPath $spawnPromptPath -Encoding UTF8"));
+        assert!(
+            script.contains("$event.type -eq 'assistant'")
+                && script.contains("$event.message.role -eq 'assistant'")
+                && script.contains("$event.type -eq 'result'")
+                && script.contains("$event.result")
+                && script.contains("'stdout_jsonl_result'"),
+            "wrapper must recover Claude stream-json assistant/result final text: {script}"
+        );
         assert!(
             script.contains("codex-app-server-runner.ps1"),
             "codex spawn must run through the app-server runner: {script}"
