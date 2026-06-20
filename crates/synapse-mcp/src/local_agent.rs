@@ -2082,13 +2082,13 @@ fn model_tool_call_pre_gate_rejection(
             return Some(rejection);
         }
     }
+    if local_agent_runner_operator_control_tool(tool_name) {
+        return Some(ModelToolCallRejection::terminal(
+            format!("{tool_name} is runner/operator-control; local models must not call it"),
+            "Stop. Runner/operator-control tools are not available to local-model workers.",
+        ));
+    }
     match tool_name {
-        "agent_send" | "approval_decide" | "approval_gate" => {
-            Some(ModelToolCallRejection::terminal(
-                format!("{tool_name} is runner/operator-control; local models must not call it"),
-                "Stop. Runner/operator-control tools are not available to local-model workers.",
-            ))
-        }
         "workspace_put" => {
             if !args.contains_key("value") && !args.contains_key("artifact") {
                 return Some(ModelToolCallRejection::recoverable(
@@ -2181,6 +2181,38 @@ fn local_agent_exact_contract_gate_bypass_denied_tool(tool_name: &str) -> bool {
     )
 }
 
+fn local_agent_runner_operator_control_tool(tool_name: &str) -> bool {
+    matches!(
+        tool_name,
+        "approval_decide"
+            | "approval_gate"
+            | "approval_request"
+            | "act_spawn_agent"
+            | "agent_send"
+            | "agent_send_broadcast"
+            | "agent_interrupt"
+            | "agent_kill"
+            | "agent_pause"
+            | "agent_respawn"
+            | "agent_resume"
+            | "agent_steer"
+            | "agent_template_delete"
+            | "agent_template_put"
+            | "fleet_stop"
+            | "local_model_probe"
+            | "local_model_register"
+            | "local_model_remove"
+            | "local_model_update"
+            | "task_cancel"
+            | "task_claim"
+            | "task_create"
+            | "task_dispatch_once"
+            | "task_reconcile"
+            | "task_update"
+            | "tool_profile_set"
+    )
+}
+
 fn task_contract_argument_rejection(
     contract: &TaskToolContract,
     tool_name: &str,
@@ -2228,8 +2260,12 @@ fn stable_json_object_text(args: &JsonObject) -> String {
 fn infer_task_tool_contract(task: &str, tools: &[Tool]) -> Option<TaskToolContract> {
     let lower = task.to_ascii_lowercase();
     let exact_tool_phrase = [
+        "exact-contract synapse task",
         "use exactly",
         "call exactly",
+        "execute exactly these mcp tools",
+        "execute exactly these synapse tools",
+        "execute exactly these real synapse tools",
         "exactly one synapse mcp tool",
         "use exactly these real synapse tools",
         "use exactly these synapse tools",
@@ -4089,6 +4125,88 @@ mod tests {
         assert!(model_tool_call_pre_gate_rejection("approval_gate", &args, true, None).is_some());
         assert!(model_tool_call_pre_gate_rejection("agent_send", &args, true, None).is_some());
         assert!(model_tool_call_pre_gate_rejection("workspace_get", &args, true, None).is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn model_tool_call_pre_gate_rejects_local_model_dispatcher_control() -> anyhow::Result<()> {
+        let args: JsonObject = serde_json::from_value(json!({
+            "task_id": "synapse",
+            "concurrency_cap": 1,
+        }))?;
+        let reason = model_tool_call_pre_gate_rejection("task_dispatch_once", &args, true, None)
+            .expect("dispatcher tools must fail before MCP dispatch");
+        assert!(reason.reason.contains("runner/operator-control"));
+        assert!(reason.terminal);
+
+        let nested_spawn: JsonObject = serde_json::from_value(json!({
+            "cli": "local_model",
+            "model_ref": "qwen8v2-tool-live",
+            "prompt": "nested"
+        }))?;
+        let spawn_reason =
+            model_tool_call_pre_gate_rejection("act_spawn_agent", &nested_spawn, true, None)
+                .expect("nested spawn is runner control for local-model workers");
+        assert!(spawn_reason.reason.contains("runner/operator-control"));
+        assert!(spawn_reason.terminal);
+        Ok(())
+    }
+
+    #[test]
+    fn exact_tool_contract_recognizes_execute_exactly_mcp_prompt() -> anyhow::Result<()> {
+        let tools = tools_named([
+            "cdp_open_tab",
+            "target_claim",
+            "browser_set_value",
+            "target_act",
+            "cdp_target_info",
+            "workspace_put",
+            "task_dispatch_once",
+        ]);
+        let task = "Exact-contract Synapse task. Execute exactly these MCP tools in order:\n\
+1. cdp_open_tab {\"url\":\"http://127.0.0.1:8896/issue1220-lane.html?agent=ramp-001\",\"window_hwnd\":7996006}\n\
+2. target_claim {\"ttl_ms\":120000}\n\
+3. browser_set_value {\"selector\":\"#agent-input\",\"text\":\"ramp-001\"}\n\
+4. target_act {\"selector\":\"#mark\",\"verb\":\"click\",\"wait_timeout_ms\":10000}\n\
+5. cdp_target_info {}\n\
+6. workspace_put {\"run_id\":\"issue1220-ramp5-20260620-0225\",\"key\":\"ramp-001\",\"value\":{\"ok\":true}}";
+        let contract = infer_task_tool_contract(task, &tools)
+            .expect("real #1220 exact-contract wording must infer a contract");
+
+        assert_eq!(
+            contract.ordered_tools,
+            vec![
+                "cdp_open_tab",
+                "target_claim",
+                "browser_set_value",
+                "target_act",
+                "cdp_target_info",
+                "workspace_put"
+            ]
+        );
+        assert!(!contract.allowed_tools.contains("task_dispatch_once"));
+        assert_eq!(
+            contract
+                .argument_templates
+                .get("cdp_open_tab")
+                .and_then(|args| args.get("window_hwnd"))
+                .and_then(Value::as_i64),
+            Some(7996006)
+        );
+
+        let dispatcher_args: JsonObject = serde_json::from_value(json!({"task_id": "synapse"}))?;
+        let rejection = model_tool_call_pre_gate_rejection(
+            "task_dispatch_once",
+            &dispatcher_args,
+            true,
+            Some(&contract),
+        )
+        .expect("dispatcher drift must not dispatch under an exact contract");
+        assert!(
+            rejection
+                .reason
+                .contains("outside this task's exact-tool contract")
+        );
         Ok(())
     }
 
