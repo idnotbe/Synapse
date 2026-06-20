@@ -1376,6 +1376,35 @@ function Read-SynapseMcpSseJsonResponse {
     return $message
 }
 
+function Get-SynapseWebResponseUtf8Content {
+    param([Parameter(Mandatory=$true)]$Response)
+
+    $streamProperty = $Response.PSObject.Properties['RawContentStream']
+    if ($streamProperty -and $null -ne $streamProperty.Value) {
+        $stream = $streamProperty.Value
+        if ($stream.CanSeek) {
+            $stream.Position = 0
+        }
+        $encoding = [System.Text.UTF8Encoding]::new($false, $true)
+        $reader = [System.IO.StreamReader]::new($stream, $encoding, $true, 4096, $true)
+        try {
+            return $reader.ReadToEnd()
+        } finally {
+            $reader.Dispose()
+            if ($stream.CanSeek) {
+                $stream.Position = 0
+            }
+        }
+    }
+
+    $content = $Response.Content
+    if ($content -is [byte[]]) {
+        $encoding = [System.Text.UTF8Encoding]::new($false, $true)
+        return $encoding.GetString($content)
+    }
+    return [string]$content
+}
+
 function Invoke-SynapseMcpHttpPost {
     param(
         [Parameter(Mandatory=$true)][string]$Bind,
@@ -1405,7 +1434,7 @@ function Invoke-SynapseMcpHttpPost {
     $body = $request | ConvertTo-Json -Depth 30 -Compress
 
     try {
-        return Invoke-WebRequest `
+        $response = Invoke-WebRequest `
             -Uri "http://$Bind/mcp" `
             -Method Post `
             -Headers $headers `
@@ -1414,6 +1443,11 @@ function Invoke-SynapseMcpHttpPost {
             -TimeoutSec 8 `
             -UseBasicParsing `
             -ErrorAction Stop
+        return [pscustomobject]@{
+            Content = Get-SynapseWebResponseUtf8Content -Response $response
+            Headers = $response.Headers
+            StatusCode = $response.StatusCode
+        }
     } catch {
         Die "SYNAPSE_MCP_TOOL_SURFACE_READ_FAILED stage=$Method bind=$Bind error=$($_.Exception.Message) remediation=repair streamable HTTP MCP before accepting setup"
     }
@@ -1485,6 +1519,36 @@ function Read-SynapseDaemonToolSurface {
 
         $sortedTools = @($tools | Sort-Object name)
         $toolNames = @($sortedTools | ForEach-Object { [string]$_.name })
+
+        $healthCallParams = @{ name = 'health'; arguments = @{} }
+        $healthCallResponse = Invoke-SynapseMcpHttpPost -Bind $Bind -Token $Token -SessionId $sessionId -Method 'tools/call' -Params $healthCallParams -Id $requestId
+        $healthCallMessage = Read-SynapseMcpSseJsonResponse -Content $healthCallResponse.Content -Operation 'tools/call health' -ExpectedId $requestId
+        $healthText = @($healthCallMessage.result.content | Where-Object { [string]$_.type -eq 'text' } | Select-Object -First 1).text
+        if ([string]::IsNullOrWhiteSpace($healthText)) {
+            Die "SYNAPSE_MCP_HEALTH_TOOL_RESULT_INVALID bind=$Bind session_id=$sessionId request_id=$requestId remediation=health tools/call did not return JSON text content"
+        }
+        try {
+            $sessionHealth = $healthText | ConvertFrom-Json
+        } catch {
+            Die "SYNAPSE_MCP_HEALTH_TOOL_JSON_INVALID bind=$Bind session_id=$sessionId request_id=$requestId error=$($_.Exception.Message) remediation=health tools/call returned non-JSON text"
+        }
+        $runtimeHash = [string]$sessionHealth.tool_surface_sha256
+        $runtimeToolCount = try { [int]$sessionHealth.tool_count } catch { -1 }
+        $runtimeNames = @($sessionHealth.tool_names | ForEach-Object { [string]$_ } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Sort-Object)
+        $toolNamesSorted = @($toolNames | Sort-Object)
+        $runtimeNamesJoined = ($runtimeNames -join "`n")
+        $toolNamesJoined = ($toolNamesSorted -join "`n")
+        if ([string]::IsNullOrWhiteSpace($runtimeHash) -or $runtimeToolCount -ne $toolNames.Count -or $runtimeNamesJoined -ne $toolNamesJoined) {
+            Die ("SYNAPSE_MCP_HEALTH_TOOL_SURFACE_MISMATCH bind={0} session_id={1} tools_list_count={2} health_count={3} health_hash={4} tools_list_only={5} health_only={6} remediation=repair health/tool-list fingerprint agreement before writing Codex snapshot" -f `
+                $Bind,
+                $sessionId,
+                $toolNames.Count,
+                $runtimeToolCount,
+                $runtimeHash,
+                (Format-SynapseLimitedList -Items @($toolNamesSorted | Where-Object { $runtimeNames -notcontains $_ })),
+                (Format-SynapseLimitedList -Items @($runtimeNames | Where-Object { $toolNamesSorted -notcontains $_ })))
+        }
+
         $toolSchemas = @($sortedTools | ForEach-Object {
             $tool = $_
             $inputSchema = Get-SynapseObjectPropertyValue -Object $tool -Names @('inputSchema', 'input_schema')
@@ -1504,7 +1568,7 @@ function Read-SynapseDaemonToolSurface {
             mcp_surface = 'tools/list'
             tools = $sortedTools
         })
-        $hash = Get-SynapseSha256Hex -Text $canonical
+        $setupCanonicalHash = Get-SynapseSha256Hex -Text $canonical
         $daemonPid = try { [int]$Health.pid } catch { $null }
 
         return [pscustomobject]([ordered]@{
@@ -1513,7 +1577,9 @@ function Read-SynapseDaemonToolSurface {
             bind = $Bind
             daemon_pid = $daemonPid
             tool_count = $toolNames.Count
-            tool_surface_sha256 = $hash
+            tool_surface_sha256 = $runtimeHash
+            tool_surface_sha256_source = 'mcp_health_tool'
+            tool_surface_setup_canonical_sha256 = $setupCanonicalHash
             tool_names = $toolNames
             tool_schemas = $toolSchemas
         })
@@ -1715,7 +1781,9 @@ function Write-SynapseCodexToolSurfaceSnapshot {
     try {
         $dir = Split-Path -Parent $Path
         New-Item -ItemType Directory -Force -Path $dir | Out-Null
-        ($Surface | ConvertTo-Json -Depth 20) | Set-Content -LiteralPath $Path -Encoding utf8
+        $json = $Surface | ConvertTo-Json -Depth 20
+        $encoding = [System.Text.UTF8Encoding]::new($false)
+        [System.IO.File]::WriteAllText($Path, $json, $encoding)
     } catch {
         Die "SYNAPSE_CODEX_TOOL_SURFACE_SNAPSHOT_WRITE_FAILED path=$Path error=$($_.Exception.Message) remediation=repair permissions on the Synapse appdata directory before starting Codex"
     }
@@ -1739,7 +1807,7 @@ function Read-SynapseCodexToolSurfaceSnapshotOrNull {
     }
 }
 
-function New-SynapseToolSchemaHashMap {
+function New-SynapseToolRecordMap {
     param([AllowNull()]$Surface)
 
     $map = @{}
@@ -1748,12 +1816,64 @@ function New-SynapseToolSchemaHashMap {
     }
     foreach ($record in @($Surface.tool_schemas)) {
         $name = [string]$record.name
-        $hash = [string]$record.tool_sha256
-        if (-not [string]::IsNullOrWhiteSpace($name) -and -not [string]::IsNullOrWhiteSpace($hash)) {
-            $map[$name] = $hash
+        if (-not [string]::IsNullOrWhiteSpace($name)) {
+            $map[$name] = $record
         }
     }
     return $map
+}
+
+function Get-SynapseNullableSchemaHash {
+    param([AllowNull()]$Schema)
+
+    if ($null -eq $Schema) {
+        return '<null>'
+    }
+    return Get-SynapseSha256Hex -Text (Get-SynapseCanonicalJson -Value $Schema)
+}
+
+function Get-SynapseStoredHashOrEmpty {
+    param(
+        [AllowNull()]$Record,
+        [Parameter(Mandatory=$true)][string]$Name
+    )
+
+    if ($null -eq $Record) {
+        return ''
+    }
+    if ($Record -is [System.Collections.IDictionary] -and $Record.Contains($Name)) {
+        if ($null -eq $Record[$Name]) {
+            return ''
+        }
+        return [string]$Record[$Name]
+    }
+    $property = $Record.PSObject.Properties[$Name]
+    if (-not $property -or $null -eq $property.Value) {
+        return ''
+    }
+    return [string]$property.Value
+}
+
+function Get-SynapseRecordSchemaHash {
+    param(
+        [AllowNull()]$Record,
+        [Parameter(Mandatory=$true)][string]$StoredHashName,
+        [Parameter(Mandatory=$true)][string]$SchemaPropertyName
+    )
+
+    $stored = Get-SynapseStoredHashOrEmpty -Record $Record -Name $StoredHashName
+    if (-not [string]::IsNullOrWhiteSpace($stored)) {
+        return $stored
+    }
+    if ($null -eq $Record) {
+        return '<null>'
+    }
+    if ($Record -is [System.Collections.IDictionary] -and $Record.Contains($SchemaPropertyName)) {
+        return Get-SynapseNullableSchemaHash -Schema $Record[$SchemaPropertyName]
+    }
+    $property = $Record.PSObject.Properties[$SchemaPropertyName]
+    $schema = if ($property) { $property.Value } else { $null }
+    return Get-SynapseNullableSchemaHash -Schema $schema
 }
 
 function Format-SynapseLimitedList {
@@ -1771,17 +1891,29 @@ function Format-SynapseLimitedList {
     return (($shown -join ',') + $suffix)
 }
 
-function Get-SynapseToolSurfaceDiffSummary {
+function Get-SynapseToolSurfaceDiff {
     param(
         [AllowNull()]$StartSurface,
         [Parameter(Mandatory=$true)]$CurrentSurface
     )
 
     if ($null -eq $StartSurface) {
-        return 'start_snapshot=missing added=unknown removed=unknown schema_changed=unknown'
+        return [pscustomobject]([ordered]@{
+            Summary = 'start_snapshot=missing added=unknown removed=unknown callable_schema_changed=unknown'
+            SchemaDetail = 'missing'
+            HasRestartRequired = $true
+            HasNameDelta = $true
+            HasCallableSchemaChange = $true
+        })
     }
     if ($StartSurface.unreadable) {
-        return "start_snapshot=unreadable error=$($StartSurface.error) added=unknown removed=unknown schema_changed=unknown"
+        return [pscustomobject]([ordered]@{
+            Summary = "start_snapshot=unreadable error=$($StartSurface.error) added=unknown removed=unknown callable_schema_changed=unknown"
+            SchemaDetail = 'unreadable'
+            HasRestartRequired = $true
+            HasNameDelta = $true
+            HasCallableSchemaChange = $true
+        })
     }
 
     $startNames = @($StartSurface.tool_names | ForEach-Object { [string]$_ } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Sort-Object -Unique)
@@ -1789,22 +1921,82 @@ function Get-SynapseToolSurfaceDiffSummary {
     $added = @($currentNames | Where-Object { $startNames -notcontains $_ })
     $removed = @($startNames | Where-Object { $currentNames -notcontains $_ })
 
-    $startMap = New-SynapseToolSchemaHashMap -Surface $StartSurface
-    $currentMap = New-SynapseToolSchemaHashMap -Surface $CurrentSurface
-    $changed = @()
+    $startMap = New-SynapseToolRecordMap -Surface $StartSurface
+    $currentMap = New-SynapseToolRecordMap -Surface $CurrentSurface
+    $inputChanged = @()
+    $outputChanged = @()
+    $descriptionChanged = @()
+    $storedHashChanged = @()
+    $storedSchemaHashOnlyChanged = @()
     if ($startMap.Count -gt 0 -and $currentMap.Count -gt 0) {
         foreach ($name in $currentNames) {
-            if ($startMap.ContainsKey($name) -and $currentMap.ContainsKey($name) -and $startMap[$name] -ne $currentMap[$name]) {
-                $changed += $name
+            if ($startMap.ContainsKey($name) -and $currentMap.ContainsKey($name)) {
+                $startRecord = $startMap[$name]
+                $currentRecord = $currentMap[$name]
+                $startInputHash = Get-SynapseRecordSchemaHash -Record $startRecord -StoredHashName 'input_schema_sha256' -SchemaPropertyName 'input_schema'
+                $currentInputHash = Get-SynapseRecordSchemaHash -Record $currentRecord -StoredHashName 'input_schema_sha256' -SchemaPropertyName 'input_schema'
+                $startOutputHash = Get-SynapseRecordSchemaHash -Record $startRecord -StoredHashName 'output_schema_sha256' -SchemaPropertyName 'output_schema'
+                $currentOutputHash = Get-SynapseRecordSchemaHash -Record $currentRecord -StoredHashName 'output_schema_sha256' -SchemaPropertyName 'output_schema'
+                if ($startInputHash -ne $currentInputHash) {
+                    $inputChanged += $name
+                }
+                if ($startOutputHash -ne $currentOutputHash) {
+                    $outputChanged += $name
+                }
+                if ([string]$startRecord.description -ne [string]$currentRecord.description) {
+                    $descriptionChanged += $name
+                }
+                $storedInputChanged = (Get-SynapseStoredHashOrEmpty -Record $startRecord -Name 'input_schema_sha256') -ne (Get-SynapseStoredHashOrEmpty -Record $currentRecord -Name 'input_schema_sha256')
+                $storedOutputChanged = (Get-SynapseStoredHashOrEmpty -Record $startRecord -Name 'output_schema_sha256') -ne (Get-SynapseStoredHashOrEmpty -Record $currentRecord -Name 'output_schema_sha256')
+                $storedToolChanged = (Get-SynapseStoredHashOrEmpty -Record $startRecord -Name 'tool_sha256') -ne (Get-SynapseStoredHashOrEmpty -Record $currentRecord -Name 'tool_sha256')
+                if ($storedToolChanged) {
+                    $storedHashChanged += $name
+                }
+                if (($storedInputChanged -or $storedOutputChanged) -and $startInputHash -eq $currentInputHash -and $startOutputHash -eq $currentOutputHash) {
+                    $storedSchemaHashOnlyChanged += $name
+                }
             }
         }
     }
     $schemaDetail = if ($startMap.Count -gt 0 -and $currentMap.Count -gt 0) { 'present' } else { 'missing' }
-    return ("start_snapshot_schema_detail={0} added={1} removed={2} schema_changed={3}" -f `
+    $callableSchemaChanged = @($inputChanged + $outputChanged | Sort-Object -Unique)
+    $hasNameDelta = ($added.Count -gt 0 -or $removed.Count -gt 0)
+    $hasCallableSchemaChange = ($schemaDetail -ne 'present' -or $callableSchemaChanged.Count -gt 0)
+    $summary = ("start_snapshot_schema_detail={0} added={1} removed={2} callable_schema_changed={3} input_schema_changed={4} output_schema_changed={5} description_changed={6} stored_tool_hash_changed={7} stored_schema_hash_only_changed={8}" -f `
         $schemaDetail,
         (Format-SynapseLimitedList -Items $added),
         (Format-SynapseLimitedList -Items $removed),
-        (Format-SynapseLimitedList -Items $changed))
+        (Format-SynapseLimitedList -Items $callableSchemaChanged),
+        (Format-SynapseLimitedList -Items $inputChanged),
+        (Format-SynapseLimitedList -Items $outputChanged),
+        (Format-SynapseLimitedList -Items $descriptionChanged),
+        (Format-SynapseLimitedList -Items $storedHashChanged),
+        (Format-SynapseLimitedList -Items $storedSchemaHashOnlyChanged))
+    return [pscustomobject]([ordered]@{
+        Summary = $summary
+        SchemaDetail = $schemaDetail
+        Added = $added
+        Removed = $removed
+        InputSchemaChanged = $inputChanged
+        OutputSchemaChanged = $outputChanged
+        CallableSchemaChanged = $callableSchemaChanged
+        DescriptionChanged = $descriptionChanged
+        StoredToolHashChanged = $storedHashChanged
+        StoredSchemaHashOnlyChanged = $storedSchemaHashOnlyChanged
+        HasNameDelta = $hasNameDelta
+        HasCallableSchemaChange = $hasCallableSchemaChange
+        HasRestartRequired = ($hasNameDelta -or $hasCallableSchemaChange)
+    })
+}
+
+function Get-SynapseToolSurfaceDiffSummary {
+    param(
+        [AllowNull()]$StartSurface,
+        [Parameter(Mandatory=$true)]$CurrentSurface
+    )
+
+    $diff = Get-SynapseToolSurfaceDiff -StartSurface $StartSurface -CurrentSurface $CurrentSurface
+    return $diff.Summary
 }
 
 function Write-SynapseUtf8NoBomFile {
@@ -2012,7 +2204,8 @@ function Assert-CodexCurrentProcessToolSurfaceFresh {
 
     $currentHash = [string]$CurrentSurface.tool_surface_sha256
     $startSurface = Read-SynapseCodexToolSurfaceSnapshotOrNull -Path $ProcessSnapshotAtStart
-    $diffSummary = Get-SynapseToolSurfaceDiffSummary -StartSurface $startSurface -CurrentSurface $CurrentSurface
+    $diff = Get-SynapseToolSurfaceDiff -StartSurface $startSurface -CurrentSurface $CurrentSurface
+    $diffSummary = $diff.Summary
     if ([string]::IsNullOrWhiteSpace($ProcessHashAtStart)) {
         $handoff = New-SynapseCodexRestartHandoff `
             -CodexAncestor $CodexAncestor `
@@ -2039,6 +2232,18 @@ function Assert-CodexCurrentProcessToolSurfaceFresh {
     }
 
     if ($ProcessHashAtStart -ne $currentHash) {
+        if (-not $diff.HasRestartRequired) {
+            Info ("Codex current-process tool surface hash changed but callable schema is unchanged; continuing without restart handoff codex_pid={0} start_tool_surface_sha256={1} current_tool_surface_sha256={2} tool_count={3} daemon_pid={4} snapshot={5} start_snapshot={6} {7}" -f `
+                $CodexAncestor.ProcessId,
+                $ProcessHashAtStart,
+                $currentHash,
+                $CurrentSurface.tool_count,
+                $CurrentSurface.daemon_pid,
+                $SnapshotPath,
+                $ProcessSnapshotAtStart,
+                $diffSummary)
+            return
+        }
         $handoff = New-SynapseCodexRestartHandoff `
             -CodexAncestor $CodexAncestor `
             -Reason 'start_snapshot_hash_mismatch' `

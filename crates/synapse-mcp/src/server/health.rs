@@ -1,4 +1,5 @@
 use super::{BTreeMap, Health, SubsystemHealth, SynapseService};
+use serde_json::{Map, Value};
 use sha2::{Digest as _, Sha256};
 use synapse_action::BackendResolutionPolicy;
 use synapse_core::Backend;
@@ -136,7 +137,7 @@ impl SynapseService {
             "mcp_surface": "tools/list",
             "tools": tools,
         });
-        let bytes = match serde_json::to_vec(&canonical) {
+        let bytes = match canonical_json_bytes(canonical) {
             Ok(bytes) => bytes,
             Err(error) => {
                 tracing::error!(
@@ -532,6 +533,26 @@ struct ToolSurfaceFingerprint {
     error: Option<String>,
 }
 
+fn canonical_json_bytes(value: Value) -> serde_json::Result<Vec<u8>> {
+    serde_json::to_vec(&canonical_json_value(value))
+}
+
+fn canonical_json_value(value: Value) -> Value {
+    match value {
+        Value::Array(items) => Value::Array(items.into_iter().map(canonical_json_value).collect()),
+        Value::Object(map) => {
+            let mut entries = map.into_iter().collect::<Vec<_>>();
+            entries.sort_by(|left, right| left.0.cmp(&right.0));
+            let mut ordered = Map::new();
+            for (key, child) in entries {
+                ordered.insert(key, canonical_json_value(child));
+            }
+            Value::Object(ordered)
+        }
+        scalar => scalar,
+    }
+}
+
 fn hex_lower(bytes: &[u8]) -> String {
     let mut out = String::with_capacity(bytes.len() * 2);
     for byte in bytes {
@@ -588,5 +609,37 @@ const fn backend_config_name(backend: Backend) -> &'static str {
         Backend::Vigem => "vigem",
         Backend::Hardware => "hardware",
         Backend::Auto => "auto",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::canonical_json_bytes;
+
+    #[test]
+    fn canonical_json_bytes_sorts_object_keys_recursively() {
+        let left = serde_json::json!({
+            "tools": [
+                {"name": "b", "inputSchema": {"z": 2, "a": 1}},
+                {"inputSchema": {"b": true, "a": false}, "name": "a"}
+            ],
+            "mcp_surface": "tools/list"
+        });
+        let right = serde_json::json!({
+            "mcp_surface": "tools/list",
+            "tools": [
+                {"inputSchema": {"a": 1, "z": 2}, "name": "b"},
+                {"name": "a", "inputSchema": {"a": false, "b": true}}
+            ]
+        });
+
+        let left = canonical_json_bytes(left).expect("canonical left");
+        let right = canonical_json_bytes(right).expect("canonical right");
+
+        assert_eq!(left, right);
+        assert_eq!(
+            String::from_utf8(left).expect("utf8"),
+            r#"{"mcp_surface":"tools/list","tools":[{"inputSchema":{"a":1,"z":2},"name":"b"},{"inputSchema":{"a":false,"b":true},"name":"a"}]}"#
+        );
     }
 }
