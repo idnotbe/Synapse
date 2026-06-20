@@ -27,6 +27,7 @@ const ATTACHED_AGENT_REGISTRY_SOURCE_OF_TRUTH: &str = "session_registry spawned_
 const SESSION_TARGET_ROW_PREFIX: &str = "mcp/session-target/v1/";
 const SESSION_LIST_DEFAULT_LIMIT: usize = 50;
 const SESSION_LIST_MAX_LIMIT: usize = 500;
+const DEAD_LIVE_SESSION_CLEANUP_MIN_QUIET_MS: u64 = 60_000;
 
 #[derive(Clone, Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -99,8 +100,8 @@ pub struct SessionStatusParams {
 #[derive(Clone, Debug, Default, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SessionEndParams {
-    /// Optional explicit session id. When supplied it must match the caller's
-    /// current MCP session id; one session may not tear down another session.
+    /// Optional explicit session id. Cross-session teardown is restricted to
+    /// cleanup-required stale rows or verified dead/quiet live resource owners.
     #[serde(default)]
     #[schemars(default)]
     pub session_id: Option<String>,
@@ -534,7 +535,7 @@ impl SynapseService {
     }
 
     #[tool(
-        description = "Explicitly end this MCP session and atomically reclaim all resources owned by it: held inputs, input lease, active target, virtual clipboard buffer, CDP targets, durable shell jobs, launched process resources, event subscriptions, persisted session row, and registry lifecycle. The optional session_id may target this caller's session, or a stale/non-live session_status row whose attention_class is cleanup_required; live or terminal-no-resource peer sessions fail closed."
+        description = "Explicitly end this MCP session and atomically reclaim all resources owned by it: held inputs, input lease, active target, virtual clipboard buffer, CDP targets, durable shell jobs, launched process resources, event subscriptions, persisted session row, and registry lifecycle. The optional session_id may target this caller's session, a stale/non-live cleanup_required session, or a live peer only when its attached agent is terminal/dead, the registry row is quiet, it owns cleanup resources, has no target claim/input lease/conflicting owner, and the daemon in-flight ledger is empty; healthy live peers and terminal-no-resource peers fail closed."
     )]
     pub async fn session_end(
         &self,
@@ -1696,9 +1697,11 @@ fn build_session_summary(
         expires_in_ms: lease_status.expires_in_ms,
     };
     let attention_class = session_attention_class(
+        session_id,
         &registry,
-        active_target_wire.as_ref(),
+        active_target.as_ref(),
         &target_claims,
+        all_target_claims,
         &lease,
         agent_state.as_ref(),
         has_persisted_cdp_owner,
@@ -1725,9 +1728,11 @@ fn build_session_summary(
 }
 
 fn session_attention_class(
+    session_id: &str,
     registry: &SessionRegistryRead,
-    active_target: Option<&TargetWire>,
+    active_target: Option<&SessionTarget>,
     target_claims: &[TargetClaimRead],
+    all_target_claims: &[TargetClaimRead],
     lease: &SessionLeaseReadback,
     agent_state: Option<&AgentStateRead>,
     has_persisted_cdp_owner: bool,
@@ -1739,9 +1744,77 @@ fn session_attention_class(
     if registry.lifecycle != "live" && owns_cleanup_resource {
         return AgentAttentionClass::CleanupRequired;
     }
+    if dead_live_cleanup_candidate_parts(
+        session_id,
+        registry,
+        active_target,
+        target_claims,
+        all_target_claims,
+        lease,
+        agent_state,
+        has_persisted_cdp_owner,
+    ) {
+        return AgentAttentionClass::CleanupRequired;
+    }
     agent_state
         .map(|read| read.attention_class)
         .unwrap_or_default()
+}
+
+fn terminal_dead_agent_state(agent_state: Option<&AgentStateRead>) -> bool {
+    let Some(agent_state) = agent_state else {
+        return false;
+    };
+    matches!(agent_state.state, AgentLifecycleState::Dead)
+        && agent_state.attention_class.is_terminal_history()
+}
+
+fn active_target_claimed_by_other(
+    session_id: &str,
+    active_target: Option<&SessionTarget>,
+    all_target_claims: &[TargetClaimRead],
+) -> bool {
+    let Some(active_target) = active_target else {
+        return false;
+    };
+    let target_key = target_claims::target_key(active_target);
+    all_target_claims
+        .iter()
+        .any(|claim| claim.target_key == target_key && claim.owner_session_id != session_id)
+}
+
+fn dead_live_cleanup_candidate_parts(
+    session_id: &str,
+    registry: &SessionRegistryRead,
+    active_target: Option<&SessionTarget>,
+    target_claims: &[TargetClaimRead],
+    all_target_claims: &[TargetClaimRead],
+    lease: &SessionLeaseReadback,
+    agent_state: Option<&AgentStateRead>,
+    has_persisted_cdp_owner: bool,
+) -> bool {
+    let owns_cleanup_resource = active_target.is_some() || has_persisted_cdp_owner;
+    registry.lifecycle == "live"
+        && registry.last_seen_ms_ago >= DEAD_LIVE_SESSION_CLEANUP_MIN_QUIET_MS
+        && registry.last_action.is_none()
+        && owns_cleanup_resource
+        && terminal_dead_agent_state(agent_state)
+        && target_claims.is_empty()
+        && !lease.is_owner
+        && !active_target_claimed_by_other(session_id, active_target, all_target_claims)
+}
+
+fn dead_live_cleanup_candidate_summary(summary: &SessionSummary) -> bool {
+    let owns_cleanup_resource =
+        summary.active_target.is_some() || !summary.persisted_cdp_target_owners.is_empty();
+    summary.registry.lifecycle == "live"
+        && summary.registry.last_seen_ms_ago >= DEAD_LIVE_SESSION_CLEANUP_MIN_QUIET_MS
+        && summary.registry.last_action.is_none()
+        && owns_cleanup_resource
+        && terminal_dead_agent_state(summary.agent_state.as_ref())
+        && summary.target_claims.is_empty()
+        && !summary.lease.is_owner
+        && summary.foreground_lane.status != "conflicting_owner"
 }
 
 fn ensure_cross_session_cleanup_allowed(
@@ -1761,23 +1834,53 @@ fn ensure_cross_session_cleanup_allowed(
             })),
         ));
     };
-    if summary.registry.lifecycle == "live"
-        || summary.attention_class != AgentAttentionClass::CleanupRequired
+    if summary.registry.lifecycle != "live"
+        && summary.attention_class == AgentAttentionClass::CleanupRequired
     {
+        return Ok(());
+    }
+    if dead_live_cleanup_candidate_summary(summary) {
+        let owner_in_flight =
+            match crate::daemon_lifecycle::in_flight_tool_calls_for_session(requested_session_id) {
+                Ok(calls) => calls,
+                #[cfg(test)]
+                Err(error) if error.to_string().contains("ledger is not configured") => Vec::new(),
+                Err(error) => {
+                    return Err(mcp_error(
+                        error_codes::TOOL_INTERNAL_ERROR,
+                        format!("read daemon lifecycle in-flight tool calls: {error:#}"),
+                    ));
+                }
+            };
+        if owner_in_flight.is_empty() {
+            return Ok(());
+        }
         return Err(ErrorData::new(
             ErrorCode(-32099),
-            "session_end cross-session cleanup is allowed only for non-live cleanup_required sessions",
+            "session_end cross-session cleanup refused because the target session has in-flight tool calls",
             Some(json!({
                 "code": error_codes::TOOL_PARAMS_INVALID,
                 "current_session_id": current_session_id,
                 "requested_session_id": requested_session_id,
                 "target_lifecycle": summary.registry.lifecycle,
                 "target_attention_class": summary.attention_class,
-                "required_attention_class": "cleanup_required",
+                "owner_in_flight": owner_in_flight,
+                "required": "dead quiet live cleanup target with empty daemon in-flight ledger",
             })),
         ));
     }
-    Ok(())
+    Err(ErrorData::new(
+        ErrorCode(-32099),
+        "session_end cross-session cleanup is allowed only for non-live cleanup_required sessions or verified dead quiet live resource owners",
+        Some(json!({
+            "code": error_codes::TOOL_PARAMS_INVALID,
+            "current_session_id": current_session_id,
+            "requested_session_id": requested_session_id,
+            "target_lifecycle": summary.registry.lifecycle,
+            "target_attention_class": summary.attention_class,
+            "required": "non-live cleanup_required or live dead quiet no-claim no-lease no-in-flight resource owner",
+        })),
+    ))
 }
 
 fn target_claim_reads_by_owner(
@@ -2617,6 +2720,163 @@ mod tests {
     }
 
     #[test]
+    fn cross_session_end_policy_allows_dead_quiet_live_resource_rows() {
+        let lease_status = synapse_action::LeaseStatus::unheld();
+        let summary = dead_live_target_summary(
+            "dead-live-target",
+            Some(SessionTarget::Window { hwnd: 0x1234 }),
+            Vec::new(),
+            &[],
+            &lease_status,
+            DEAD_LIVE_SESSION_CLEANUP_MIN_QUIET_MS + 1,
+            None,
+            false,
+        );
+
+        assert_eq!(summary.registry.lifecycle, "live");
+        assert_eq!(
+            summary.agent_state.as_ref().unwrap().state,
+            AgentLifecycleState::Dead
+        );
+        assert_eq!(
+            summary.attention_class,
+            AgentAttentionClass::CleanupRequired
+        );
+        assert!(
+            ensure_cross_session_cleanup_allowed(
+                "caller",
+                "dead-live-target",
+                &status_response(Some(summary))
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn cross_session_end_policy_refuses_guarded_dead_live_rows() {
+        let lease_status = synapse_action::LeaseStatus::unheld();
+        let recent = dead_live_target_summary(
+            "recent-dead-live",
+            Some(SessionTarget::Window { hwnd: 0x1234 }),
+            Vec::new(),
+            &[],
+            &lease_status,
+            DEAD_LIVE_SESSION_CLEANUP_MIN_QUIET_MS - 1,
+            None,
+            false,
+        );
+        assert_eq!(
+            recent.attention_class,
+            AgentAttentionClass::TerminalRuntimeFailure
+        );
+        assert!(
+            ensure_cross_session_cleanup_allowed(
+                "caller",
+                "recent-dead-live",
+                &status_response(Some(recent))
+            )
+            .is_err()
+        );
+
+        let own_claim = TargetClaimRead {
+            target_key: "window:0x1234".to_owned(),
+            target: TargetWire::Window {
+                window_hwnd: 0x1234,
+            },
+            owner_session_id: "claimed-dead-live".to_owned(),
+            claimed_at_unix_ms: 1_000,
+            renewed_at_unix_ms: 1_000,
+            ttl_ms: 120_000,
+            expires_at_unix_ms: 121_000,
+            expires_in_ms: 120_000,
+            generation: 1,
+            source_of_truth: "test target claim registry".to_owned(),
+        };
+        let claimed = dead_live_target_summary(
+            "claimed-dead-live",
+            Some(SessionTarget::Window { hwnd: 0x1234 }),
+            vec![own_claim.clone()],
+            std::slice::from_ref(&own_claim),
+            &lease_status,
+            DEAD_LIVE_SESSION_CLEANUP_MIN_QUIET_MS + 1,
+            None,
+            false,
+        );
+        assert_eq!(
+            claimed.attention_class,
+            AgentAttentionClass::TerminalRuntimeFailure
+        );
+        assert!(
+            ensure_cross_session_cleanup_allowed(
+                "caller",
+                "claimed-dead-live",
+                &status_response(Some(claimed))
+            )
+            .is_err()
+        );
+
+        let conflicting_claim = TargetClaimRead {
+            owner_session_id: "other-session".to_owned(),
+            ..own_claim.clone()
+        };
+        let conflicting = dead_live_target_summary(
+            "conflicting-dead-live",
+            Some(SessionTarget::Window { hwnd: 0x1234 }),
+            Vec::new(),
+            std::slice::from_ref(&conflicting_claim),
+            &lease_status,
+            DEAD_LIVE_SESSION_CLEANUP_MIN_QUIET_MS + 1,
+            None,
+            false,
+        );
+        assert_eq!(
+            conflicting.attention_class,
+            AgentAttentionClass::TerminalRuntimeFailure
+        );
+        assert_eq!(conflicting.foreground_lane.status, "conflicting_owner");
+        assert!(
+            ensure_cross_session_cleanup_allowed(
+                "caller",
+                "conflicting-dead-live",
+                &status_response(Some(conflicting))
+            )
+            .is_err()
+        );
+
+        let held_lease = synapse_action::LeaseStatus {
+            held: true,
+            owner_session_id: Some("leased-dead-live".to_owned()),
+            acquired_at_ms_ago: Some(1),
+            renewed_at_ms_ago: Some(1),
+            ttl_ms: Some(30_000),
+            expires_in_ms: Some(29_999),
+        };
+        let leased = dead_live_target_summary(
+            "leased-dead-live",
+            Some(SessionTarget::Window { hwnd: 0x1234 }),
+            Vec::new(),
+            &[],
+            &held_lease,
+            DEAD_LIVE_SESSION_CLEANUP_MIN_QUIET_MS + 1,
+            None,
+            false,
+        );
+        assert_eq!(
+            leased.attention_class,
+            AgentAttentionClass::TerminalRuntimeFailure
+        );
+        assert!(leased.lease.is_owner);
+        assert!(
+            ensure_cross_session_cleanup_allowed(
+                "caller",
+                "leased-dead-live",
+                &status_response(Some(leased))
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
     fn terminal_unbound_agents_are_split_from_actionable_session_list_rows() {
         let rows = vec![
             agent_read("active-working", AgentLifecycleState::Working, None),
@@ -3004,6 +3264,56 @@ mod tests {
             agent_process_id: None,
             log_dir: None,
         }
+    }
+
+    fn dead_live_target_summary(
+        session_id: &str,
+        active_target: Option<SessionTarget>,
+        target_claims: Vec<TargetClaimRead>,
+        all_target_claims: &[TargetClaimRead],
+        lease_status: &synapse_action::LeaseStatus,
+        last_seen_ms_ago: u64,
+        last_action: Option<&str>,
+        has_persisted_cdp_owner: bool,
+    ) -> SessionSummary {
+        let now_unix_ms = 1_000_000;
+        let mut registry = synthetic_registry_read(session_id, now_unix_ms, 500);
+        registry.lifecycle = "live".to_owned();
+        registry.last_seen_unix_ms = now_unix_ms.saturating_sub(last_seen_ms_ago);
+        registry.last_seen_ms_ago = last_seen_ms_ago;
+        registry.last_action = last_action.map(ToOwned::to_owned);
+        let attention_target = active_target.clone();
+        let mut summary = build_session_summary(
+            session_id,
+            Some(registry),
+            active_target,
+            target_claims,
+            all_target_claims,
+            lease_status,
+            now_unix_ms,
+            500,
+            has_persisted_cdp_owner,
+        )
+        .expect("dead live summary");
+        let mut agent_state = agent_read(
+            session_id,
+            AgentLifecycleState::Dead,
+            Some("unprobeable_silent_ended"),
+        );
+        agent_state.session_id = Some(session_id.to_owned());
+        agent_state.spawn_id = None;
+        summary.agent_state = Some(agent_state);
+        summary.attention_class = session_attention_class(
+            session_id,
+            &summary.registry,
+            attention_target.as_ref(),
+            &summary.target_claims,
+            all_target_claims,
+            &summary.lease,
+            summary.agent_state.as_ref(),
+            has_persisted_cdp_owner,
+        );
+        summary
     }
 
     fn spawned_summary(
