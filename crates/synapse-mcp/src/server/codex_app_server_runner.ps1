@@ -33,7 +33,8 @@ param(
     [ValidateNotNullOrEmpty()]
     [string]$McpUrl,
     [string]$Model = "",
-    [string]$NotifyScriptPath = ""
+    [string]$NotifyScriptPath = "",
+    [switch]$RequireApprovalGate
 )
 
 $ErrorActionPreference = 'Stop'
@@ -54,6 +55,40 @@ function Get-UnixMs {
 
 function ConvertTo-TomlStringLiteral([string]$Value) {
     return ($Value | ConvertTo-Json -Compress)
+}
+
+function Get-CodexApprovalPolicy {
+    if ($RequireApprovalGate.IsPresent) {
+        return 'on-request'
+    }
+    return 'never'
+}
+
+function Get-CodexSandboxMode {
+    if ($RequireApprovalGate.IsPresent) {
+        return 'workspace-write'
+    }
+    return 'danger-full-access'
+}
+
+function New-CodexSandboxPolicy([string]$Mode, [string]$Root) {
+    if ($Mode -eq 'workspace-write') {
+        return [ordered]@{
+            type = 'workspaceWrite'
+            writableRoots = @($Root)
+            networkAccess = $false
+            excludeTmpdirEnvVar = $false
+            excludeSlashTmp = $false
+        }
+    }
+    return [ordered]@{ type = 'dangerFullAccess' }
+}
+
+function Get-CodexAppServerRequestBridgeUrl([string]$Url) {
+    if (-not $Url.EndsWith('/mcp', [StringComparison]::OrdinalIgnoreCase)) {
+        throw "cannot derive Codex app-server request bridge URL from MCP URL without /mcp suffix: $Url"
+    }
+    return ($Url.Substring(0, $Url.Length - 4) + '/codex-app-server/request')
 }
 
 function Add-JsonLine([string]$Path, [object]$Value) {
@@ -97,6 +132,9 @@ function Write-Control([hashtable]$Patch) {
     $current['turn_id'] = $script:TurnId
     $current['turn_status'] = $script:TurnStatus
     $current['last_error'] = $script:LastErrorText
+    $current['approval_policy'] = $script:CodexApprovalPolicy
+    $current['sandbox_mode'] = $script:CodexSandboxMode
+    $current['app_server_request_bridge_url'] = $script:CodexAppServerRequestBridgeUrl
     foreach ($key in $Patch.Keys) {
         $current[$key] = $Patch[$key]
     }
@@ -203,6 +241,101 @@ function Send-WebSocketJson($Socket, [object]$Message) {
     })
 }
 
+function Invoke-CodexAppServerRequestBridge($Message) {
+    $method = [string](Get-JsonProperty $Message 'method')
+    $id = Get-JsonProperty $Message 'id'
+    $params = Get-JsonProperty $Message 'params'
+    if ([string]::IsNullOrWhiteSpace($method) -or $null -eq $id) {
+        throw 'app-server request bridge requires method and id'
+    }
+    $token = $env:SYNAPSE_BEARER_TOKEN
+    if ([string]::IsNullOrWhiteSpace($token)) {
+        throw 'SYNAPSE_BEARER_TOKEN is not set in the Codex app-server runner environment'
+    }
+    $payload = [ordered]@{
+        spawn_id = $SpawnId
+        method = $method
+        id = $id
+        params = $params
+    }
+    $body = $payload | ConvertTo-Json -Compress -Depth 100
+    Add-JsonLine -Path $EventsPath -Value ([ordered]@{
+        direction = 'bridge'
+        phase = 'request_start'
+        method = $method
+        id = $id
+        bytes = ([System.Text.Encoding]::UTF8.GetByteCount($body))
+        at_unix_ms = Get-UnixMs
+    })
+    $response = Invoke-RestMethod -Method Post -Uri $script:CodexAppServerRequestBridgeUrl -Headers @{ Authorization = "Bearer $token" } -ContentType 'application/json' -Body $body -TimeoutSec 1800
+    Add-JsonLine -Path $EventsPath -Value ([ordered]@{
+        direction = 'bridge'
+        phase = 'request_ok'
+        method = $method
+        id = $id
+        approval_id = [string](Get-JsonProperty $response 'approval_id')
+        final_status = [string](Get-JsonProperty $response 'final_status')
+        at_unix_ms = Get-UnixMs
+    })
+    return $response
+}
+
+function Send-AppServerErrorResponse($Socket, $Id, [string]$Message) {
+    Send-WebSocketJson $Socket ([ordered]@{
+        id = $Id
+        error = [ordered]@{
+            code = -32000
+            message = $Message
+        }
+    })
+}
+
+function Handle-AppServerRequest($Socket, $Message) {
+    $method = Get-JsonProperty $Message 'method'
+    $id = Get-JsonProperty $Message 'id'
+    if ($null -eq $method -or $null -eq $id) {
+        return $false
+    }
+    try {
+        $bridge = Invoke-CodexAppServerRequestBridge $Message
+        $result = Get-JsonProperty $bridge 'app_server_response'
+        if ($null -eq $result) {
+            throw 'bridge response did not contain app_server_response'
+        }
+        Send-WebSocketJson $Socket ([ordered]@{
+            id = $id
+            result = $result
+        })
+        Write-Control @{
+            last_app_server_request_status = 'responded'
+            last_app_server_request_method = [string]$method
+            last_app_server_request_id = [string]$id
+            last_app_server_request_approval_id = [string](Get-JsonProperty $bridge 'approval_id')
+            last_app_server_request_final_status = [string](Get-JsonProperty $bridge 'final_status')
+            last_app_server_request_at_unix_ms = Get-UnixMs
+        }
+    } catch {
+        $detail = $_.Exception.Message
+        Add-JsonLine -Path $EventsPath -Value ([ordered]@{
+            direction = 'bridge'
+            phase = 'request_failed'
+            method = [string]$method
+            id = $id
+            error = $detail
+            at_unix_ms = Get-UnixMs
+        })
+        Send-AppServerErrorResponse -Socket $Socket -Id $id -Message $detail
+        Write-Control @{
+            last_app_server_request_status = 'failed'
+            last_app_server_request_method = [string]$method
+            last_app_server_request_id = [string]$id
+            last_app_server_request_error = $detail
+            last_app_server_request_at_unix_ms = Get-UnixMs
+        }
+    }
+    return $true
+}
+
 function Receive-WebSocketText($Socket) {
     $buffer = [byte[]]::new(65536)
     $builder = [System.Text.StringBuilder]::new()
@@ -261,6 +394,9 @@ function Update-FromNotification($Message) {
 function Receive-Response($Socket, [int]$Id) {
     while ($true) {
         $message = Read-Message $Socket
+        if (Handle-AppServerRequest -Socket $Socket -Message $message) {
+            continue
+        }
         Update-FromNotification $message
         $messageId = Get-JsonProperty $message 'id'
         if ($null -ne $messageId -and [int]$messageId -eq $Id) {
@@ -298,6 +434,9 @@ $script:TurnStatus = 'starting'
 $script:LastErrorText = $null
 $script:LastAgentMessageText = $null
 $script:LastFinalAgentMessageText = $null
+$script:CodexApprovalPolicy = Get-CodexApprovalPolicy
+$script:CodexSandboxMode = Get-CodexSandboxMode
+$script:CodexAppServerRequestBridgeUrl = Get-CodexAppServerRequestBridgeUrl -Url $McpUrl
 $socket = $null
 $appServer = $null
 
@@ -311,8 +450,8 @@ try {
     $appArgs = @(
         'app-server',
         '--listen', $script:Endpoint,
-        '-c', 'sandbox_mode="danger-full-access"',
-        '-c', 'approval_policy="never"',
+        '-c', ('sandbox_mode=' + (ConvertTo-TomlStringLiteral $script:CodexSandboxMode)),
+        '-c', ('approval_policy=' + (ConvertTo-TomlStringLiteral $script:CodexApprovalPolicy)),
         '-c', ('mcp_servers.synapse.url=' + (ConvertTo-TomlStringLiteral $McpUrl)),
         '-c', 'mcp_servers.synapse.bearer_token_env_var="SYNAPSE_BEARER_TOKEN"'
     )
@@ -345,8 +484,9 @@ try {
 
     $threadParams = [ordered]@{
         cwd = $WorkingDir
-        sandbox = 'danger-full-access'
-        approvalPolicy = 'never'
+        sandbox = $script:CodexSandboxMode
+        approvalPolicy = $script:CodexApprovalPolicy
+        approvalsReviewer = 'user'
         ephemeral = $true
         threadSource = 'subagent'
         sessionStartSource = 'startup'
@@ -376,7 +516,9 @@ try {
         threadId = $script:ThreadId
         input = @([ordered]@{ type = 'text'; text = $prompt })
         cwd = $WorkingDir
-        approvalPolicy = 'never'
+        approvalPolicy = $script:CodexApprovalPolicy
+        approvalsReviewer = 'user'
+        sandboxPolicy = (New-CodexSandboxPolicy -Mode $script:CodexSandboxMode -Root $WorkingDir)
         runtimeWorkspaceRoots = @($WorkingDir)
     }
     if (-not [string]::IsNullOrWhiteSpace($Model)) {
@@ -396,6 +538,9 @@ try {
 
     while ($true) {
         $message = Read-Message $socket
+        if (Handle-AppServerRequest -Socket $socket -Message $message) {
+            continue
+        }
         Update-FromNotification $message
         $method = Get-JsonProperty $message 'method'
         $params = Get-JsonProperty $message 'params'

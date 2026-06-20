@@ -4613,9 +4613,15 @@ fn agent_spawn_powershell_script(
                     )
                 })
                 .unwrap_or_default();
+            let approval_gate_arg = if params.require_approval_gate {
+                "$codexRunnerArgs += @('-RequireApprovalGate')\n"
+            } else {
+                ""
+            };
             format!(
                 "$codexRunnerArgs = @('-NoLogo','-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',{runner_path},'-SpawnId',$spawnId,'-PromptPath',$spawnPromptPath,'-StdoutPath',$spawnStdoutPath,'-StderrPath',$spawnStderrPath,'-FinalMessagePath',$spawnFinalMessagePath,'-ControlPath',{control_path},'-EventsPath',{events_path},'-AppServerStdoutPath',{app_stdout_path},'-AppServerStderrPath',{app_stderr_path},'-WorkingDir',{working_dir},'-McpUrl',{mcp_url},'-NotifyScriptPath',{notify_script_path})\n\
 {model_arg}\
+{approval_gate_arg}\
 & powershell.exe @codexRunnerArgs\n\
 ",
                 runner_path = ps_single_quoted_path(runner_path),
@@ -4627,6 +4633,7 @@ fn agent_spawn_powershell_script(
                 mcp_url = ps_single_quote(&params.mcp_url),
                 notify_script_path = ps_single_quoted_path(notify_script_path),
                 model_arg = model_arg,
+                approval_gate_arg = approval_gate_arg,
             )
         }
         ActSpawnAgentCli::Claude => {
@@ -6341,6 +6348,16 @@ mod tests {
                 "turn_id": "turn-1",
                 "turn_status": "inProgress",
                 "last_error": null,
+                "approval_policy": "on-request",
+                "sandbox_mode": "workspace-write",
+                "app_server_request_bridge_url": "http://127.0.0.1:17700/codex-app-server/request",
+                "last_app_server_request_status": "responded",
+                "last_app_server_request_method": "mcpServer/elicitation/request",
+                "last_app_server_request_id": "3",
+                "last_app_server_request_approval_id": "apr1-test",
+                "last_app_server_request_final_status": "accepted",
+                "last_app_server_request_error": null,
+                "last_app_server_request_at_unix_ms": 123790,
                 "last_steer_status": "delivered",
                 "last_steer_error": null,
                 "last_steer_at_unix_ms": 123789,
@@ -6360,6 +6377,16 @@ mod tests {
         assert_eq!(control.last_steer_status.as_deref(), Some("delivered"));
         assert_eq!(control.last_steer_turn_id.as_deref(), Some("turn-1"));
         assert_eq!(control.last_steer_instruction_chars, Some(42));
+        assert_eq!(control.approval_policy.as_deref(), Some("on-request"));
+        assert_eq!(control.sandbox_mode.as_deref(), Some("workspace-write"));
+        assert_eq!(
+            control.last_app_server_request_status.as_deref(),
+            Some("responded")
+        );
+        assert_eq!(
+            control.last_app_server_request_approval_id.as_deref(),
+            Some("apr1-test")
+        );
 
         let mut bom_prefixed = vec![0xEF, 0xBB, 0xBF];
         bom_prefixed.extend(
@@ -6457,6 +6484,19 @@ mod tests {
             "runner must journal outbound JSON-RPC send boundaries for app-server stalls"
         );
         assert!(
+            CODEX_APP_SERVER_RUNNER_SCRIPT.contains("/codex-app-server/request")
+                && CODEX_APP_SERVER_RUNNER_SCRIPT.contains("Handle-AppServerRequest")
+                && CODEX_APP_SERVER_RUNNER_SCRIPT.contains("app_server_response")
+                && CODEX_APP_SERVER_RUNNER_SCRIPT.contains("last_app_server_request_status"),
+            "runner must bridge Codex app-server approval/input requests into Synapse queue rows"
+        );
+        assert!(
+            CODEX_APP_SERVER_RUNNER_SCRIPT.contains("'workspace-write'")
+                && CODEX_APP_SERVER_RUNNER_SCRIPT.contains("'on-request'")
+                && CODEX_APP_SERVER_RUNNER_SCRIPT.contains("New-CodexSandboxPolicy"),
+            "gated Codex spawns must use Codex's own on-request approval policy and workspace-write sandbox"
+        );
+        assert!(
             CODEX_APP_SERVER_RUNNER_SCRIPT.contains("$script:LastFinalAgentMessageText")
                 && CODEX_APP_SERVER_RUNNER_SCRIPT.contains("$phase -eq 'final_answer'")
                 && CODEX_APP_SERVER_RUNNER_SCRIPT
@@ -6552,6 +6592,10 @@ mod tests {
             script.contains("codex-app-server-runner.ps1"),
             "codex spawn must run through the app-server runner: {script}"
         );
+        assert!(
+            script.contains("-RequireApprovalGate"),
+            "default gated Codex spawns must tell the app-server runner to bridge approvals: {script}"
+        );
         assert!(script.contains("-ControlPath"));
         assert!(script.contains("codex-control.json"));
         assert!(script.contains("-NotifyScriptPath"));
@@ -6625,6 +6669,10 @@ mod tests {
             codex_script.contains("$codexRunnerArgs += @('-Model','gpt-5-codex')"),
             "codex runner args must inject the pinned model: {codex_script}"
         );
+        assert!(
+            codex_script.contains("$codexRunnerArgs += @('-RequireApprovalGate')"),
+            "codex runner args must enable app-server approval bridging when the spawn is gated: {codex_script}"
+        );
 
         // Codex without a model: no runner model override appears.
         let codex_no_model =
@@ -6635,6 +6683,7 @@ mod tests {
             "codex still runs through app-server without a pinned model: {codex_no_model}"
         );
         assert!(!codex_no_model.contains("'-Model'"));
+        assert!(codex_no_model.contains("'-RequireApprovalGate'"));
 
         // Claude: `--model <model>` injected right after `-p`.
         let claude_files = AgentSpawnFiles {
@@ -6680,6 +6729,8 @@ mod tests {
         assert_eq!(manifest["spawn_id"], "agent-spawn-manifest-regression");
         assert_eq!(manifest["cli"], "codex");
         assert_eq!(manifest["model"], "gpt-5-codex");
+        assert_eq!(manifest["require_approval_gate"], true);
+        assert_eq!(manifest["approval_gate_effective"], true);
         assert_eq!(manifest["assigned_prompt_present"], true);
         assert!(manifest["created_unix_ms"].as_u64().is_some());
 

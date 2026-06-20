@@ -473,6 +473,12 @@ fn router(
         )
         .route("/agent-events/stats", get(agent_events_ingress_stats))
         .route(
+            "/codex-app-server/request",
+            post(codex_app_server_request).layer(DefaultBodyLimit::max(
+                crate::server::codex_app_server_bridge::MAX_CODEX_APP_SERVER_REQUEST_BODY_BYTES,
+            )),
+        )
+        .route(
             "/agent-transcripts/stats",
             get(agent_transcripts_ingest_stats),
         )
@@ -3965,6 +3971,28 @@ fn agent_events_refusal_response(
     let status =
         StatusCode::from_u16(refusal.http_status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
     (status, Json(refusal.response_body())).into_response()
+}
+
+/// Codex app-server bridge: the PowerShell runner POSTs server-to-client
+/// app-server requests here, this route blocks on the durable Synapse approval
+/// row, then returns the app-server response payload the runner should send.
+async fn codex_app_server_request(
+    State(state): State<HttpState>,
+    Json(request): Json<crate::server::codex_app_server_bridge::CodexAppServerRequestEnvelope>,
+) -> Response {
+    match crate::server::codex_app_server_bridge::handle_codex_app_server_request(
+        &state.agent_events_db,
+        request,
+    )
+    .await
+    {
+        Ok(response) => (StatusCode::OK, Json(response)).into_response(),
+        Err(error) => {
+            let status = StatusCode::from_u16(error.http_status)
+                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            (status, Json(error.response_body())).into_response()
+        }
+    }
 }
 
 /// Process-lifetime acceptance/rejection counters for the ingress, proving

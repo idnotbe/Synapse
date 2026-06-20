@@ -187,6 +187,7 @@ pub(crate) mod agent_templates;
 pub(crate) mod agent_transcripts;
 pub(crate) mod ambient_agents;
 mod audit_context;
+pub(crate) mod codex_app_server_bridge;
 pub(crate) mod command_audit;
 mod context;
 pub(crate) use context::AgentTranscriptSnapshotRow;

@@ -904,7 +904,7 @@ impl ActSpawnAgentCli {
 
     #[must_use]
     pub const fn uses_approval_gate(self) -> bool {
-        matches!(self, Self::Claude)
+        matches!(self, Self::Claude | Self::Codex)
     }
 }
 
@@ -1223,7 +1223,7 @@ pub const fn default_agent_spawn_hold_open_ms() -> u64 {
     DEFAULT_AGENT_SPAWN_HOLD_OPEN_MS
 }
 
-/// Approval gating is on by default for every spawned Claude agent (#927).
+/// Approval gating is on by default for spawned agents with a supported bridge.
 pub const fn default_require_approval_gate() -> bool {
     true
 }

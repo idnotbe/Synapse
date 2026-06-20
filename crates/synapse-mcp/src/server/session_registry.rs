@@ -105,6 +105,26 @@ pub(crate) struct SpawnedAgentControlRead {
     pub previous_control_parse_error: Option<String>,
     pub updated_at_unix_ms: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval_policy: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sandbox_mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_server_request_bridge_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_app_server_request_status: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_app_server_request_method: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_app_server_request_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_app_server_request_approval_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_app_server_request_final_status: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_app_server_request_error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_app_server_request_at_unix_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_interrupt_status: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_interrupt_error: Option<String>,
