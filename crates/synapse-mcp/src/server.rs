@@ -212,6 +212,7 @@ mod browser_assert;
 mod browser_clock_events;
 mod browser_dialog;
 mod browser_field;
+mod browser_frames;
 mod browser_network;
 mod data_cleaning;
 pub(crate) mod drain;
@@ -623,6 +624,7 @@ impl SynapseService {
             + Self::browser_clock_events_tool_router()
             + Self::browser_dialog_tool_router()
             + Self::browser_field_tool_router()
+            + Self::browser_frames_tool_router()
             + Self::browser_network_tool_router()
             + Self::tool_profile_tool_router();
         // The EverQuest domain pack (25 tools) is off the general-agent surface

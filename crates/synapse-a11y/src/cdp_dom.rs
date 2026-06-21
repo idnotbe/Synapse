@@ -291,6 +291,63 @@ pub struct CdpDomSnapshot {
     pub frame_snapshot_errors: Vec<String>,
 }
 
+/// One frame document from `browser_frames` / raw-CDP frame enumeration.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CdpFrameTreeEntry {
+    /// CDP Page.FrameId for this document.
+    pub frame_id: String,
+    /// Parent Page.FrameId, when this is not the main frame.
+    pub parent_frame_id: Option<String>,
+    /// CDP target that owns this frame document.
+    pub cdp_target_id: String,
+    /// CDP target type for `cdp_target_id` (`page` or `iframe`).
+    pub target_type: String,
+    /// Whether Target.getTargets reported this target as attached.
+    pub target_attached: Option<bool>,
+    /// Document URL reported by Page.getFrameTree.
+    pub url: String,
+    /// Frame name from the frame element/name attribute, when present.
+    pub name: Option<String>,
+    /// Best available document origin.
+    pub origin: String,
+    /// Chromium securityOrigin, when available.
+    pub security_origin: Option<String>,
+    /// Loader id for the frame document.
+    pub loader_id: Option<String>,
+    /// Depth in the composed frame tree, with the main frame at 0.
+    pub depth: u32,
+    /// Zero-based sibling index under the parent frame.
+    pub sibling_index: u32,
+    /// Number of direct child frames known from Page.getFrameTree.
+    pub child_count: u32,
+    /// True when this frame is represented by a separate iframe target.
+    pub is_out_of_process: bool,
+    /// Synapse element id for the owning iframe/frame element, when CDP exposes it.
+    pub frame_element_id: Option<String>,
+    /// BackendNodeId for the owning iframe/frame element, when CDP exposes it.
+    pub frame_element_backend_node_id: Option<i64>,
+    /// CDP target that owns the iframe/frame element id.
+    pub frame_element_cdp_target_id: Option<String>,
+    /// How the owning frame element id was resolved.
+    pub frame_element_source: String,
+}
+
+/// Structured result for background-safe raw-CDP frame enumeration.
+#[derive(Clone, Debug)]
+pub struct CdpFrameListResult {
+    pub endpoint: String,
+    pub target_id: String,
+    pub session_id: String,
+    pub page_url: String,
+    pub page_title: String,
+    pub frame_count: usize,
+    pub oopif_target_count: u32,
+    pub attached_frame_target_count: u32,
+    pub blocked_frame_targets: Vec<String>,
+    pub frame_snapshot_errors: Vec<String>,
+    pub frames: Vec<CdpFrameTreeEntry>,
+}
+
 /// Attaches CDP at `endpoint` and maps the selected tab into web nodes.
 ///
 /// The selected tab is an existing live target from `Target.getTargets`. Synapse
@@ -463,6 +520,195 @@ pub async fn fetch_dom_snapshot(
             attached_frame_target_count,
             blocked_frame_targets,
             frame_snapshot_errors,
+        })
+    }
+    .await;
+
+    handler_task.abort();
+    result
+}
+
+/// Enumerates the composed frame tree for an existing CDP target without
+/// activating the tab or reading the human foreground window.
+///
+/// # Errors
+///
+/// Returns [`crate::A11yError::CdpAttachFailed`] when the client cannot connect
+/// or attach to `target_id`, and [`crate::A11yError::CdpAxtreeFailed`] when the
+/// root frame tree cannot be read.
+#[cfg(windows)]
+#[allow(
+    clippy::future_not_send,
+    clippy::too_many_lines,
+    reason = "single CDP attach/read transaction keeps browser handler lifetime explicit"
+)]
+pub async fn cdp_list_frames(
+    endpoint: &str,
+    hwnd: i64,
+    target_id: &str,
+) -> crate::A11yResult<CdpFrameListResult> {
+    use std::collections::{HashMap, HashSet};
+
+    use chromiumoxide::Browser;
+    use chromiumoxide::cdp::browser_protocol::target::{GetTargetsParams, TargetId, TargetInfo};
+    use futures_util::StreamExt as _;
+
+    use crate::A11yError;
+
+    let (browser, mut handler) =
+        Browser::connect(endpoint)
+            .await
+            .map_err(|err| A11yError::CdpAttachFailed {
+                detail: format!("connect {endpoint}: {err}"),
+            })?;
+    let handler_task = tokio::spawn(async move { while handler.next().await.is_some() {} });
+
+    let result = async {
+        let page = wait_for_page_target(&browser, TargetId::new(target_id.to_owned()))
+            .await
+            .map_err(|error| A11yError::CdpAttachFailed {
+                detail: format!("target {target_id} did not expose a callable page: {error}"),
+            })?;
+        let page_url = page.url().await.ok().flatten().unwrap_or_default();
+        let page_title = page.get_title().await.ok().flatten().unwrap_or_default();
+        let session_id = page.session_id().inner().clone();
+
+        let mut frame_snapshot_errors = Vec::new();
+        if let Err(detail) = enable_flat_iframe_auto_attach(&page).await {
+            frame_snapshot_errors.push(detail);
+        } else {
+            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        }
+        let target_infos = browser
+            .execute(GetTargetsParams::default())
+            .await
+            .map_err(|err| A11yError::CdpAttachFailed {
+                detail: format!("Target.getTargets: {err}"),
+            })?
+            .result
+            .target_infos;
+        let target_info_by_id: HashMap<String, TargetInfo> = target_infos
+            .iter()
+            .map(|info| (info.target_id.inner().clone(), info.clone()))
+            .collect();
+        let root_target_info = target_info_by_id.get(target_id);
+        let root_attached = root_target_info.map(|info| info.attached);
+        let root_target_type = root_target_info.map_or("page", |info| info.r#type.as_str());
+
+        let mut owner_elements = HashMap::new();
+        let mut frames = frame_entries_for_page(
+            &page,
+            hwnd,
+            target_id,
+            root_target_type,
+            root_attached,
+            false,
+            None,
+            0,
+            &mut owner_elements,
+            &mut frame_snapshot_errors,
+        )
+        .await?;
+
+        let mut seen_oopif_targets = HashSet::from([target_id.to_owned()]);
+        let mut blocked_frame_targets = Vec::new();
+        let mut attached_frame_target_count = 0_u32;
+
+        loop {
+            let known_frame_ids = frames
+                .iter()
+                .map(|frame| frame.frame_id.clone())
+                .collect::<Vec<_>>();
+            let mut related_targets = related_iframe_targets(&target_infos, &known_frame_ids)
+                .into_iter()
+                .filter(|target| seen_oopif_targets.insert(target.target_id.inner().clone()))
+                .cloned()
+                .collect::<Vec<_>>();
+            related_targets.sort_by(|a, b| a.target_id.inner().cmp(b.target_id.inner()));
+            if related_targets.is_empty() {
+                break;
+            }
+
+            for target in related_targets {
+                let target_id = target.target_id.inner().clone();
+                let parent_frame_id = target.parent_frame_id.as_ref().map(|id| id.inner().clone());
+                let parent_depth = parent_frame_id
+                    .as_deref()
+                    .and_then(|id| frames.iter().find(|frame| frame.frame_id == id))
+                    .map_or(0, |frame| frame.depth.saturating_add(1));
+                let iframe_page = match wait_for_page_target(&browser, target.target_id.clone()).await
+                {
+                    Ok(page) => page,
+                    Err(error) => {
+                        blocked_frame_targets.push(format!(
+                            "iframe target {} parentFrameId={} url={} was discovered in Target.getTargets but did not expose a callable flat session through chromiumoxide: {error}",
+                            target_id,
+                            parent_frame_id.as_deref().unwrap_or(""),
+                            target.url
+                        ));
+                        continue;
+                    }
+                };
+
+                attached_frame_target_count = attached_frame_target_count.saturating_add(1);
+                let mut target_entries = match frame_entries_for_page(
+                    &iframe_page,
+                    hwnd,
+                    &target_id,
+                    target.r#type.as_str(),
+                    Some(target.attached),
+                    true,
+                    parent_frame_id.as_deref(),
+                    parent_depth,
+                    &mut owner_elements,
+                    &mut frame_snapshot_errors,
+                )
+                .await
+                {
+                    Ok(entries) => entries,
+                    Err(error) => {
+                        blocked_frame_targets.push(format!(
+                            "iframe target {} parentFrameId={} url={} attached but Page.getFrameTree failed: {error}",
+                            target_id,
+                            parent_frame_id.as_deref().unwrap_or(""),
+                            target.url
+                        ));
+                        continue;
+                    }
+                };
+                for entry in &mut target_entries {
+                    apply_frame_owner(entry, &owner_elements);
+                }
+                merge_frame_entries(&mut frames, target_entries);
+            }
+        }
+
+        for frame in &mut frames {
+            apply_frame_owner(frame, &owner_elements);
+        }
+        frames.sort_by(|a, b| {
+            a.depth
+                .cmp(&b.depth)
+                .then_with(|| a.parent_frame_id.cmp(&b.parent_frame_id))
+                .then_with(|| a.sibling_index.cmp(&b.sibling_index))
+                .then_with(|| a.frame_id.cmp(&b.frame_id))
+        });
+
+        Ok(CdpFrameListResult {
+            endpoint: endpoint.to_owned(),
+            target_id: target_id.to_owned(),
+            session_id,
+            page_url,
+            page_title,
+            frame_count: frames.len(),
+            oopif_target_count: u32::try_from(
+                frames.iter().filter(|frame| frame.is_out_of_process).count(),
+            )
+            .unwrap_or(u32::MAX),
+            attached_frame_target_count,
+            blocked_frame_targets,
+            frame_snapshot_errors,
+            frames,
         })
     }
     .await;
@@ -721,6 +967,306 @@ fn related_iframe_targets<'a>(
                 .is_some_and(|frame_id| selected_frame_ids.iter().any(|id| id == frame_id.inner()))
         })
         .collect()
+}
+
+#[cfg(windows)]
+#[derive(Clone, Debug)]
+struct CdpFrameOwnerElement {
+    cdp_target_id: String,
+    backend_node_id: i64,
+    element_id: String,
+}
+
+#[cfg(windows)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "CDP frame metadata is shaped for one wire entry"
+)]
+async fn frame_entries_for_page(
+    page: &chromiumoxide::Page,
+    hwnd: i64,
+    target_id: &str,
+    target_type: &str,
+    target_attached: Option<bool>,
+    is_oopif: bool,
+    parent_frame_override: Option<&str>,
+    depth_offset: u32,
+    owner_elements: &mut std::collections::HashMap<String, CdpFrameOwnerElement>,
+    frame_snapshot_errors: &mut Vec<String>,
+) -> crate::A11yResult<Vec<CdpFrameTreeEntry>> {
+    use chromiumoxide::cdp::browser_protocol::page::GetFrameTreeParams;
+
+    let page_owner_elements =
+        frame_owner_elements_for_page(page, hwnd, target_id, frame_snapshot_errors).await;
+    owner_elements.extend(page_owner_elements.clone());
+
+    let tree = page
+        .execute(GetFrameTreeParams::default())
+        .await
+        .map_err(|error| crate::A11yError::CdpAxtreeFailed {
+            detail: format!("target {target_id} Page.getFrameTree failed: {error}"),
+        })?;
+    let mut frames = Vec::new();
+    collect_frame_list_entries(
+        &tree.result.frame_tree,
+        target_id,
+        target_type,
+        target_attached,
+        is_oopif,
+        parent_frame_override,
+        depth_offset,
+        0,
+        0,
+        &page_owner_elements,
+        &mut frames,
+    );
+    if frames.is_empty() {
+        return Err(crate::A11yError::CdpAxtreeFailed {
+            detail: format!("target {target_id} Page.getFrameTree returned zero frames"),
+        });
+    }
+    Ok(frames)
+}
+
+#[cfg(windows)]
+async fn frame_owner_elements_for_page(
+    page: &chromiumoxide::Page,
+    hwnd: i64,
+    target_id: &str,
+    frame_snapshot_errors: &mut Vec<String>,
+) -> std::collections::HashMap<String, CdpFrameOwnerElement> {
+    use chromiumoxide::cdp::browser_protocol::dom::GetDocumentParams;
+
+    let mut owner_elements = std::collections::HashMap::new();
+    let params = GetDocumentParams::builder().depth(-1).pierce(true).build();
+    match page.execute(params).await {
+        Ok(document) => collect_frame_owner_elements(
+            &document.result.root,
+            hwnd,
+            target_id,
+            &mut owner_elements,
+        ),
+        Err(error) => frame_snapshot_errors.push(format!(
+            "target {target_id} DOM.getDocument depth=-1 pierce=true failed while resolving frame owner elements: {error}"
+        )),
+    }
+    owner_elements
+}
+
+#[cfg(windows)]
+fn collect_frame_owner_elements(
+    node: &chromiumoxide::cdp::browser_protocol::dom::Node,
+    hwnd: i64,
+    target_id: &str,
+    out: &mut std::collections::HashMap<String, CdpFrameOwnerElement>,
+) {
+    if let Some(frame_id) = node.frame_id.as_ref() {
+        let backend_node_id = *node.backend_node_id.inner();
+        out.insert(
+            frame_id.inner().clone(),
+            CdpFrameOwnerElement {
+                cdp_target_id: target_id.to_owned(),
+                backend_node_id,
+                element_id: cdp_element_id_for_target(hwnd, target_id, backend_node_id).to_string(),
+            },
+        );
+    }
+    if let Some(children) = node.children.as_ref() {
+        for child in children {
+            collect_frame_owner_elements(child, hwnd, target_id, out);
+        }
+    }
+    if let Some(content_document) = node.content_document.as_ref() {
+        collect_frame_owner_elements(content_document, hwnd, target_id, out);
+    }
+    if let Some(shadow_roots) = node.shadow_roots.as_ref() {
+        for shadow_root in shadow_roots {
+            collect_frame_owner_elements(shadow_root, hwnd, target_id, out);
+        }
+    }
+    if let Some(template_content) = node.template_content.as_ref() {
+        collect_frame_owner_elements(template_content, hwnd, target_id, out);
+    }
+    if let Some(pseudo_elements) = node.pseudo_elements.as_ref() {
+        for pseudo in pseudo_elements {
+            collect_frame_owner_elements(pseudo, hwnd, target_id, out);
+        }
+    }
+}
+
+#[cfg(windows)]
+#[allow(clippy::too_many_arguments, reason = "recursive CDP tree flattening")]
+fn collect_frame_list_entries(
+    frame_tree: &chromiumoxide::cdp::browser_protocol::page::FrameTree,
+    target_id: &str,
+    target_type: &str,
+    target_attached: Option<bool>,
+    is_oopif: bool,
+    parent_frame_override: Option<&str>,
+    depth_offset: u32,
+    local_depth: u32,
+    sibling_index: u32,
+    owner_elements: &std::collections::HashMap<String, CdpFrameOwnerElement>,
+    out: &mut Vec<CdpFrameTreeEntry>,
+) {
+    let frame = &frame_tree.frame;
+    let frame_id = frame.id.inner().clone();
+    let parent_frame_id = frame
+        .parent_id
+        .as_ref()
+        .map(|id| id.inner().clone())
+        .or_else(|| {
+            (local_depth == 0)
+                .then(|| parent_frame_override.map(str::to_owned))
+                .flatten()
+        });
+    let children = frame_tree.child_frames.as_deref().unwrap_or(&[]);
+    let owner = owner_elements.get(&frame_id);
+    let url = frame_url(frame);
+    let security_origin =
+        (!frame.security_origin.is_empty()).then(|| frame.security_origin.clone());
+    out.push(CdpFrameTreeEntry {
+        frame_id: frame_id.clone(),
+        parent_frame_id,
+        cdp_target_id: target_id.to_owned(),
+        target_type: target_type.to_owned(),
+        target_attached,
+        url: url.clone(),
+        name: frame.name.as_ref().filter(|name| !name.is_empty()).cloned(),
+        origin: security_origin
+            .clone()
+            .filter(|origin| !origin.is_empty() && origin != "://")
+            .unwrap_or_else(|| origin_from_url(&url)),
+        security_origin,
+        loader_id: Some(frame.loader_id.inner().clone()),
+        depth: depth_offset.saturating_add(local_depth),
+        sibling_index,
+        child_count: u32::try_from(children.len()).unwrap_or(u32::MAX),
+        is_out_of_process: is_oopif,
+        frame_element_id: owner.map(|owner| owner.element_id.clone()),
+        frame_element_backend_node_id: owner.map(|owner| owner.backend_node_id),
+        frame_element_cdp_target_id: owner.map(|owner| owner.cdp_target_id.clone()),
+        frame_element_source: frame_element_source(local_depth, parent_frame_override, owner),
+    });
+    for (index, child) in children.iter().enumerate() {
+        collect_frame_list_entries(
+            child,
+            target_id,
+            target_type,
+            target_attached,
+            is_oopif,
+            None,
+            depth_offset,
+            local_depth.saturating_add(1),
+            u32::try_from(index).unwrap_or(u32::MAX),
+            owner_elements,
+            out,
+        );
+    }
+}
+
+#[cfg(windows)]
+fn frame_url(frame: &chromiumoxide::cdp::browser_protocol::page::Frame) -> String {
+    let mut url = frame.url.clone();
+    if let Some(fragment) = frame.url_fragment.as_ref()
+        && !fragment.is_empty()
+        && !url.ends_with(fragment)
+    {
+        url.push_str(fragment);
+    }
+    url
+}
+
+#[cfg(windows)]
+fn frame_element_source(
+    local_depth: u32,
+    parent_frame_override: Option<&str>,
+    owner: Option<&CdpFrameOwnerElement>,
+) -> String {
+    if owner.is_some() {
+        "DOM.Node.frameId".to_owned()
+    } else if local_depth == 0 && parent_frame_override.is_none() {
+        "main_frame".to_owned()
+    } else {
+        "unavailable".to_owned()
+    }
+}
+
+#[cfg(windows)]
+fn apply_frame_owner(
+    frame: &mut CdpFrameTreeEntry,
+    owner_elements: &std::collections::HashMap<String, CdpFrameOwnerElement>,
+) {
+    if frame.frame_element_id.is_some() {
+        return;
+    }
+    if let Some(owner) = owner_elements.get(&frame.frame_id) {
+        frame.frame_element_id = Some(owner.element_id.clone());
+        frame.frame_element_backend_node_id = Some(owner.backend_node_id);
+        frame.frame_element_cdp_target_id = Some(owner.cdp_target_id.clone());
+        frame.frame_element_source = "DOM.Node.frameId".to_owned();
+    }
+}
+
+#[cfg(windows)]
+fn merge_frame_entries(frames: &mut Vec<CdpFrameTreeEntry>, incoming: Vec<CdpFrameTreeEntry>) {
+    for entry in incoming {
+        if let Some(existing) = frames
+            .iter_mut()
+            .find(|frame| frame.frame_id == entry.frame_id)
+        {
+            existing.cdp_target_id = entry.cdp_target_id;
+            existing.target_type = entry.target_type;
+            existing.target_attached = entry.target_attached.or(existing.target_attached);
+            existing.is_out_of_process |= entry.is_out_of_process;
+            if existing.parent_frame_id.is_none() {
+                existing.parent_frame_id = entry.parent_frame_id;
+            }
+            if existing.frame_element_id.is_none() {
+                existing.frame_element_id = entry.frame_element_id;
+                existing.frame_element_backend_node_id = entry.frame_element_backend_node_id;
+                existing.frame_element_cdp_target_id = entry.frame_element_cdp_target_id;
+                existing.frame_element_source = entry.frame_element_source;
+            }
+            if existing.security_origin.is_none() {
+                existing.security_origin = entry.security_origin;
+            }
+            if existing.origin.is_empty() {
+                existing.origin = entry.origin;
+            }
+            if existing.loader_id.is_none() {
+                existing.loader_id = entry.loader_id;
+            }
+        } else {
+            frames.push(entry);
+        }
+    }
+}
+
+#[cfg(windows)]
+fn origin_from_url(url: &str) -> String {
+    let trimmed = url.trim();
+    let Some(scheme_end) = trimmed.find("://") else {
+        return String::new();
+    };
+    let scheme = &trimmed[..scheme_end];
+    if scheme.is_empty() {
+        return String::new();
+    }
+    let rest = &trimmed[scheme_end + 3..];
+    let authority = rest
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or_default()
+        .trim();
+    if authority.is_empty() {
+        return String::new();
+    }
+    format!(
+        "{}://{}",
+        scheme.to_ascii_lowercase(),
+        authority.to_ascii_lowercase()
+    )
 }
 
 #[cfg(windows)]
@@ -1128,6 +1674,67 @@ mod tests {
             Some(target_id)
         );
         assert_eq!(cdp_backend_from_element_id(&mapped[1].element_id), Some(6));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn frame_origin_from_url_derives_scheme_host_port() {
+        assert_eq!(
+            origin_from_url("https://Example.COM:8443/path?q=1#hash"),
+            "https://example.com:8443"
+        );
+        assert_eq!(origin_from_url("about:blank"), "");
+        assert_eq!(origin_from_url(""), "");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn apply_frame_owner_promotes_real_frame_element_id() {
+        let owner_target_id = "7F8969F3FC3DCB527D0658F63027FF3E";
+        let mut frame = CdpFrameTreeEntry {
+            frame_id: "child-frame".to_owned(),
+            parent_frame_id: Some("root-frame".to_owned()),
+            cdp_target_id: "iframe-target".to_owned(),
+            target_type: "iframe".to_owned(),
+            target_attached: Some(true),
+            url: "https://child.example/frame".to_owned(),
+            name: Some("checkout".to_owned()),
+            origin: "https://child.example".to_owned(),
+            security_origin: Some("https://child.example".to_owned()),
+            loader_id: Some("loader-1".to_owned()),
+            depth: 1,
+            sibling_index: 0,
+            child_count: 0,
+            is_out_of_process: true,
+            frame_element_id: None,
+            frame_element_backend_node_id: None,
+            frame_element_cdp_target_id: None,
+            frame_element_source: "unavailable".to_owned(),
+        };
+        let owner = CdpFrameOwnerElement {
+            cdp_target_id: owner_target_id.to_owned(),
+            backend_node_id: 42,
+            element_id: cdp_element_id_for_target(0x2200, owner_target_id, 42).to_string(),
+        };
+        let owners = std::collections::HashMap::from([("child-frame".to_owned(), owner)]);
+
+        apply_frame_owner(&mut frame, &owners);
+
+        assert_eq!(frame.frame_element_backend_node_id, Some(42));
+        assert_eq!(
+            frame.frame_element_cdp_target_id.as_deref(),
+            Some(owner_target_id)
+        );
+        assert_eq!(frame.frame_element_source, "DOM.Node.frameId");
+        assert_eq!(
+            frame
+                .frame_element_id
+                .as_ref()
+                .and_then(|id| id.parse().ok())
+                .as_ref()
+                .and_then(cdp_backend_from_element_id),
+            Some(42)
+        );
     }
 
     #[test]

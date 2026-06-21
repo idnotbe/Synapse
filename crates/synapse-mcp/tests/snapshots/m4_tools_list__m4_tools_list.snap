@@ -3,7 +3,7 @@ source: crates/synapse-mcp/tests/m4_tools_list.rs
 expression: snapshot
 ---
 {
-  "count": 222,
+  "count": 223,
   "m4_defaults": [
     {
       "actual": 33,
@@ -270,6 +270,7 @@ expression: snapshot
     "browser_content",
     "browser_evaluate",
     "browser_expose_binding",
+    "browser_frames",
     "browser_handle_dialog",
     "browser_inspect",
     "browser_locate",
