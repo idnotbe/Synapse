@@ -11,6 +11,7 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use chromiumoxide::cdp::browser_protocol::emulation::SetUserAgentOverrideParams as EmulationSetUserAgentOverrideParams;
 use chromiumoxide::cdp::browser_protocol::fetch::{
     ContinueRequestParams as FetchContinueRequestParams, DisableParams as FetchDisableParams,
@@ -21,9 +22,12 @@ use chromiumoxide::cdp::browser_protocol::fetch::{
 };
 use chromiumoxide::cdp::browser_protocol::network::{
     EnableParams as NetworkEnableParams, ErrorReason as NetworkErrorReason, EventLoadingFailed,
-    EventLoadingFinished, EventRequestWillBeSent, EventResponseReceived, GetRequestPostDataParams,
-    GetResponseBodyParams, Headers, ResourceType as NetworkResourceType, Response,
-    SetExtraHttpHeadersParams as NetworkSetExtraHttpHeadersParams,
+    EventLoadingFinished, EventRequestWillBeSent, EventResponseReceived, EventWebSocketClosed,
+    EventWebSocketCreated, EventWebSocketFrameError, EventWebSocketFrameReceived,
+    EventWebSocketFrameSent, EventWebSocketHandshakeResponseReceived,
+    EventWebSocketWillSendHandshakeRequest, GetRequestPostDataParams, GetResponseBodyParams,
+    Headers, ResourceType as NetworkResourceType, Response,
+    SetExtraHttpHeadersParams as NetworkSetExtraHttpHeadersParams, WebSocketFrame,
 };
 use chromiumoxide::{Browser, Page};
 use futures_util::StreamExt as _;
@@ -38,6 +42,8 @@ use crate::{A11yError, A11yResult};
 pub const DEFAULT_NETWORK_BUFFER_CAPACITY: usize = 1000;
 /// Hard ceiling on requested network buffer capacity.
 pub const MAX_NETWORK_BUFFER_CAPACITY: usize = 10_000;
+/// Per-WebSocket frame retention cap so chatty sockets cannot grow unbounded.
+pub const MAX_WEBSOCKET_FRAMES_PER_ENTRY: usize = 1000;
 
 /// A response snapshot captured either as the current response or as a redirect
 /// response attached to the next `Network.requestWillBeSent` event.
@@ -163,6 +169,108 @@ pub struct CdpNetworkReadFilter<'a> {
 #[derive(Clone, Debug, Serialize)]
 pub struct CdpNetworkReadResult {
     pub entries: Vec<CdpNetworkEntry>,
+    pub next_cursor: u64,
+    pub returned: usize,
+    pub total_buffered: usize,
+    pub dropped: u64,
+    pub armed_at_unix_ms: f64,
+    pub capacity: usize,
+}
+
+/// One captured WebSocket frame or frame error.
+#[derive(Clone, Debug, Serialize, PartialEq)]
+pub struct CdpWebSocketFrame {
+    pub seq: u64,
+    /// `sent`, `received`, or `error`.
+    pub direction: String,
+    pub timestamp_s: Option<f64>,
+    pub opcode: Option<f64>,
+    pub mask: Option<bool>,
+    pub payload_data: Option<String>,
+    pub payload_len_chars: usize,
+    pub payload_base64_encoded: bool,
+    pub close_code: Option<u16>,
+    pub close_reason: Option<String>,
+    pub error_message: Option<String>,
+}
+
+/// One WebSocket lifecycle record keyed by CDP request id.
+#[derive(Clone, Debug, Serialize, PartialEq)]
+pub struct CdpWebSocketEntry {
+    pub seq: u64,
+    pub first_seq: u64,
+    pub request_id: String,
+    pub url: Option<String>,
+    pub created: bool,
+    pub created_at_unix_ms: Option<f64>,
+    pub initiator: Option<Value>,
+    pub handshake_request_timestamp_s: Option<f64>,
+    pub handshake_request_wall_time_ms: Option<f64>,
+    pub handshake_request_headers: Option<Value>,
+    pub handshake_response_timestamp_s: Option<f64>,
+    pub status: Option<i64>,
+    pub status_text: Option<String>,
+    pub handshake_response_headers: Option<Value>,
+    pub handshake_response_headers_text: Option<String>,
+    pub handshake_response_request_headers: Option<Value>,
+    pub handshake_response_request_headers_text: Option<String>,
+    pub frames: Vec<CdpWebSocketFrame>,
+    pub sent_frame_count: u64,
+    pub received_frame_count: u64,
+    pub frame_error_count: u64,
+    pub dropped_frames: u64,
+    pub closed: bool,
+    pub closed_timestamp_s: Option<f64>,
+    pub close_code: Option<u16>,
+    pub close_reason: Option<String>,
+}
+
+impl CdpWebSocketEntry {
+    fn new(seq: u64, request_id: String) -> Self {
+        Self {
+            seq,
+            first_seq: seq,
+            request_id,
+            url: None,
+            created: false,
+            created_at_unix_ms: None,
+            initiator: None,
+            handshake_request_timestamp_s: None,
+            handshake_request_wall_time_ms: None,
+            handshake_request_headers: None,
+            handshake_response_timestamp_s: None,
+            status: None,
+            status_text: None,
+            handshake_response_headers: None,
+            handshake_response_headers_text: None,
+            handshake_response_request_headers: None,
+            handshake_response_request_headers_text: None,
+            frames: Vec::new(),
+            sent_frame_count: 0,
+            received_frame_count: 0,
+            frame_error_count: 0,
+            dropped_frames: 0,
+            closed: false,
+            closed_timestamp_s: None,
+            close_code: None,
+            close_reason: None,
+        }
+    }
+}
+
+/// Optional filters for [`network_web_socket_read`].
+#[derive(Clone, Debug, Default)]
+pub struct CdpWebSocketReadFilter<'a> {
+    pub since_seq: Option<u64>,
+    pub request_id: Option<&'a str>,
+    pub url_contains: Option<&'a str>,
+    pub max: usize,
+}
+
+/// A cursor-delimited view of captured WebSocket lifecycle/frame buffers.
+#[derive(Clone, Debug, Serialize)]
+pub struct CdpWebSocketReadResult {
+    pub entries: Vec<CdpWebSocketEntry>,
     pub next_cursor: u64,
     pub returned: usize,
     pub total_buffered: usize,
@@ -437,8 +545,176 @@ impl RingBuffer {
     }
 }
 
+struct WebSocketRingBuffer {
+    entries: VecDeque<CdpWebSocketEntry>,
+    capacity: usize,
+    next_seq: u64,
+    dropped: u64,
+}
+
+impl WebSocketRingBuffer {
+    fn new(capacity: usize) -> Self {
+        Self {
+            entries: VecDeque::with_capacity(capacity.min(256)),
+            capacity: capacity.max(1),
+            next_seq: 0,
+            dropped: 0,
+        }
+    }
+
+    fn cursor(&self) -> u64 {
+        self.next_seq
+    }
+
+    fn reserve_seq(&mut self) -> u64 {
+        let seq = self.next_seq;
+        self.next_seq = self.next_seq.saturating_add(1);
+        seq
+    }
+
+    fn entry_for_seq(&mut self, request_id: &str, seq: u64) -> usize {
+        if let Some(index) = self.entries.iter().position(|e| e.request_id == request_id) {
+            if let Some(entry) = self.entries.get_mut(index) {
+                entry.seq = seq;
+            }
+            return index;
+        }
+
+        while self.entries.len() >= self.capacity {
+            self.entries.pop_front();
+            self.dropped = self.dropped.saturating_add(1);
+        }
+        self.entries
+            .push_back(CdpWebSocketEntry::new(seq, request_id.to_owned()));
+        self.entries.len() - 1
+    }
+
+    fn apply_created(&mut self, event: &EventWebSocketCreated) {
+        let seq = self.reserve_seq();
+        let index = self.entry_for_seq(event.request_id.inner(), seq);
+        let entry = self
+            .entries
+            .get_mut(index)
+            .expect("entry_for_seq inserted or found websocket entry");
+        entry.created = true;
+        entry.created_at_unix_ms = Some(now_unix_ms());
+        entry.url = Some(event.url.clone());
+        entry.initiator = event
+            .initiator
+            .as_ref()
+            .and_then(|initiator| serde_json::to_value(initiator).ok());
+        entry.closed = false;
+        entry.closed_timestamp_s = None;
+    }
+
+    fn apply_handshake_request(&mut self, event: &EventWebSocketWillSendHandshakeRequest) {
+        let seq = self.reserve_seq();
+        let index = self.entry_for_seq(event.request_id.inner(), seq);
+        let entry = self
+            .entries
+            .get_mut(index)
+            .expect("entry_for_seq inserted or found websocket entry");
+        entry.handshake_request_timestamp_s = Some(timestamp_s(&event.timestamp));
+        entry.handshake_request_wall_time_ms = Some(timestamp_s(&event.wall_time) * 1000.0);
+        entry.handshake_request_headers = Some(headers_value(&event.request.headers));
+    }
+
+    fn apply_handshake_response(&mut self, event: &EventWebSocketHandshakeResponseReceived) {
+        let seq = self.reserve_seq();
+        let index = self.entry_for_seq(event.request_id.inner(), seq);
+        let entry = self
+            .entries
+            .get_mut(index)
+            .expect("entry_for_seq inserted or found websocket entry");
+        entry.handshake_response_timestamp_s = Some(timestamp_s(&event.timestamp));
+        entry.status = Some(event.response.status);
+        entry.status_text = Some(event.response.status_text.clone());
+        entry.handshake_response_headers = Some(headers_value(&event.response.headers));
+        entry.handshake_response_headers_text = event.response.headers_text.clone();
+        entry.handshake_response_request_headers =
+            event.response.request_headers.as_ref().map(headers_value);
+        entry.handshake_response_request_headers_text = event.response.request_headers_text.clone();
+    }
+
+    fn apply_frame_sent(&mut self, event: &EventWebSocketFrameSent) {
+        let seq = self.reserve_seq();
+        let index = self.entry_for_seq(event.request_id.inner(), seq);
+        let entry = self
+            .entries
+            .get_mut(index)
+            .expect("entry_for_seq inserted or found websocket entry");
+        entry.sent_frame_count = entry.sent_frame_count.saturating_add(1);
+        push_websocket_frame(
+            entry,
+            websocket_frame_snapshot(
+                seq,
+                "sent",
+                Some(timestamp_s(&event.timestamp)),
+                &event.response,
+            ),
+        );
+    }
+
+    fn apply_frame_received(&mut self, event: &EventWebSocketFrameReceived) {
+        let seq = self.reserve_seq();
+        let index = self.entry_for_seq(event.request_id.inner(), seq);
+        let entry = self
+            .entries
+            .get_mut(index)
+            .expect("entry_for_seq inserted or found websocket entry");
+        entry.received_frame_count = entry.received_frame_count.saturating_add(1);
+        push_websocket_frame(
+            entry,
+            websocket_frame_snapshot(
+                seq,
+                "received",
+                Some(timestamp_s(&event.timestamp)),
+                &event.response,
+            ),
+        );
+    }
+
+    fn apply_frame_error(&mut self, event: &EventWebSocketFrameError) {
+        let seq = self.reserve_seq();
+        let index = self.entry_for_seq(event.request_id.inner(), seq);
+        let entry = self
+            .entries
+            .get_mut(index)
+            .expect("entry_for_seq inserted or found websocket entry");
+        entry.frame_error_count = entry.frame_error_count.saturating_add(1);
+        push_websocket_frame(
+            entry,
+            CdpWebSocketFrame {
+                seq,
+                direction: "error".to_owned(),
+                timestamp_s: Some(timestamp_s(&event.timestamp)),
+                opcode: None,
+                mask: None,
+                payload_data: None,
+                payload_len_chars: 0,
+                payload_base64_encoded: false,
+                close_code: None,
+                close_reason: None,
+                error_message: Some(event.error_message.clone()),
+            },
+        );
+    }
+
+    fn apply_closed(&mut self, event: &EventWebSocketClosed) {
+        let seq = self.reserve_seq();
+        let index = self.entry_for_seq(event.request_id.inner(), seq);
+        let entry = self
+            .entries
+            .get_mut(index)
+            .expect("entry_for_seq inserted or found websocket entry");
+        entry.closed = true;
+        entry.closed_timestamp_s = Some(timestamp_s(&event.timestamp));
+    }
+}
+
 struct NetworkCaptureSlot {
     buffer: Arc<Mutex<RingBuffer>>,
+    web_sockets: Arc<Mutex<WebSocketRingBuffer>>,
     endpoint: String,
     armed_at_unix_ms: f64,
     capacity: usize,
@@ -603,12 +879,61 @@ pub async fn network_capture_ensure(
             .map_err(|err| A11yError::CdpAxtreeFailed {
                 detail: format!("subscribe Network.loadingFailed: {err}"),
             })?;
+        let websocket_created = page
+            .event_listener::<EventWebSocketCreated>()
+            .await
+            .map_err(|err| A11yError::CdpAxtreeFailed {
+                detail: format!("subscribe Network.webSocketCreated: {err}"),
+            })?;
+        let websocket_handshake_request = page
+            .event_listener::<EventWebSocketWillSendHandshakeRequest>()
+            .await
+            .map_err(|err| A11yError::CdpAxtreeFailed {
+                detail: format!("subscribe Network.webSocketWillSendHandshakeRequest: {err}"),
+            })?;
+        let websocket_handshake_response = page
+            .event_listener::<EventWebSocketHandshakeResponseReceived>()
+            .await
+            .map_err(|err| A11yError::CdpAxtreeFailed {
+                detail: format!("subscribe Network.webSocketHandshakeResponseReceived: {err}"),
+            })?;
+        let websocket_frame_sent = page
+            .event_listener::<EventWebSocketFrameSent>()
+            .await
+            .map_err(|err| A11yError::CdpAxtreeFailed {
+                detail: format!("subscribe Network.webSocketFrameSent: {err}"),
+            })?;
+        let websocket_frame_received = page
+            .event_listener::<EventWebSocketFrameReceived>()
+            .await
+            .map_err(|err| A11yError::CdpAxtreeFailed {
+            detail: format!("subscribe Network.webSocketFrameReceived: {err}"),
+        })?;
+        let websocket_frame_error = page
+            .event_listener::<EventWebSocketFrameError>()
+            .await
+            .map_err(|err| A11yError::CdpAxtreeFailed {
+                detail: format!("subscribe Network.webSocketFrameError: {err}"),
+            })?;
+        let websocket_closed = page
+            .event_listener::<EventWebSocketClosed>()
+            .await
+            .map_err(|err| A11yError::CdpAxtreeFailed {
+                detail: format!("subscribe Network.webSocketClosed: {err}"),
+            })?;
         Ok::<_, A11yError>((
             page,
             request_started,
             response_received,
             loading_finished,
             loading_failed,
+            websocket_created,
+            websocket_handshake_request,
+            websocket_handshake_response,
+            websocket_frame_sent,
+            websocket_frame_received,
+            websocket_frame_error,
+            websocket_closed,
         ))
     }
     .await;
@@ -619,6 +944,13 @@ pub async fn network_capture_ensure(
         mut response_received,
         mut loading_finished,
         mut loading_failed,
+        mut websocket_created,
+        mut websocket_handshake_request,
+        mut websocket_handshake_response,
+        mut websocket_frame_sent,
+        mut websocket_frame_received,
+        mut websocket_frame_error,
+        mut websocket_closed,
     ) = match armed {
         Ok(streams) => streams,
         Err(err) => {
@@ -629,6 +961,8 @@ pub async fn network_capture_ensure(
 
     let buffer = Arc::new(Mutex::new(RingBuffer::new(capacity)));
     let pump_buffer = Arc::clone(&buffer);
+    let web_sockets = Arc::new(Mutex::new(WebSocketRingBuffer::new(capacity)));
+    let pump_web_sockets = Arc::clone(&web_sockets);
     let slot_page = page.clone();
     let listener_task = tokio::spawn(async move {
         let _page = page;
@@ -646,6 +980,27 @@ pub async fn network_capture_ensure(
                 Some(event) = loading_failed.next() => {
                     apply_failed(&pump_buffer, event.as_ref());
                 }
+                Some(event) = websocket_created.next() => {
+                    apply_websocket_created(&pump_web_sockets, event.as_ref());
+                }
+                Some(event) = websocket_handshake_request.next() => {
+                    apply_websocket_handshake_request(&pump_web_sockets, event.as_ref());
+                }
+                Some(event) = websocket_handshake_response.next() => {
+                    apply_websocket_handshake_response(&pump_web_sockets, event.as_ref());
+                }
+                Some(event) = websocket_frame_sent.next() => {
+                    apply_websocket_frame_sent(&pump_web_sockets, event.as_ref());
+                }
+                Some(event) = websocket_frame_received.next() => {
+                    apply_websocket_frame_received(&pump_web_sockets, event.as_ref());
+                }
+                Some(event) = websocket_frame_error.next() => {
+                    apply_websocket_frame_error(&pump_web_sockets, event.as_ref());
+                }
+                Some(event) = websocket_closed.next() => {
+                    apply_websocket_closed(&pump_web_sockets, event.as_ref());
+                }
                 else => break,
             }
         }
@@ -654,6 +1009,7 @@ pub async fn network_capture_ensure(
     let armed_at_unix_ms = now_unix_ms();
     let slot = Arc::new(NetworkCaptureSlot {
         buffer,
+        web_sockets,
         endpoint: endpoint.to_owned(),
         armed_at_unix_ms,
         capacity,
@@ -752,6 +1108,55 @@ pub fn network_capture_read(
     entries.truncate(max);
 
     Some(CdpNetworkReadResult {
+        returned: entries.len(),
+        entries,
+        next_cursor,
+        total_buffered,
+        dropped,
+        armed_at_unix_ms: slot.armed_at_unix_ms,
+        capacity: slot.capacity,
+    })
+}
+
+/// Reads a filtered, cursor-delimited slice of captured WebSocket entries.
+pub fn network_web_socket_read(
+    target_id: &str,
+    filter: &CdpWebSocketReadFilter<'_>,
+) -> Option<CdpWebSocketReadResult> {
+    let slot = {
+        let slots = registry().slots.lock().ok()?;
+        Arc::clone(slots.get(target_id.trim())?)
+    };
+    let buffer = slot.web_sockets.lock().ok()?;
+    let total_buffered = buffer.entries.len();
+    let next_cursor = buffer.cursor();
+    let dropped = buffer.dropped;
+    let max = if filter.max == 0 {
+        usize::MAX
+    } else {
+        filter.max
+    };
+    let mut entries: Vec<CdpWebSocketEntry> = buffer
+        .entries
+        .iter()
+        .filter(|entry| filter.since_seq.is_none_or(|since| entry.seq >= since))
+        .filter(|entry| filter.request_id.is_none_or(|id| entry.request_id == id))
+        .filter(|entry| {
+            filter.url_contains.is_none_or(|needle| {
+                entry
+                    .url
+                    .as_deref()
+                    .unwrap_or_default()
+                    .to_lowercase()
+                    .contains(&needle.to_lowercase())
+            })
+        })
+        .cloned()
+        .collect();
+    entries.sort_by_key(|entry| entry.seq);
+    entries.truncate(max);
+
+    Some(CdpWebSocketReadResult {
         returned: entries.len(),
         entries,
         next_cursor,
@@ -1219,6 +1624,9 @@ pub fn network_capture_clear(target_id: &str) -> bool {
     match slot.buffer.lock() {
         Ok(mut buffer) => {
             *buffer = RingBuffer::new(slot.capacity);
+            if let Ok(mut web_sockets) = slot.web_sockets.lock() {
+                *web_sockets = WebSocketRingBuffer::new(slot.capacity);
+            }
             true
         }
         Err(_) => false,
@@ -1904,6 +2312,120 @@ fn apply_failed(buffer: &Arc<Mutex<RingBuffer>>, event: &EventLoadingFailed) {
     }
 }
 
+fn apply_websocket_created(
+    buffer: &Arc<Mutex<WebSocketRingBuffer>>,
+    event: &EventWebSocketCreated,
+) {
+    if let Ok(mut buf) = buffer.lock() {
+        buf.apply_created(event);
+    }
+}
+
+fn apply_websocket_handshake_request(
+    buffer: &Arc<Mutex<WebSocketRingBuffer>>,
+    event: &EventWebSocketWillSendHandshakeRequest,
+) {
+    if let Ok(mut buf) = buffer.lock() {
+        buf.apply_handshake_request(event);
+    }
+}
+
+fn apply_websocket_handshake_response(
+    buffer: &Arc<Mutex<WebSocketRingBuffer>>,
+    event: &EventWebSocketHandshakeResponseReceived,
+) {
+    if let Ok(mut buf) = buffer.lock() {
+        buf.apply_handshake_response(event);
+    }
+}
+
+fn apply_websocket_frame_sent(
+    buffer: &Arc<Mutex<WebSocketRingBuffer>>,
+    event: &EventWebSocketFrameSent,
+) {
+    if let Ok(mut buf) = buffer.lock() {
+        buf.apply_frame_sent(event);
+    }
+}
+
+fn apply_websocket_frame_received(
+    buffer: &Arc<Mutex<WebSocketRingBuffer>>,
+    event: &EventWebSocketFrameReceived,
+) {
+    if let Ok(mut buf) = buffer.lock() {
+        buf.apply_frame_received(event);
+    }
+}
+
+fn apply_websocket_frame_error(
+    buffer: &Arc<Mutex<WebSocketRingBuffer>>,
+    event: &EventWebSocketFrameError,
+) {
+    if let Ok(mut buf) = buffer.lock() {
+        buf.apply_frame_error(event);
+    }
+}
+
+fn apply_websocket_closed(buffer: &Arc<Mutex<WebSocketRingBuffer>>, event: &EventWebSocketClosed) {
+    if let Ok(mut buf) = buffer.lock() {
+        buf.apply_closed(event);
+    }
+}
+
+fn push_websocket_frame(entry: &mut CdpWebSocketEntry, frame: CdpWebSocketFrame) {
+    if let Some(close_code) = frame.close_code {
+        entry.close_code = Some(close_code);
+        entry.close_reason = frame.close_reason.clone();
+    }
+    while entry.frames.len() >= MAX_WEBSOCKET_FRAMES_PER_ENTRY {
+        entry.frames.remove(0);
+        entry.dropped_frames = entry.dropped_frames.saturating_add(1);
+    }
+    entry.frames.push(frame);
+}
+
+fn websocket_frame_snapshot(
+    seq: u64,
+    direction: &str,
+    timestamp_s: Option<f64>,
+    frame: &WebSocketFrame,
+) -> CdpWebSocketFrame {
+    let payload_base64_encoded = frame.opcode != 1.0;
+    let (close_code, close_reason) = websocket_close_info(frame);
+    CdpWebSocketFrame {
+        seq,
+        direction: direction.to_owned(),
+        timestamp_s,
+        opcode: Some(frame.opcode),
+        mask: Some(frame.mask),
+        payload_len_chars: frame.payload_data.chars().count(),
+        payload_data: Some(frame.payload_data.clone()),
+        payload_base64_encoded,
+        close_code,
+        close_reason,
+        error_message: None,
+    }
+}
+
+fn websocket_close_info(frame: &WebSocketFrame) -> (Option<u16>, Option<String>) {
+    if frame.opcode != 8.0 {
+        return (None, None);
+    }
+    let Ok(bytes) = BASE64_STANDARD.decode(&frame.payload_data) else {
+        return (None, None);
+    };
+    if bytes.len() < 2 {
+        return (None, None);
+    }
+    let code = u16::from_be_bytes([bytes[0], bytes[1]]);
+    let reason = if bytes.len() > 2 {
+        String::from_utf8(bytes[2..].to_vec()).ok()
+    } else {
+        None
+    };
+    (Some(code), reason)
+}
+
 fn response_snapshot(
     response: &Response,
     event_timestamp_s: Option<f64>,
@@ -2038,6 +2560,90 @@ mod tests {
         }
     }
 
+    fn websocket_created_event(request_id: &str, url: &str) -> EventWebSocketCreated {
+        serde_json::from_value(json!({
+            "requestId": request_id,
+            "url": url,
+            "initiator": {"type": "script"}
+        }))
+        .expect("websocket created event")
+    }
+
+    fn websocket_handshake_request_event(
+        request_id: &str,
+    ) -> EventWebSocketWillSendHandshakeRequest {
+        serde_json::from_value(json!({
+            "requestId": request_id,
+            "timestamp": 20.0,
+            "wallTime": 30.0,
+            "request": {
+                "headers": {
+                    "Sec-WebSocket-Key": "abc"
+                }
+            }
+        }))
+        .expect("websocket handshake request event")
+    }
+
+    fn websocket_handshake_response_event(
+        request_id: &str,
+    ) -> EventWebSocketHandshakeResponseReceived {
+        serde_json::from_value(json!({
+            "requestId": request_id,
+            "timestamp": 21.0,
+            "response": {
+                "status": 101,
+                "statusText": "Switching Protocols",
+                "headers": {
+                    "Upgrade": "websocket"
+                }
+            }
+        }))
+        .expect("websocket handshake response event")
+    }
+
+    fn websocket_frame_sent_event(
+        request_id: &str,
+        opcode: f64,
+        payload_data: &str,
+    ) -> EventWebSocketFrameSent {
+        serde_json::from_value(json!({
+            "requestId": request_id,
+            "timestamp": 22.0,
+            "response": {
+                "opcode": opcode,
+                "mask": true,
+                "payloadData": payload_data
+            }
+        }))
+        .expect("websocket frame sent event")
+    }
+
+    fn websocket_frame_received_event(
+        request_id: &str,
+        opcode: f64,
+        payload_data: &str,
+    ) -> EventWebSocketFrameReceived {
+        serde_json::from_value(json!({
+            "requestId": request_id,
+            "timestamp": 23.0,
+            "response": {
+                "opcode": opcode,
+                "mask": false,
+                "payloadData": payload_data
+            }
+        }))
+        .expect("websocket frame received event")
+    }
+
+    fn websocket_closed_event(request_id: &str) -> EventWebSocketClosed {
+        serde_json::from_value(json!({
+            "requestId": request_id,
+            "timestamp": 24.0
+        }))
+        .expect("websocket closed event")
+    }
+
     fn paused_event(request_id: &str, url: &str, resource_type: &str) -> FetchEventRequestPaused {
         serde_json::from_value(json!({
             "requestId": request_id,
@@ -2107,6 +2713,44 @@ mod tests {
         assert!(entry.response_received);
         assert!(entry.loading_finished);
         assert!(!entry.loading_failed);
+    }
+
+    #[test]
+    fn websocket_buffer_tracks_frames_and_close_info() {
+        let mut buffer = WebSocketRingBuffer::new(8);
+        buffer.apply_created(&websocket_created_event(
+            "ws-1",
+            "wss://example.test/socket",
+        ));
+        buffer.apply_handshake_request(&websocket_handshake_request_event("ws-1"));
+        buffer.apply_handshake_response(&websocket_handshake_response_event("ws-1"));
+        buffer.apply_frame_sent(&websocket_frame_sent_event("ws-1", 1.0, "hello"));
+        let close_payload = BASE64_STANDARD.encode([0x03, 0xe8, b'o', b'k']);
+        buffer.apply_frame_received(&websocket_frame_received_event("ws-1", 8.0, &close_payload));
+        buffer.apply_closed(&websocket_closed_event("ws-1"));
+
+        assert_eq!(buffer.entries.len(), 1);
+        let entry = &buffer.entries[0];
+        assert_eq!(entry.request_id, "ws-1");
+        assert_eq!(entry.url.as_deref(), Some("wss://example.test/socket"));
+        assert!(entry.created);
+        assert_eq!(entry.status, Some(101));
+        assert_eq!(entry.sent_frame_count, 1);
+        assert_eq!(entry.received_frame_count, 1);
+        assert!(entry.closed);
+        assert_eq!(entry.close_code, Some(1000));
+        assert_eq!(entry.close_reason.as_deref(), Some("ok"));
+        assert_eq!(entry.frames.len(), 2);
+        assert_eq!(entry.frames[0].payload_data.as_deref(), Some("hello"));
+        assert_eq!(entry.frames[1].close_code, Some(1000));
+        println!(
+            "readback=websocket_buffer request_id={} sent={} received={} close_code={:?} close_reason={:?}",
+            entry.request_id,
+            entry.sent_frame_count,
+            entry.received_frame_count,
+            entry.close_code,
+            entry.close_reason
+        );
     }
 
     #[test]

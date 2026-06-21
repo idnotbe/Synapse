@@ -3708,6 +3708,7 @@ dependencies = [
 name = "synapse-a11y"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "chromiumoxide",
  "criterion",
  "futures-util",

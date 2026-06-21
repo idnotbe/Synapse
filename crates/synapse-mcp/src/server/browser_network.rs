@@ -19,6 +19,7 @@ use synapse_core::error_codes;
 
 const REQUESTS_TOOL: &str = "browser_network_requests";
 const REQUEST_TOOL: &str = "browser_network_request";
+const WEBSOCKETS_TOOL: &str = "browser_network_websockets";
 const OVERRIDES_TOOL: &str = "browser_network_overrides";
 const ROUTE_TOOL: &str = "browser_route";
 const DEFAULT_NETWORK_REQUEST_LIMIT: usize = 100;
@@ -104,6 +105,66 @@ pub struct BrowserNetworkRequestsResponse {
     pub dropped: u64,
     pub filters: BrowserNetworkRequestFilters,
     pub entries: Vec<BrowserNetworkWaitEntry>,
+    pub readback_backend: String,
+    pub backend_tier_used: String,
+    pub required_foreground: bool,
+}
+
+/// Parameters for `browser_network_websockets` (#1089): return captured
+/// WebSocket lifecycle and sent/received frame records for the calling
+/// session's owned CDP target.
+#[derive(Clone, Debug, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct BrowserNetworkWebSocketsParams {
+    /// CDP TargetID to read. Defaults to the active session CDP target. Must be
+    /// owned by this session; the human foreground tab is never an implicit fallback.
+    #[serde(default)]
+    pub cdp_target_id: Option<String>,
+    /// Browser HWND that owns the target. Required only with an explicit
+    /// `cdp_target_id` and no active session target.
+    #[serde(default)]
+    pub window_hwnd: Option<i64>,
+    /// Return only sockets whose latest update sequence is >= this cursor.
+    #[serde(default)]
+    pub since_seq: Option<u64>,
+    /// Maximum sockets to return after filtering. Defaults to 100, max 1000.
+    #[serde(default)]
+    pub limit: Option<usize>,
+    /// Exact CDP request id filter.
+    #[serde(default)]
+    pub request_id: Option<String>,
+    /// Case-insensitive substring filter against WebSocket URL.
+    #[serde(default)]
+    pub url_contains: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct BrowserNetworkWebSocketFilters {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub since_seq: Option<u64>,
+    pub limit: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url_contains: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct BrowserNetworkWebSocketsResponse {
+    pub session_id: String,
+    pub window_hwnd: i64,
+    pub transport: String,
+    pub endpoint: String,
+    pub cdp_target_id: String,
+    pub capture_newly_armed: bool,
+    pub next_cursor: u64,
+    pub returned: usize,
+    pub total_buffered: usize,
+    pub dropped: u64,
+    pub filters: BrowserNetworkWebSocketFilters,
+    pub entries: Vec<BrowserNetworkWebSocketEntry>,
     pub readback_backend: String,
     pub backend_tier_used: String,
     pub required_foreground: bool,
@@ -258,6 +319,76 @@ pub struct BrowserNetworkResponseBody {
     pub body: String,
     pub base64_encoded: bool,
     pub body_len_chars: usize,
+}
+
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct BrowserNetworkWebSocketEntry {
+    pub seq: u64,
+    pub first_seq: u64,
+    pub request_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    pub created: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at_unix_ms: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initiator: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handshake_request_timestamp_s: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handshake_request_wall_time_ms: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handshake_request_headers: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handshake_response_timestamp_s: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status_text: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handshake_response_headers: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handshake_response_headers_text: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handshake_response_request_headers: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handshake_response_request_headers_text: Option<String>,
+    pub frames: Vec<BrowserNetworkWebSocketFrame>,
+    pub sent_frame_count: u64,
+    pub received_frame_count: u64,
+    pub frame_error_count: u64,
+    pub dropped_frames: u64,
+    pub closed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub closed_timestamp_s: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub close_code: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub close_reason: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct BrowserNetworkWebSocketFrame {
+    pub seq: u64,
+    pub direction: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timestamp_s: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub opcode: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mask: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload_data: Option<String>,
+    pub payload_len_chars: usize,
+    pub payload_base64_encoded: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub close_code: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub close_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_message: Option<String>,
 }
 
 /// Operation for `browser_network_overrides` (#1087).
@@ -547,6 +678,14 @@ struct NormalizedBrowserNetworkRequestsParams {
 }
 
 #[derive(Debug)]
+struct NormalizedBrowserNetworkWebSocketsParams {
+    since_seq: Option<u64>,
+    limit: usize,
+    request_id: Option<String>,
+    url_contains: Option<String>,
+}
+
+#[derive(Debug)]
 struct NormalizedBrowserNetworkRequestParams {
     request_id: String,
     include_body: bool,
@@ -632,6 +771,66 @@ impl SynapseService {
             .browser_network_requests_impl(&session_id, window_hwnd, &cdp_target_id, &filters)
             .await;
         self.audit_action_result_for_session(REQUESTS_TOOL, &result, &session_id)?;
+        result.map(Json)
+    }
+
+    #[tool(
+        description = "List captured WebSocket lifecycle and frame records for the calling session's owned browser tab. Arms/reuses the same target-scoped raw CDP Network buffer as browser_network_requests and returns cursor-delimited Network.webSocketCreated, handshake, sent/received frame, frame error, and closed events. Close code/reason are decoded from opcode 8 close frames when CDP provides the frame payload. Target-scoped and background-safe: never activates the tab, never uses OS foreground input, and never falls back to the human foreground tab. Raw CDP only; the popup-safe normal Chrome bridge fails closed."
+    )]
+    pub async fn browser_network_websockets(
+        &self,
+        params: Parameters<BrowserNetworkWebSocketsParams>,
+        request_context: RequestContext<RoleServer>,
+    ) -> Result<Json<BrowserNetworkWebSocketsResponse>, ErrorData> {
+        tracing::info!(
+            code = "MCP_TOOL_INVOCATION",
+            kind = WEBSOCKETS_TOOL,
+            "tool.invocation kind=browser_network_websockets"
+        );
+        let session_id = require_target_session_id(&request_context)?;
+        let filters = validate_browser_network_websockets_params(&params.0)?;
+        let request_details = json!({
+            "session_id": &session_id,
+            "window_hwnd": params.0.window_hwnd,
+            "requested_cdp_target": cdp_target_id_audit_ref(params.0.cdp_target_id.as_deref()),
+            "since_seq": filters.since_seq,
+            "limit": filters.limit,
+            "request_id": filters.request_id.as_deref(),
+            "url_contains_len": filters.url_contains.as_deref().map(str::len),
+            "required_foreground": false,
+            "phase": "target_resolution",
+        });
+        let resolution = self.resolve_cdp_tab_mutation_target(
+            WEBSOCKETS_TOOL,
+            &session_id,
+            params.0.window_hwnd,
+            params.0.cdp_target_id.as_deref(),
+        );
+        let (window_hwnd, cdp_target_id) = self.audit_cdp_target_resolution_result(
+            WEBSOCKETS_TOOL,
+            &session_id,
+            &request_details,
+            resolution,
+        )?;
+        let request_details = json!({
+            "session_id": &session_id,
+            "window_hwnd": window_hwnd,
+            "cdp_target_id": &cdp_target_id,
+            "since_seq": filters.since_seq,
+            "limit": filters.limit,
+            "request_id": filters.request_id.as_deref(),
+            "url_contains_len": filters.url_contains.as_deref().map(str::len),
+            "required_foreground": false,
+        });
+        self.audit_action_started_with_details_for_session(
+            WEBSOCKETS_TOOL,
+            &request_details,
+            &session_id,
+        )?;
+        let result = self
+            .browser_network_websockets_impl(&session_id, window_hwnd, &cdp_target_id, &filters)
+            .await;
+        self.audit_action_result_for_session(WEBSOCKETS_TOOL, &result, &session_id)?;
         result.map(Json)
     }
 
@@ -887,6 +1086,82 @@ impl SynapseService {
             filters: filters.to_wire(),
             entries,
             readback_backend: "Network event buffer(browser_network_requests)".to_owned(),
+            backend_tier_used: "cdp".to_owned(),
+            required_foreground: false,
+        })
+    }
+
+    #[cfg(windows)]
+    async fn browser_network_websockets_impl(
+        &self,
+        session_id: &str,
+        window_hwnd: i64,
+        cdp_target_id: &str,
+        filters: &NormalizedBrowserNetworkWebSocketsParams,
+    ) -> Result<BrowserNetworkWebSocketsResponse, ErrorData> {
+        let Some(endpoint) = synapse_a11y::endpoint_for_window(window_hwnd) else {
+            return Err(browser_raw_cdp_required_error(WEBSOCKETS_TOOL, window_hwnd));
+        };
+        let capture = synapse_a11y::network_capture_ensure(
+            &endpoint,
+            cdp_target_id,
+            synapse_a11y::DEFAULT_NETWORK_BUFFER_CAPACITY,
+        )
+        .await
+        .map_err(|error| {
+            mcp_error(
+                error.code(),
+                format!("{WEBSOCKETS_TOOL} raw CDP network capture failed: {error}"),
+            )
+        })?;
+        let read = synapse_a11y::network_web_socket_read(
+            cdp_target_id,
+            &synapse_a11y::CdpWebSocketReadFilter {
+                since_seq: filters.since_seq,
+                request_id: filters.request_id.as_deref(),
+                url_contains: filters.url_contains.as_deref(),
+                max: filters.limit,
+            },
+        )
+        .ok_or_else(|| {
+            mcp_error(
+                error_codes::TOOL_INTERNAL_ERROR,
+                format!(
+                    "{WEBSOCKETS_TOOL} network capture was not armed for target {cdp_target_id}"
+                ),
+            )
+        })?;
+        let entries = read
+            .entries
+            .iter()
+            .map(browser_network_websocket_entry_to_wire)
+            .collect::<Vec<_>>();
+        tracing::info!(
+            code = "CDP_BACKGROUND_NETWORK_WEBSOCKETS",
+            session_id = %session_id,
+            hwnd = window_hwnd,
+            endpoint = %endpoint,
+            cdp_target_id,
+            returned = entries.len(),
+            total_buffered = read.total_buffered,
+            next_cursor = read.next_cursor,
+            "readback=Network.webSocket* event_buffer(browser_network_websockets) outcome=list_returned"
+        );
+        Ok(BrowserNetworkWebSocketsResponse {
+            session_id: session_id.to_owned(),
+            window_hwnd,
+            transport: "raw_cdp".to_owned(),
+            endpoint,
+            cdp_target_id: cdp_target_id.to_owned(),
+            capture_newly_armed: capture.newly_armed,
+            next_cursor: read.next_cursor,
+            returned: entries.len(),
+            total_buffered: read.total_buffered,
+            dropped: read.dropped,
+            filters: filters.to_wire(),
+            entries,
+            readback_backend: "Network.webSocket* event buffer(browser_network_websockets)"
+                .to_owned(),
             backend_tier_used: "cdp".to_owned(),
             required_foreground: false,
         })
@@ -1263,6 +1538,20 @@ impl SynapseService {
             "browser_network_requests is only available on Windows in this build",
         ))
     }
+
+    #[cfg(not(windows))]
+    async fn browser_network_websockets_impl(
+        &self,
+        _session_id: &str,
+        _window_hwnd: i64,
+        _cdp_target_id: &str,
+        _filters: &NormalizedBrowserNetworkWebSocketsParams,
+    ) -> Result<BrowserNetworkWebSocketsResponse, ErrorData> {
+        Err(mcp_error(
+            error_codes::A11Y_NOT_AVAILABLE,
+            "browser_network_websockets is only available on Windows in this build",
+        ))
+    }
 }
 
 impl NormalizedBrowserNetworkRequestsParams {
@@ -1275,6 +1564,17 @@ impl NormalizedBrowserNetworkRequestsParams {
             resource_type: self.resource_type.clone(),
             status_min: self.status_min,
             status_max: self.status_max,
+        }
+    }
+}
+
+impl NormalizedBrowserNetworkWebSocketsParams {
+    fn to_wire(&self) -> BrowserNetworkWebSocketFilters {
+        BrowserNetworkWebSocketFilters {
+            since_seq: self.since_seq,
+            limit: self.limit,
+            request_id: self.request_id.clone(),
+            url_contains: self.url_contains.clone(),
         }
     }
 }
@@ -1624,6 +1924,37 @@ fn validate_browser_network_requests_params(
     })
 }
 
+fn validate_browser_network_websockets_params(
+    params: &BrowserNetworkWebSocketsParams,
+) -> Result<NormalizedBrowserNetworkWebSocketsParams, ErrorData> {
+    if let Some(target_id) = params.cdp_target_id.as_deref() {
+        validate_cdp_target_id(target_id)?;
+    }
+    let limit = params.limit.unwrap_or(DEFAULT_NETWORK_REQUEST_LIMIT);
+    if !(1..=MAX_NETWORK_REQUEST_LIMIT).contains(&limit) {
+        return Err(mcp_error(
+            error_codes::TOOL_PARAMS_INVALID,
+            format!("{WEBSOCKETS_TOOL} limit must be 1..={MAX_NETWORK_REQUEST_LIMIT}"),
+        ));
+    }
+    let request_id = params
+        .request_id
+        .as_deref()
+        .map(|request_id| validate_request_id_for_tool(WEBSOCKETS_TOOL, request_id))
+        .transpose()?;
+    let url_contains = validate_text_filter_for_tool(
+        WEBSOCKETS_TOOL,
+        "url_contains",
+        params.url_contains.as_deref(),
+    )?;
+    Ok(NormalizedBrowserNetworkWebSocketsParams {
+        since_seq: params.since_seq,
+        limit,
+        request_id,
+        url_contains,
+    })
+}
+
 fn validate_browser_network_request_params(
     params: &BrowserNetworkRequestParams,
 ) -> Result<NormalizedBrowserNetworkRequestParams, ErrorData> {
@@ -1639,29 +1970,33 @@ fn validate_browser_network_request_params(
 }
 
 fn validate_request_id(request_id: &str) -> Result<String, ErrorData> {
+    validate_request_id_for_tool(REQUEST_TOOL, request_id)
+}
+
+fn validate_request_id_for_tool(tool: &str, request_id: &str) -> Result<String, ErrorData> {
     if request_id.is_empty() {
         return Err(mcp_error(
             error_codes::TOOL_PARAMS_INVALID,
-            format!("{REQUEST_TOOL} request_id must not be empty"),
+            format!("{tool} request_id must not be empty"),
         ));
     }
     if request_id.trim() != request_id {
         return Err(mcp_error(
             error_codes::TOOL_PARAMS_INVALID,
-            format!("{REQUEST_TOOL} request_id must not contain leading or trailing whitespace"),
+            format!("{tool} request_id must not contain leading or trailing whitespace"),
         ));
     }
     if request_id.contains('\0') || request_id.chars().any(char::is_control) {
         return Err(mcp_error(
             error_codes::TOOL_PARAMS_INVALID,
-            format!("{REQUEST_TOOL} request_id must not contain control characters"),
+            format!("{tool} request_id must not contain control characters"),
         ));
     }
     if request_id.chars().count() > MAX_NETWORK_REQUEST_ID_CHARS {
         return Err(mcp_error(
             error_codes::TOOL_PARAMS_INVALID,
             format!(
-                "{REQUEST_TOOL} request_id must be at most {MAX_NETWORK_REQUEST_ID_CHARS} Unicode scalar values"
+                "{tool} request_id must be at most {MAX_NETWORK_REQUEST_ID_CHARS} Unicode scalar values"
             ),
         ));
     }
@@ -1669,26 +2004,34 @@ fn validate_request_id(request_id: &str) -> Result<String, ErrorData> {
 }
 
 fn validate_text_filter(field: &str, value: Option<&str>) -> Result<Option<String>, ErrorData> {
+    validate_text_filter_for_tool(REQUESTS_TOOL, field, value)
+}
+
+fn validate_text_filter_for_tool(
+    tool: &str,
+    field: &str,
+    value: Option<&str>,
+) -> Result<Option<String>, ErrorData> {
     let Some(value) = value else {
         return Ok(None);
     };
     if value.is_empty() {
         return Err(mcp_error(
             error_codes::TOOL_PARAMS_INVALID,
-            format!("{REQUESTS_TOOL} {field} must not be empty"),
+            format!("{tool} {field} must not be empty"),
         ));
     }
     if value.contains('\0') {
         return Err(mcp_error(
             error_codes::TOOL_PARAMS_INVALID,
-            format!("{REQUESTS_TOOL} {field} must not contain NUL"),
+            format!("{tool} {field} must not contain NUL"),
         ));
     }
     if value.chars().count() > MAX_NETWORK_FILTER_CHARS {
         return Err(mcp_error(
             error_codes::TOOL_PARAMS_INVALID,
             format!(
-                "{REQUESTS_TOOL} {field} must be at most {MAX_NETWORK_FILTER_CHARS} Unicode scalar values"
+                "{tool} {field} must be at most {MAX_NETWORK_FILTER_CHARS} Unicode scalar values"
             ),
         ));
     }
@@ -2181,6 +2524,63 @@ fn browser_network_request_detail_to_wire(
     }
 }
 
+fn browser_network_websocket_entry_to_wire(
+    entry: &synapse_a11y::CdpWebSocketEntry,
+) -> BrowserNetworkWebSocketEntry {
+    BrowserNetworkWebSocketEntry {
+        seq: entry.seq,
+        first_seq: entry.first_seq,
+        request_id: entry.request_id.clone(),
+        url: entry.url.clone(),
+        created: entry.created,
+        created_at_unix_ms: entry.created_at_unix_ms,
+        initiator: entry.initiator.clone(),
+        handshake_request_timestamp_s: entry.handshake_request_timestamp_s,
+        handshake_request_wall_time_ms: entry.handshake_request_wall_time_ms,
+        handshake_request_headers: entry.handshake_request_headers.clone(),
+        handshake_response_timestamp_s: entry.handshake_response_timestamp_s,
+        status: entry.status,
+        status_text: entry.status_text.clone(),
+        handshake_response_headers: entry.handshake_response_headers.clone(),
+        handshake_response_headers_text: entry.handshake_response_headers_text.clone(),
+        handshake_response_request_headers: entry.handshake_response_request_headers.clone(),
+        handshake_response_request_headers_text: entry
+            .handshake_response_request_headers_text
+            .clone(),
+        frames: entry
+            .frames
+            .iter()
+            .map(browser_network_websocket_frame_to_wire)
+            .collect(),
+        sent_frame_count: entry.sent_frame_count,
+        received_frame_count: entry.received_frame_count,
+        frame_error_count: entry.frame_error_count,
+        dropped_frames: entry.dropped_frames,
+        closed: entry.closed,
+        closed_timestamp_s: entry.closed_timestamp_s,
+        close_code: entry.close_code,
+        close_reason: entry.close_reason.clone(),
+    }
+}
+
+fn browser_network_websocket_frame_to_wire(
+    frame: &synapse_a11y::CdpWebSocketFrame,
+) -> BrowserNetworkWebSocketFrame {
+    BrowserNetworkWebSocketFrame {
+        seq: frame.seq,
+        direction: frame.direction.clone(),
+        timestamp_s: frame.timestamp_s,
+        opcode: frame.opcode,
+        mask: frame.mask,
+        payload_data: frame.payload_data.clone(),
+        payload_len_chars: frame.payload_len_chars,
+        payload_base64_encoded: frame.payload_base64_encoded,
+        close_code: frame.close_code,
+        close_reason: frame.close_reason.clone(),
+        error_message: frame.error_message.clone(),
+    }
+}
+
 fn browser_network_response_snapshot_to_wire(
     response: &synapse_a11y::CdpNetworkResponseSnapshot,
 ) -> BrowserNetworkResponseSnapshot {
@@ -2500,6 +2900,64 @@ mod tests {
         }
     }
 
+    fn websocket_entry() -> synapse_a11y::CdpWebSocketEntry {
+        synapse_a11y::CdpWebSocketEntry {
+            seq: 4,
+            first_seq: 0,
+            request_id: "ws-1".to_owned(),
+            url: Some("wss://example.test/socket".to_owned()),
+            created: true,
+            created_at_unix_ms: Some(1_710_000_000_000.0),
+            initiator: Some(json!({"type": "script"})),
+            handshake_request_timestamp_s: Some(1.0),
+            handshake_request_wall_time_ms: Some(1_710_000_000_100.0),
+            handshake_request_headers: Some(json!({"sec-websocket-key": "abc"})),
+            handshake_response_timestamp_s: Some(2.0),
+            status: Some(101),
+            status_text: Some("Switching Protocols".to_owned()),
+            handshake_response_headers: Some(json!({"upgrade": "websocket"})),
+            handshake_response_headers_text: None,
+            handshake_response_request_headers: None,
+            handshake_response_request_headers_text: None,
+            frames: vec![
+                synapse_a11y::CdpWebSocketFrame {
+                    seq: 3,
+                    direction: "sent".to_owned(),
+                    timestamp_s: Some(3.0),
+                    opcode: Some(1.0),
+                    mask: Some(true),
+                    payload_data: Some("ping".to_owned()),
+                    payload_len_chars: 4,
+                    payload_base64_encoded: false,
+                    close_code: None,
+                    close_reason: None,
+                    error_message: None,
+                },
+                synapse_a11y::CdpWebSocketFrame {
+                    seq: 4,
+                    direction: "received".to_owned(),
+                    timestamp_s: Some(4.0),
+                    opcode: Some(8.0),
+                    mask: Some(false),
+                    payload_data: Some("A+hPSw==".to_owned()),
+                    payload_len_chars: 8,
+                    payload_base64_encoded: true,
+                    close_code: Some(1000),
+                    close_reason: Some("OK".to_owned()),
+                    error_message: None,
+                },
+            ],
+            sent_frame_count: 1,
+            received_frame_count: 1,
+            frame_error_count: 0,
+            dropped_frames: 0,
+            closed: true,
+            closed_timestamp_s: Some(5.0),
+            close_code: Some(1000),
+            close_reason: Some("OK".to_owned()),
+        }
+    }
+
     #[test]
     fn browser_network_requests_validation_edges() {
         let ok = validate_browser_network_requests_params(&BrowserNetworkRequestsParams {
@@ -2559,6 +3017,71 @@ mod tests {
                 .and_then(serde_json::Value::as_str);
             assert_eq!(code, Some(error_codes::TOOL_PARAMS_INVALID));
         }
+    }
+
+    #[test]
+    fn browser_network_websockets_validation_edges() {
+        let ok = validate_browser_network_websockets_params(&BrowserNetworkWebSocketsParams {
+            cdp_target_id: Some("target-123".to_owned()),
+            since_seq: Some(7),
+            limit: Some(MAX_NETWORK_REQUEST_LIMIT),
+            request_id: Some("ws-1".to_owned()),
+            url_contains: Some("socket".to_owned()),
+            window_hwnd: None,
+        })
+        .expect("valid websocket params pass");
+        assert_eq!(ok.since_seq, Some(7));
+        assert_eq!(ok.limit, MAX_NETWORK_REQUEST_LIMIT);
+        assert_eq!(ok.request_id.as_deref(), Some("ws-1"));
+        assert_eq!(ok.url_contains.as_deref(), Some("socket"));
+
+        for error in [
+            validate_browser_network_websockets_params(&BrowserNetworkWebSocketsParams {
+                limit: Some(0),
+                ..Default::default()
+            })
+            .expect_err("zero limit must be rejected"),
+            validate_browser_network_websockets_params(&BrowserNetworkWebSocketsParams {
+                request_id: Some(" ws-1".to_owned()),
+                ..Default::default()
+            })
+            .expect_err("request id whitespace must be rejected"),
+            validate_browser_network_websockets_params(&BrowserNetworkWebSocketsParams {
+                url_contains: Some(String::new()),
+                ..Default::default()
+            })
+            .expect_err("empty url_contains must be rejected"),
+        ] {
+            let code = error
+                .data
+                .as_ref()
+                .and_then(|data| data.get("code"))
+                .and_then(serde_json::Value::as_str);
+            assert_eq!(code, Some(error_codes::TOOL_PARAMS_INVALID));
+        }
+        println!("readback=browser_network_websockets validation edges rejected invalid params");
+    }
+
+    #[test]
+    fn browser_network_websocket_entry_maps_frames_and_close_info() {
+        let wire = browser_network_websocket_entry_to_wire(&websocket_entry());
+        assert_eq!(wire.request_id, "ws-1");
+        assert_eq!(wire.status, Some(101));
+        assert_eq!(wire.sent_frame_count, 1);
+        assert_eq!(wire.received_frame_count, 1);
+        assert!(wire.closed);
+        assert_eq!(wire.close_code, Some(1000));
+        assert_eq!(wire.close_reason.as_deref(), Some("OK"));
+        assert_eq!(wire.frames.len(), 2);
+        assert_eq!(wire.frames[0].direction, "sent");
+        assert_eq!(wire.frames[0].payload_data.as_deref(), Some("ping"));
+        assert_eq!(wire.frames[1].close_code, Some(1000));
+        println!(
+            "readback=browser_network_websocket wire request_id={} frames={} close_code={:?}",
+            wire.request_id,
+            wire.frames.len(),
+            wire.close_code
+        );
     }
 
     #[test]
