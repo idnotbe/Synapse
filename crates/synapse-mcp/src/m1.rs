@@ -697,16 +697,40 @@ pub struct CdpTargetInfoResponse {
     pub page_vitals: Option<CdpPageVitalsInfo>,
 }
 
-/// Parameters for `browser_tabs` (#1298): enumerate tabs in an already-open
-/// Chromium browser window through the normal Chrome bridge.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BrowserTabsOperation {
+    /// Enumerate tabs without changing browser or session state.
+    #[default]
+    List,
+    /// Bind an existing listed tab as this MCP session's active CDP target.
+    Select,
+    /// Open a new background tab in the already-open browser window.
+    New,
+    /// Close a tab owned by this MCP session.
+    Close,
+}
+
+/// Parameters for `browser_tabs` (#1298/#1188): enumerate and manage tabs in an
+/// already-open Chromium browser window through the normal Chrome bridge.
 #[derive(Clone, Debug, Default, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct BrowserTabsParams {
+    /// Operation to perform. Defaults to `list`, preserving the original
+    /// read-only tab enumeration behavior.
+    #[serde(default)]
+    pub operation: BrowserTabsOperation,
     /// Browser HWND whose tabs should be listed. If omitted, the active session
     /// target's window is used; if the session has no target, this explicit
-    /// discovery tool passively uses the current human OS foreground window.
+    /// discovery behavior is available only for `list` and `select`.
     #[serde(default)]
     pub window_hwnd: Option<i64>,
+    /// Target id for `select` or `close`.
+    #[serde(default)]
+    pub cdp_target_id: Option<String>,
+    /// URL for `new`. Empty string opens about:blank.
+    #[serde(default)]
+    pub url: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, JsonSchema)]
@@ -732,8 +756,30 @@ pub struct BrowserTabEntry {
 
 #[derive(Clone, Debug, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+pub struct BrowserTabsMutation {
+    pub operation: BrowserTabsOperation,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_cdp_target_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous: Option<TargetWire>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current: Option<TargetWire>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_tab: Option<BrowserTabEntry>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub opened_cdp_target_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub closed_cdp_target_id: Option<String>,
+    pub closed: bool,
+}
+
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct BrowserTabsResponse {
     pub session_id: String,
+    pub operation: BrowserTabsOperation,
     pub window_hwnd: i64,
     pub transport: String,
     pub endpoint: String,
@@ -750,6 +796,8 @@ pub struct BrowserTabsResponse {
     pub active_tab_count: u32,
     pub used_human_os_foreground_window: bool,
     pub source_of_truth: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mutation: Option<BrowserTabsMutation>,
     pub tabs: Vec<BrowserTabEntry>,
 }
 
