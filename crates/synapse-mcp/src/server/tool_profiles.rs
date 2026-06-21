@@ -62,6 +62,8 @@ const NORMAL_ALLOWED_EXACT: &[&str] = &[
     "browser_wait_for",
     "browser_wait_for_function",
     "browser_wait_for_load_state",
+    "browser_wait_for_request",
+    "browser_wait_for_response",
     "browser_wait_for_selector",
     "browser_wait_for_url",
     "capture_screenshot",
@@ -140,6 +142,8 @@ const BROWSER_CONTROL_ALLOWED_EXACT: &[&str] = &[
     "browser_wait_for",
     "browser_wait_for_function",
     "browser_wait_for_load_state",
+    "browser_wait_for_request",
+    "browser_wait_for_response",
     "browser_wait_for_selector",
     "browser_wait_for_url",
     "capture_screenshot",
@@ -1256,6 +1260,8 @@ mod tests {
                 "browser_wait_for",
                 "browser_wait_for_function",
                 "browser_wait_for_load_state",
+                "browser_wait_for_request",
+                "browser_wait_for_response",
                 "browser_wait_for_selector",
                 "browser_wait_for_url",
                 "control_lease_acquire",
@@ -1284,6 +1290,8 @@ mod tests {
         assert!(visible.contains(&"browser_wait_for".to_owned()));
         assert!(visible.contains(&"browser_wait_for_function".to_owned()));
         assert!(visible.contains(&"browser_wait_for_load_state".to_owned()));
+        assert!(visible.contains(&"browser_wait_for_request".to_owned()));
+        assert!(visible.contains(&"browser_wait_for_response".to_owned()));
         assert!(visible.contains(&"browser_wait_for_selector".to_owned()));
         assert!(visible.contains(&"browser_wait_for_url".to_owned()));
         assert!(visible.contains(&"control_lease_acquire".to_owned()));
@@ -1350,6 +1358,8 @@ mod tests {
         assert!(visible.contains(&"browser_wait_for".to_owned()));
         assert!(visible.contains(&"browser_wait_for_function".to_owned()));
         assert!(visible.contains(&"browser_wait_for_load_state".to_owned()));
+        assert!(visible.contains(&"browser_wait_for_request".to_owned()));
+        assert!(visible.contains(&"browser_wait_for_response".to_owned()));
         assert!(visible.contains(&"browser_wait_for_selector".to_owned()));
         assert!(visible.contains(&"browser_wait_for_url".to_owned()));
         assert!(visible.contains(&"control_lease_acquire".to_owned()));

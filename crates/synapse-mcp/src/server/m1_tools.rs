@@ -5,10 +5,12 @@ use super::{
     BrowserContentParams, BrowserContentResponse, BrowserEvaluateParams, BrowserEvaluateResponse,
     BrowserInitScriptOperation, BrowserInspectParams, BrowserInspectResponse,
     BrowserLayoutRelation, BrowserLocateEngine, BrowserLocateParams, BrowserLocateResponse,
-    BrowserSetContentParams, BrowserSetContentResponse, BrowserTabEntry, BrowserTabsParams,
-    BrowserTabsResponse, BrowserWaitForFunctionParams, BrowserWaitForFunctionResponse,
-    BrowserWaitForLoadStateParams, BrowserWaitForLoadStateResponse, BrowserWaitForLoadStateState,
-    BrowserWaitForParams, BrowserWaitForResponse, BrowserWaitForSelectorParams,
+    BrowserNetworkWaitEntry, BrowserSetContentParams, BrowserSetContentResponse, BrowserTabEntry,
+    BrowserTabsParams, BrowserTabsResponse, BrowserWaitForFunctionParams,
+    BrowserWaitForFunctionResponse, BrowserWaitForLoadStateParams, BrowserWaitForLoadStateResponse,
+    BrowserWaitForLoadStateState, BrowserWaitForNetworkResponseParams,
+    BrowserWaitForNetworkResponseResponse, BrowserWaitForParams, BrowserWaitForRequestParams,
+    BrowserWaitForRequestResponse, BrowserWaitForResponse, BrowserWaitForSelectorParams,
     BrowserWaitForSelectorResponse, BrowserWaitForSelectorState, BrowserWaitForState,
     BrowserWaitForUrlMatchKind, BrowserWaitForUrlParams, BrowserWaitForUrlResponse,
     CaptureScreenshotFormat, CaptureScreenshotParams, CaptureScreenshotResponse,
@@ -2171,6 +2173,130 @@ impl SynapseService {
         self.audit_action_started_with_details_for_session(TOOL, &request_details, &session_id)?;
         let result = self
             .browser_wait_for_url_impl(&session_id, window_hwnd, &cdp_target_id, &wait)
+            .await;
+        self.audit_action_result_for_session(TOOL, &result, &session_id)?;
+        result.map(Json)
+    }
+
+    #[tool(
+        description = "Wait until the calling session's owned browser tab observes a network request matching optional URL exact/glob/regex, method, and resource_type predicates. Uses the persistent target-scoped CDP Network buffer and returns the matched request details; timeouts return BROWSER_WAIT_TIMEOUT. Target-scoped and background-safe: never activates the tab, never uses OS foreground input, and never falls back to the human foreground tab. Raw CDP only; the popup-safe normal Chrome extension bridge fails closed."
+    )]
+    pub async fn browser_wait_for_request(
+        &self,
+        params: Parameters<BrowserWaitForRequestParams>,
+        request_context: RequestContext<RoleServer>,
+    ) -> Result<Json<BrowserWaitForRequestResponse>, ErrorData> {
+        const TOOL: &str = "browser_wait_for_request";
+        tracing::info!(
+            code = "MCP_TOOL_INVOCATION",
+            kind = TOOL,
+            "tool.invocation kind=browser_wait_for_request"
+        );
+        let session_id = require_target_session_id(&request_context)?;
+        let wait = validate_browser_wait_for_request_params(&params.0)?;
+        let request_details = json!({
+            "session_id": &session_id,
+            "window_hwnd": params.0.window_hwnd,
+            "requested_cdp_target": cdp_target_id_audit_ref(params.0.cdp_target_id.as_deref()),
+            "url_len": wait.url.as_deref().map(str::len),
+            "match_kind": wait.match_kind,
+            "method": wait.method.as_deref(),
+            "resource_type": wait.resource_type.as_deref(),
+            "timeout_ms": wait.timeout_ms,
+            "polling_interval_ms": wait.polling_interval_ms,
+            "required_foreground": false,
+            "phase": "target_resolution",
+        });
+        let resolution = self.resolve_cdp_tab_mutation_target(
+            TOOL,
+            &session_id,
+            params.0.window_hwnd,
+            params.0.cdp_target_id.as_deref(),
+        );
+        let (window_hwnd, cdp_target_id) = self.audit_cdp_target_resolution_result(
+            TOOL,
+            &session_id,
+            &request_details,
+            resolution,
+        )?;
+        let request_details = json!({
+            "session_id": &session_id,
+            "window_hwnd": window_hwnd,
+            "cdp_target_id": &cdp_target_id,
+            "url_len": wait.url.as_deref().map(str::len),
+            "match_kind": wait.match_kind,
+            "method": wait.method.as_deref(),
+            "resource_type": wait.resource_type.as_deref(),
+            "timeout_ms": wait.timeout_ms,
+            "polling_interval_ms": wait.polling_interval_ms,
+            "required_foreground": false,
+        });
+        self.audit_action_started_with_details_for_session(TOOL, &request_details, &session_id)?;
+        let result = self
+            .browser_wait_for_request_impl(&session_id, window_hwnd, &cdp_target_id, &wait)
+            .await;
+        self.audit_action_result_for_session(TOOL, &result, &session_id)?;
+        result.map(Json)
+    }
+
+    #[tool(
+        description = "Wait until the calling session's owned browser tab observes a network response matching optional URL exact/glob/regex, method, status, and resource_type predicates. Uses the persistent target-scoped CDP Network buffer and returns the matched response details; timeouts return BROWSER_WAIT_TIMEOUT. Target-scoped and background-safe: never activates the tab, never uses OS foreground input, and never falls back to the human foreground tab. Raw CDP only; the popup-safe normal Chrome extension bridge fails closed."
+    )]
+    pub async fn browser_wait_for_response(
+        &self,
+        params: Parameters<BrowserWaitForNetworkResponseParams>,
+        request_context: RequestContext<RoleServer>,
+    ) -> Result<Json<BrowserWaitForNetworkResponseResponse>, ErrorData> {
+        const TOOL: &str = "browser_wait_for_response";
+        tracing::info!(
+            code = "MCP_TOOL_INVOCATION",
+            kind = TOOL,
+            "tool.invocation kind=browser_wait_for_response"
+        );
+        let session_id = require_target_session_id(&request_context)?;
+        let wait = validate_browser_wait_for_response_params(&params.0)?;
+        let request_details = json!({
+            "session_id": &session_id,
+            "window_hwnd": params.0.window_hwnd,
+            "requested_cdp_target": cdp_target_id_audit_ref(params.0.cdp_target_id.as_deref()),
+            "url_len": wait.url.as_deref().map(str::len),
+            "match_kind": wait.match_kind,
+            "method": wait.method.as_deref(),
+            "status": wait.status,
+            "resource_type": wait.resource_type.as_deref(),
+            "timeout_ms": wait.timeout_ms,
+            "polling_interval_ms": wait.polling_interval_ms,
+            "required_foreground": false,
+            "phase": "target_resolution",
+        });
+        let resolution = self.resolve_cdp_tab_mutation_target(
+            TOOL,
+            &session_id,
+            params.0.window_hwnd,
+            params.0.cdp_target_id.as_deref(),
+        );
+        let (window_hwnd, cdp_target_id) = self.audit_cdp_target_resolution_result(
+            TOOL,
+            &session_id,
+            &request_details,
+            resolution,
+        )?;
+        let request_details = json!({
+            "session_id": &session_id,
+            "window_hwnd": window_hwnd,
+            "cdp_target_id": &cdp_target_id,
+            "url_len": wait.url.as_deref().map(str::len),
+            "match_kind": wait.match_kind,
+            "method": wait.method.as_deref(),
+            "status": wait.status,
+            "resource_type": wait.resource_type.as_deref(),
+            "timeout_ms": wait.timeout_ms,
+            "polling_interval_ms": wait.polling_interval_ms,
+            "required_foreground": false,
+        });
+        self.audit_action_started_with_details_for_session(TOOL, &request_details, &session_id)?;
+        let result = self
+            .browser_wait_for_response_impl(&session_id, window_hwnd, &cdp_target_id, &wait)
             .await;
         self.audit_action_result_for_session(TOOL, &result, &session_id)?;
         result.map(Json)
@@ -4972,6 +5098,228 @@ impl SynapseService {
     }
 
     #[cfg(windows)]
+    async fn browser_wait_for_request_impl(
+        &self,
+        session_id: &str,
+        window_hwnd: i64,
+        cdp_target_id: &str,
+        wait: &NormalizedBrowserNetworkWaitParams,
+    ) -> Result<BrowserWaitForRequestResponse, ErrorData> {
+        const TOOL: &str = "browser_wait_for_request";
+        let Some(endpoint) = synapse_a11y::endpoint_for_window(window_hwnd) else {
+            return Err(browser_raw_cdp_required_error(TOOL, window_hwnd));
+        };
+        let (entry, elapsed_ms, poll_count) = self
+            .browser_wait_for_network_entry(TOOL, &endpoint, cdp_target_id, wait, false)
+            .await?;
+        tracing::info!(
+            code = "CDP_BACKGROUND_WAIT_FOR_REQUEST",
+            session_id = %session_id,
+            hwnd = window_hwnd,
+            endpoint = %endpoint,
+            cdp_target_id,
+            request_id = %entry.request_id,
+            elapsed_ms,
+            poll_count,
+            method = ?entry.method,
+            url = ?entry.url,
+            "readback=Network.requestWillBeSent(buffer) outcome=wait_satisfied"
+        );
+        Ok(BrowserWaitForRequestResponse {
+            session_id: session_id.to_owned(),
+            window_hwnd,
+            transport: "raw_cdp".to_owned(),
+            endpoint,
+            cdp_target_id: cdp_target_id.to_owned(),
+            url_pattern: wait.url.clone(),
+            match_kind: wait.match_kind,
+            method: wait.method.clone(),
+            resource_type: wait.resource_type.clone(),
+            condition_met: true,
+            elapsed_ms,
+            timeout_ms: wait.timeout_ms,
+            polling_interval_ms: wait.polling_interval_ms,
+            poll_count,
+            matched_entry: browser_network_entry_to_wire(&entry),
+            readback_backend: "Network event buffer(browser_wait_for_request)".to_owned(),
+            backend_tier_used: "cdp".to_owned(),
+            required_foreground: false,
+        })
+    }
+
+    #[cfg(not(windows))]
+    async fn browser_wait_for_request_impl(
+        &self,
+        _session_id: &str,
+        _window_hwnd: i64,
+        _cdp_target_id: &str,
+        _wait: &NormalizedBrowserNetworkWaitParams,
+    ) -> Result<BrowserWaitForRequestResponse, ErrorData> {
+        Err(mcp_error(
+            error_codes::A11Y_NOT_AVAILABLE,
+            "browser_wait_for_request is only available on Windows in this build",
+        ))
+    }
+
+    #[cfg(windows)]
+    async fn browser_wait_for_response_impl(
+        &self,
+        session_id: &str,
+        window_hwnd: i64,
+        cdp_target_id: &str,
+        wait: &NormalizedBrowserNetworkWaitParams,
+    ) -> Result<BrowserWaitForNetworkResponseResponse, ErrorData> {
+        const TOOL: &str = "browser_wait_for_response";
+        let Some(endpoint) = synapse_a11y::endpoint_for_window(window_hwnd) else {
+            return Err(browser_raw_cdp_required_error(TOOL, window_hwnd));
+        };
+        let (entry, elapsed_ms, poll_count) = self
+            .browser_wait_for_network_entry(TOOL, &endpoint, cdp_target_id, wait, true)
+            .await?;
+        let status = entry.response.as_ref().map(|response| response.status);
+        tracing::info!(
+            code = "CDP_BACKGROUND_WAIT_FOR_RESPONSE",
+            session_id = %session_id,
+            hwnd = window_hwnd,
+            endpoint = %endpoint,
+            cdp_target_id,
+            request_id = %entry.request_id,
+            elapsed_ms,
+            poll_count,
+            status = ?status,
+            method = ?entry.method,
+            url = ?entry.url,
+            "readback=Network.responseReceived(buffer) outcome=wait_satisfied"
+        );
+        Ok(BrowserWaitForNetworkResponseResponse {
+            session_id: session_id.to_owned(),
+            window_hwnd,
+            transport: "raw_cdp".to_owned(),
+            endpoint,
+            cdp_target_id: cdp_target_id.to_owned(),
+            url_pattern: wait.url.clone(),
+            match_kind: wait.match_kind,
+            method: wait.method.clone(),
+            status: wait.status,
+            resource_type: wait.resource_type.clone(),
+            condition_met: true,
+            elapsed_ms,
+            timeout_ms: wait.timeout_ms,
+            polling_interval_ms: wait.polling_interval_ms,
+            poll_count,
+            matched_entry: browser_network_entry_to_wire(&entry),
+            readback_backend: "Network event buffer(browser_wait_for_response)".to_owned(),
+            backend_tier_used: "cdp".to_owned(),
+            required_foreground: false,
+        })
+    }
+
+    #[cfg(not(windows))]
+    async fn browser_wait_for_response_impl(
+        &self,
+        _session_id: &str,
+        _window_hwnd: i64,
+        _cdp_target_id: &str,
+        _wait: &NormalizedBrowserNetworkWaitParams,
+    ) -> Result<BrowserWaitForNetworkResponseResponse, ErrorData> {
+        Err(mcp_error(
+            error_codes::A11Y_NOT_AVAILABLE,
+            "browser_wait_for_response is only available on Windows in this build",
+        ))
+    }
+
+    #[cfg(windows)]
+    async fn browser_wait_for_network_entry(
+        &self,
+        tool: &str,
+        endpoint: &str,
+        cdp_target_id: &str,
+        wait: &NormalizedBrowserNetworkWaitParams,
+        require_response: bool,
+    ) -> Result<(synapse_a11y::CdpNetworkEntry, u64, u64), ErrorData> {
+        let capture_status = synapse_a11y::network_capture_ensure(
+            endpoint,
+            cdp_target_id,
+            synapse_a11y::DEFAULT_NETWORK_BUFFER_CAPACITY,
+        )
+        .await
+        .map_err(|error| {
+            mcp_error(
+                error.code(),
+                format!("{tool} raw CDP network capture failed: {error}"),
+            )
+        })?;
+        let read = synapse_a11y::network_capture_read(
+            cdp_target_id,
+            &synapse_a11y::CdpNetworkReadFilter {
+                max: 0,
+                ..Default::default()
+            },
+        )
+        .ok_or_else(|| {
+            mcp_error(
+                error_codes::TOOL_INTERNAL_ERROR,
+                format!("{tool} network capture was not armed for target {cdp_target_id}"),
+            )
+        })?;
+        let mut since_seq = if capture_status.newly_armed {
+            0
+        } else {
+            read.next_cursor
+        };
+        let started = Instant::now();
+        let timeout = std::time::Duration::from_millis(wait.timeout_ms);
+        let polling_interval = std::time::Duration::from_millis(wait.polling_interval_ms);
+        let mut poll_count = 0u64;
+
+        loop {
+            poll_count = poll_count.saturating_add(1);
+            let read = synapse_a11y::network_capture_read(
+                cdp_target_id,
+                &synapse_a11y::CdpNetworkReadFilter {
+                    since_seq: Some(since_seq),
+                    max: 0,
+                    ..Default::default()
+                },
+            )
+            .ok_or_else(|| {
+                mcp_error(
+                    error_codes::TOOL_INTERNAL_ERROR,
+                    format!("{tool} network capture stopped for target {cdp_target_id}"),
+                )
+            })?;
+            if let Some(entry) = read
+                .entries
+                .iter()
+                .find(|entry| browser_network_entry_matches(entry, wait, require_response))
+            {
+                return Ok((
+                    entry.clone(),
+                    duration_millis_u64(started.elapsed()),
+                    poll_count,
+                ));
+            }
+            since_seq = read.next_cursor;
+            let elapsed = started.elapsed();
+            if elapsed >= timeout {
+                return Err(mcp_error(
+                    error_codes::BROWSER_WAIT_TIMEOUT,
+                    format!(
+                        "{tool} timed out after {} ms; url_filter={:?} match_kind={:?} method={:?} status={:?} resource_type={:?} poll_count={poll_count}",
+                        wait.timeout_ms,
+                        wait.url,
+                        wait.match_kind,
+                        wait.method,
+                        wait.status,
+                        wait.resource_type,
+                    ),
+                ));
+            }
+            tokio::time::sleep(timeout.saturating_sub(elapsed).min(polling_interval)).await;
+        }
+    }
+
+    #[cfg(windows)]
     async fn browser_wait_for_selector_impl(
         &self,
         session_id: &str,
@@ -6631,6 +6979,7 @@ const MIN_BROWSER_WAIT_POLLING_INTERVAL_MS: u64 = 10;
 const MAX_BROWSER_WAIT_POLLING_INTERVAL_MS: u64 = 5_000;
 const BROWSER_WAIT_MAX_TEXT_BYTES: usize = 64 * 1024;
 const BROWSER_WAIT_MAX_URL_PATTERN_CHARS: usize = 8192;
+const BROWSER_WAIT_MAX_NETWORK_TOKEN_CHARS: usize = 128;
 
 #[derive(Debug)]
 struct NormalizedBrowserWaitForParams {
@@ -6650,6 +6999,18 @@ struct NormalizedBrowserWaitForLoadStateParams {
 struct NormalizedBrowserWaitForUrlParams {
     url: String,
     match_kind: BrowserWaitForUrlMatchKind,
+    timeout_ms: u64,
+    polling_interval_ms: u64,
+}
+
+#[derive(Debug)]
+struct NormalizedBrowserNetworkWaitParams {
+    url: Option<String>,
+    match_kind: BrowserWaitForUrlMatchKind,
+    url_regex: Option<regex::Regex>,
+    method: Option<String>,
+    status: Option<i64>,
+    resource_type: Option<String>,
     timeout_ms: u64,
     polling_interval_ms: u64,
 }
@@ -6816,6 +7177,177 @@ fn validate_browser_wait_for_url_params(
         timeout_ms,
         polling_interval_ms,
     })
+}
+
+fn validate_browser_wait_for_request_params(
+    params: &BrowserWaitForRequestParams,
+) -> Result<NormalizedBrowserNetworkWaitParams, ErrorData> {
+    validate_browser_network_wait_params(
+        "browser_wait_for_request",
+        params.cdp_target_id.as_deref(),
+        params.url.as_deref(),
+        params.match_kind,
+        params.method.as_deref(),
+        None,
+        params.resource_type.as_deref(),
+        params.timeout_ms,
+        params.polling_interval_ms,
+    )
+}
+
+fn validate_browser_wait_for_response_params(
+    params: &BrowserWaitForNetworkResponseParams,
+) -> Result<NormalizedBrowserNetworkWaitParams, ErrorData> {
+    validate_browser_network_wait_params(
+        "browser_wait_for_response",
+        params.cdp_target_id.as_deref(),
+        params.url.as_deref(),
+        params.match_kind,
+        params.method.as_deref(),
+        params.status,
+        params.resource_type.as_deref(),
+        params.timeout_ms,
+        params.polling_interval_ms,
+    )
+}
+
+fn validate_browser_network_wait_params(
+    tool: &str,
+    cdp_target_id: Option<&str>,
+    url: Option<&str>,
+    match_kind: Option<BrowserWaitForUrlMatchKind>,
+    method: Option<&str>,
+    status: Option<i64>,
+    resource_type: Option<&str>,
+    timeout_ms: Option<u64>,
+    polling_interval_ms: Option<u64>,
+) -> Result<NormalizedBrowserNetworkWaitParams, ErrorData> {
+    if let Some(target_id) = cdp_target_id {
+        validate_cdp_target_id(target_id)?;
+    }
+    let (url, match_kind, url_regex) = validate_browser_network_wait_url(tool, url, match_kind)?;
+    let method = validate_browser_network_wait_token(tool, "method", method)?
+        .map(|method| method.to_ascii_uppercase());
+    let resource_type = validate_browser_network_wait_token(tool, "resource_type", resource_type)?;
+    if let Some(status) = status
+        && !(0..=999).contains(&status)
+    {
+        return Err(mcp_error(
+            error_codes::TOOL_PARAMS_INVALID,
+            format!("{tool} status must be 0..=999"),
+        ));
+    }
+    let timeout_ms = validate_browser_wait_timeout(tool, timeout_ms)?;
+    let polling_interval_ms = validate_browser_wait_polling_interval(tool, polling_interval_ms)?;
+    Ok(NormalizedBrowserNetworkWaitParams {
+        url,
+        match_kind,
+        url_regex,
+        method,
+        status,
+        resource_type,
+        timeout_ms,
+        polling_interval_ms,
+    })
+}
+
+fn validate_browser_network_wait_url(
+    tool: &str,
+    url: Option<&str>,
+    match_kind: Option<BrowserWaitForUrlMatchKind>,
+) -> Result<
+    (
+        Option<String>,
+        BrowserWaitForUrlMatchKind,
+        Option<regex::Regex>,
+    ),
+    ErrorData,
+> {
+    let match_kind = match_kind.unwrap_or_default();
+    let Some(url) = url else {
+        if match_kind != BrowserWaitForUrlMatchKind::Exact {
+            return Err(mcp_error(
+                error_codes::TOOL_PARAMS_INVALID,
+                format!("{tool} match_kind requires url"),
+            ));
+        }
+        return Ok((None, match_kind, None));
+    };
+    if url.trim().is_empty() {
+        return Err(mcp_error(
+            error_codes::TOOL_PARAMS_INVALID,
+            format!("{tool} url must not be empty"),
+        ));
+    }
+    if url.chars().count() > BROWSER_WAIT_MAX_URL_PATTERN_CHARS {
+        return Err(mcp_error(
+            error_codes::TOOL_PARAMS_INVALID,
+            format!(
+                "{tool} url must be at most {BROWSER_WAIT_MAX_URL_PATTERN_CHARS} Unicode scalar values"
+            ),
+        ));
+    }
+    if url.contains('\0') {
+        return Err(mcp_error(
+            error_codes::TOOL_PARAMS_INVALID,
+            format!("{tool} url must not contain NUL"),
+        ));
+    }
+    if url.trim() != url {
+        return Err(mcp_error(
+            error_codes::TOOL_PARAMS_INVALID,
+            format!("{tool} url must not contain leading or trailing whitespace"),
+        ));
+    }
+    let url_regex = match match_kind {
+        BrowserWaitForUrlMatchKind::Exact => None,
+        BrowserWaitForUrlMatchKind::Glob => Some(compile_browser_wait_url_regex(
+            tool,
+            match_kind,
+            &browser_wait_for_url_glob_regex(url),
+        )?),
+        BrowserWaitForUrlMatchKind::Regex => {
+            Some(compile_browser_wait_url_regex(tool, match_kind, url)?)
+        }
+    };
+    Ok((Some(url.to_owned()), match_kind, url_regex))
+}
+
+fn validate_browser_network_wait_token(
+    tool: &str,
+    field: &str,
+    value: Option<&str>,
+) -> Result<Option<String>, ErrorData> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    if value.trim().is_empty() {
+        return Err(mcp_error(
+            error_codes::TOOL_PARAMS_INVALID,
+            format!("{tool} {field} must not be empty"),
+        ));
+    }
+    if value.trim() != value {
+        return Err(mcp_error(
+            error_codes::TOOL_PARAMS_INVALID,
+            format!("{tool} {field} must not contain leading or trailing whitespace"),
+        ));
+    }
+    if value.contains('\0') || value.chars().any(char::is_control) {
+        return Err(mcp_error(
+            error_codes::TOOL_PARAMS_INVALID,
+            format!("{tool} {field} must not contain control characters"),
+        ));
+    }
+    if value.chars().count() > BROWSER_WAIT_MAX_NETWORK_TOKEN_CHARS {
+        return Err(mcp_error(
+            error_codes::TOOL_PARAMS_INVALID,
+            format!(
+                "{tool} {field} must be at most {BROWSER_WAIT_MAX_NETWORK_TOKEN_CHARS} Unicode scalar values"
+            ),
+        ));
+    }
+    Ok(Some(value.to_owned()))
 }
 
 fn validate_browser_wait_for_selector_params(
@@ -7039,13 +7571,21 @@ fn validate_browser_wait_for_url_pattern(
         BrowserWaitForUrlMatchKind::Glob => browser_wait_for_url_glob_regex(pattern),
         BrowserWaitForUrlMatchKind::Regex => pattern.to_owned(),
     };
-    regex::Regex::new(&regex_pattern).map_err(|error| {
+    compile_browser_wait_url_regex("browser_wait_for_url", match_kind, &regex_pattern)?;
+    Ok(())
+}
+
+fn compile_browser_wait_url_regex(
+    tool: &str,
+    match_kind: BrowserWaitForUrlMatchKind,
+    pattern: &str,
+) -> Result<regex::Regex, ErrorData> {
+    regex::Regex::new(pattern).map_err(|error| {
         mcp_error(
             error_codes::TOOL_PARAMS_INVALID,
-            format!("browser_wait_for_url {match_kind:?} pattern is invalid: {error}"),
+            format!("{tool} {match_kind:?} pattern is invalid: {error}"),
         )
-    })?;
-    Ok(())
+    })
 }
 
 fn browser_wait_for_url_glob_regex(glob: &str) -> String {
@@ -7059,6 +7599,86 @@ fn browser_wait_for_url_glob_regex(glob: &str) -> String {
     }
     regex.push('$');
     regex
+}
+
+fn browser_network_entry_matches(
+    entry: &synapse_a11y::CdpNetworkEntry,
+    wait: &NormalizedBrowserNetworkWaitParams,
+    require_response: bool,
+) -> bool {
+    if require_response && !(entry.response_received && entry.response.is_some()) {
+        return false;
+    }
+    if let Some(method) = wait.method.as_deref()
+        && !entry
+            .method
+            .as_deref()
+            .is_some_and(|entry_method| entry_method.eq_ignore_ascii_case(method))
+    {
+        return false;
+    }
+    if let Some(status) = wait.status
+        && entry.response.as_ref().map(|response| response.status) != Some(status)
+    {
+        return false;
+    }
+    if let Some(resource_type) = wait.resource_type.as_deref()
+        && !entry
+            .resource_type
+            .as_deref()
+            .is_some_and(|entry_type| entry_type.eq_ignore_ascii_case(resource_type))
+    {
+        return false;
+    }
+    if let Some(url) = wait.url.as_deref() {
+        let candidate = if require_response {
+            entry
+                .response
+                .as_ref()
+                .map(|response| response.url.as_str())
+                .or(entry.url.as_deref())
+        } else {
+            entry.url.as_deref()
+        };
+        let Some(candidate) = candidate else {
+            return false;
+        };
+        return match wait.match_kind {
+            BrowserWaitForUrlMatchKind::Exact => candidate == url,
+            BrowserWaitForUrlMatchKind::Glob | BrowserWaitForUrlMatchKind::Regex => wait
+                .url_regex
+                .as_ref()
+                .is_some_and(|regex| regex.is_match(candidate)),
+        };
+    }
+    true
+}
+
+fn browser_network_entry_to_wire(entry: &synapse_a11y::CdpNetworkEntry) -> BrowserNetworkWaitEntry {
+    let response = entry.response.as_ref();
+    BrowserNetworkWaitEntry {
+        seq: entry.seq,
+        request_id: entry.request_id.clone(),
+        url: entry.url.clone(),
+        method: entry.method.clone(),
+        resource_type: entry.resource_type.clone(),
+        request_headers: entry.request_headers.clone(),
+        response_received: entry.response_received,
+        response_url: response.map(|response| response.url.clone()),
+        status: response.map(|response| response.status),
+        status_text: response.map(|response| response.status_text.clone()),
+        response_headers: response.map(|response| response.headers.clone()),
+        response_timing: response.and_then(|response| response.timing.clone()),
+        protocol: response.and_then(|response| response.protocol.clone()),
+        remote_ip_address: response.and_then(|response| response.remote_ip_address.clone()),
+        remote_port: response.and_then(|response| response.remote_port),
+        encoded_data_length: entry
+            .encoded_data_length
+            .or_else(|| response.map(|response| response.encoded_data_length)),
+        loading_finished: entry.loading_finished,
+        loading_failed: entry.loading_failed,
+        failure_error_text: entry.failure_error_text.clone(),
+    }
 }
 
 fn browser_wait_for_selector_locate_params(
@@ -10611,6 +11231,7 @@ mod tests {
         validate_browser_add_style_tag_params, validate_browser_evaluate_params,
         validate_browser_set_content_params, validate_browser_wait_for_function_params,
         validate_browser_wait_for_load_state_params, validate_browser_wait_for_params,
+        validate_browser_wait_for_request_params, validate_browser_wait_for_response_params,
         validate_browser_wait_for_selector_params, validate_browser_wait_for_url_params,
         validate_target_window,
     };
@@ -10618,7 +11239,8 @@ mod tests {
         BrowserAddInitScriptParams, BrowserAddScriptTagParams, BrowserAddStyleTagParams,
         BrowserEvaluateParams, BrowserInitScriptOperation, BrowserSetContentParams,
         BrowserTabEntry, BrowserTabsResponse, BrowserWaitForFunctionParams,
-        BrowserWaitForLoadStateParams, BrowserWaitForLoadStateState, BrowserWaitForParams,
+        BrowserWaitForLoadStateParams, BrowserWaitForLoadStateState,
+        BrowserWaitForNetworkResponseParams, BrowserWaitForParams, BrowserWaitForRequestParams,
         BrowserWaitForSelectorParams, BrowserWaitForSelectorState, BrowserWaitForState,
         BrowserWaitForUrlMatchKind, BrowserWaitForUrlParams, CdpActivateTabParams,
         CdpTargetInfoParams, FindResponse, FindResult, FindResultKind, HiddenDesktopPipFrameParams,
@@ -11429,6 +12051,91 @@ mod tests {
 
         println!(
             "readback=browser_wait_for_url validation edges all rejected with TOOL_PARAMS_INVALID"
+        );
+    }
+
+    #[test]
+    fn browser_wait_for_network_params_validation_edges() {
+        let request = validate_browser_wait_for_request_params(&BrowserWaitForRequestParams {
+            url: Some("https://example.test/api/*".to_owned()),
+            match_kind: Some(BrowserWaitForUrlMatchKind::Glob),
+            method: Some("get".to_owned()),
+            resource_type: Some("XHR".to_owned()),
+            timeout_ms: Some(MAX_BROWSER_WAIT_TIMEOUT_MS),
+            polling_interval_ms: Some(MIN_BROWSER_WAIT_POLLING_INTERVAL_MS),
+            cdp_target_id: Some("target-123".to_owned()),
+            ..Default::default()
+        })
+        .expect("valid request waiter params pass");
+        assert_eq!(request.match_kind, BrowserWaitForUrlMatchKind::Glob);
+        assert_eq!(request.method.as_deref(), Some("GET"));
+        assert_eq!(request.resource_type.as_deref(), Some("XHR"));
+        assert!(
+            request
+                .url_regex
+                .as_ref()
+                .expect("glob regex")
+                .is_match("https://example.test/api/users")
+        );
+
+        let response =
+            validate_browser_wait_for_response_params(&BrowserWaitForNetworkResponseParams {
+                url: Some(r"^https://example\.test/api/\d+$".to_owned()),
+                match_kind: Some(BrowserWaitForUrlMatchKind::Regex),
+                method: Some("POST".to_owned()),
+                status: Some(201),
+                resource_type: Some("Fetch".to_owned()),
+                ..Default::default()
+            })
+            .expect("valid response waiter params pass");
+        assert_eq!(response.status, Some(201));
+        assert_eq!(response.method.as_deref(), Some("POST"));
+        assert!(
+            response
+                .url_regex
+                .as_ref()
+                .expect("regex")
+                .is_match("https://example.test/api/42")
+        );
+
+        for error in [
+            validate_browser_wait_for_request_params(&BrowserWaitForRequestParams {
+                match_kind: Some(BrowserWaitForUrlMatchKind::Regex),
+                ..Default::default()
+            })
+            .expect_err("match_kind without url must be rejected"),
+            validate_browser_wait_for_request_params(&BrowserWaitForRequestParams {
+                method: Some(" GET".to_owned()),
+                ..Default::default()
+            })
+            .expect_err("method with leading whitespace must be rejected"),
+            validate_browser_wait_for_response_params(&BrowserWaitForNetworkResponseParams {
+                status: Some(1000),
+                ..Default::default()
+            })
+            .expect_err("status above 999 must be rejected"),
+            validate_browser_wait_for_response_params(&BrowserWaitForNetworkResponseParams {
+                url: Some("(".to_owned()),
+                match_kind: Some(BrowserWaitForUrlMatchKind::Regex),
+                ..Default::default()
+            })
+            .expect_err("invalid response URL regex must be rejected"),
+            validate_browser_wait_for_response_params(&BrowserWaitForNetworkResponseParams {
+                polling_interval_ms: Some(MAX_BROWSER_WAIT_POLLING_INTERVAL_MS + 1),
+                ..Default::default()
+            })
+            .expect_err("oversize polling interval must be rejected"),
+        ] {
+            let code = error
+                .data
+                .as_ref()
+                .and_then(|data| data.get("code"))
+                .and_then(serde_json::Value::as_str);
+            assert_eq!(code, Some(error_codes::TOOL_PARAMS_INVALID));
+        }
+
+        println!(
+            "readback=browser_wait_for_request/response validation edges all rejected with TOOL_PARAMS_INVALID"
         );
     }
 

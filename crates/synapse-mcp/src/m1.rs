@@ -1566,6 +1566,178 @@ pub struct BrowserWaitForUrlResponse {
     pub required_foreground: bool,
 }
 
+/// Network request/response record returned by `browser_wait_for_request` and
+/// `browser_wait_for_response` (#1132). Headers and timing stay as JSON because
+/// CDP reports protocol-shaped maps whose keys vary by server.
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct BrowserNetworkWaitEntry {
+    pub seq: u64,
+    pub request_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub method: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_headers: Option<Value>,
+    pub response_received: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status_text: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_headers: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_timing: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protocol: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_ip_address: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_port: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encoded_data_length: Option<f64>,
+    pub loading_finished: bool,
+    pub loading_failed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_error_text: Option<String>,
+}
+
+/// Parameters for `browser_wait_for_request` (#1132): wait for a captured
+/// Network.requestWillBeSent entry matching optional URL/method/resource-type
+/// predicates in the calling session's owned CDP target.
+#[derive(Clone, Debug, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct BrowserWaitForRequestParams {
+    /// Optional URL pattern to match. If omitted, the first request matching the
+    /// remaining predicates is returned.
+    #[serde(default)]
+    pub url: Option<String>,
+    /// Matching mode for `url`. Defaults to exact string matching when `url` is supplied.
+    #[serde(default)]
+    pub match_kind: Option<BrowserWaitForUrlMatchKind>,
+    /// Optional HTTP method predicate, case-insensitive.
+    #[serde(default)]
+    pub method: Option<String>,
+    /// Optional CDP Network resource type predicate, case-insensitive.
+    #[serde(default)]
+    pub resource_type: Option<String>,
+    /// CDP TargetID to wait in. Defaults to the active session CDP target. Must
+    /// be owned by this session; the human foreground tab is never an implicit
+    /// fallback.
+    #[serde(default)]
+    pub cdp_target_id: Option<String>,
+    /// Browser HWND that owns the target. Required only with an explicit
+    /// `cdp_target_id` and no active session target.
+    #[serde(default)]
+    pub window_hwnd: Option<i64>,
+    /// Maximum wait budget in milliseconds. Defaults to 30 seconds.
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
+    /// Poll interval in milliseconds. Defaults to 100 ms.
+    #[serde(default)]
+    pub polling_interval_ms: Option<u64>,
+}
+
+/// Response for `browser_wait_for_request`.
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct BrowserWaitForRequestResponse {
+    pub session_id: String,
+    pub window_hwnd: i64,
+    pub transport: String,
+    pub endpoint: String,
+    pub cdp_target_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url_pattern: Option<String>,
+    pub match_kind: BrowserWaitForUrlMatchKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub method: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource_type: Option<String>,
+    pub condition_met: bool,
+    pub elapsed_ms: u64,
+    pub timeout_ms: u64,
+    pub polling_interval_ms: u64,
+    pub poll_count: u64,
+    pub matched_entry: BrowserNetworkWaitEntry,
+    pub readback_backend: String,
+    pub backend_tier_used: String,
+    pub required_foreground: bool,
+}
+
+/// Parameters for `browser_wait_for_response` (#1132): wait for a captured
+/// Network.responseReceived entry matching optional URL/method/status/resource
+/// predicates in the calling session's owned CDP target.
+#[derive(Clone, Debug, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct BrowserWaitForNetworkResponseParams {
+    /// Optional URL pattern to match. If omitted, the first response matching
+    /// the remaining predicates is returned.
+    #[serde(default)]
+    pub url: Option<String>,
+    /// Matching mode for `url`. Defaults to exact string matching when `url` is supplied.
+    #[serde(default)]
+    pub match_kind: Option<BrowserWaitForUrlMatchKind>,
+    /// Optional HTTP method predicate, case-insensitive.
+    #[serde(default)]
+    pub method: Option<String>,
+    /// Optional HTTP status predicate.
+    #[serde(default)]
+    pub status: Option<i64>,
+    /// Optional CDP Network resource type predicate, case-insensitive.
+    #[serde(default)]
+    pub resource_type: Option<String>,
+    /// CDP TargetID to wait in. Defaults to the active session CDP target. Must
+    /// be owned by this session; the human foreground tab is never an implicit
+    /// fallback.
+    #[serde(default)]
+    pub cdp_target_id: Option<String>,
+    /// Browser HWND that owns the target. Required only with an explicit
+    /// `cdp_target_id` and no active session target.
+    #[serde(default)]
+    pub window_hwnd: Option<i64>,
+    /// Maximum wait budget in milliseconds. Defaults to 30 seconds.
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
+    /// Poll interval in milliseconds. Defaults to 100 ms.
+    #[serde(default)]
+    pub polling_interval_ms: Option<u64>,
+}
+
+/// Response for `browser_wait_for_response`.
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct BrowserWaitForNetworkResponseResponse {
+    pub session_id: String,
+    pub window_hwnd: i64,
+    pub transport: String,
+    pub endpoint: String,
+    pub cdp_target_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url_pattern: Option<String>,
+    pub match_kind: BrowserWaitForUrlMatchKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub method: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource_type: Option<String>,
+    pub condition_met: bool,
+    pub elapsed_ms: u64,
+    pub timeout_ms: u64,
+    pub polling_interval_ms: u64,
+    pub poll_count: u64,
+    pub matched_entry: BrowserNetworkWaitEntry,
+    pub readback_backend: String,
+    pub backend_tier_used: String,
+    pub required_foreground: bool,
+}
+
 /// Parameters for `browser_wait_for_function` (#1129): poll a JavaScript
 /// predicate/expression until it resolves truthy in the calling session's owned
 /// CDP target.
