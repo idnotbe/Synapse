@@ -57,6 +57,7 @@ const NORMAL_ALLOWED_EXACT: &[&str] = &[
     "browser_console_messages",
     "browser_content",
     "browser_device",
+    "browser_emulate",
     "browser_evaluate",
     "browser_expose_binding",
     "browser_frames",
@@ -156,6 +157,7 @@ const BROWSER_CONTROL_ALLOWED_EXACT: &[&str] = &[
     "browser_console_messages",
     "browser_content",
     "browser_device",
+    "browser_emulate",
     "browser_evaluate",
     "browser_expose_binding",
     "browser_frames",
@@ -1293,6 +1295,7 @@ mod tests {
                 "browser_add_script_tag",
                 "browser_add_style_tag",
                 "browser_device",
+                "browser_emulate",
                 "browser_evaluate",
                 "browser_expose_binding",
                 "browser_geolocation",
@@ -1338,6 +1341,7 @@ mod tests {
         assert!(visible.contains(&"browser_add_script_tag".to_owned()));
         assert!(visible.contains(&"browser_add_style_tag".to_owned()));
         assert!(visible.contains(&"browser_device".to_owned()));
+        assert!(visible.contains(&"browser_emulate".to_owned()));
         assert!(visible.contains(&"browser_expose_binding".to_owned()));
         assert!(visible.contains(&"browser_geolocation".to_owned()));
         assert!(visible.contains(&"browser_handle_dialog".to_owned()));
@@ -1420,6 +1424,7 @@ mod tests {
         assert!(visible.contains(&"browser_add_script_tag".to_owned()));
         assert!(visible.contains(&"browser_add_style_tag".to_owned()));
         assert!(visible.contains(&"browser_device".to_owned()));
+        assert!(visible.contains(&"browser_emulate".to_owned()));
         assert!(visible.contains(&"browser_expose_binding".to_owned()));
         assert!(visible.contains(&"browser_geolocation".to_owned()));
         assert!(visible.contains(&"browser_handle_dialog".to_owned()));
