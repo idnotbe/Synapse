@@ -1,7 +1,7 @@
 //! Browser clock control and page lifecycle/worker event tools (#1201).
 
 use super::{
-    ErrorData, Json, Parameters, SynapseService,
+    ErrorData, Json, Parameters, SynapseService, TargetWire,
     m1_tools::{
         browser_raw_cdp_required_error, cdp_target_id_audit_ref, require_target_session_id,
         validate_cdp_target_id,
@@ -169,6 +169,22 @@ pub struct BrowserPageEventEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_type: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_attached: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page_target_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adoptable_target: Option<TargetWire>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub opener_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub opener_frame_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub can_access_opener: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub browser_context_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subtype: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worker_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worker_type: Option<String>,
@@ -191,6 +207,32 @@ pub struct BrowserPageEventEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timestamp_s: Option<f64>,
     pub observed_at_unix_ms: u64,
+}
+
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct BrowserPageTargetSnapshot {
+    pub cdp_target_id: String,
+    pub target: TargetWire,
+    pub target_type: String,
+    pub url: String,
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub opener_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub opener_frame_id: Option<String>,
+    pub can_access_opener: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub browser_context_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subtype: Option<String>,
+    pub attached: bool,
+    pub destroyed: bool,
+    pub adoptable: bool,
+    pub first_seen_seq: u64,
+    pub last_seen_seq: u64,
+    pub first_seen_unix_ms: u64,
+    pub last_seen_unix_ms: u64,
 }
 
 #[derive(Clone, Debug, Serialize, JsonSchema)]
@@ -223,6 +265,7 @@ pub struct BrowserPageEventsResponse {
     pub dropped: u64,
     pub filters: BrowserPageEventsFilters,
     pub entries: Vec<BrowserPageEventEntry>,
+    pub pages: Vec<BrowserPageTargetSnapshot>,
     pub workers: Vec<BrowserWorkerSnapshot>,
     pub readback_backend: String,
     pub backend_tier_used: String,
@@ -298,7 +341,7 @@ impl SynapseService {
     }
 
     #[tool(
-        description = "Arm and read target-scoped raw CDP page lifecycle and worker events for the calling session's owned browser tab. Returns a cursor-delimited buffer of Page.domContentEventFired, Page.loadEventFired, Page.lifecycleEvent, Page.frameNavigated, Page.navigatedWithinDocument / SPA route changes, frame loading events, and Target worker/service_worker/shared_worker created/attached/destroyed snapshots. Background-safe: never activates the tab, never uses OS foreground input, and never falls back to the human foreground tab. Raw CDP only; call before navigation or worker creation for gap-free capture, then poll with since_seq=next_cursor."
+        description = "Arm and read target-scoped raw CDP page lifecycle, popup/new-page, and worker events for the calling session's owned browser tab. Returns a cursor-delimited buffer of Page.domContentEventFired, Page.loadEventFired, Page.lifecycleEvent, Page.frameNavigated, Page.navigatedWithinDocument / SPA route changes, frame loading events, Target page created/attached/destroyed snapshots for opener-related popups/target=_blank pages, and Target worker/service_worker/shared_worker created/attached/destroyed snapshots. Captured live pages include ready-to-pass set_target payloads and are scoped by opener metadata to the armed page target. Background-safe: never activates the tab, never uses OS foreground input, and never falls back to the human foreground tab. Raw CDP only; call before navigation, popup creation, or worker creation for gap-free capture, then poll with since_seq=next_cursor."
     )]
     pub async fn browser_page_events(
         &self,
@@ -469,8 +512,9 @@ impl SynapseService {
             endpoint = %endpoint,
             cdp_target_id,
             returned = read.returned,
+            page_count = read.pages.len(),
             worker_count = read.workers.len(),
-            "readback=Page.lifecycleEvent+Page.frameNavigated+Target.worker_events outcome=list_returned"
+            "readback=Page.lifecycleEvent+Page.frameNavigated+Target.page_and_worker_events outcome=list_returned"
         );
         Ok(BrowserPageEventsResponse {
             session_id: session_id.to_owned(),
@@ -492,14 +536,19 @@ impl SynapseService {
             entries: read
                 .entries
                 .into_iter()
-                .map(browser_page_event_entry)
+                .map(|entry| browser_page_event_entry(window_hwnd, entry))
+                .collect(),
+            pages: read
+                .pages
+                .into_iter()
+                .map(|page| browser_page_target_snapshot(window_hwnd, page))
                 .collect(),
             workers: read
                 .workers
                 .into_iter()
                 .map(browser_worker_snapshot)
                 .collect(),
-            readback_backend: "Page lifecycle + Target worker event buffer".to_owned(),
+            readback_backend: "Page lifecycle + Target page/worker event buffer".to_owned(),
             backend_tier_used: "cdp".to_owned(),
             required_foreground: false,
         })
@@ -591,6 +640,10 @@ fn validate_browser_page_events_params(
                 | "framenavigated"
                 | "framestartednavigating"
                 | "framestoppedloading"
+                | "page_created"
+                | "page_attached"
+                | "page_destroyed"
+                | "page_info_changed"
                 | "worker_created"
                 | "worker_attached"
                 | "worker_destroyed"
@@ -686,12 +739,29 @@ fn browser_clock_readback(readback: synapse_a11y::CdpClockReadback) -> BrowserCl
     }
 }
 
-fn browser_page_event_entry(entry: synapse_a11y::CdpPageEventEntry) -> BrowserPageEventEntry {
+fn browser_page_event_entry(
+    window_hwnd: i64,
+    entry: synapse_a11y::CdpPageEventEntry,
+) -> BrowserPageEventEntry {
+    let adoptable_target = entry.page_target_id.as_ref().and_then(|target_id| {
+        (entry.event_kind != "page_destroyed").then(|| TargetWire::Cdp {
+            window_hwnd,
+            cdp_target_id: target_id.clone(),
+        })
+    });
     BrowserPageEventEntry {
         seq: entry.seq,
         event_kind: entry.event_kind,
         target_id: entry.target_id,
         target_type: entry.target_type,
+        target_attached: entry.target_attached,
+        page_target_id: entry.page_target_id,
+        adoptable_target,
+        opener_id: entry.opener_id,
+        opener_frame_id: entry.opener_frame_id,
+        can_access_opener: entry.can_access_opener,
+        browser_context_id: entry.browser_context_id,
+        subtype: entry.subtype,
         worker_id: entry.worker_id,
         worker_type: entry.worker_type,
         worker_url: entry.worker_url,
@@ -704,6 +774,34 @@ fn browser_page_event_entry(entry: synapse_a11y::CdpPageEventEntry) -> BrowserPa
         navigation_type: entry.navigation_type,
         timestamp_s: entry.timestamp_s,
         observed_at_unix_ms: entry.observed_at_unix_ms,
+    }
+}
+
+fn browser_page_target_snapshot(
+    window_hwnd: i64,
+    page: synapse_a11y::CdpPageTargetSnapshot,
+) -> BrowserPageTargetSnapshot {
+    BrowserPageTargetSnapshot {
+        cdp_target_id: page.target_id.clone(),
+        target: TargetWire::Cdp {
+            window_hwnd,
+            cdp_target_id: page.target_id,
+        },
+        target_type: page.target_type,
+        url: page.url,
+        title: page.title,
+        opener_id: page.opener_id,
+        opener_frame_id: page.opener_frame_id,
+        can_access_opener: page.can_access_opener,
+        browser_context_id: page.browser_context_id,
+        subtype: page.subtype,
+        attached: page.attached,
+        adoptable: !page.destroyed,
+        destroyed: page.destroyed,
+        first_seen_seq: page.first_seen_seq,
+        last_seen_seq: page.last_seen_seq,
+        first_seen_unix_ms: page.first_seen_unix_ms,
+        last_seen_unix_ms: page.last_seen_unix_ms,
     }
 }
 
@@ -802,6 +900,12 @@ mod tests {
             })
             .expect_err("unknown event rejected"),
             validate_browser_page_events_params(&BrowserPageEventsParams {
+                event_kind: Some("page_created".to_owned()),
+                worker_type: Some("page".to_owned()),
+                ..Default::default()
+            })
+            .expect_err("page is not a worker type"),
+            validate_browser_page_events_params(&BrowserPageEventsParams {
                 worker_type: Some("page".to_owned()),
                 ..Default::default()
             })
@@ -819,5 +923,107 @@ mod tests {
                 .and_then(serde_json::Value::as_str);
             assert_eq!(code, Some(error_codes::TOOL_PARAMS_INVALID));
         }
+
+        let page_filter = validate_browser_page_events_params(&BrowserPageEventsParams {
+            event_kind: Some("PAGE_CREATED".to_owned()),
+            ..Default::default()
+        })
+        .expect("page events are supported");
+        assert_eq!(page_filter.event_kind.as_deref(), Some("page_created"));
+    }
+
+    #[test]
+    fn browser_page_events_maps_page_targets_as_adoptable() {
+        let page_event = browser_page_event_entry(
+            0x1234,
+            synapse_a11y::CdpPageEventEntry {
+                seq: 7,
+                event_kind: "page_created".to_owned(),
+                target_id: "root-page".to_owned(),
+                target_type: Some("page".to_owned()),
+                target_attached: Some(false),
+                page_target_id: Some("popup-page".to_owned()),
+                opener_id: Some("root-page".to_owned()),
+                opener_frame_id: None,
+                can_access_opener: Some(false),
+                browser_context_id: Some("context-1".to_owned()),
+                subtype: None,
+                worker_id: None,
+                worker_type: None,
+                worker_url: None,
+                frame_id: None,
+                parent_frame_id: None,
+                loader_id: None,
+                name: None,
+                url: Some("https://example.test/popup".to_owned()),
+                title: Some("Popup".to_owned()),
+                navigation_type: None,
+                timestamp_s: None,
+                observed_at_unix_ms: 10,
+            },
+        );
+        match page_event.adoptable_target {
+            Some(TargetWire::Cdp {
+                window_hwnd,
+                cdp_target_id,
+            }) => {
+                assert_eq!(window_hwnd, 0x1234);
+                assert_eq!(cdp_target_id, "popup-page");
+            }
+            other => panic!("unexpected target: {other:?}"),
+        }
+
+        let destroyed = browser_page_event_entry(
+            0x1234,
+            synapse_a11y::CdpPageEventEntry {
+                seq: 8,
+                event_kind: "page_destroyed".to_owned(),
+                target_id: "root-page".to_owned(),
+                target_type: Some("page".to_owned()),
+                target_attached: None,
+                page_target_id: Some("popup-page".to_owned()),
+                opener_id: None,
+                opener_frame_id: None,
+                can_access_opener: None,
+                browser_context_id: None,
+                subtype: None,
+                worker_id: None,
+                worker_type: None,
+                worker_url: None,
+                frame_id: None,
+                parent_frame_id: None,
+                loader_id: None,
+                name: None,
+                url: None,
+                title: None,
+                navigation_type: None,
+                timestamp_s: None,
+                observed_at_unix_ms: 11,
+            },
+        );
+        assert!(destroyed.adoptable_target.is_none());
+
+        let snapshot = browser_page_target_snapshot(
+            0x1234,
+            synapse_a11y::CdpPageTargetSnapshot {
+                target_id: "popup-page".to_owned(),
+                target_type: "page".to_owned(),
+                url: "https://example.test/popup".to_owned(),
+                title: "Popup".to_owned(),
+                opener_id: Some("root-page".to_owned()),
+                opener_frame_id: None,
+                can_access_opener: false,
+                browser_context_id: Some("context-1".to_owned()),
+                subtype: None,
+                attached: true,
+                destroyed: false,
+                first_seen_seq: 7,
+                last_seen_seq: 7,
+                first_seen_unix_ms: 10,
+                last_seen_unix_ms: 10,
+            },
+        );
+        assert!(snapshot.adoptable);
+        assert_eq!(snapshot.cdp_target_id, "popup-page");
     }
 }

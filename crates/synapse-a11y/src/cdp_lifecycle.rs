@@ -31,6 +31,20 @@ pub struct CdpPageEventEntry {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub target_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_attached: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub page_target_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub opener_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub opener_frame_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub can_access_opener: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub browser_context_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subtype: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub worker_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub worker_type: Option<String>,
@@ -75,6 +89,7 @@ pub struct CdpPageEventsReadFilter<'a> {
 #[derive(Clone, Debug, Serialize)]
 pub struct CdpPageEventsReadResult {
     pub entries: Vec<CdpPageEventEntry>,
+    pub pages: Vec<CdpPageTargetSnapshot>,
     pub workers: Vec<CdpWorkerSnapshot>,
     pub next_cursor: u64,
     pub returned: usize,
@@ -82,6 +97,25 @@ pub struct CdpPageEventsReadResult {
     pub dropped: u64,
     pub armed_at_unix_ms: u64,
     pub capacity: usize,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+pub struct CdpPageTargetSnapshot {
+    pub target_id: String,
+    pub target_type: String,
+    pub url: String,
+    pub title: String,
+    pub opener_id: Option<String>,
+    pub opener_frame_id: Option<String>,
+    pub can_access_opener: bool,
+    pub browser_context_id: Option<String>,
+    pub subtype: Option<String>,
+    pub attached: bool,
+    pub destroyed: bool,
+    pub first_seen_seq: u64,
+    pub last_seen_seq: u64,
+    pub first_seen_unix_ms: u64,
+    pub last_seen_unix_ms: u64,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
@@ -100,6 +134,7 @@ pub struct CdpWorkerSnapshot {
 
 struct RingBuffer {
     entries: VecDeque<CdpPageEventEntry>,
+    pages: HashMap<String, CdpPageTargetSnapshot>,
     workers: HashMap<String, CdpWorkerSnapshot>,
     capacity: usize,
     next_seq: u64,
@@ -110,6 +145,7 @@ impl RingBuffer {
     fn new(capacity: usize) -> Self {
         Self {
             entries: VecDeque::with_capacity(capacity.min(256)),
+            pages: HashMap::new(),
             workers: HashMap::new(),
             capacity: capacity.max(1),
             next_seq: 0,
@@ -124,6 +160,73 @@ impl RingBuffer {
     fn push(&mut self, mut entry: CdpPageEventEntry) {
         entry.seq = self.next_seq;
         self.next_seq = self.next_seq.saturating_add(1);
+        if let Some(page_target_id) = entry.page_target_id.as_deref() {
+            let page = self
+                .pages
+                .entry(page_target_id.to_owned())
+                .or_insert_with(|| CdpPageTargetSnapshot {
+                    target_id: page_target_id.to_owned(),
+                    target_type: entry
+                        .target_type
+                        .clone()
+                        .unwrap_or_else(|| "page".to_owned()),
+                    url: entry.url.clone().unwrap_or_default(),
+                    title: entry.title.clone().unwrap_or_default(),
+                    opener_id: entry.opener_id.clone(),
+                    opener_frame_id: entry.opener_frame_id.clone(),
+                    can_access_opener: entry.can_access_opener.unwrap_or(false),
+                    browser_context_id: entry.browser_context_id.clone(),
+                    subtype: entry.subtype.clone(),
+                    attached: false,
+                    destroyed: false,
+                    first_seen_seq: entry.seq,
+                    last_seen_seq: entry.seq,
+                    first_seen_unix_ms: entry.observed_at_unix_ms,
+                    last_seen_unix_ms: entry.observed_at_unix_ms,
+                });
+            if let Some(target_type) = entry.target_type.as_ref()
+                && !target_type.is_empty()
+            {
+                page.target_type = target_type.clone();
+            }
+            if let Some(url) = entry.url.as_ref()
+                && !url.is_empty()
+            {
+                page.url = url.clone();
+            }
+            if let Some(title) = entry.title.as_ref()
+                && !title.is_empty()
+            {
+                page.title = title.clone();
+            }
+            if entry.opener_id.is_some() {
+                page.opener_id = entry.opener_id.clone();
+            }
+            if entry.opener_frame_id.is_some() {
+                page.opener_frame_id = entry.opener_frame_id.clone();
+            }
+            if let Some(can_access_opener) = entry.can_access_opener {
+                page.can_access_opener = can_access_opener;
+            }
+            if entry.browser_context_id.is_some() {
+                page.browser_context_id = entry.browser_context_id.clone();
+            }
+            if entry.subtype.is_some() {
+                page.subtype = entry.subtype.clone();
+            }
+            if let Some(target_attached) = entry.target_attached {
+                page.attached = target_attached;
+            }
+            if entry.event_kind == "page_attached" {
+                page.attached = true;
+            }
+            if entry.event_kind == "page_destroyed" {
+                page.attached = false;
+                page.destroyed = true;
+            }
+            page.last_seen_seq = entry.seq;
+            page.last_seen_unix_ms = entry.observed_at_unix_ms;
+        }
         if let Some(worker_id) = entry.worker_id.as_deref() {
             let worker =
                 self.workers
@@ -252,7 +355,8 @@ pub async fn lifecycle_capture_ensure(
                 detail: format!("Page.setLifecycleEventsEnabled for page event capture: {err}"),
             })?;
 
-        let worker_filter = TargetFilter::new(vec![
+        let related_target_filter = TargetFilter::new(vec![
+            FilterEntry::builder().r#type("page").exclude(false).build(),
             FilterEntry::builder()
                 .r#type("worker")
                 .exclude(false)
@@ -271,15 +375,17 @@ pub async fn lifecycle_capture_ensure(
                 AutoAttachRelatedParams::builder()
                     .target_id(TargetId::new(target_id.to_owned()))
                     .wait_for_debugger_on_start(false)
-                    .filter(worker_filter)
+                    .filter(related_target_filter)
                     .build()
                     .map_err(|error| A11yError::CdpAxtreeFailed {
-                        detail: format!("Target.autoAttachRelated worker params: {error}"),
+                        detail: format!("Target.autoAttachRelated related target params: {error}"),
                     })?,
             )
             .await
             .map_err(|err| A11yError::CdpAxtreeFailed {
-                detail: format!("Target.autoAttachRelated workers for page event capture: {err}"),
+                detail: format!(
+                    "Target.autoAttachRelated related targets for page event capture: {err}"
+                ),
             })?;
 
         let dom_content_loaded = page
@@ -324,25 +430,25 @@ pub async fn lifecycle_capture_ensure(
             .map_err(|err| A11yError::CdpAxtreeFailed {
                 detail: format!("subscribe Page.navigatedWithinDocument: {err}"),
             })?;
-        let worker_attached = browser
+        let target_attached = browser
             .event_listener::<EventAttachedToTarget>()
             .await
             .map_err(|err| A11yError::CdpAxtreeFailed {
                 detail: format!("subscribe Target.attachedToTarget: {err}"),
             })?;
-        let worker_created = browser
+        let target_created = browser
             .event_listener::<EventTargetCreated>()
             .await
             .map_err(|err| A11yError::CdpAxtreeFailed {
                 detail: format!("subscribe Target.targetCreated: {err}"),
             })?;
-        let worker_destroyed = browser
+        let target_destroyed = browser
             .event_listener::<EventTargetDestroyed>()
             .await
             .map_err(|err| A11yError::CdpAxtreeFailed {
                 detail: format!("subscribe Target.targetDestroyed: {err}"),
             })?;
-        let worker_info_changed = browser
+        let target_info_changed = browser
             .event_listener::<EventTargetInfoChanged>()
             .await
             .map_err(|err| A11yError::CdpAxtreeFailed {
@@ -358,10 +464,10 @@ pub async fn lifecycle_capture_ensure(
             frame_started,
             frame_stopped,
             same_document,
-            worker_attached,
-            worker_created,
-            worker_destroyed,
-            worker_info_changed,
+            target_attached,
+            target_created,
+            target_destroyed,
+            target_info_changed,
         ))
     }
     .await;
@@ -375,10 +481,10 @@ pub async fn lifecycle_capture_ensure(
         mut frame_started,
         mut frame_stopped,
         mut same_document,
-        mut worker_attached,
-        mut worker_created,
-        mut worker_destroyed,
-        mut worker_info_changed,
+        mut target_attached,
+        mut target_created,
+        mut target_destroyed,
+        mut target_info_changed,
     ) = match armed {
         Ok(streams) => streams,
         Err(err) => {
@@ -392,6 +498,7 @@ pub async fn lifecycle_capture_ensure(
     let root_target_id = target_id.to_owned();
     let listener_task = tokio::spawn(async move {
         let _page = page;
+        let mut page_ids = HashSet::<String>::from([root_target_id.clone()]);
         let mut worker_ids = HashSet::<String>::new();
         loop {
             tokio::select! {
@@ -416,29 +523,40 @@ pub async fn lifecycle_capture_ensure(
                 Some(event) = same_document.next() => {
                     push(&pump_buffer, same_document_entry(&root_target_id, event.as_ref()));
                 }
-                Some(event) = worker_attached.next() => {
+                Some(event) = target_attached.next() => {
                     let info = &event.target_info;
-                    if is_worker_type(&info.r#type) {
+                    if is_related_page_target(&root_target_id, &page_ids, info) {
+                        page_ids.insert(info.target_id.inner().clone());
+                        push(&pump_buffer, page_entry("page_attached", &root_target_id, info));
+                    } else if is_worker_type(&info.r#type) {
                         worker_ids.insert(info.target_id.inner().clone());
                         push(&pump_buffer, worker_entry("worker_attached", &root_target_id, info));
                     }
                 }
-                Some(event) = worker_created.next() => {
+                Some(event) = target_created.next() => {
                     let info = &event.target_info;
-                    if is_worker_type(&info.r#type) {
+                    if is_related_page_target(&root_target_id, &page_ids, info) {
+                        page_ids.insert(info.target_id.inner().clone());
+                        push(&pump_buffer, page_entry("page_created", &root_target_id, info));
+                    } else if is_worker_type(&info.r#type) {
                         worker_ids.insert(info.target_id.inner().clone());
                         push(&pump_buffer, worker_entry("worker_created", &root_target_id, info));
                     }
                 }
-                Some(event) = worker_destroyed.next() => {
-                    let worker_id = event.target_id.inner().clone();
-                    if worker_ids.contains(&worker_id) {
-                        push(&pump_buffer, worker_destroyed_entry(&root_target_id, &worker_id));
+                Some(event) = target_destroyed.next() => {
+                    let target_id = event.target_id.inner().clone();
+                    if target_id != root_target_id && page_ids.remove(&target_id) {
+                        push(&pump_buffer, page_destroyed_entry(&root_target_id, &target_id));
+                    } else if worker_ids.contains(&target_id) {
+                        push(&pump_buffer, worker_destroyed_entry(&root_target_id, &target_id));
                     }
                 }
-                Some(event) = worker_info_changed.next() => {
+                Some(event) = target_info_changed.next() => {
                     let info = &event.target_info;
-                    if is_worker_type(&info.r#type) {
+                    if is_related_page_target(&root_target_id, &page_ids, info) {
+                        page_ids.insert(info.target_id.inner().clone());
+                        push(&pump_buffer, page_entry("page_info_changed", &root_target_id, info));
+                    } else if is_worker_type(&info.r#type) {
                         worker_ids.insert(info.target_id.inner().clone());
                         push(&pump_buffer, worker_entry("worker_info_changed", &root_target_id, info));
                     }
@@ -519,11 +637,14 @@ pub fn lifecycle_capture_read(
         .take(max)
         .cloned()
         .collect();
+    let mut pages = buffer.pages.values().cloned().collect::<Vec<_>>();
+    pages.sort_by(|left, right| left.target_id.cmp(&right.target_id));
     let mut workers = buffer.workers.values().cloned().collect::<Vec<_>>();
     workers.sort_by(|left, right| left.worker_id.cmp(&right.worker_id));
     Some(CdpPageEventsReadResult {
         returned: entries.len(),
         entries,
+        pages,
         workers,
         next_cursor,
         total_buffered,
@@ -545,6 +666,13 @@ fn base_entry(event_kind: &str, target_id: &str) -> CdpPageEventEntry {
         event_kind: event_kind.to_owned(),
         target_id: target_id.to_owned(),
         target_type: None,
+        target_attached: None,
+        page_target_id: None,
+        opener_id: None,
+        opener_frame_id: None,
+        can_access_opener: None,
+        browser_context_id: None,
+        subtype: None,
         worker_id: None,
         worker_type: None,
         worker_url: None,
@@ -620,6 +748,31 @@ fn frame_entry(event_kind: &str, target_id: &str, frame: &Frame) -> CdpPageEvent
     entry
 }
 
+fn page_entry(event_kind: &str, root_target_id: &str, info: &TargetInfo) -> CdpPageEventEntry {
+    let mut entry = base_entry(event_kind, root_target_id);
+    entry.target_type = Some(info.r#type.clone());
+    entry.target_attached = Some(info.attached);
+    entry.page_target_id = Some(info.target_id.inner().clone());
+    entry.opener_id = info.opener_id.as_ref().map(|id| id.inner().clone());
+    entry.opener_frame_id = info.opener_frame_id.as_ref().map(|id| id.inner().clone());
+    entry.can_access_opener = Some(info.can_access_opener);
+    entry.browser_context_id = info
+        .browser_context_id
+        .as_ref()
+        .map(|id| id.inner().clone());
+    entry.subtype = info.subtype.clone();
+    entry.title = Some(info.title.clone());
+    entry.url = Some(info.url.clone());
+    entry
+}
+
+fn page_destroyed_entry(root_target_id: &str, page_target_id: &str) -> CdpPageEventEntry {
+    let mut entry = base_entry("page_destroyed", root_target_id);
+    entry.target_type = Some("page".to_owned());
+    entry.page_target_id = Some(page_target_id.to_owned());
+    entry
+}
+
 fn worker_entry(event_kind: &str, root_target_id: &str, info: &TargetInfo) -> CdpPageEventEntry {
     let mut entry = base_entry(event_kind, root_target_id);
     entry.target_type = Some(info.r#type.clone());
@@ -635,6 +788,25 @@ fn worker_destroyed_entry(root_target_id: &str, worker_id: &str) -> CdpPageEvent
     let mut entry = base_entry("worker_destroyed", root_target_id);
     entry.worker_id = Some(worker_id.to_owned());
     entry
+}
+
+fn is_related_page_target(
+    root_target_id: &str,
+    tracked_page_ids: &HashSet<String>,
+    info: &TargetInfo,
+) -> bool {
+    if info.r#type != "page" {
+        return false;
+    }
+    let target_id = info.target_id.inner();
+    if target_id == root_target_id {
+        return false;
+    }
+    tracked_page_ids.contains(target_id)
+        || info
+            .opener_id
+            .as_ref()
+            .is_some_and(|opener_id| tracked_page_ids.contains(opener_id.inner()))
 }
 
 fn is_worker_type(target_type: &str) -> bool {
@@ -681,6 +853,48 @@ mod tests {
         let worker = buffer.workers.get("worker-1").expect("worker snapshot");
         assert_eq!(worker.worker_type, "worker");
         assert_eq!(worker.url, "https://example.test/worker.js");
+    }
+
+    #[test]
+    fn page_event_ring_buffer_tracks_related_pages() {
+        let mut buffer = RingBuffer::new(8);
+        let popup = TargetInfo::builder()
+            .target_id(TargetId::new("popup-1"))
+            .r#type("page")
+            .title("Popup")
+            .url("https://example.test/popup")
+            .attached(false)
+            .opener_id(TargetId::new("page-1"))
+            .can_access_opener(true)
+            .build()
+            .expect("target info");
+        let unrelated = TargetInfo::builder()
+            .target_id(TargetId::new("unrelated-1"))
+            .r#type("page")
+            .title("Unrelated")
+            .url("https://elsewhere.test/")
+            .attached(false)
+            .can_access_opener(false)
+            .build()
+            .expect("target info");
+        let mut page_ids = HashSet::<String>::from(["page-1".to_owned()]);
+
+        assert!(is_related_page_target("page-1", &page_ids, &popup));
+        assert!(!is_related_page_target("page-1", &page_ids, &unrelated));
+        page_ids.insert(popup.target_id.inner().clone());
+
+        buffer.push(page_entry("page_created", "page-1", &popup));
+        buffer.push(page_destroyed_entry("page-1", "popup-1"));
+
+        let page = buffer.pages.get("popup-1").expect("page snapshot");
+        assert_eq!(page.target_type, "page");
+        assert_eq!(page.url, "https://example.test/popup");
+        assert_eq!(page.title, "Popup");
+        assert_eq!(page.opener_id.as_deref(), Some("page-1"));
+        assert!(!page.attached);
+        assert!(page.destroyed);
+        assert_eq!(page.first_seen_seq, 0);
+        assert_eq!(page.last_seen_seq, 1);
     }
 
     #[test]
