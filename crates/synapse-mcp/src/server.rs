@@ -208,6 +208,7 @@ pub(crate) mod command_audit;
 mod context;
 pub(crate) use context::AgentTranscriptSnapshotRow;
 mod background_router;
+mod browser_assert;
 mod browser_clock_events;
 mod browser_dialog;
 mod browser_field;
@@ -618,6 +619,7 @@ impl SynapseService {
             + Self::permission_gate_tool_router()
             + Self::escalation_tool_router()
             + Self::background_router_tool_router()
+            + Self::browser_assert_tool_router()
             + Self::browser_clock_events_tool_router()
             + Self::browser_dialog_tool_router()
             + Self::browser_field_tool_router()
