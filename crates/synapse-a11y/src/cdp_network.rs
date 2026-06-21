@@ -11,11 +11,12 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use chromiumoxide::Browser;
 use chromiumoxide::cdp::browser_protocol::network::{
     EnableParams as NetworkEnableParams, EventLoadingFailed, EventLoadingFinished,
-    EventRequestWillBeSent, EventResponseReceived, Headers, Response,
+    EventRequestWillBeSent, EventResponseReceived, GetRequestPostDataParams, GetResponseBodyParams,
+    Headers, Response,
 };
+use chromiumoxide::{Browser, Page};
 use futures_util::StreamExt as _;
 use serde::Serialize;
 use serde_json::Value;
@@ -158,6 +159,21 @@ pub struct CdpNetworkReadResult {
     pub dropped: u64,
     pub armed_at_unix_ms: f64,
     pub capacity: usize,
+}
+
+/// Response body returned by `Network.getResponseBody` for a captured request.
+#[derive(Clone, Debug, Serialize, PartialEq)]
+pub struct CdpNetworkResponseBody {
+    pub request_id: String,
+    pub body: String,
+    pub base64_encoded: bool,
+}
+
+/// Request body returned by `Network.getRequestPostData` for a captured request.
+#[derive(Clone, Debug, Serialize, PartialEq)]
+pub struct CdpNetworkRequestPostData {
+    pub request_id: String,
+    pub post_data: String,
 }
 
 struct RingBuffer {
@@ -304,6 +320,7 @@ struct NetworkCaptureSlot {
     endpoint: String,
     armed_at_unix_ms: f64,
     capacity: usize,
+    page: Page,
     _browser: Browser,
     handler_task: JoinHandle<()>,
     listener_task: JoinHandle<()>,
@@ -418,6 +435,7 @@ pub async fn network_capture_ensure(
 
     let buffer = Arc::new(Mutex::new(RingBuffer::new(capacity)));
     let pump_buffer = Arc::clone(&buffer);
+    let slot_page = page.clone();
     let listener_task = tokio::spawn(async move {
         let _page = page;
         loop {
@@ -445,6 +463,7 @@ pub async fn network_capture_ensure(
         endpoint: endpoint.to_owned(),
         armed_at_unix_ms,
         capacity,
+        page: slot_page,
         _browser: browser,
         handler_task,
         listener_task,
@@ -549,6 +568,55 @@ pub fn network_capture_read(
     })
 }
 
+/// Reads the response body for a captured request from the persistent capture
+/// CDP session. Chrome may evict bodies; that surfaces as a CDP error.
+pub async fn network_response_body(
+    target_id: &str,
+    request_id: &str,
+) -> A11yResult<CdpNetworkResponseBody> {
+    let target_id = target_id.trim();
+    let request_id = normalize_request_id(request_id)?;
+    let slot = lookup_live(target_id).ok_or_else(|| A11yError::CdpAttachFailed {
+        detail: format!("network capture for target {target_id} is not armed"),
+    })?;
+    let body = slot
+        .page
+        .execute(GetResponseBodyParams::new(request_id.to_owned()))
+        .await
+        .map_err(|err| A11yError::CdpAxtreeFailed {
+            detail: format!("Network.getResponseBody request_id={request_id}: {err}"),
+        })?;
+    Ok(CdpNetworkResponseBody {
+        request_id: request_id.to_owned(),
+        body: body.body.clone(),
+        base64_encoded: body.base64_encoded,
+    })
+}
+
+/// Reads request post data for a captured request from the persistent capture
+/// CDP session. Chrome returns an error when no post data exists.
+pub async fn network_request_post_data(
+    target_id: &str,
+    request_id: &str,
+) -> A11yResult<CdpNetworkRequestPostData> {
+    let target_id = target_id.trim();
+    let request_id = normalize_request_id(request_id)?;
+    let slot = lookup_live(target_id).ok_or_else(|| A11yError::CdpAttachFailed {
+        detail: format!("network capture for target {target_id} is not armed"),
+    })?;
+    let post_data = slot
+        .page
+        .execute(GetRequestPostDataParams::new(request_id.to_owned()))
+        .await
+        .map_err(|err| A11yError::CdpAxtreeFailed {
+            detail: format!("Network.getRequestPostData request_id={request_id}: {err}"),
+        })?;
+    Ok(CdpNetworkRequestPostData {
+        request_id: request_id.to_owned(),
+        post_data: post_data.post_data.clone(),
+    })
+}
+
 /// Tears down network capture for a target. Idempotent.
 pub fn network_capture_stop(target_id: &str) -> bool {
     registry()
@@ -596,6 +664,16 @@ fn lookup_live(target_id: &str) -> Option<Arc<NetworkCaptureSlot>> {
         }
         None => None,
     }
+}
+
+fn normalize_request_id(request_id: &str) -> A11yResult<&str> {
+    let request_id = request_id.trim();
+    if request_id.is_empty() {
+        return Err(A11yError::CdpAttachFailed {
+            detail: "network request id must not be empty".to_owned(),
+        });
+    }
+    Ok(request_id)
 }
 
 fn apply_request(buffer: &Arc<Mutex<RingBuffer>>, event: &EventRequestWillBeSent) {
