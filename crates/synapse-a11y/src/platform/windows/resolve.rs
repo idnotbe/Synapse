@@ -22,7 +22,9 @@ use windows::Win32::{
 
 use crate::{
     A11yError, A11yResult, ElementClickAction, ElementMetadataReadback, ElementScrollReadback,
-    ElementScrollStateReadback, ElementValueReadback, ElementValueSetReadback, ExpandState,
+    ElementScrollStateReadback, ElementTextInsertReadback, ElementTextSelectionReadback,
+    ElementValueReadback,
+    ElementValueSetReadback, ExpandState,
 };
 
 use super::common::{
@@ -682,7 +684,7 @@ fn password_text_len(id: &ElementId, element: &UIElement) -> A11yResult<usize> {
 fn native_text_message_supported(element: &UIElement) -> bool {
     let role = cached_role(element);
     let class_name = element.get_cached_classname().unwrap_or_default();
-    native_text_class_supported(&class_name) && role.to_ascii_lowercase().contains("edit")
+    native_text_class_supported(&class_name) && native_text_role_supported(&role)
 }
 
 fn native_text_class_supported(class_name: &str) -> bool {
@@ -691,6 +693,11 @@ fn native_text_class_supported(class_name: &str) -> bool {
         || class_name.starts_with("richedit")
         || class_name.contains(".edit.")
         || class_name.starts_with("windowsforms10.edit.")
+}
+
+fn native_text_role_supported(role: &str) -> bool {
+    let role = role.to_ascii_lowercase();
+    role.contains("edit") || role.contains("document") || role.contains("text")
 }
 
 fn native_text_hwnd(element: &UIElement) -> A11yResult<Option<HWND>> {
@@ -796,7 +803,11 @@ fn normalize_multiline_edit_newlines(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::native_text_class_supported;
+    use synapse_core::element_id;
+
+    use super::{
+        native_text_class_supported, native_text_expected_after_wide, native_text_role_supported,
+    };
 
     #[test]
     fn native_text_class_supported_accepts_classic_edit_classes() {
@@ -815,6 +826,25 @@ mod tests {
             "SynapseIssue784NativeHostWindow"
         ));
     }
+
+    #[test]
+    fn native_text_role_supported_accepts_document_backed_edit_controls() {
+        assert!(native_text_role_supported("Edit"));
+        assert!(native_text_role_supported("Document"));
+        assert!(native_text_role_supported("Text"));
+        assert!(!native_text_role_supported("Button"));
+    }
+
+    #[test]
+    fn native_text_expected_after_wide_splices_by_utf16_offsets() {
+        let id = element_id(0x2a, "0000002a00000001");
+        let before: Vec<u16> = "a😀z".encode_utf16().collect();
+        let inserted: Vec<u16> = "B".encode_utf16().collect();
+        let expected = native_text_expected_after_wide(&id, &before, &inserted, 1, 3)
+            .expect("valid UTF-16 range should splice");
+
+        assert_eq!(String::from_utf16(&expected).unwrap(), "aBz");
+    }
 }
 
 fn native_set_window_text(id: &ElementId, hwnd: HWND, value: &str) -> A11yResult<()> {
@@ -831,6 +861,245 @@ fn native_set_window_text(id: &ElementId, hwnd: HWND, value: &str) -> A11yResult
         "WM_SETTEXT",
         &mut result,
     )
+}
+
+fn native_replace_text_selection(id: &ElementId, hwnd: HWND, value: &str) -> A11yResult<()> {
+    const EM_REPLACESEL: u32 = 0x00C2;
+    let mut wide: Vec<u16> = value.encode_utf16().collect();
+    wide.push(0);
+    let mut result = 0_usize;
+    send_native_text_message(
+        id,
+        hwnd,
+        EM_REPLACESEL,
+        WPARAM(1),
+        LPARAM(wide.as_ptr().cast::<c_void>() as isize),
+        NATIVE_TEXT_MESSAGE_TIMEOUT_MS,
+        "EM_REPLACESEL",
+        &mut result,
+    )
+}
+
+fn native_text_selection(id: &ElementId, hwnd: HWND) -> A11yResult<(u32, u32)> {
+    const EM_GETSEL: u32 = 0x00B0;
+    let mut start = 0_u32;
+    let mut end = 0_u32;
+    let mut result = 0_usize;
+    send_native_text_message(
+        id,
+        hwnd,
+        EM_GETSEL,
+        WPARAM((&raw mut start) as usize),
+        LPARAM((&raw mut end) as isize),
+        NATIVE_TEXT_MESSAGE_TIMEOUT_MS,
+        "EM_GETSEL",
+        &mut result,
+    )?;
+    Ok((start, end))
+}
+
+fn native_set_text_selection(id: &ElementId, hwnd: HWND, start: u32, end: u32) -> A11yResult<()> {
+    const EM_SETSEL: u32 = 0x00B1;
+    let mut result = 0_usize;
+    send_native_text_message(
+        id,
+        hwnd,
+        EM_SETSEL,
+        WPARAM(start as usize),
+        LPARAM(end as isize),
+        NATIVE_TEXT_MESSAGE_TIMEOUT_MS,
+        "EM_SETSEL",
+        &mut result,
+    )
+}
+
+fn native_text_u32_len(id: &ElementId, len: usize, label: &str) -> A11yResult<u32> {
+    u32::try_from(len).map_err(|_err| {
+        A11yError::ElementValueUnsupported {
+            detail: format!(
+                "{label} UTF-16 length {len} exceeds u32::MAX for native text element {id}"
+            ),
+        }
+    })
+}
+
+fn native_text_replace_range(
+    id: &ElementId,
+    before_len: usize,
+    start: u32,
+    end: u32,
+) -> A11yResult<(usize, usize)> {
+    if end < start {
+        return Err(A11yError::ElementValueUnsupported {
+            detail: format!(
+                "native text replace selection end {end} is before start {start} for element {id}"
+            ),
+        });
+    }
+    let start = usize::try_from(start).map_err(|err| {
+        A11yError::ElementValueUnsupported {
+            detail: format!("native text selection start could not fit usize for {id}: {err}"),
+        }
+    })?;
+    let end = usize::try_from(end).map_err(|err| {
+        A11yError::ElementValueUnsupported {
+            detail: format!("native text selection end could not fit usize for {id}: {err}"),
+        }
+    })?;
+    if start > before_len || end > before_len {
+        return Err(A11yError::ElementValueUnsupported {
+            detail: format!(
+                "native text replace range {start}..{end} exceeds UTF-16 text length {before_len} for element {id}"
+            ),
+        });
+    }
+    Ok((start, end))
+}
+
+fn native_text_expected_after_wide(
+    id: &ElementId,
+    before_wide: &[u16],
+    inserted_wide: &[u16],
+    start: u32,
+    end: u32,
+) -> A11yResult<Vec<u16>> {
+    let (start, end) = native_text_replace_range(id, before_wide.len(), start, end)?;
+    let mut expected = Vec::with_capacity(
+        before_wide
+            .len()
+            .saturating_sub(end.saturating_sub(start))
+            .saturating_add(inserted_wide.len()),
+    );
+    expected.extend_from_slice(&before_wide[..start]);
+    expected.extend_from_slice(inserted_wide);
+    expected.extend_from_slice(&before_wide[end..]);
+    Ok(expected)
+}
+
+fn native_replace_element_text_selection(
+    id: &ElementId,
+    hwnd: HWND,
+    text: &str,
+    append: bool,
+) -> A11yResult<ElementTextInsertReadback> {
+    if text.contains('\0') {
+        return Err(A11yError::ElementValueUnsupported {
+            detail: format!(
+                "native text insertion for element {id} does not support embedded NUL characters"
+            ),
+        });
+    }
+    let before_value = native_text_value(id, hwnd)?;
+    let before_wide: Vec<u16> = before_value.encode_utf16().collect();
+    let before_len = native_text_u32_len(id, before_wide.len(), "before text")?;
+    let before_selection = native_text_selection(id, hwnd)?;
+    let replace_selection = if append {
+        native_set_text_selection(id, hwnd, before_len, before_len)?;
+        let selection = native_text_selection(id, hwnd)?;
+        if selection != (before_len, before_len) {
+            return Err(A11yError::internal(format!(
+                "native append selection postcondition failed for {id}: requested end {before_len}, read back {}..{}",
+                selection.0, selection.1
+            )));
+        }
+        selection
+    } else {
+        before_selection
+    };
+    let inserted_text = if native_is_multiline(hwnd) {
+        normalize_multiline_edit_newlines(text)
+    } else {
+        text.to_owned()
+    };
+    let inserted_wide: Vec<u16> = inserted_text.encode_utf16().collect();
+    let requested_text_utf16_len =
+        native_text_u32_len(id, text.encode_utf16().count(), "requested text")?;
+    let inserted_text_utf16_len =
+        native_text_u32_len(id, inserted_wide.len(), "inserted text")?;
+    let expected_wide = native_text_expected_after_wide(
+        id,
+        &before_wide,
+        &inserted_wide,
+        replace_selection.0,
+        replace_selection.1,
+    )?;
+    let expected_after_text_utf16_len =
+        native_text_u32_len(id, expected_wide.len(), "expected after text")?;
+    native_replace_text_selection(id, hwnd, &inserted_text)?;
+    let after_value = native_text_value(id, hwnd)?;
+    let after_wide: Vec<u16> = after_value.encode_utf16().collect();
+    let after_text_utf16_len = native_text_u32_len(id, after_wide.len(), "after text")?;
+    if after_wide != expected_wide {
+        return Err(A11yError::internal(format!(
+            "native text insertion postcondition failed for {id}: expected UTF-16 len {expected_after_text_utf16_len}, read back {after_text_utf16_len}"
+        )));
+    }
+    let after_selection = native_text_selection(id, hwnd)?;
+    let expected_caret = replace_selection
+        .0
+        .checked_add(inserted_text_utf16_len)
+        .ok_or_else(|| {
+            A11yError::ElementValueUnsupported {
+                detail: format!(
+                    "native text insertion caret offset overflowed u32 for element {id}"
+                ),
+            }
+        })?;
+    if after_selection != (expected_caret, expected_caret) {
+        return Err(A11yError::internal(format!(
+            "native text insertion caret postcondition failed for {id}: expected {expected_caret}..{expected_caret}, read back {}..{}",
+            after_selection.0, after_selection.1
+        )));
+    }
+    let method = if append {
+        "native_edit_em_setsel_em_replacesel"
+    } else {
+        "native_edit_em_replacesel"
+    };
+    let mode = if append {
+        "append_text"
+    } else {
+        "replace_selection"
+    };
+    tracing::info!(
+        code = "A11Y_NATIVE_TEXT_INSERT_READBACK",
+        element_id = %id,
+        method,
+        mode,
+        before_text_utf16_len = before_len,
+        after_text_utf16_len,
+        requested_text_utf16_len,
+        inserted_text_utf16_len,
+        replace_start = replace_selection.0,
+        replace_end = replace_selection.1,
+        after_start = after_selection.0,
+        after_end = after_selection.1,
+        "readback=native_text_insert method={} mode={} before_len={} after_len={} replace={}..{} after_selection={}..{}",
+        method,
+        mode,
+        before_len,
+        after_text_utf16_len,
+        replace_selection.0,
+        replace_selection.1,
+        after_selection.0,
+        after_selection.1
+    );
+    Ok(ElementTextInsertReadback {
+        method: method.to_owned(),
+        mode: mode.to_owned(),
+        before_text_utf16_len: before_len,
+        after_text_utf16_len,
+        requested_text_utf16_len,
+        inserted_text_utf16_len,
+        expected_after_text_utf16_len,
+        normalized_text: inserted_text != text,
+        before_start: before_selection.0,
+        before_end: before_selection.1,
+        replace_start: replace_selection.0,
+        replace_end: replace_selection.1,
+        after_start: after_selection.0,
+        after_end: after_selection.1,
+    })
 }
 
 #[allow(
@@ -865,6 +1134,132 @@ fn send_native_text_message(
         )));
     }
     Ok(())
+}
+
+pub fn set_element_text_selection(
+    id: &ElementId,
+    start: u32,
+    end: u32,
+) -> A11yResult<ElementTextSelectionReadback> {
+    let id = id.clone();
+    with_automation(move |automation| {
+        if end < start {
+            return Err(A11yError::ElementValueUnsupported {
+                detail: format!(
+                    "selection end {end} is before start {start} for native text element {id}"
+                ),
+            });
+        }
+        let element = re_resolve_on_worker(automation, &id)?;
+        if !cached_bool(&element, UIProperty::IsEnabled) {
+            return Err(A11yError::ElementNotEnabled {
+                detail: format!("element {id} IsEnabled=false before native text selection"),
+            });
+        }
+        let hwnd = native_text_hwnd(&element)?.ok_or_else(|| {
+            A11yError::ElementValueUnsupported {
+                detail: format!(
+                    "set_text_selection requires a native edit/rich-edit HWND target; element {id} does not expose a supported native text message route"
+                ),
+            }
+        })?;
+        let text_len = native_text_len(&id, hwnd)?;
+        let text_len_u32 = u32::try_from(text_len).unwrap_or(u32::MAX);
+        if start > text_len_u32 || end > text_len_u32 {
+            return Err(A11yError::ElementValueUnsupported {
+                detail: format!(
+                    "selection range {start}..{end} exceeds native text length {text_len_u32} for element {id}"
+                ),
+            });
+        }
+        let before = native_text_selection(&id, hwnd)?;
+        native_set_text_selection(&id, hwnd, start, end)?;
+        let after = native_text_selection(&id, hwnd)?;
+        if after != (start, end) {
+            return Err(A11yError::internal(format!(
+                "native text selection postcondition failed for {id}: requested {start}..{end}, read back {}..{}",
+                after.0, after.1
+            )));
+        }
+        tracing::info!(
+            code = "A11Y_NATIVE_TEXT_SELECTION_READBACK",
+            element_id = %id,
+            method = "native_edit_em_setsel",
+            text_len = text_len_u32,
+            requested_start = start,
+            requested_end = end,
+            before_start = before.0,
+            before_end = before.1,
+            after_start = after.0,
+            after_end = after.1,
+            "readback=native_text_selection method=native_edit_em_setsel text_len={} requested={}..{} before={}..{} after={}..{}",
+            text_len_u32,
+            start,
+            end,
+            before.0,
+            before.1,
+            after.0,
+            after.1
+        );
+        Ok(ElementTextSelectionReadback {
+            method: "native_edit_em_setsel".to_owned(),
+            text_len: text_len_u32,
+            requested_start: start,
+            requested_end: end,
+            before_start: before.0,
+            before_end: before.1,
+            after_start: after.0,
+            after_end: after.1,
+        })
+    })
+}
+
+pub fn replace_element_text_selection(
+    id: &ElementId,
+    text: &str,
+) -> A11yResult<ElementTextInsertReadback> {
+    replace_or_append_element_text(id, text, false)
+}
+
+pub fn append_element_text(id: &ElementId, text: &str) -> A11yResult<ElementTextInsertReadback> {
+    replace_or_append_element_text(id, text, true)
+}
+
+fn replace_or_append_element_text(
+    id: &ElementId,
+    text: &str,
+    append: bool,
+) -> A11yResult<ElementTextInsertReadback> {
+    let id = id.clone();
+    let text = text.to_owned();
+    with_automation(move |automation| {
+        let element = re_resolve_on_worker(automation, &id)?;
+        if !cached_bool(&element, UIProperty::IsEnabled) {
+            return Err(A11yError::ElementNotEnabled {
+                detail: format!("element {id} IsEnabled=false before native text insertion"),
+            });
+        }
+        if cached_bool(&element, UIProperty::IsPassword) {
+            return Err(A11yError::ElementValueUnsupported {
+                detail: format!(
+                    "native text insertion for element {id} requires exact text readback and refuses password targets"
+                ),
+            });
+        }
+        let hwnd = native_text_hwnd(&element)?.ok_or_else(|| {
+            A11yError::ElementValueUnsupported {
+                detail: format!(
+                    "native text insertion requires a native edit/rich-edit HWND target; element {id} does not expose a supported native text message route"
+                ),
+            }
+        })?;
+        if native_is_readonly(hwnd) {
+            return Err(A11yError::ElementValueReadOnly {
+                detail: format!("native edit HWND is read-only for element {id}"),
+            });
+        }
+        native_replace_element_text_selection(&id, hwnd, &text, append)
+    })
 }
 
 pub fn element_metadata(id: &ElementId) -> A11yResult<ElementMetadataReadback> {

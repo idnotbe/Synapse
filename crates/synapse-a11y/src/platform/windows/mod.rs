@@ -10,9 +10,10 @@ pub fn uia_worker_readback() -> crate::A11yResult<crate::UiaWorkerReadback> {
 
 pub use events::{WinEventSubscription, subscribe_win_events};
 pub use resolve::{
-    click_element_action, element_bounding_rect, element_metadata, element_scroll_state,
-    element_value, expand_state_of, expand_state_of_id, focus_element, re_resolve, scroll_element,
-    scroll_element_into_view, set_element_value,
+    append_element_text, click_element_action, element_bounding_rect, element_metadata,
+    element_scroll_state, element_value, expand_state_of, expand_state_of_id, focus_element,
+    re_resolve, replace_element_text_selection, scroll_element, scroll_element_into_view,
+    set_element_text_selection, set_element_value,
 };
 pub use snapshot::{
     chromium_renderer_accessibility_nodes_from_window, element_node_from_point,

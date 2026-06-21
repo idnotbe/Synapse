@@ -64,6 +64,40 @@ pub struct ElementValueReadback {
     pub password_len: Option<usize>,
 }
 
+/// Readback from setting the selection range on a native text/edit element.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct ElementTextSelectionReadback {
+    pub method: String,
+    pub text_len: u32,
+    pub requested_start: u32,
+    pub requested_end: u32,
+    pub before_start: u32,
+    pub before_end: u32,
+    pub after_start: u32,
+    pub after_end: u32,
+}
+
+/// Readback from replacing the current selection on a native text/edit element.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct ElementTextInsertReadback {
+    pub method: String,
+    pub mode: String,
+    pub before_text_utf16_len: u32,
+    pub after_text_utf16_len: u32,
+    pub requested_text_utf16_len: u32,
+    pub inserted_text_utf16_len: u32,
+    pub expected_after_text_utf16_len: u32,
+    pub normalized_text: bool,
+    pub before_start: u32,
+    pub before_end: u32,
+    pub replace_start: u32,
+    pub replace_end: u32,
+    pub after_start: u32,
+    pub after_end: u32,
+}
+
 /// Live metadata read from a re-resolved element on the UIA worker.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
@@ -164,6 +198,49 @@ pub fn set_element_value(id: &ElementId, value: &str) -> A11yResult<ElementValue
 /// `A11Y_NOT_AVAILABLE` on non-Windows.
 pub fn element_value(id: &ElementId) -> A11yResult<ElementValueReadback> {
     platform::element_value(id)
+}
+
+/// Sets a re-resolved native edit/rich-edit element's selection range and
+/// verifies it with a separate native message readback.
+///
+/// # Errors
+///
+/// Returns `A11Y_ELEMENT_STALE` when the element id cannot be re-resolved, a
+/// structured unsupported-pattern error when the target is not backed by a
+/// native edit HWND, and `A11Y_NOT_AVAILABLE` on non-Windows.
+pub fn set_element_text_selection(
+    id: &ElementId,
+    start: u32,
+    end: u32,
+) -> A11yResult<ElementTextSelectionReadback> {
+    platform::set_element_text_selection(id, start, end)
+}
+
+/// Replaces the current selection on a native edit/rich-edit element and
+/// verifies the resulting text with a separate native message readback.
+///
+/// # Errors
+///
+/// Returns `A11Y_ELEMENT_STALE` when the element id cannot be re-resolved, a
+/// structured unsupported-pattern error when the target is not backed by a
+/// native edit HWND, and `A11Y_NOT_AVAILABLE` on non-Windows.
+pub fn replace_element_text_selection(
+    id: &ElementId,
+    text: &str,
+) -> A11yResult<ElementTextInsertReadback> {
+    platform::replace_element_text_selection(id, text)
+}
+
+/// Appends text to a native edit/rich-edit element by setting the selection to
+/// the exact end of the native text buffer before replacing the selection.
+///
+/// # Errors
+///
+/// Returns `A11Y_ELEMENT_STALE` when the element id cannot be re-resolved, a
+/// structured unsupported-pattern error when the target is not backed by a
+/// native edit HWND, and `A11Y_NOT_AVAILABLE` on non-Windows.
+pub fn append_element_text(id: &ElementId, text: &str) -> A11yResult<ElementTextInsertReadback> {
+    platform::append_element_text(id, text)
 }
 
 /// Reads live metadata for a re-resolved element without mutating it.

@@ -5,8 +5,10 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use crate::{
     A11yError, A11yResult, AccessibleEvent, ElementClickAction, ElementMetadataReadback,
-    ElementScrollReadback, ElementSearchScope, ElementValueReadback, ElementValueSetReadback,
-    ExpandState, ForegroundActivationIntent, UIElement, UiaWorkerReadback, WinEventHookReadback,
+    ElementScrollReadback, ElementSearchScope, ElementTextInsertReadback,
+    ElementTextSelectionReadback, ElementValueReadback, ElementValueSetReadback, ExpandState,
+    ForegroundActivationIntent, UIElement,
+    UiaWorkerReadback, WinEventHookReadback,
 };
 
 pub struct WinEventSubscription {
@@ -226,6 +228,31 @@ pub fn set_element_value(_id: &ElementId, _value: &str) -> A11yResult<ElementVal
 pub fn element_value(_id: &ElementId) -> A11yResult<ElementValueReadback> {
     Err(A11yError::not_available(
         "UIA/native element text readback requires Windows",
+    ))
+}
+
+pub fn set_element_text_selection(
+    _id: &ElementId,
+    _start: u32,
+    _end: u32,
+) -> A11yResult<ElementTextSelectionReadback> {
+    Err(A11yError::not_available(
+        "UIA/native text selection requires Windows",
+    ))
+}
+
+pub fn replace_element_text_selection(
+    _id: &ElementId,
+    _text: &str,
+) -> A11yResult<ElementTextInsertReadback> {
+    Err(A11yError::not_available(
+        "UIA/native text insertion requires Windows",
+    ))
+}
+
+pub fn append_element_text(_id: &ElementId, _text: &str) -> A11yResult<ElementTextInsertReadback> {
+    Err(A11yError::not_available(
+        "UIA/native text append requires Windows",
     ))
 }
 

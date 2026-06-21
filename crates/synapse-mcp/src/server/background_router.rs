@@ -15,11 +15,11 @@
 use super::browser_field::BrowserSetValueParams;
 use super::{ErrorData, Json, Parameters, SessionTarget, SynapseService, tool, tool_router};
 use crate::m1::{
-    CaptureScreenshotParams, CdpActivateTabParams, CdpNavigateAction, CdpNavigateTabParams,
-    CdpTargetInfoParams, ObserveParams, mcp_error,
+    BrowserEvaluateParams, CaptureScreenshotParams, CdpActivateTabParams, CdpNavigateAction,
+    CdpNavigateTabParams, CdpTargetInfoParams, ObserveParams, mcp_error,
 };
 use crate::m2::{
-    ActClickParams, ActFocusWindowParams, ActSetFieldTextParams, ActTypeParams,
+    ActClickParams, ActFocusWindowParams, ActPressParams, ActSetFieldTextParams, ActTypeParams,
     default_verify_timeout_ms,
 };
 use crate::m4::{ActRunShellExecutionMode, ActRunShellParams};
@@ -47,7 +47,7 @@ const TARGET_ACT_STATUS_OK: &str = "ok";
 const TARGET_ACT_STATUS_VERIFY_NEEDED: &str = "verify_needed";
 const TARGET_ACT_STATUS_REFUSED: &str = "refused";
 const TARGET_ACT_STATUS_ERROR: &str = "error";
-const TARGET_ACT_KNOWN_VERBS: &str = "read, screenshot, navigate, set_field, click, type, press, select, submit, save, cleanup_notepad_tabs, run_shell, focus_window";
+const TARGET_ACT_KNOWN_VERBS: &str = "read, screenshot, navigate, set_field, insert_text, append_text, set_selection, click, type, key, press, select, submit, save, cleanup_notepad_tabs, run_shell, focus_window";
 
 #[derive(Clone, Debug, JsonSchema)]
 #[schemars(transparent)]
@@ -92,8 +92,24 @@ pub struct TargetActParams {
     pub selector: Option<String>,
     /// `set_field`: full replacement text (empty clears the field). `save`:
     /// optional expected file contents for the post-save file-byte readback.
+    /// `insert_text` / `append_text`: text to type through the target-scoped
+    /// keyboard path.
     #[serde(default)]
     pub text: Option<String>,
+    /// `key` / `press`: raw key or chord, e.g. `Ctrl+End`, `Tab`, `Ctrl+Z`.
+    /// Prefer this over `keys` when a single chord string is easier for the
+    /// caller to produce.
+    #[serde(default)]
+    pub key: Option<String>,
+    /// `key` / `press`: explicit raw key list, e.g. `["ctrl", "end"]`.
+    #[serde(default)]
+    pub keys: Vec<String>,
+    /// `set_selection`: zero-based selection start offset.
+    #[serde(default, alias = "start")]
+    pub selection_start: Option<u32>,
+    /// `set_selection`: zero-based selection end offset.
+    #[serde(default, alias = "end")]
+    pub selection_end: Option<u32>,
     /// Browser DOM action: accessible/ARIA role to resolve.
     #[serde(default)]
     pub role: Option<String>,
@@ -184,7 +200,7 @@ pub struct TargetActResponse {
 #[tool_router(router = background_router_tool_router, vis = "pub(super)")]
 impl SynapseService {
     #[tool(
-        description = "High-level capability-preserving computer-use router (#1005/#1033/#1207/#1219/#1261/#1267). One verb, routed to the correct session-targeted primitive: background/target-scoped when sufficient, agent_logical_foreground/foreground_lane when foreground-equivalent semantics are required, and never implicit fallback to the human OS foreground. verb=read observes the target; verb=screenshot captures it; verb=navigate drives the owned browser target (Chrome bridge/CDP); verb=set_field replaces a web/UIA field's text by element id via target-capable tiers or by CSS selector through the safe normal-Chrome bridge; verb=click clicks a target element by observed element_id, selector/role/name DOM action, or x/y coordinate fallback on the owned target; verb=type optionally focuses x/y then types text into the session-owned browser active element or leased foreground target; verb=press presses a named button/link in the session-owned tab; verb=select chooses a native dropdown option; verb=submit calls HTMLFormElement.requestSubmit() for a matched form/submitter; verb=save persists an already-owned Notepad target to an existing file path and verifies file bytes as the Source of Truth; verb=cleanup_notepad_tabs removes stale restored tabs from an owned hidden-desktop Notepad target while keeping the requested file tab; verb=run_shell runs a command in the session workspace; verb=focus_window intentionally activates the session target's top-level HWND only after the session is already break_glass/full_capability and holds the foreground input lease, so Codex clients can use an existing target_act schema when they cannot hot-add act_focus_window after tools/list_changed. Prefer this over raw act_* primitives: it inherits target resolution, action audit, lane/lease guards, and structured refusals, so a normal session can keep valid foreground-equivalent capability without seizing the human foreground. Mutating failures are returned as ok=false with status=verify_needed/refused/error and the original structured error in result; no optimistic success. Bind a target first with set_target (discover one with window_list/cdp_open_tab)."
+        description = "High-level capability-preserving computer-use router (#1005/#1033/#1207/#1219/#1261/#1267/#1300). One verb, routed to the correct session-targeted primitive: background/target-scoped when sufficient, agent_logical_foreground/foreground_lane when foreground-equivalent semantics are required, and never implicit fallback to the human OS foreground. verb=read observes the target; verb=screenshot captures it; verb=navigate drives the owned browser target (Chrome bridge/CDP); verb=set_field replaces a web/UIA field's text by element id via target-capable tiers or by CSS selector through the safe normal-Chrome bridge; verb=insert_text replaces the current selection/caret text on an observed native editable element_id via exact native readback, or types text at the current caret after an optional target focus/click; verb=append_text appends to an observed native editable element_id via exact native readback, or moves the current caret to the end with Ctrl+End and types text; verb=set_selection sets an exact start/end selection on an observed web/native editable element; verb=click clicks a target element by observed element_id, selector/role/name DOM action, or x/y coordinate fallback on the owned target; verb=type optionally focuses x/y then types text into the session-owned browser active element or leased foreground target; verb=key presses a raw key/chord such as Ctrl+End or Tab; verb=press presses a named button/link in the session-owned tab, or a raw key/chord when key/keys is supplied; verb=select chooses a native dropdown option; verb=submit calls HTMLFormElement.requestSubmit() for a matched form/submitter; verb=save persists an already-owned Notepad target to an existing file path and verifies file bytes as the Source of Truth; verb=cleanup_notepad_tabs removes stale restored tabs from an owned hidden-desktop Notepad target while keeping the requested file tab; verb=run_shell runs a command in the session workspace; verb=focus_window intentionally activates the session target's top-level HWND only after the session is already break_glass/full_capability and holds the foreground input lease, so Codex clients can use an existing target_act schema when they cannot hot-add act_focus_window after tools/list_changed. Prefer this over raw act_* primitives: it inherits target resolution, action audit, lane/lease guards, and structured refusals, so a normal session can keep valid foreground-equivalent capability without seizing the human foreground. Mutating failures are returned as ok=false with status=verify_needed/refused/error and the original structured error in result; no optimistic success. Bind a target first with set_target (discover one with window_list/cdp_open_tab)."
     )]
     pub async fn target_act(
         &self,
@@ -382,6 +398,13 @@ impl SynapseService {
                     target_act_delegate_response("act_set_field_text", response)?
                 }
             }
+            "insert_text" => {
+                target_act_insert_or_append_text(self, &params, &request_context, false).await?
+            }
+            "append_text" => {
+                target_act_insert_or_append_text(self, &params, &request_context, true).await?
+            }
+            "set_selection" => target_act_set_selection(self, &params, &request_context).await?,
             "click" => {
                 if target_act_coordinate(&params)?.is_some() {
                     if target_act_has_any_locator(&params) {
@@ -455,8 +478,13 @@ impl SynapseService {
                     ("act_type", ok, status, type_result)
                 }
             }
+            "key" | "key_chord" => target_act_key_press(self, &params, &request_context).await?,
             "press" => {
-                target_act_browser_dom_action(self, "press", &params, &request_context).await?
+                if target_act_has_key_chord(&params) {
+                    target_act_key_press(self, &params, &request_context).await?
+                } else {
+                    target_act_browser_dom_action(self, "press", &params, &request_context).await?
+                }
             }
             "select" => {
                 target_act_browser_dom_action(self, "select", &params, &request_context).await?
@@ -2470,12 +2498,19 @@ fn target_act_coordinate(
 }
 
 fn target_act_legacy_click_element_id(value: &str) -> Result<Option<ElementId>, ErrorData> {
+    target_act_parse_observed_element_id(value, "click")
+}
+
+fn target_act_parse_observed_element_id(
+    value: &str,
+    verb: &str,
+) -> Result<Option<ElementId>, ErrorData> {
     match ElementId::parse(value) {
         Ok(element_id) => Ok(Some(element_id)),
         Err(_) if target_act_click_element_id_can_be_dom_id(value) => Ok(None),
         Err(error) => Err(mcp_error(
             error_codes::TOOL_PARAMS_INVALID,
-            format!("target_act verb=click element_id is invalid: {error}"),
+            format!("target_act verb={verb} element_id is invalid: {error}"),
         )),
     }
 }
@@ -2668,6 +2703,641 @@ fn target_act_delegate_response<T: Serialize>(
     }
 }
 
+async fn target_act_key_press(
+    service: &SynapseService,
+    params: &TargetActParams,
+    request_context: &RequestContext<RoleServer>,
+) -> Result<(&'static str, bool, &'static str, Value), ErrorData> {
+    if target_act_coordinate(params)?.is_some() || target_act_has_any_locator(params) {
+        return Err(mcp_error(
+            error_codes::TOOL_PARAMS_INVALID,
+            "target_act verb=key/press with key(s) targets the current focused control and does not accept x/y or element/DOM locators; focus/click first, or use insert_text/append_text",
+        ));
+    }
+    let verb = params.verb.as_str();
+    let keys = target_act_key_chord_keys(params, verb)?;
+    let press_params = target_act_press_params(keys, params.wait_timeout_ms, verb)?;
+    let response = service
+        .act_press(Parameters(press_params), request_context.clone())
+        .await;
+    target_act_delegate_response("act_press", response)
+}
+
+async fn target_act_insert_or_append_text(
+    service: &SynapseService,
+    params: &TargetActParams,
+    request_context: &RequestContext<RoleServer>,
+    append: bool,
+) -> Result<(&'static str, bool, &'static str, Value), ErrorData> {
+    if target_act_has_key_chord(params) {
+        return Err(mcp_error(
+            error_codes::TOOL_PARAMS_INVALID,
+            "target_act verb=insert_text/append_text does not accept key(s); use verb=key for raw chords",
+        ));
+    }
+    let verb = if append { "append_text" } else { "insert_text" };
+    if target_act_coordinate(params)?.is_some() && target_act_has_any_locator(params) {
+        return Err(mcp_error(
+            error_codes::TOOL_PARAMS_INVALID,
+            format!(
+                "target_act verb={verb} accepts either x/y coordinates or an element/DOM locator, not both"
+            ),
+        ));
+    }
+    let text = require_param(params.text.clone(), verb, "text")?;
+    if let Some(element_id) = target_act_native_text_element_id(params, verb)? {
+        let verify_timeout_ms = target_act_verify_timeout(params.wait_timeout_ms, verb)?;
+        return target_act_insert_or_append_text_native(
+            service,
+            element_id,
+            text,
+            append,
+            verify_timeout_ms,
+            request_context,
+        )
+        .await;
+    }
+    let mut steps = Vec::new();
+
+    if let Some(focus_step) =
+        target_act_focus_for_text_insert(service, params, request_context, verb).await?
+    {
+        let (tool, ok, status, result) = focus_step;
+        steps.push(json!({
+            "step": "focus",
+            "delegated_tool": tool,
+            "ok": ok,
+            "status": status,
+            "result": result,
+        }));
+        if !ok {
+            return Ok((
+                "target_act.text_focus+act_type",
+                false,
+                status,
+                json!({
+                    "ok": false,
+                    "mode": verb,
+                    "failed_step": "focus",
+                    "steps": steps,
+                }),
+            ));
+        }
+    }
+
+    if append {
+        let press_params =
+            target_act_press_params(vec!["ctrl".to_owned(), "end".to_owned()], None, verb)?;
+        let key_response = service
+            .act_press(Parameters(press_params), request_context.clone())
+            .await;
+        let (tool, ok, status, result) = target_act_delegate_response("act_press", key_response)?;
+        steps.push(json!({
+            "step": "move_caret_to_end",
+            "delegated_tool": tool,
+            "ok": ok,
+            "status": status,
+            "result": result,
+        }));
+        if !ok {
+            return Ok((
+                "target_act.text_focus+act_press+act_type",
+                false,
+                status,
+                json!({
+                    "ok": false,
+                    "mode": verb,
+                    "failed_step": "move_caret_to_end",
+                    "steps": steps,
+                }),
+            ));
+        }
+    }
+
+    let type_params = target_act_type_params(text, params.wait_timeout_ms)?;
+    let type_response = service
+        .act_type(Parameters(type_params), request_context.clone())
+        .await;
+    let (tool, ok, status, result) = target_act_delegate_response("act_type", type_response)?;
+    steps.push(json!({
+        "step": "type",
+        "delegated_tool": tool,
+        "ok": ok,
+        "status": status,
+        "result": result,
+    }));
+
+    Ok((
+        if append {
+            "target_act.text_focus+act_press+act_type"
+        } else {
+            "target_act.text_focus+act_type"
+        },
+        ok,
+        status,
+        json!({
+            "ok": ok,
+            "mode": verb,
+            "steps": steps,
+        }),
+    ))
+}
+
+fn target_act_native_text_element_id(
+    params: &TargetActParams,
+    verb: &str,
+) -> Result<Option<ElementId>, ErrorData> {
+    let Some(raw_element_id) = params
+        .element_id
+        .as_ref()
+        .filter(|value| !value.trim().is_empty())
+    else {
+        return Ok(None);
+    };
+    let Some(element_id) = target_act_parse_observed_element_id(raw_element_id, verb)? else {
+        return Ok(None);
+    };
+    if synapse_a11y::cdp_backend_from_element_id(&element_id).is_some() {
+        return Ok(None);
+    }
+    if target_act_has_dom_locator(params) {
+        return Err(mcp_error(
+            error_codes::TOOL_PARAMS_INVALID,
+            format!(
+                "target_act verb={verb} accepts an observed native element_id or a DOM locator, not both"
+            ),
+        ));
+    }
+    Ok(Some(element_id))
+}
+
+async fn target_act_insert_or_append_text_native(
+    service: &SynapseService,
+    element_id: ElementId,
+    text: String,
+    append: bool,
+    verify_timeout_ms: u32,
+    request_context: &RequestContext<RoleServer>,
+) -> Result<(&'static str, bool, &'static str, Value), ErrorData> {
+    let verb = if append { "append_text" } else { "insert_text" };
+    let delegated_tool = if append {
+        "synapse_a11y.append_element_text"
+    } else {
+        "synapse_a11y.replace_element_text_selection"
+    };
+    let session_id = target_act_session_id(request_context, verb)?;
+    let (element_hwnd, root_hwnd, target) = target_act_native_element_target(&element_id, verb)?;
+    let request_details = json!({
+        "session_id": &session_id,
+        "verb": verb,
+        "delegated_tool": delegated_tool,
+        "element_id": element_id.to_string(),
+        "element_hwnd": element_hwnd,
+        "window_hwnd": root_hwnd,
+        "text_len": text.chars().count(),
+        "text_utf16_len": text.encode_utf16().count(),
+        "append": append,
+        "verify_timeout_ms": verify_timeout_ms,
+        "required_foreground": false,
+    });
+    match service.session_target(Some(&session_id))? {
+        Some(current) if current == target => {}
+        Some(current) => {
+            let error = mcp_error(
+                error_codes::ACTION_TARGET_INVALID,
+                format!(
+                    "target_act verb={verb} element belongs to HWND 0x{root_hwnd:x}, but this session target is {current:?}"
+                ),
+            );
+            service.audit_action_denied_with_details_for_session(
+                "target_act",
+                &error,
+                &request_details,
+                &session_id,
+            );
+            return Ok((
+                delegated_tool,
+                false,
+                target_act_error_status(&error),
+                target_act_error_result("target_act", error),
+            ));
+        }
+        None => {
+            let error = mcp_error(
+                error_codes::TARGET_NOT_SET,
+                format!(
+                    "target_act verb={verb} requires this MCP session to have an owned window target; call set_target for the exact HWND first"
+                ),
+            );
+            service.audit_action_denied_with_details_for_session(
+                "target_act",
+                &error,
+                &request_details,
+                &session_id,
+            );
+            return Ok((
+                delegated_tool,
+                false,
+                target_act_error_status(&error),
+                target_act_error_result("target_act", error),
+            ));
+        }
+    }
+    if let Err(error) =
+        service.ensure_target_claim_allows_session("target_act", &session_id, &target)
+    {
+        service.audit_action_denied_with_details_for_session(
+            "target_act",
+            &error,
+            &request_details,
+            &session_id,
+        );
+        return Ok((
+            delegated_tool,
+            false,
+            target_act_error_status(&error),
+            target_act_error_result("target_act", error),
+        ));
+    }
+    service.audit_action_started_with_details_for_session(
+        "target_act",
+        &request_details,
+        &session_id,
+    )?;
+    let result = if append {
+        synapse_a11y::append_element_text(&element_id, &text)
+    } else {
+        synapse_a11y::replace_element_text_selection(&element_id, &text)
+    }
+    .map_err(|error| {
+        mcp_error(
+            error.code(),
+            format!("target_act native {verb} failed: {error}"),
+        )
+    });
+    service.audit_action_result_for_session("target_act", &result, &session_id)?;
+    match result {
+        Ok(readback) => Ok((
+            delegated_tool,
+            true,
+            TARGET_ACT_STATUS_OK,
+            target_act_result(&readback)?,
+        )),
+        Err(error) => Ok((
+            delegated_tool,
+            false,
+            target_act_error_status(&error),
+            target_act_error_result(delegated_tool, error),
+        )),
+    }
+}
+
+async fn target_act_focus_for_text_insert(
+    service: &SynapseService,
+    params: &TargetActParams,
+    request_context: &RequestContext<RoleServer>,
+    verb: &str,
+) -> Result<Option<(&'static str, bool, &'static str, Value)>, ErrorData> {
+    if target_act_coordinate(params)?.is_some() {
+        return target_act_coordinate_click(service, params, request_context)
+            .await
+            .map(Some);
+    }
+
+    if let Some(raw_element_id) = params
+        .element_id
+        .as_ref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        if let Some(element_id) = target_act_legacy_click_element_id(raw_element_id)? {
+            let click_params = target_act_click_params(element_id, 1)?;
+            let response = service
+                .act_click(Parameters(click_params), request_context.clone())
+                .await;
+            return target_act_delegate_response("act_click", response).map(Some);
+        }
+        return target_act_browser_dom_action(service, "click", params, request_context)
+            .await
+            .map(Some);
+    }
+
+    if target_act_has_dom_locator(params) {
+        return target_act_browser_dom_action(service, "click", params, request_context)
+            .await
+            .map(Some);
+    }
+
+    tracing::info!(
+        code = "TARGET_ACT_TEXT_INSERT_CURRENT_FOCUS",
+        verb,
+        "target_act text insertion will use the current focused control without a focus step"
+    );
+    Ok(None)
+}
+
+const TARGET_ACT_SET_SELECTION_JS: &str = r#"(el, start, end) => {
+    if (!Number.isInteger(start) || !Number.isInteger(end) || start < 0 || end < start) {
+        throw new Error(`invalid selection range ${start}..${end}`);
+    }
+    const selectedText = () => {
+        const selection = el.ownerDocument.defaultView.getSelection();
+        return selection ? selection.toString() : '';
+    };
+    if (typeof el.setSelectionRange === 'function' && 'value' in el) {
+        if (el.disabled || el.readOnly) {
+            throw new Error('target value control is disabled or readonly');
+        }
+        const value = String(el.value ?? '');
+        if (end > value.length) {
+            throw new Error(`selection range ${start}..${end} exceeds value length ${value.length}`);
+        }
+        const beforeStart = el.selectionStart ?? 0;
+        const beforeEnd = el.selectionEnd ?? beforeStart;
+        el.focus();
+        el.setSelectionRange(start, end);
+        el.dispatchEvent(new Event('select', { bubbles: true }));
+        return {
+            method: 'dom_set_selection_range',
+            text_len: value.length,
+            requested_start: start,
+            requested_end: end,
+            before_start: beforeStart,
+            before_end: beforeEnd,
+            after_start: el.selectionStart ?? start,
+            after_end: el.selectionEnd ?? end,
+            selected_text: value.slice(start, end)
+        };
+    }
+    if (!el.isContentEditable) {
+        throw new Error('target is not an editable value control or contenteditable element');
+    }
+    const doc = el.ownerDocument;
+    const walker = doc.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+    const textNodes = [];
+    let textLen = 0;
+    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+        const len = node.nodeValue.length;
+        textNodes.push({ node, start: textLen, end: textLen + len });
+        textLen += len;
+    }
+    if (end > textLen) {
+        throw new Error(`selection range ${start}..${end} exceeds textContent length ${textLen}`);
+    }
+    const boundary = (offset) => {
+        for (const item of textNodes) {
+            if (offset <= item.end) {
+                return { node: item.node, offset: Math.max(0, offset - item.start) };
+            }
+        }
+        return { node: el, offset: el.childNodes.length };
+    };
+    const selectionOffsets = () => {
+        const selection = doc.defaultView.getSelection();
+        if (!selection || selection.rangeCount === 0) {
+            return { start: 0, end: 0 };
+        }
+        const range = selection.getRangeAt(0);
+        const preStart = doc.createRange();
+        preStart.selectNodeContents(el);
+        preStart.setEnd(range.startContainer, range.startOffset);
+        const preEnd = doc.createRange();
+        preEnd.selectNodeContents(el);
+        preEnd.setEnd(range.endContainer, range.endOffset);
+        return { start: preStart.toString().length, end: preEnd.toString().length };
+    };
+    const before = selectionOffsets();
+    const startBoundary = boundary(start);
+    const endBoundary = boundary(end);
+    const range = doc.createRange();
+    range.setStart(startBoundary.node, startBoundary.offset);
+    range.setEnd(endBoundary.node, endBoundary.offset);
+    el.focus();
+    const selection = doc.defaultView.getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+    doc.dispatchEvent(new Event('selectionchange', { bubbles: true }));
+    const after = selectionOffsets();
+    return {
+        method: 'contenteditable_dom_range',
+        text_len: textLen,
+        requested_start: start,
+        requested_end: end,
+        before_start: before.start,
+        before_end: before.end,
+        after_start: after.start,
+        after_end: after.end,
+        selected_text: selectedText()
+    };
+}"#;
+
+async fn target_act_set_selection(
+    service: &SynapseService,
+    params: &TargetActParams,
+    request_context: &RequestContext<RoleServer>,
+) -> Result<(&'static str, bool, &'static str, Value), ErrorData> {
+    if target_act_coordinate(params)?.is_some() {
+        return Err(mcp_error(
+            error_codes::TOOL_PARAMS_INVALID,
+            "target_act verb=set_selection does not accept x/y coordinates; pass an observed element_id",
+        ));
+    }
+    if target_act_has_dom_locator(params) {
+        return Err(mcp_error(
+            error_codes::TOOL_PARAMS_INVALID,
+            "target_act verb=set_selection currently accepts an observed Synapse element_id only, not selector/role/name/value/option locators",
+        ));
+    }
+    if target_act_has_key_chord(params) {
+        return Err(mcp_error(
+            error_codes::TOOL_PARAMS_INVALID,
+            "target_act verb=set_selection does not accept key(s); use verb=key for raw keyboard selection chords",
+        ));
+    }
+    if params.text.as_ref().is_some_and(|value| !value.is_empty()) {
+        return Err(mcp_error(
+            error_codes::TOOL_PARAMS_INVALID,
+            "target_act verb=set_selection does not accept text; use insert_text or append_text after setting the selection",
+        ));
+    }
+    let element_id = require_param(params.element_id.clone(), "set_selection", "element_id")?;
+    let element_id = ElementId::parse(&element_id).map_err(|error| {
+        mcp_error(
+            error_codes::TOOL_PARAMS_INVALID,
+            format!("target_act verb=set_selection element_id is invalid: {error}"),
+        )
+    })?;
+    let (start, end) = target_act_selection_range(params)?;
+    if synapse_a11y::cdp_backend_from_element_id(&element_id).is_some() {
+        target_act_set_selection_web(service, element_id, start, end, request_context).await
+    } else {
+        target_act_set_selection_native(service, element_id, start, end, request_context).await
+    }
+}
+
+async fn target_act_set_selection_web(
+    service: &SynapseService,
+    element_id: ElementId,
+    start: u32,
+    end: u32,
+    request_context: &RequestContext<RoleServer>,
+) -> Result<(&'static str, bool, &'static str, Value), ErrorData> {
+    if synapse_a11y::cdp_target_from_element_id(&element_id).is_none() {
+        return Err(mcp_error(
+            error_codes::TOOL_PARAMS_INVALID,
+            "target_act verb=set_selection web element_id must include an embedded CDP target id; re-resolve it with find/observe against the owned tab",
+        ));
+    }
+    let response = service
+        .browser_evaluate(
+            Parameters(BrowserEvaluateParams {
+                expression: TARGET_ACT_SET_SELECTION_JS.to_owned(),
+                cdp_target_id: None,
+                window_hwnd: None,
+                element_id: Some(element_id.to_string()),
+                args: Some(vec![json!(start), json!(end)]),
+                await_promise: Some(false),
+                return_by_value: Some(true),
+            }),
+            request_context.clone(),
+        )
+        .await;
+    target_act_delegate_response("browser_evaluate", response)
+}
+
+fn target_act_native_element_target(
+    element_id: &ElementId,
+    verb: &str,
+) -> Result<(i64, i64, SessionTarget), ErrorData> {
+    let element_hwnd = element_id
+        .parts()
+        .map_err(|error| {
+            mcp_error(
+                error_codes::TOOL_PARAMS_INVALID,
+                format!("target_act verb={verb} element_id is invalid: {error}"),
+            )
+        })?
+        .hwnd;
+    let root_hwnd = synapse_a11y::top_level_root_hwnd(element_hwnd).map_err(|error| {
+        mcp_error(
+            error.code(),
+            format!(
+                "target_act verb={verb} element HWND 0x{element_hwnd:x} root readback failed: {error}"
+            ),
+        )
+    })?;
+    Ok((
+        element_hwnd,
+        root_hwnd,
+        SessionTarget::Window { hwnd: root_hwnd },
+    ))
+}
+
+async fn target_act_set_selection_native(
+    service: &SynapseService,
+    element_id: ElementId,
+    start: u32,
+    end: u32,
+    request_context: &RequestContext<RoleServer>,
+) -> Result<(&'static str, bool, &'static str, Value), ErrorData> {
+    let session_id = target_act_session_id(request_context, "set_selection")?;
+    let (element_hwnd, root_hwnd, target) =
+        target_act_native_element_target(&element_id, "set_selection")?;
+    let request_details = json!({
+        "session_id": &session_id,
+        "verb": "set_selection",
+        "element_id": element_id.to_string(),
+        "element_hwnd": element_hwnd,
+        "window_hwnd": root_hwnd,
+        "selection_start": start,
+        "selection_end": end,
+        "required_foreground": false,
+    });
+    match service.session_target(Some(&session_id))? {
+        Some(current) if current == target => {}
+        Some(current) => {
+            let error = mcp_error(
+                error_codes::ACTION_TARGET_INVALID,
+                format!(
+                    "target_act verb=set_selection element belongs to HWND 0x{root_hwnd:x}, but this session target is {current:?}"
+                ),
+            );
+            service.audit_action_denied_with_details_for_session(
+                "target_act",
+                &error,
+                &request_details,
+                &session_id,
+            );
+            return Ok((
+                "synapse_a11y.set_element_text_selection",
+                false,
+                target_act_error_status(&error),
+                target_act_error_result("target_act", error),
+            ));
+        }
+        None => {
+            let error = mcp_error(
+                error_codes::TARGET_NOT_SET,
+                "target_act verb=set_selection requires this MCP session to have an owned window target; call set_target for the exact HWND first",
+            );
+            service.audit_action_denied_with_details_for_session(
+                "target_act",
+                &error,
+                &request_details,
+                &session_id,
+            );
+            return Ok((
+                "synapse_a11y.set_element_text_selection",
+                false,
+                target_act_error_status(&error),
+                target_act_error_result("target_act", error),
+            ));
+        }
+    }
+    if let Err(error) =
+        service.ensure_target_claim_allows_session("target_act", &session_id, &target)
+    {
+        service.audit_action_denied_with_details_for_session(
+            "target_act",
+            &error,
+            &request_details,
+            &session_id,
+        );
+        return Ok((
+            "synapse_a11y.set_element_text_selection",
+            false,
+            target_act_error_status(&error),
+            target_act_error_result("target_act", error),
+        ));
+    }
+    service.audit_action_started_with_details_for_session(
+        "target_act",
+        &request_details,
+        &session_id,
+    )?;
+    let result =
+        synapse_a11y::set_element_text_selection(&element_id, start, end).map_err(|error| {
+            mcp_error(
+                error.code(),
+                format!("target_act native set_selection failed: {error}"),
+            )
+        });
+    service.audit_action_result_for_session("target_act", &result, &session_id)?;
+    match result {
+        Ok(readback) => Ok((
+            "synapse_a11y.set_element_text_selection",
+            true,
+            TARGET_ACT_STATUS_OK,
+            target_act_result(&readback)?,
+        )),
+        Err(error) => Ok((
+            "synapse_a11y.set_element_text_selection",
+            false,
+            target_act_error_status(&error),
+            target_act_error_result("synapse_a11y.set_element_text_selection", error),
+        )),
+    }
+}
+
 fn target_act_click_count(clicks: Option<u8>) -> Result<u8, ErrorData> {
     let clicks = clicks.unwrap_or(1);
     if !(1..=3).contains(&clicks) {
@@ -2732,17 +3402,111 @@ fn target_act_type_params(
     })
 }
 
+fn target_act_press_params(
+    keys: Vec<String>,
+    wait_timeout_ms: Option<u64>,
+    verb: &str,
+) -> Result<ActPressParams, ErrorData> {
+    let verify_timeout_ms = target_act_verify_timeout(wait_timeout_ms, verb)?;
+    serde_json::from_value(json!({
+        "keys": keys,
+        "verify_delta": true,
+        "verify_timeout_ms": verify_timeout_ms
+    }))
+    .map_err(|error| {
+        mcp_error(
+            error_codes::TOOL_INTERNAL_ERROR,
+            format!("target_act failed to construct act_press params: {error}"),
+        )
+    })
+}
+
 fn target_act_type_verify_timeout(value: Option<u64>) -> Result<u32, ErrorData> {
+    target_act_verify_timeout(value, "type")
+}
+
+fn target_act_verify_timeout(value: Option<u64>, verb: &str) -> Result<u32, ErrorData> {
     let wait_timeout_ms = value.unwrap_or_else(|| u64::from(default_verify_timeout_ms()));
     if !(50..=5000).contains(&wait_timeout_ms) {
         return Err(mcp_error(
             error_codes::TOOL_PARAMS_INVALID,
             format!(
-                "target_act verb=type wait_timeout_ms must be 50..=5000, got {wait_timeout_ms}"
+                "target_act verb={verb} wait_timeout_ms must be 50..=5000, got {wait_timeout_ms}"
             ),
         ));
     }
     Ok(wait_timeout_ms as u32)
+}
+
+fn target_act_has_key_chord(params: &TargetActParams) -> bool {
+    params
+        .key
+        .as_ref()
+        .is_some_and(|value| !value.trim().is_empty())
+        || !params.keys.is_empty()
+}
+
+fn target_act_key_chord_keys(
+    params: &TargetActParams,
+    verb: &str,
+) -> Result<Vec<String>, ErrorData> {
+    let has_key = params
+        .key
+        .as_ref()
+        .is_some_and(|value| !value.trim().is_empty());
+    let has_keys = !params.keys.is_empty();
+    match (has_key, has_keys) {
+        (true, true) => Err(mcp_error(
+            error_codes::TOOL_PARAMS_INVALID,
+            format!("target_act verb={verb} accepts either key or keys, not both"),
+        )),
+        (true, false) => {
+            target_act_parse_key_chord(params.key.as_deref().unwrap_or_default(), verb)
+        }
+        (false, true) => Ok(params.keys.clone()),
+        (false, false) => Err(mcp_error(
+            error_codes::TOOL_PARAMS_INVALID,
+            format!("target_act verb={verb} requires key or keys"),
+        )),
+    }
+}
+
+fn target_act_parse_key_chord(raw: &str, verb: &str) -> Result<Vec<String>, ErrorData> {
+    let keys = raw
+        .split('+')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    if keys.is_empty() {
+        return Err(mcp_error(
+            error_codes::TOOL_PARAMS_INVALID,
+            format!("target_act verb={verb} key chord must contain at least one key"),
+        ));
+    }
+    Ok(keys)
+}
+
+fn target_act_selection_range(params: &TargetActParams) -> Result<(u32, u32), ErrorData> {
+    let start = params.selection_start.ok_or_else(|| {
+        mcp_error(
+            error_codes::TOOL_PARAMS_INVALID,
+            "target_act verb=set_selection requires selection_start (alias: start)",
+        )
+    })?;
+    let end = params.selection_end.ok_or_else(|| {
+        mcp_error(
+            error_codes::TOOL_PARAMS_INVALID,
+            "target_act verb=set_selection requires selection_end (alias: end)",
+        )
+    })?;
+    if end < start {
+        return Err(mcp_error(
+            error_codes::TOOL_PARAMS_INVALID,
+            format!("target_act verb=set_selection requires end >= start, got {start}..{end}"),
+        ));
+    }
+    Ok((start, end))
 }
 
 fn target_act_window_coordinate_to_screen_point(
@@ -3640,6 +4404,144 @@ mod tests {
         .expect("submit params should deserialize");
         assert_eq!(submit.verb.as_str(), "submit");
         target_act_validate_dom_locator("submit", &submit).expect("submit locator should validate");
+    }
+
+    #[test]
+    fn target_act_key_chord_deserializes_and_constructs_press_request() {
+        let params: TargetActParams = serde_json::from_value(json!({
+            "verb": "key",
+            "key": "Ctrl+End",
+            "wait_timeout_ms": 750
+        }))
+        .expect("key params should deserialize");
+
+        let keys = target_act_key_chord_keys(&params, "key").expect("key chord should parse");
+        assert_eq!(keys, vec!["Ctrl", "End"]);
+        let press =
+            target_act_press_params(keys, params.wait_timeout_ms, "key").expect("press params");
+        assert_eq!(press.keys, vec!["Ctrl", "End"]);
+        assert!(press.verify_delta);
+        assert_eq!(press.verify_timeout_ms, 750);
+    }
+
+    #[test]
+    fn target_act_key_chord_rejects_key_and_keys_together() {
+        let params: TargetActParams = serde_json::from_value(json!({
+            "verb": "key",
+            "key": "Ctrl+Z",
+            "keys": ["ctrl", "z"]
+        }))
+        .expect("key params should deserialize");
+
+        let error = target_act_key_chord_keys(&params, "key")
+            .expect_err("key and keys together should fail closed");
+        assert_eq!(
+            target_act_error_code(&error),
+            Some(error_codes::TOOL_PARAMS_INVALID)
+        );
+    }
+
+    #[test]
+    fn target_act_insert_and_append_params_deserialize() {
+        let insert: TargetActParams = serde_json::from_value(json!({
+            "verb": "insert_text",
+            "element_id": "0x2a:0000000000000001",
+            "text": "insert me"
+        }))
+        .expect("insert_text params should deserialize");
+        assert_eq!(insert.verb.as_str(), "insert_text");
+        assert_eq!(insert.text.as_deref(), Some("insert me"));
+
+        let append: TargetActParams = serde_json::from_value(json!({
+            "verb": "append_text",
+            "text": "append me"
+        }))
+        .expect("append_text current-focus params should deserialize");
+        assert_eq!(append.verb.as_str(), "append_text");
+        assert!(!target_act_has_any_locator(&append));
+    }
+
+    #[test]
+    fn target_act_insert_native_element_id_routes_to_native_text() {
+        let params: TargetActParams = serde_json::from_value(json!({
+            "verb": "insert_text",
+            "element_id": "0x2a:0000000000000001",
+            "text": "insert me"
+        }))
+        .expect("insert_text params should deserialize");
+
+        let element_id = target_act_native_text_element_id(&params, "insert_text")
+            .expect("native element routing should validate")
+            .expect("native element id should use native text route");
+
+        assert_eq!(element_id.as_str(), "0x2a:0000000000000001");
+    }
+
+    #[test]
+    fn target_act_insert_cdp_element_id_uses_existing_focus_type_path() {
+        let cdp_id = synapse_a11y::cdp_element_id(0x2a, 42);
+        let params: TargetActParams = serde_json::from_value(json!({
+            "verb": "insert_text",
+            "element_id": cdp_id.to_string(),
+            "text": "insert me"
+        }))
+        .expect("insert_text params should deserialize");
+
+        assert!(
+            target_act_native_text_element_id(&params, "insert_text")
+                .expect("cdp element routing should validate")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn target_act_insert_native_element_id_rejects_dom_locator_mix() {
+        let params: TargetActParams = serde_json::from_value(json!({
+            "verb": "insert_text",
+            "element_id": "0x2a:0000000000000001",
+            "selector": "#editor",
+            "text": "insert me"
+        }))
+        .expect("insert_text params should deserialize");
+
+        let error = target_act_native_text_element_id(&params, "insert_text")
+            .expect_err("native element id plus selector must fail closed");
+        assert_eq!(
+            target_act_error_code(&error),
+            Some(error_codes::TOOL_PARAMS_INVALID)
+        );
+    }
+
+    #[test]
+    fn target_act_set_selection_params_deserialize_with_aliases() {
+        let params: TargetActParams = serde_json::from_value(json!({
+            "verb": "set_selection",
+            "element_id": "0x2a:0000000000000001",
+            "start": 3,
+            "end": 8
+        }))
+        .expect("set_selection params should deserialize");
+
+        assert_eq!(params.verb.as_str(), "set_selection");
+        assert_eq!(target_act_selection_range(&params).expect("range"), (3, 8));
+    }
+
+    #[test]
+    fn target_act_set_selection_rejects_reversed_range() {
+        let params: TargetActParams = serde_json::from_value(json!({
+            "verb": "set_selection",
+            "element_id": "0x2a:0000000000000001",
+            "selection_start": 9,
+            "selection_end": 2
+        }))
+        .expect("set_selection params should deserialize");
+
+        let error = target_act_selection_range(&params)
+            .expect_err("set_selection must reject end before start");
+        assert_eq!(
+            target_act_error_code(&error),
+            Some(error_codes::TOOL_PARAMS_INVALID)
+        );
     }
 
     #[test]
