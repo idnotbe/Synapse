@@ -267,6 +267,8 @@ pub enum BrowserRouteOperation {
     AddFulfill,
     /// Add or replace a route that aborts matching requests.
     AddAbort,
+    /// Add or replace a route that continues matching requests with overrides.
+    AddContinue,
     /// Remove one route by id.
     Remove,
     /// Clear all routes for the target and disable Fetch interception.
@@ -382,6 +384,21 @@ pub struct BrowserRouteParams {
     /// CDP Network.ErrorReason for `add_abort`. Defaults to `blocked_by_client`.
     #[serde(default)]
     pub error_reason: Option<BrowserRouteErrorReason>,
+    /// Replacement request URL for `add_continue`.
+    #[serde(default)]
+    pub continue_url: Option<String>,
+    /// Replacement request method for `add_continue`.
+    #[serde(default)]
+    pub continue_method: Option<String>,
+    /// Replacement request headers for `add_continue`.
+    #[serde(default)]
+    pub continue_headers: Vec<BrowserRouteHeader>,
+    /// UTF-8 replacement request postData for `add_continue`.
+    #[serde(default)]
+    pub continue_post_data: Option<String>,
+    /// Base64 replacement request postData for `add_continue`.
+    #[serde(default)]
+    pub continue_post_data_base64: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, JsonSchema)]
@@ -419,10 +436,16 @@ pub struct BrowserRouteRuleResponse {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error_reason: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub continue_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub continue_method: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub response_phrase: Option<String>,
     pub headers: Vec<BrowserRouteHeader>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub body_base64_len_chars: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub post_data_base64_len_chars: Option<usize>,
 }
 
 #[derive(Clone, Debug, Serialize, JsonSchema)]
@@ -601,7 +624,7 @@ impl SynapseService {
     }
 
     #[tool(
-        description = "Add/list/remove/clear Fetch route rules for the calling session's owned browser tab. The default add_fulfill operation arms target-scoped raw CDP Fetch interception and fulfills matching URL glob/regex requests with status/headers/body; add_abort fails matching requests with Fetch.failRequest and a CDP Network.ErrorReason. Unmatched requests continue by default. Target-scoped and background-safe: never activates the tab, never uses OS foreground input, and never falls back to the human foreground tab. Raw CDP only; the popup-safe normal Chrome extension bridge fails closed."
+        description = "Add/list/remove/clear Fetch route rules for the calling session's owned browser tab. The default add_fulfill operation arms target-scoped raw CDP Fetch interception and fulfills matching URL glob/regex requests with status/headers/body; add_abort fails matching requests with Fetch.failRequest and a CDP Network.ErrorReason; add_continue continues matching requests with optional URL, method, headers, and postData overrides. Unmatched requests continue by default. Target-scoped and background-safe: never activates the tab, never uses OS foreground input, and never falls back to the human foreground tab. Raw CDP only; the popup-safe normal Chrome extension bridge fails closed."
     )]
     pub async fn browser_route(
         &self,
@@ -629,6 +652,11 @@ impl SynapseService {
             "body_len": params.0.body.as_deref().map(str::len),
             "body_base64_len": params.0.body_base64.as_deref().map(str::len),
             "error_reason": params.0.error_reason,
+            "continue_url_len": params.0.continue_url.as_deref().map(str::len),
+            "continue_method": params.0.continue_method.as_deref(),
+            "continue_header_count": params.0.continue_headers.len(),
+            "continue_post_data_len": params.0.continue_post_data.as_deref().map(str::len),
+            "continue_post_data_base64_len": params.0.continue_post_data_base64.as_deref().map(str::len),
             "required_foreground": false,
             "phase": "target_resolution",
         });
@@ -867,7 +895,9 @@ impl SynapseService {
         let mut route_removed = false;
         let mut cleared_count = 0usize;
         let fetch_status = match route.operation {
-            BrowserRouteOperation::AddFulfill | BrowserRouteOperation::AddAbort => {
+            BrowserRouteOperation::AddFulfill
+            | BrowserRouteOperation::AddAbort
+            | BrowserRouteOperation::AddContinue => {
                 let ensure =
                     synapse_a11y::fetch_interception_ensure(&endpoint, cdp_target_id, Vec::new())
                         .await
@@ -1050,7 +1080,9 @@ fn validate_browser_route_params(
         validate_cdp_target_id(target_id)?;
     }
     let route_id = match params.operation {
-        BrowserRouteOperation::AddFulfill | BrowserRouteOperation::AddAbort => params
+        BrowserRouteOperation::AddFulfill
+        | BrowserRouteOperation::AddAbort
+        | BrowserRouteOperation::AddContinue => params
             .route_id
             .as_deref()
             .map(validate_route_id)
@@ -1088,6 +1120,12 @@ fn validate_browser_route_params(
             route_id
                 .clone()
                 .expect("add_abort always has a generated route id"),
+        )?),
+        BrowserRouteOperation::AddContinue => Some(normalize_route_continue(
+            params,
+            route_id
+                .clone()
+                .expect("add_continue always has a generated route id"),
         )?),
         BrowserRouteOperation::Remove
         | BrowserRouteOperation::Clear
@@ -1167,6 +1205,65 @@ fn normalize_route_abort(
         resource_type,
         action: synapse_a11y::CdpFetchRouteAction::Abort(synapse_a11y::CdpFetchRouteAbort {
             error_reason: error_reason.as_cdp_str().to_owned(),
+        }),
+    })
+}
+
+fn normalize_route_continue(
+    params: &BrowserRouteParams,
+    route_id: String,
+) -> Result<synapse_a11y::CdpFetchRouteRule, ErrorData> {
+    let (url, resource_type) = normalize_route_match(params, "add_continue")?;
+    if params.status.is_some()
+        || params.response_phrase.is_some()
+        || !params.headers.is_empty()
+        || params.body.is_some()
+        || params.body_base64.is_some()
+        || params.error_reason.is_some()
+    {
+        return Err(mcp_error(
+            error_codes::TOOL_PARAMS_INVALID,
+            format!(
+                "{ROUTE_TOOL} status, response_phrase, headers, body, body_base64, and error_reason are not valid for add_continue"
+            ),
+        ));
+    }
+    if params.continue_url.is_none()
+        && params.continue_method.is_none()
+        && params.continue_headers.is_empty()
+        && params.continue_post_data.is_none()
+        && params.continue_post_data_base64.is_none()
+    {
+        return Err(mcp_error(
+            error_codes::TOOL_PARAMS_INVALID,
+            format!("{ROUTE_TOOL} add_continue requires at least one override"),
+        ));
+    }
+    let continue_url = params
+        .continue_url
+        .as_deref()
+        .map(validate_route_url)
+        .transpose()?;
+    let continue_method = params
+        .continue_method
+        .as_deref()
+        .map(validate_route_method)
+        .transpose()?;
+    let headers = validate_route_headers(&params.continue_headers)?;
+    let post_data_base64 = normalize_route_continue_post_data(params)?;
+    Ok(synapse_a11y::CdpFetchRouteRule {
+        id: route_id,
+        url,
+        match_kind: match params.match_kind {
+            BrowserRouteMatchKind::Glob => synapse_a11y::CdpFetchRouteMatchKind::Glob,
+            BrowserRouteMatchKind::Regex => synapse_a11y::CdpFetchRouteMatchKind::Regex,
+        },
+        resource_type,
+        action: synapse_a11y::CdpFetchRouteAction::Continue(synapse_a11y::CdpFetchRouteContinue {
+            url: continue_url,
+            method: continue_method,
+            headers,
+            post_data_base64,
         }),
     })
 }
@@ -1421,6 +1518,50 @@ fn validate_route_url(url: &str) -> Result<String, ErrorData> {
     Ok(url.to_owned())
 }
 
+fn validate_route_method(method: &str) -> Result<String, ErrorData> {
+    if method.is_empty() {
+        return Err(mcp_error(
+            error_codes::TOOL_PARAMS_INVALID,
+            format!("{ROUTE_TOOL} continue_method must not be empty"),
+        ));
+    }
+    if method.trim() != method {
+        return Err(mcp_error(
+            error_codes::TOOL_PARAMS_INVALID,
+            format!("{ROUTE_TOOL} continue_method must not contain leading or trailing whitespace"),
+        ));
+    }
+    if method.bytes().any(|byte| {
+        byte <= 0x20
+            || byte >= 0x7f
+            || matches!(
+                byte,
+                b'(' | b')'
+                    | b'<'
+                    | b'>'
+                    | b'@'
+                    | b','
+                    | b';'
+                    | b':'
+                    | b'\\'
+                    | b'"'
+                    | b'/'
+                    | b'['
+                    | b']'
+                    | b'?'
+                    | b'='
+                    | b'{'
+                    | b'}'
+            )
+    }) {
+        return Err(mcp_error(
+            error_codes::TOOL_PARAMS_INVALID,
+            format!("{ROUTE_TOOL} continue_method {method:?} contains an invalid byte"),
+        ));
+    }
+    Ok(method.to_owned())
+}
+
 fn validate_route_response_phrase(value: Option<&str>) -> Result<Option<String>, ErrorData> {
     let Some(value) = value else {
         return Ok(None);
@@ -1571,6 +1712,56 @@ fn normalize_route_body(params: &BrowserRouteParams) -> Result<Option<String>, E
             )
         })?;
         return Ok(Some(body_base64.to_owned()));
+    }
+    Ok(None)
+}
+
+fn normalize_route_continue_post_data(
+    params: &BrowserRouteParams,
+) -> Result<Option<String>, ErrorData> {
+    if params.continue_post_data.is_some() && params.continue_post_data_base64.is_some() {
+        return Err(mcp_error(
+            error_codes::TOOL_PARAMS_INVALID,
+            format!(
+                "{ROUTE_TOOL} accepts continue_post_data or continue_post_data_base64, not both"
+            ),
+        ));
+    }
+    if let Some(post_data) = params.continue_post_data.as_deref() {
+        if post_data.chars().count() > MAX_ROUTE_BODY_CHARS {
+            return Err(mcp_error(
+                error_codes::TOOL_PARAMS_INVALID,
+                format!(
+                    "{ROUTE_TOOL} continue_post_data must be at most {MAX_ROUTE_BODY_CHARS} Unicode scalar values"
+                ),
+            ));
+        }
+        return Ok(Some(BASE64_STANDARD.encode(post_data.as_bytes())));
+    }
+    if let Some(post_data_base64) = params.continue_post_data_base64.as_deref() {
+        if post_data_base64.contains('\0') || post_data_base64.chars().any(char::is_control) {
+            return Err(mcp_error(
+                error_codes::TOOL_PARAMS_INVALID,
+                format!(
+                    "{ROUTE_TOOL} continue_post_data_base64 must not contain control characters"
+                ),
+            ));
+        }
+        if post_data_base64.chars().count() > MAX_ROUTE_BODY_CHARS {
+            return Err(mcp_error(
+                error_codes::TOOL_PARAMS_INVALID,
+                format!(
+                    "{ROUTE_TOOL} continue_post_data_base64 must be at most {MAX_ROUTE_BODY_CHARS} Unicode scalar values"
+                ),
+            ));
+        }
+        BASE64_STANDARD.decode(post_data_base64).map_err(|error| {
+            mcp_error(
+                error_codes::TOOL_PARAMS_INVALID,
+                format!("{ROUTE_TOOL} continue_post_data_base64 is invalid: {error}"),
+            )
+        })?;
+        return Ok(Some(post_data_base64.to_owned()));
     }
     Ok(None)
 }
@@ -1845,6 +2036,8 @@ fn browser_route_rule_to_wire(rule: &synapse_a11y::CdpFetchRouteRule) -> Browser
             action: "fulfill".to_owned(),
             status: Some(fulfill.status),
             error_reason: None,
+            continue_url: None,
+            continue_method: None,
             response_phrase: fulfill.response_phrase.clone(),
             headers: fulfill
                 .headers
@@ -1858,6 +2051,7 @@ fn browser_route_rule_to_wire(rule: &synapse_a11y::CdpFetchRouteRule) -> Browser
                 .body_base64
                 .as_ref()
                 .map(|body| body.chars().count()),
+            post_data_base64_len_chars: None,
         },
         synapse_a11y::CdpFetchRouteAction::Abort(abort) => BrowserRouteRuleResponse {
             id: rule.id.clone(),
@@ -1870,9 +2064,40 @@ fn browser_route_rule_to_wire(rule: &synapse_a11y::CdpFetchRouteRule) -> Browser
             action: "abort".to_owned(),
             status: None,
             error_reason: Some(abort.error_reason.clone()),
+            continue_url: None,
+            continue_method: None,
             response_phrase: None,
             headers: Vec::new(),
             body_base64_len_chars: None,
+            post_data_base64_len_chars: None,
+        },
+        synapse_a11y::CdpFetchRouteAction::Continue(continue_rule) => BrowserRouteRuleResponse {
+            id: rule.id.clone(),
+            url: rule.url.clone(),
+            match_kind: match rule.match_kind {
+                synapse_a11y::CdpFetchRouteMatchKind::Glob => BrowserRouteMatchKind::Glob,
+                synapse_a11y::CdpFetchRouteMatchKind::Regex => BrowserRouteMatchKind::Regex,
+            },
+            resource_type: rule.resource_type.clone(),
+            action: "continue".to_owned(),
+            status: None,
+            error_reason: None,
+            continue_url: continue_rule.url.clone(),
+            continue_method: continue_rule.method.clone(),
+            response_phrase: None,
+            headers: continue_rule
+                .headers
+                .iter()
+                .map(|(name, value)| BrowserRouteHeader {
+                    name: name.clone(),
+                    value: value.clone(),
+                })
+                .collect(),
+            body_base64_len_chars: None,
+            post_data_base64_len_chars: continue_rule
+                .post_data_base64
+                .as_ref()
+                .map(|post_data| post_data.chars().count()),
         },
     }
 }
@@ -2117,6 +2342,7 @@ mod tests {
         let fulfill = match route.action {
             synapse_a11y::CdpFetchRouteAction::Fulfill(fulfill) => fulfill,
             synapse_a11y::CdpFetchRouteAction::Abort(_) => panic!("expected fulfill rule"),
+            synapse_a11y::CdpFetchRouteAction::Continue(_) => panic!("expected fulfill rule"),
         };
         assert_eq!(fulfill.status, 200);
         assert_eq!(fulfill.headers[0].0, "content-type");
@@ -2145,8 +2371,46 @@ mod tests {
         let abort = match route.action {
             synapse_a11y::CdpFetchRouteAction::Abort(abort) => abort,
             synapse_a11y::CdpFetchRouteAction::Fulfill(_) => panic!("expected abort rule"),
+            synapse_a11y::CdpFetchRouteAction::Continue(_) => panic!("expected abort rule"),
         };
         assert_eq!(abort.error_reason, "BlockedByClient");
+    }
+
+    #[test]
+    fn browser_route_add_continue_validation_encodes_post_data() {
+        let normalized = validate_browser_route_params(&BrowserRouteParams {
+            operation: BrowserRouteOperation::AddContinue,
+            route_id: Some("rewrite-api".to_owned()),
+            url: Some("https://example.test/api/*".to_owned()),
+            continue_url: Some("https://example.test/mock".to_owned()),
+            continue_method: Some("POST".to_owned()),
+            continue_headers: vec![BrowserRouteHeader {
+                name: "x-test".to_owned(),
+                value: "yes".to_owned(),
+            }],
+            continue_post_data: Some("{\"patched\":true}".to_owned()),
+            ..Default::default()
+        })
+        .expect("valid continue params pass");
+
+        assert_eq!(normalized.operation, BrowserRouteOperation::AddContinue);
+        assert_eq!(normalized.route_id.as_deref(), Some("rewrite-api"));
+        let route = normalized.route.expect("route normalized");
+        let continue_rule = match route.action {
+            synapse_a11y::CdpFetchRouteAction::Continue(continue_rule) => continue_rule,
+            synapse_a11y::CdpFetchRouteAction::Fulfill(_) => panic!("expected continue rule"),
+            synapse_a11y::CdpFetchRouteAction::Abort(_) => panic!("expected continue rule"),
+        };
+        assert_eq!(
+            continue_rule.url.as_deref(),
+            Some("https://example.test/mock")
+        );
+        assert_eq!(continue_rule.method.as_deref(), Some("POST"));
+        assert_eq!(continue_rule.headers[0].0, "x-test");
+        assert_eq!(
+            continue_rule.post_data_base64.as_deref(),
+            Some(BASE64_STANDARD.encode("{\"patched\":true}").as_str())
+        );
     }
 
     #[test]
@@ -2217,6 +2481,39 @@ mod tests {
                 ..Default::default()
             })
             .expect_err("fulfill rejects error_reason"),
+            validate_browser_route_params(&BrowserRouteParams {
+                operation: BrowserRouteOperation::AddContinue,
+                route_id: Some("continue-empty".to_owned()),
+                url: Some("https://example.test/*".to_owned()),
+                ..Default::default()
+            })
+            .expect_err("continue requires at least one override"),
+            validate_browser_route_params(&BrowserRouteParams {
+                operation: BrowserRouteOperation::AddContinue,
+                route_id: Some("continue-bad-method".to_owned()),
+                url: Some("https://example.test/*".to_owned()),
+                continue_method: Some("BAD METHOD".to_owned()),
+                ..Default::default()
+            })
+            .expect_err("continue method token must be valid"),
+            validate_browser_route_params(&BrowserRouteParams {
+                operation: BrowserRouteOperation::AddContinue,
+                route_id: Some("continue-two-bodies".to_owned()),
+                url: Some("https://example.test/*".to_owned()),
+                continue_post_data: Some("plain".to_owned()),
+                continue_post_data_base64: Some("cGxhaW4=".to_owned()),
+                ..Default::default()
+            })
+            .expect_err("continue postData inputs are mutually exclusive"),
+            validate_browser_route_params(&BrowserRouteParams {
+                operation: BrowserRouteOperation::AddContinue,
+                route_id: Some("continue-fulfill-fields".to_owned()),
+                url: Some("https://example.test/*".to_owned()),
+                status: Some(204),
+                continue_method: Some("GET".to_owned()),
+                ..Default::default()
+            })
+            .expect_err("continue rejects fulfill-only fields"),
         ] {
             let code = error
                 .data
@@ -2273,6 +2570,37 @@ mod tests {
         assert_eq!(wire.error_reason.as_deref(), Some("BlockedByClient"));
         assert!(wire.headers.is_empty());
         assert_eq!(wire.body_base64_len_chars, None);
+        assert_eq!(wire.post_data_base64_len_chars, None);
+    }
+
+    #[test]
+    fn browser_route_rule_wire_maps_continue_overrides() {
+        let rule = synapse_a11y::CdpFetchRouteRule {
+            id: "rewrite-api".to_owned(),
+            url: "https://example.test/api/*".to_owned(),
+            match_kind: synapse_a11y::CdpFetchRouteMatchKind::Glob,
+            resource_type: Some("Fetch".to_owned()),
+            action: synapse_a11y::CdpFetchRouteAction::Continue(
+                synapse_a11y::CdpFetchRouteContinue {
+                    url: Some("https://example.test/mock".to_owned()),
+                    method: Some("POST".to_owned()),
+                    headers: vec![("x-test".to_owned(), "yes".to_owned())],
+                    post_data_base64: Some("eyJwYXRjaGVkIjp0cnVlfQ==".to_owned()),
+                },
+            ),
+        };
+
+        let wire = browser_route_rule_to_wire(&rule);
+        assert_eq!(wire.id, "rewrite-api");
+        assert_eq!(wire.action, "continue");
+        assert_eq!(wire.status, None);
+        assert_eq!(
+            wire.continue_url.as_deref(),
+            Some("https://example.test/mock")
+        );
+        assert_eq!(wire.continue_method.as_deref(), Some("POST"));
+        assert_eq!(wire.headers[0].name, "x-test");
+        assert_eq!(wire.post_data_base64_len_chars, Some(24));
     }
 
     #[test]

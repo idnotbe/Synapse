@@ -246,11 +246,22 @@ pub struct CdpFetchRouteAbort {
     pub error_reason: String,
 }
 
+/// Request overrides used by a Fetch route continue rule.
+#[derive(Clone, Debug, Default, Serialize, PartialEq, Eq)]
+pub struct CdpFetchRouteContinue {
+    pub url: Option<String>,
+    pub method: Option<String>,
+    pub headers: Vec<(String, String)>,
+    /// Base64-encoded request body, as expected by CDP Fetch.continueRequest.
+    pub post_data_base64: Option<String>,
+}
+
 /// Action for a Fetch route rule.
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 pub enum CdpFetchRouteAction {
     Fulfill(CdpFetchRouteFulfill),
     Abort(CdpFetchRouteAbort),
+    Continue(CdpFetchRouteContinue),
 }
 
 /// Per-target Fetch route rule. Rules are evaluated in insertion order; the
@@ -455,6 +466,7 @@ struct FetchInterceptionSlot {
 enum FetchRouteApplied {
     Fulfilled,
     Failed,
+    Continued,
 }
 
 impl Drop for FetchInterceptionSlot {
@@ -848,6 +860,10 @@ pub async fn fetch_interception_ensure(
                                         counters.failed_count =
                                             counters.failed_count.saturating_add(1);
                                     }
+                                    FetchRouteApplied::Continued => {
+                                        counters.continued_count =
+                                            counters.continued_count.saturating_add(1);
+                                    }
                                 }
                             }
                         }
@@ -1211,6 +1227,15 @@ async fn fetch_apply_route(
                 })?;
             Ok(FetchRouteApplied::Failed)
         }
+        CdpFetchRouteAction::Continue(continue_rule) => {
+            let params = fetch_continue_params(event.request_id.clone(), continue_rule)?;
+            page.execute(params)
+                .await
+                .map_err(|err| A11yError::CdpAxtreeFailed {
+                    detail: format!("Fetch.continueRequest route_id={}: {err}", rule.id),
+                })?;
+            Ok(FetchRouteApplied::Continued)
+        }
     }
 }
 
@@ -1237,6 +1262,35 @@ fn fetch_fulfill_params(
         .build()
         .map_err(|detail| A11yError::CdpAttachFailed {
             detail: format!("Fetch.fulfillRequest route params: {detail}"),
+        })
+}
+
+fn fetch_continue_params(
+    request_id: FetchRequestId,
+    continue_rule: &CdpFetchRouteContinue,
+) -> A11yResult<FetchContinueRequestParams> {
+    validate_fetch_route_continue(continue_rule)?;
+    let mut builder = FetchContinueRequestParams::builder().request_id(request_id);
+    if !continue_rule.headers.is_empty() {
+        let headers = continue_rule
+            .headers
+            .iter()
+            .map(|(name, value)| FetchHeaderEntry::new(name.clone(), value.clone()));
+        builder = builder.headers(headers);
+    }
+    if let Some(url) = continue_rule.url.as_deref() {
+        builder = builder.url(url.to_owned());
+    }
+    if let Some(method) = continue_rule.method.as_deref() {
+        builder = builder.method(method.to_owned());
+    }
+    if let Some(post_data_base64) = continue_rule.post_data_base64.as_deref() {
+        builder = builder.post_data(post_data_base64.to_owned());
+    }
+    builder
+        .build()
+        .map_err(|detail| A11yError::CdpAttachFailed {
+            detail: format!("Fetch.continueRequest route params: {detail}"),
         })
 }
 
@@ -1286,6 +1340,9 @@ fn validate_fetch_route_rule(rule: &CdpFetchRouteRule) -> A11yResult<()> {
     match &rule.action {
         CdpFetchRouteAction::Fulfill(fulfill) => validate_fetch_route_fulfill(fulfill)?,
         CdpFetchRouteAction::Abort(abort) => validate_fetch_route_abort(abort)?,
+        CdpFetchRouteAction::Continue(continue_rule) => {
+            validate_fetch_route_continue(continue_rule)?;
+        }
     }
     Ok(())
 }
@@ -1318,6 +1375,41 @@ fn validate_fetch_route_fulfill(fulfill: &CdpFetchRouteFulfill) -> A11yResult<()
     Ok(())
 }
 
+fn validate_fetch_route_continue(continue_rule: &CdpFetchRouteContinue) -> A11yResult<()> {
+    if continue_rule.url.is_none()
+        && continue_rule.method.is_none()
+        && continue_rule.headers.is_empty()
+        && continue_rule.post_data_base64.is_none()
+    {
+        return Err(A11yError::CdpAttachFailed {
+            detail: "Fetch route continue requires at least one override".to_owned(),
+        });
+    }
+    if let Some(url) = continue_rule.url.as_deref() {
+        if url.trim() != url || url.is_empty() || url.contains('\0') {
+            return Err(A11yError::CdpAttachFailed {
+                detail: "Fetch route continue url must be non-empty without surrounding whitespace or NUL"
+                    .to_owned(),
+            });
+        }
+    }
+    if let Some(method) = continue_rule.method.as_deref() {
+        validate_http_method(method)?;
+    }
+    for (name, value) in &continue_rule.headers {
+        validate_header_name(name)?;
+        validate_header_value(value)?;
+    }
+    if let Some(post_data_base64) = continue_rule.post_data_base64.as_deref() {
+        if post_data_base64.contains('\0') {
+            return Err(A11yError::CdpAttachFailed {
+                detail: "Fetch route continue post_data_base64 must not contain NUL".to_owned(),
+            });
+        }
+    }
+    Ok(())
+}
+
 fn validate_fetch_route_abort(abort: &CdpFetchRouteAbort) -> A11yResult<()> {
     if abort.error_reason.trim() != abort.error_reason || abort.error_reason.is_empty() {
         return Err(A11yError::CdpAttachFailed {
@@ -1336,6 +1428,43 @@ fn validate_fetch_route_abort(abort: &CdpFetchRouteAbort) -> A11yResult<()> {
                 abort.error_reason
             ),
         })
+}
+
+fn validate_http_method(value: &str) -> A11yResult<()> {
+    if value.trim() != value || value.is_empty() {
+        return Err(A11yError::CdpAttachFailed {
+            detail: "Fetch route continue method must be non-empty without surrounding whitespace"
+                .to_owned(),
+        });
+    }
+    if value.bytes().any(|byte| {
+        byte <= 0x20
+            || byte >= 0x7f
+            || matches!(
+                byte,
+                b'(' | b')'
+                    | b'<'
+                    | b'>'
+                    | b'@'
+                    | b','
+                    | b';'
+                    | b':'
+                    | b'\\'
+                    | b'"'
+                    | b'/'
+                    | b'['
+                    | b']'
+                    | b'?'
+                    | b'='
+                    | b'{'
+                    | b'}'
+            )
+    }) {
+        return Err(A11yError::CdpAttachFailed {
+            detail: format!("Fetch route continue method {value:?} contains an invalid byte"),
+        });
+    }
+    Ok(())
 }
 
 fn normalize_route_id(route_id: &str) -> A11yResult<&str> {
@@ -1829,6 +1958,7 @@ mod tests {
         let fulfill = match &mut rule.action {
             CdpFetchRouteAction::Fulfill(fulfill) => fulfill,
             CdpFetchRouteAction::Abort(_) => panic!("expected fulfill rule"),
+            CdpFetchRouteAction::Continue(_) => panic!("expected fulfill rule"),
         };
         fulfill.status = 99;
         assert!(validate_fetch_route_rule(&rule).is_err());
@@ -1836,6 +1966,9 @@ mod tests {
         rule.action = CdpFetchRouteAction::Abort(CdpFetchRouteAbort {
             error_reason: "NotAReason".to_owned(),
         });
+        assert!(validate_fetch_route_rule(&rule).is_err());
+
+        rule.action = CdpFetchRouteAction::Continue(CdpFetchRouteContinue::default());
         assert!(validate_fetch_route_rule(&rule).is_err());
     }
 
@@ -1850,6 +1983,7 @@ mod tests {
         {
             CdpFetchRouteAction::Fulfill(fulfill) => fulfill,
             CdpFetchRouteAction::Abort(_) => panic!("expected fulfill rule"),
+            CdpFetchRouteAction::Continue(_) => panic!("expected fulfill rule"),
         };
         let params = fetch_fulfill_params(FetchRequestId::from("intercept-1".to_owned()), &fulfill)
             .expect("fulfill params");
@@ -1861,6 +1995,28 @@ mod tests {
         assert_eq!(value["body"], "eyJvayI6dHJ1ZX0=");
         assert_eq!(value["responseHeaders"][0]["name"], "content-type");
         assert_eq!(value["responseHeaders"][0]["value"], "application/json");
+    }
+
+    #[test]
+    fn fetch_continue_params_serializes_overrides() {
+        let params = fetch_continue_params(
+            FetchRequestId::from("intercept-1".to_owned()),
+            &CdpFetchRouteContinue {
+                url: Some("https://example.test/rewritten".to_owned()),
+                method: Some("POST".to_owned()),
+                headers: vec![("x-test".to_owned(), "yes".to_owned())],
+                post_data_base64: Some("eyJwYXRjaGVkIjp0cnVlfQ==".to_owned()),
+            },
+        )
+        .expect("continue params");
+        let value = serde_json::to_value(params).expect("params json");
+
+        assert_eq!(value["requestId"], "intercept-1");
+        assert_eq!(value["url"], "https://example.test/rewritten");
+        assert_eq!(value["method"], "POST");
+        assert_eq!(value["postData"], "eyJwYXRjaGVkIjp0cnVlfQ==");
+        assert_eq!(value["headers"][0]["name"], "x-test");
+        assert_eq!(value["headers"][0]["value"], "yes");
     }
 
     #[test]
