@@ -3,9 +3,11 @@
 mod cdp;
 mod cdp_action;
 mod cdp_binding;
+mod cdp_clock;
 mod cdp_console;
 mod cdp_dialog;
 mod cdp_dom;
+mod cdp_lifecycle;
 mod cdp_network;
 mod error;
 mod events;
@@ -22,9 +24,11 @@ pub use cdp_action::*;
 #[cfg(windows)]
 pub use cdp_action::{CdpMouseStrokePoint, cdp_mouse_stroke_target};
 pub use cdp_binding::*;
+pub use cdp_clock::*;
 pub use cdp_console::*;
 pub use cdp_dialog::*;
 pub use cdp_dom::*;
+pub use cdp_lifecycle::*;
 pub use cdp_network::*;
 pub use error::*;
 pub use events::*;
