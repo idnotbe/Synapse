@@ -1,4 +1,4 @@
-//! Target-scoped raw-CDP browser emulation helpers (#1173/#1174/#1175/#1176/#1177).
+//! Target-scoped raw-CDP browser emulation helpers (#1173/#1174/#1175/#1176/#1177/#1178).
 
 use std::{
     collections::HashMap,
@@ -16,6 +16,8 @@ pub const CDP_DEVICE_MAX_USER_AGENT_CHARS: usize = 4096;
 pub const CDP_GEOLOCATION_MAX_ACCURACY_METERS: f64 = 1_000_000_000.0;
 pub const CDP_LOCALE_MAX_CHARS: usize = 128;
 pub const CDP_TIMEZONE_MAX_CHARS: usize = 128;
+pub const CDP_NETWORK_MAX_LATENCY_MS: f64 = 3_600_000.0;
+pub const CDP_NETWORK_MAX_THROUGHPUT_BYTES_PER_SEC: f64 = 10_000_000_000.0;
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct CdpViewportOverride {
@@ -196,6 +198,37 @@ pub struct CdpMediaResult {
     pub readback: CdpMediaReadback,
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct CdpNetworkConditionsOverride {
+    pub offline: bool,
+    pub latency_ms: f64,
+    pub download_throughput_bytes_per_sec: f64,
+    pub upload_throughput_bytes_per_sec: f64,
+    pub connection_type: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct CdpNetworkConditionsReadback {
+    pub online: bool,
+    pub connection_type: Option<String>,
+    pub effective_type: Option<String>,
+    pub downlink_mbps: Option<f64>,
+    pub rtt_ms: Option<f64>,
+    pub save_data: Option<bool>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct CdpNetworkConditionsResult {
+    pub endpoint: String,
+    pub cdp_target_id: String,
+    pub operation: String,
+    pub requested: Option<CdpNetworkConditionsOverride>,
+    pub page_url: String,
+    pub page_title: String,
+    pub ready_state: String,
+    pub readback: CdpNetworkConditionsReadback,
+}
+
 enum DeviceMetricsCommand {
     Set(CdpViewportOverride),
     Reset,
@@ -224,6 +257,11 @@ enum LocaleTimezoneCommand {
 
 enum MediaCommand {
     Set(CdpMediaOverride),
+    Reset,
+}
+
+enum NetworkConditionsCommand {
+    Set(CdpNetworkConditionsOverride),
     Reset,
 }
 
@@ -535,6 +573,53 @@ pub async fn cdp_reset_media_override(
     })
 }
 
+/// Applies offline/throttling network conditions to one CDP page target, then
+/// reads back page-visible navigator network state from the same target.
+pub async fn cdp_set_network_conditions(
+    endpoint: &str,
+    target_id: &str,
+    requested: CdpNetworkConditionsOverride,
+) -> A11yResult<CdpNetworkConditionsResult> {
+    validate_network_conditions_override(&requested)?;
+    run_network_conditions_command(
+        endpoint,
+        target_id,
+        NetworkConditionsCommand::Set(requested.clone()),
+    )
+    .await?;
+    let readback = network_conditions_readback(endpoint, target_id).await?;
+    Ok(CdpNetworkConditionsResult {
+        endpoint: endpoint.to_owned(),
+        cdp_target_id: readback.target_id,
+        operation: "set".to_owned(),
+        requested: Some(requested),
+        page_url: readback.url,
+        page_title: readback.title,
+        ready_state: readback.ready_state,
+        readback: readback.metrics,
+    })
+}
+
+/// Clears network-condition emulation for one CDP page target by restoring
+/// Chromium's online/full-speed defaults.
+pub async fn cdp_reset_network_conditions(
+    endpoint: &str,
+    target_id: &str,
+) -> A11yResult<CdpNetworkConditionsResult> {
+    run_network_conditions_command(endpoint, target_id, NetworkConditionsCommand::Reset).await?;
+    let readback = network_conditions_readback(endpoint, target_id).await?;
+    Ok(CdpNetworkConditionsResult {
+        endpoint: endpoint.to_owned(),
+        cdp_target_id: readback.target_id,
+        operation: "reset".to_owned(),
+        requested: None,
+        page_url: readback.url,
+        page_title: readback.title,
+        ready_state: readback.ready_state,
+        readback: readback.metrics,
+    })
+}
+
 fn validate_viewport_override(width: u32, height: u32, device_scale_factor: f64) -> A11yResult<()> {
     if width == 0 || width > CDP_DEVICE_METRICS_MAX_DIMENSION {
         return Err(A11yError::CdpAxtreeFailed {
@@ -786,6 +871,83 @@ fn validate_reduced_motion(value: &str) -> A11yResult<()> {
     } else {
         Err(A11yError::CdpAxtreeFailed {
             detail: format!("reduced_motion must be 'reduce' or 'no-preference', got {value:?}"),
+        })
+    }
+}
+
+fn validate_network_conditions_override(
+    requested: &CdpNetworkConditionsOverride,
+) -> A11yResult<()> {
+    validate_network_latency(requested.latency_ms)?;
+    validate_network_throughput(
+        "download_throughput_bytes_per_sec",
+        requested.download_throughput_bytes_per_sec,
+    )?;
+    validate_network_throughput(
+        "upload_throughput_bytes_per_sec",
+        requested.upload_throughput_bytes_per_sec,
+    )?;
+    if let Some(connection_type) = requested.connection_type.as_deref() {
+        validate_network_connection_type(connection_type)?;
+    }
+    if !requested.offline
+        && requested.latency_ms == 0.0
+        && requested.download_throughput_bytes_per_sec == -1.0
+        && requested.upload_throughput_bytes_per_sec == -1.0
+        && requested.connection_type.is_none()
+    {
+        return Err(A11yError::CdpAxtreeFailed {
+            detail: "network conditions set requires offline=true, latency, throughput and/or connection_type; use reset to restore defaults".to_owned(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_network_latency(value: f64) -> A11yResult<()> {
+    if value.is_finite() && (0.0..=CDP_NETWORK_MAX_LATENCY_MS).contains(&value) {
+        Ok(())
+    } else {
+        Err(A11yError::CdpAxtreeFailed {
+            detail: format!(
+                "latency_ms must be finite and in 0..={CDP_NETWORK_MAX_LATENCY_MS}, got {value}"
+            ),
+        })
+    }
+}
+
+fn validate_network_throughput(field: &str, value: f64) -> A11yResult<()> {
+    if value.is_finite()
+        && (value == -1.0 || (0.0..=CDP_NETWORK_MAX_THROUGHPUT_BYTES_PER_SEC).contains(&value))
+    {
+        Ok(())
+    } else {
+        Err(A11yError::CdpAxtreeFailed {
+            detail: format!(
+                "{field} must be -1 to disable throttling or finite in 0..={CDP_NETWORK_MAX_THROUGHPUT_BYTES_PER_SEC}, got {value}"
+            ),
+        })
+    }
+}
+
+fn validate_network_connection_type(value: &str) -> A11yResult<()> {
+    if matches!(
+        value,
+        "none"
+            | "cellular2g"
+            | "cellular3g"
+            | "cellular4g"
+            | "bluetooth"
+            | "ethernet"
+            | "wifi"
+            | "wimax"
+            | "other"
+    ) {
+        Ok(())
+    } else {
+        Err(A11yError::CdpAxtreeFailed {
+            detail: format!(
+                "connection_type must be one of none, cellular2g, cellular3g, cellular4g, bluetooth, ethernet, wifi, wimax or other, got {value:?}"
+            ),
         })
     }
 }
@@ -1202,6 +1364,70 @@ async fn run_media_command(
     result
 }
 
+#[allow(deprecated)]
+async fn run_network_conditions_command(
+    endpoint: &str,
+    target_id: &str,
+    command: NetworkConditionsCommand,
+) -> A11yResult<()> {
+    use chromiumoxide::Browser;
+    use chromiumoxide::cdp::browser_protocol::network::{
+        ConnectionType, EmulateNetworkConditionsParams,
+    };
+    use futures_util::StreamExt as _;
+
+    let (browser, mut handler) =
+        Browser::connect(endpoint)
+            .await
+            .map_err(|err| A11yError::CdpAttachFailed {
+                detail: format!("connect {endpoint}: {err}"),
+            })?;
+    let handler_task = tokio::spawn(async move { while handler.next().await.is_some() {} });
+
+    let result = async {
+        let page = crate::cdp_action::get_target_page_with_discovery(&browser, target_id).await?;
+        let params = match command {
+            NetworkConditionsCommand::Set(requested) => {
+                let mut builder = EmulateNetworkConditionsParams::builder()
+                    .offline(requested.offline)
+                    .latency(requested.latency_ms)
+                    .download_throughput(requested.download_throughput_bytes_per_sec)
+                    .upload_throughput(requested.upload_throughput_bytes_per_sec);
+                if let Some(connection_type) = requested.connection_type.as_deref() {
+                    let parsed = connection_type.parse::<ConnectionType>().map_err(|err| {
+                        A11yError::CdpAxtreeFailed {
+                            detail: format!("connection_type {connection_type:?}: {err}"),
+                        }
+                    })?;
+                    builder = builder.connection_type(parsed);
+                }
+                builder.build().map_err(|err| A11yError::CdpAxtreeFailed {
+                    detail: format!("Network.emulateNetworkConditions params: {err}"),
+                })?
+            }
+            NetworkConditionsCommand::Reset => EmulateNetworkConditionsParams::builder()
+                .offline(false)
+                .latency(0.0)
+                .download_throughput(-1.0)
+                .upload_throughput(-1.0)
+                .build()
+                .map_err(|err| A11yError::CdpAxtreeFailed {
+                    detail: format!("Network.emulateNetworkConditions reset params: {err}"),
+                })?,
+        };
+        page.execute(params)
+            .await
+            .map_err(|err| A11yError::CdpAxtreeFailed {
+                detail: format!("Network.emulateNetworkConditions: {err}"),
+            })?;
+        Ok(())
+    }
+    .await;
+
+    handler_task.abort();
+    result
+}
+
 struct ViewportReadback {
     target_id: String,
     url: String,
@@ -1240,6 +1466,14 @@ struct MediaReadback {
     title: String,
     ready_state: String,
     metrics: CdpMediaReadback,
+}
+
+struct NetworkConditionsReadback {
+    target_id: String,
+    url: String,
+    title: String,
+    ready_state: String,
+    metrics: CdpNetworkConditionsReadback,
 }
 
 async fn viewport_readback(endpoint: &str, target_id: &str) -> A11yResult<ViewportReadback> {
@@ -1381,6 +1615,32 @@ async fn media_readback(endpoint: &str, target_id: &str) -> A11yResult<MediaRead
         }
     })?;
     Ok(MediaReadback {
+        target_id: evaluated.target_id,
+        url: evaluated.url,
+        title: evaluated.title,
+        ready_state: evaluated.ready_state,
+        metrics,
+    })
+}
+
+async fn network_conditions_readback(
+    endpoint: &str,
+    target_id: &str,
+) -> A11yResult<NetworkConditionsReadback> {
+    let evaluated = crate::cdp_action::cdp_evaluate_expression(
+        endpoint,
+        target_id,
+        NETWORK_CONDITIONS_READBACK_JS,
+        false,
+        true,
+    )
+    .await?;
+    let metrics = serde_json::from_value::<CdpNetworkConditionsReadback>(evaluated.value).map_err(
+        |error| A11yError::CdpAxtreeFailed {
+            detail: format!("network conditions readback decode: {error}"),
+        },
+    )?;
+    Ok(NetworkConditionsReadback {
         target_id: evaluated.target_id,
         url: evaluated.url,
         title: evaluated.title,
@@ -1542,6 +1802,22 @@ const MEDIA_READBACK_JS: &str = r#"(() => {
     color_scheme_no_preference: media("(prefers-color-scheme: no-preference)"),
     reduced_motion_reduce: media("(prefers-reduced-motion: reduce)"),
     reduced_motion_no_preference: media("(prefers-reduced-motion: no-preference)")
+  };
+})()"#;
+
+const NETWORK_CONDITIONS_READBACK_JS: &str = r#"(() => {
+  const nav = globalThis.navigator || null;
+  const connection = nav && (nav.connection || nav.mozConnection || nav.webkitConnection) || null;
+  const finiteNumber = value => {
+    return typeof value === "number" && Number.isFinite(value) ? value : null;
+  };
+  return {
+    online: Boolean(nav ? nav.onLine : false),
+    connection_type: connection && typeof connection.type === "string" ? connection.type : null,
+    effective_type: connection && typeof connection.effectiveType === "string" ? connection.effectiveType : null,
+    downlink_mbps: connection ? finiteNumber(connection.downlink) : null,
+    rtt_ms: connection ? finiteNumber(connection.rtt) : null,
+    save_data: connection && typeof connection.saveData === "boolean" ? connection.saveData : null
   };
 })()"#;
 
@@ -1715,5 +1991,53 @@ mod tests {
             reduced_motion: Some("always".to_owned()),
         };
         assert!(validate_media_override(&bad_motion).is_err());
+    }
+
+    #[test]
+    fn network_conditions_validation_edges() {
+        let offline = CdpNetworkConditionsOverride {
+            offline: true,
+            latency_ms: 0.0,
+            download_throughput_bytes_per_sec: -1.0,
+            upload_throughput_bytes_per_sec: -1.0,
+            connection_type: None,
+        };
+        assert!(validate_network_conditions_override(&offline).is_ok());
+
+        let throttled = CdpNetworkConditionsOverride {
+            offline: false,
+            latency_ms: 400.0,
+            download_throughput_bytes_per_sec: 50_000.0,
+            upload_throughput_bytes_per_sec: 20_000.0,
+            connection_type: Some("cellular3g".to_owned()),
+        };
+        assert!(validate_network_conditions_override(&throttled).is_ok());
+
+        let no_op = CdpNetworkConditionsOverride {
+            offline: false,
+            latency_ms: 0.0,
+            download_throughput_bytes_per_sec: -1.0,
+            upload_throughput_bytes_per_sec: -1.0,
+            connection_type: None,
+        };
+        assert!(validate_network_conditions_override(&no_op).is_err());
+
+        let bad_latency = CdpNetworkConditionsOverride {
+            latency_ms: -1.0,
+            ..offline.clone()
+        };
+        assert!(validate_network_conditions_override(&bad_latency).is_err());
+
+        let bad_throughput = CdpNetworkConditionsOverride {
+            download_throughput_bytes_per_sec: -2.0,
+            ..offline.clone()
+        };
+        assert!(validate_network_conditions_override(&bad_throughput).is_err());
+
+        let bad_connection = CdpNetworkConditionsOverride {
+            connection_type: Some("lte".to_owned()),
+            ..offline
+        };
+        assert!(validate_network_conditions_override(&bad_connection).is_err());
     }
 }
