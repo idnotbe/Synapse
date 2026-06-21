@@ -971,6 +971,7 @@ fn launch_agent_spawn_with_terminal_capture(
     let env = crate::m4::launch_child_environment(params, ACT_SPAWN_AGENT)?;
     let artifacts = agent_spawn_terminal_capture_artifacts(&files.log_dir);
     let spec = CaptureSpec {
+        live_key: Some(spawn_id.to_owned()),
         program: params.target.clone(),
         args: params.args.clone(),
         cwd: params.working_dir.as_ref().map(PathBuf::from),
@@ -993,6 +994,7 @@ fn launch_agent_spawn_with_terminal_capture(
                 "terminal_asciicast_path": artifacts.asciicast_path.display().to_string(),
                 "terminal_capture_status_path": artifacts.status_path.display().to_string(),
                 "terminal_final_screen_path": artifacts.final_screen_path.display().to_string(),
+                "terminal_input_audit_path": artifacts.input_audit_path.display().to_string(),
                 "source_error": error.to_string(),
             }),
         )
@@ -2664,6 +2666,7 @@ impl AgentSpawnFiles {
             terminal_asciicast_path: terminal.asciicast_path.display().to_string(),
             terminal_capture_status_path: terminal.status_path.display().to_string(),
             terminal_final_screen_path: terminal.final_screen_path.display().to_string(),
+            terminal_input_audit_path: terminal.input_audit_path.display().to_string(),
             debug_path: self
                 .debug_path
                 .as_ref()
@@ -2713,6 +2716,7 @@ fn agent_spawn_terminal_capture_artifacts(log_dir: &Path) -> CaptureArtifacts {
         asciicast_path: log_dir.join("terminal.cast"),
         status_path: log_dir.join("terminal-capture-status.json"),
         final_screen_path: log_dir.join("terminal-final-screen.txt"),
+        input_audit_path: log_dir.join("terminal-input-audit.ndjson"),
     }
 }
 
@@ -3105,6 +3109,7 @@ fn write_agent_spawn_daemon_terminal_artifacts(
         "terminal_asciicast_path": terminal.asciicast_path.display().to_string(),
         "terminal_capture_status_path": terminal.status_path.display().to_string(),
         "terminal_final_screen_path": terminal.final_screen_path.display().to_string(),
+        "terminal_input_audit_path": terminal.input_audit_path.display().to_string(),
         "details": details,
     });
     let final_write = serde_json::to_vec_pretty(&final_message)
@@ -3144,6 +3149,8 @@ fn write_agent_spawn_daemon_terminal_artifacts(
         "terminal_capture_status_bytes": file_len(&terminal.status_path),
         "terminal_final_screen_path": terminal.final_screen_path.display().to_string(),
         "terminal_final_screen_bytes": file_len(&terminal.final_screen_path),
+        "terminal_input_audit_path": terminal.input_audit_path.display().to_string(),
+        "terminal_input_audit_bytes": file_len(&terminal.input_audit_path),
         "daemon_terminal_artifact": true,
     });
     let status_write = serde_json::to_vec_pretty(&completion_status)
@@ -5435,6 +5442,8 @@ fn agent_spawn_readiness_file_readback(files: &AgentSpawnFiles) -> Value {
         "terminal_capture_status": read_json_file_lossy(&terminal.status_path),
         "terminal_final_screen_path": terminal.final_screen_path.display().to_string(),
         "terminal_final_screen_bytes": file_len(&terminal.final_screen_path),
+        "terminal_input_audit_path": terminal.input_audit_path.display().to_string(),
+        "terminal_input_audit_bytes": file_len(&terminal.input_audit_path),
     })
 }
 

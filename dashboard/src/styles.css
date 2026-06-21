@@ -42,4 +42,14 @@
   .tracking-normal {
     letter-spacing: 0;
   }
+
+  .terminal-shell .xterm {
+    height: 100%;
+    padding: 8px;
+  }
+
+  .terminal-shell .xterm-viewport,
+  .terminal-shell .xterm-screen {
+    height: 100%;
+  }
 }

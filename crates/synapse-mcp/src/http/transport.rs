@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     io,
     net::SocketAddr,
     process::ExitCode,
@@ -11,12 +11,16 @@ use anyhow::Context;
 use axum::{
     Json, Router,
     body::Body,
-    extract::{DefaultBodyLimit, Path, Query, State},
+    extract::{
+        DefaultBodyLimit, Path, Query, State,
+        ws::{Message, WebSocket, WebSocketUpgrade},
+    },
     http::{HeaderMap, HeaderName, HeaderValue, Request, StatusCode, header},
     middleware,
     response::{Html, IntoResponse, Response},
     routing::{delete, get, post},
 };
+use futures_util::{SinkExt, StreamExt, stream::SplitSink};
 use rmcp::transport::streamable_http_server::{
     StreamableHttpServerConfig, StreamableHttpService,
     session::{SessionState, SessionStore, SessionStoreError, local::LocalSessionManager},
@@ -27,7 +31,12 @@ use synapse_action::ActionHandle;
 use synapse_action::ActionStateSnapshot;
 use synapse_core::Health;
 use synapse_storage::{Db, cf};
-use tokio::{net::TcpListener, sync::watch, task::JoinHandle, time};
+use tokio::{
+    net::TcpListener,
+    sync::{broadcast, watch},
+    task::JoinHandle,
+    time,
+};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
@@ -37,7 +46,13 @@ use crate::{
     m2::M2ServiceConfig,
     m3::M3ServiceConfig,
     m4::M4ServiceConfig,
-    server::SynapseService,
+    server::{
+        SynapseService,
+        terminal_capture::capture::{
+            LiveTerminalSession, TerminalCaptureEvent, TerminalCaptureEventKind,
+            TerminalCaptureStatus, terminal_capture_session,
+        },
+    },
 };
 
 type McpHttpService = StreamableHttpService<SynapseService, LocalSessionManager>;
@@ -515,6 +530,10 @@ fn router(
         .route("/dashboard", get(dashboard_index))
         .route("/dashboard/assets/{asset}", get(dashboard_asset))
         .route("/dashboard/state.json", get(dashboard_state))
+        .route(
+            "/dashboard/agent-terminal/{spawn_id}/ws",
+            get(dashboard_agent_terminal_ws),
+        )
         .route("/dashboard/audit/query", get(dashboard_audit_query))
         .route(
             "/dashboard/saved-views",
@@ -2050,6 +2069,561 @@ async fn dashboard_saved_view_delete(
             error,
         )),
     }
+}
+
+#[derive(Debug, Deserialize)]
+struct DashboardTerminalWsQuery {
+    mode: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DashboardTerminalMode {
+    Observer,
+    Controller,
+}
+
+impl DashboardTerminalMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Observer => "observer",
+            Self::Controller => "controller",
+        }
+    }
+}
+
+const TERMINAL_WS_COMMAND_INPUT: u8 = b'0';
+const TERMINAL_WS_COMMAND_RESIZE: u8 = b'1';
+const TERMINAL_WS_COMMAND_PAUSE: u8 = b'2';
+const TERMINAL_WS_COMMAND_RESUME: u8 = b'3';
+const TERMINAL_WS_COMMAND_AUTH_INIT: u8 = b'{';
+const TERMINAL_WS_SERVER_OUTPUT: u8 = b'0';
+const TERMINAL_WS_SERVER_TITLE: u8 = b'1';
+const TERMINAL_WS_SERVER_PREFS: u8 = b'2';
+const TERMINAL_WS_PAUSED_BUFFER_BYTES_MAX: usize = 64 * 1024 * 1024;
+
+async fn dashboard_agent_terminal_ws(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    Path(spawn_id): Path<String>,
+    Query(query): Query<DashboardTerminalWsQuery>,
+    ws: WebSocketUpgrade,
+) -> Response {
+    if let Err(response) = dashboard_local_only(&state, &headers) {
+        return with_dashboard_security_headers(response);
+    }
+    if !dashboard_valid_agent_spawn_id(&spawn_id) {
+        return with_dashboard_security_headers(dashboard_error_response(
+            StatusCode::BAD_REQUEST,
+            "TERMINAL_SPAWN_ID_INVALID",
+            "terminal WebSocket requires a valid agent-spawn id",
+            Some(serde_json::json!({ "spawn_id": spawn_id })),
+        ));
+    }
+    let mode = match dashboard_terminal_mode(query.mode.as_deref()) {
+        Ok(mode) => mode,
+        Err(response) => return with_dashboard_security_headers(response),
+    };
+    let Some(session) = terminal_capture_session(&spawn_id) else {
+        return with_dashboard_security_headers(dashboard_error_response(
+            StatusCode::CONFLICT,
+            "TERMINAL_SESSION_NOT_LIVE",
+            "terminal WebSocket attach requires a currently running owned-PTY agent spawn",
+            Some(serde_json::json!({
+                "spawn_id": spawn_id,
+                "structured_error": "dead_or_missing_terminal_session",
+            })),
+        ));
+    };
+    let snapshot = match session.snapshot() {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            return with_dashboard_security_headers(dashboard_error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "TERMINAL_SNAPSHOT_FAILED",
+                "terminal WebSocket failed to read the current shadow screen",
+                Some(serde_json::json!({
+                    "spawn_id": spawn_id,
+                    "source_error": error.to_string(),
+                })),
+            ));
+        }
+    };
+    if !matches!(snapshot.status, TerminalCaptureStatus::Running) {
+        return with_dashboard_security_headers(dashboard_error_response(
+            StatusCode::CONFLICT,
+            "TERMINAL_SESSION_FINISHED",
+            "terminal WebSocket attach requires a running PTY session",
+            Some(serde_json::json!({
+                "spawn_id": spawn_id,
+                "status": format!("{:?}", snapshot.status),
+            })),
+        ));
+    }
+
+    let connection_id = uuid::Uuid::new_v4().to_string();
+    tracing::info!(
+        code = "DASHBOARD_TERMINAL_WS_ATTACH",
+        spawn_id,
+        connection_id,
+        mode = mode.as_str(),
+        process_id = snapshot.process_id,
+        "dashboard terminal WebSocket attach accepted"
+    );
+    ws.on_upgrade(move |socket| {
+        dashboard_agent_terminal_ws_loop(socket, session, spawn_id, connection_id, mode)
+    })
+}
+
+async fn dashboard_agent_terminal_ws_loop(
+    socket: WebSocket,
+    session: Arc<LiveTerminalSession>,
+    spawn_id: String,
+    connection_id: String,
+    mode: DashboardTerminalMode,
+) {
+    let (mut sender, mut receiver) = socket.split();
+    let mut events = session.subscribe();
+    let snapshot = match session.snapshot() {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            let _ = terminal_ws_send_prefs(
+                &mut sender,
+                serde_json::json!({
+                    "event": "error",
+                    "code": "TERMINAL_SNAPSHOT_FAILED",
+                    "source_error": error.to_string(),
+                }),
+            )
+            .await;
+            return;
+        }
+    };
+    let snapshot_seq = snapshot.seq;
+    let mut paused = false;
+    let mut paused_frames: VecDeque<Vec<u8>> = VecDeque::new();
+    let mut paused_bytes = 0usize;
+
+    if terminal_ws_send_prefs(
+        &mut sender,
+        serde_json::json!({
+            "event": "attach",
+            "protocol": "ttyd-compatible-1-byte-command",
+            "mode": mode.as_str(),
+            "spawn_id": spawn_id,
+            "connection_id": connection_id,
+            "process_id": snapshot.process_id,
+            "cols": snapshot.cols,
+            "rows": snapshot.rows,
+            "snapshot_seq": snapshot_seq,
+        }),
+    )
+    .await
+    .is_err()
+    {
+        return;
+    }
+    if !snapshot.title.is_empty()
+        && terminal_ws_send_frame(
+            &mut sender,
+            TERMINAL_WS_SERVER_TITLE,
+            snapshot.title.as_bytes(),
+        )
+        .await
+        .is_err()
+    {
+        return;
+    }
+    if terminal_ws_send_frame(
+        &mut sender,
+        TERMINAL_WS_SERVER_OUTPUT,
+        &terminal_snapshot_dump(&snapshot.screen_text),
+    )
+    .await
+    .is_err()
+    {
+        return;
+    }
+
+    loop {
+        tokio::select! {
+            incoming = receiver.next() => {
+                match incoming {
+                    Some(Ok(message)) => {
+                        match terminal_ws_client_payload(message) {
+                            Some(payload) => {
+                                if terminal_ws_handle_client_payload(
+                                    &session,
+                                    &mut sender,
+                                    &connection_id,
+                                    mode,
+                                    &mut paused,
+                                    &mut paused_frames,
+                                    &mut paused_bytes,
+                                    payload,
+                                ).await.is_err() {
+                                    break;
+                                }
+                            }
+                            None => break,
+                        }
+                    }
+                    Some(Err(error)) => {
+                        tracing::warn!(
+                            code = "DASHBOARD_TERMINAL_WS_RECEIVE_FAILED",
+                            spawn_id,
+                            connection_id,
+                            error = %error,
+                            "dashboard terminal WebSocket receive failed"
+                        );
+                        break;
+                    }
+                    None => break,
+                }
+            }
+            event = events.recv() => {
+                match event {
+                    Ok(event) => {
+                        if event.seq <= snapshot_seq {
+                            continue;
+                        }
+                        if terminal_ws_deliver_event(
+                            &mut sender,
+                            event,
+                            paused,
+                            &mut paused_frames,
+                            &mut paused_bytes,
+                        ).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(dropped)) => {
+                        let _ = terminal_ws_send_prefs(
+                            &mut sender,
+                            serde_json::json!({
+                                "event": "stream_lagged",
+                                "dropped_events": dropped,
+                            }),
+                        ).await;
+                        break;
+                    }
+                    Err(broadcast::error::RecvError::Closed) => {
+                        let _ = terminal_ws_send_prefs(
+                            &mut sender,
+                            serde_json::json!({ "event": "closed" }),
+                        ).await;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    tracing::info!(
+        code = "DASHBOARD_TERMINAL_WS_DETACHED",
+        spawn_id,
+        connection_id,
+        mode = mode.as_str(),
+        "dashboard terminal WebSocket detached"
+    );
+}
+
+async fn terminal_ws_handle_client_payload(
+    session: &LiveTerminalSession,
+    sender: &mut SplitSink<WebSocket, Message>,
+    connection_id: &str,
+    mode: DashboardTerminalMode,
+    paused: &mut bool,
+    paused_frames: &mut VecDeque<Vec<u8>>,
+    paused_bytes: &mut usize,
+    payload: Vec<u8>,
+) -> Result<(), ()> {
+    let Some((&command, body)) = payload.split_first() else {
+        return Ok(());
+    };
+    match command {
+        TERMINAL_WS_COMMAND_INPUT => {
+            if mode != DashboardTerminalMode::Controller {
+                let _ = session.audit_rejected_input(connection_id, body, "observer_mode");
+                terminal_ws_send_prefs(
+                    sender,
+                    serde_json::json!({
+                        "event": "input_rejected",
+                        "reason": "observer_mode",
+                    }),
+                )
+                .await
+                .map_err(|_| ())?;
+                return Ok(());
+            }
+            if let Err(error) = session.write_controller_input(connection_id, body) {
+                terminal_ws_send_prefs(
+                    sender,
+                    serde_json::json!({
+                        "event": "input_error",
+                        "reason": error.to_string(),
+                    }),
+                )
+                .await
+                .map_err(|_| ())?;
+            }
+        }
+        TERMINAL_WS_COMMAND_RESIZE => {
+            if mode != DashboardTerminalMode::Controller {
+                terminal_ws_send_prefs(
+                    sender,
+                    serde_json::json!({
+                        "event": "resize_rejected",
+                        "reason": "observer_mode",
+                    }),
+                )
+                .await
+                .map_err(|_| ())?;
+                return Ok(());
+            }
+            match terminal_ws_parse_resize(body) {
+                Ok((cols, rows)) => {
+                    if let Err(error) = session.resize(connection_id, cols, rows) {
+                        terminal_ws_send_prefs(
+                            sender,
+                            serde_json::json!({
+                                "event": "resize_error",
+                                "reason": error.to_string(),
+                            }),
+                        )
+                        .await
+                        .map_err(|_| ())?;
+                    }
+                }
+                Err(error) => {
+                    terminal_ws_send_prefs(
+                        sender,
+                        serde_json::json!({
+                            "event": "resize_error",
+                            "reason": error,
+                        }),
+                    )
+                    .await
+                    .map_err(|_| ())?;
+                }
+            }
+        }
+        TERMINAL_WS_COMMAND_PAUSE => {
+            *paused = true;
+            terminal_ws_send_prefs(
+                sender,
+                serde_json::json!({
+                    "event": "paused",
+                    "buffered_bytes": paused_bytes,
+                }),
+            )
+            .await
+            .map_err(|_| ())?;
+        }
+        TERMINAL_WS_COMMAND_RESUME => {
+            *paused = false;
+            while let Some(frame) = paused_frames.pop_front() {
+                *paused_bytes = paused_bytes.saturating_sub(frame.len());
+                sender
+                    .send(Message::Binary(frame.into()))
+                    .await
+                    .map_err(|_| ())?;
+            }
+            terminal_ws_send_prefs(
+                sender,
+                serde_json::json!({
+                    "event": "resumed",
+                    "buffered_bytes": paused_bytes,
+                }),
+            )
+            .await
+            .map_err(|_| ())?;
+        }
+        TERMINAL_WS_COMMAND_AUTH_INIT => {
+            terminal_ws_send_prefs(
+                sender,
+                serde_json::json!({
+                    "event": "auth",
+                    "status": "local_only_loopback",
+                    "mode": mode.as_str(),
+                }),
+            )
+            .await
+            .map_err(|_| ())?;
+        }
+        _ => {
+            terminal_ws_send_prefs(
+                sender,
+                serde_json::json!({
+                    "event": "unknown_command",
+                    "command": command,
+                }),
+            )
+            .await
+            .map_err(|_| ())?;
+        }
+    }
+    Ok(())
+}
+
+async fn terminal_ws_deliver_event(
+    sender: &mut SplitSink<WebSocket, Message>,
+    event: TerminalCaptureEvent,
+    paused: bool,
+    paused_frames: &mut VecDeque<Vec<u8>>,
+    paused_bytes: &mut usize,
+) -> Result<(), ()> {
+    let frame = match event.kind {
+        TerminalCaptureEventKind::Output(bytes) => {
+            terminal_ws_frame(TERMINAL_WS_SERVER_OUTPUT, &bytes)
+        }
+        TerminalCaptureEventKind::Title(title) => {
+            terminal_ws_frame(TERMINAL_WS_SERVER_TITLE, title.as_bytes())
+        }
+        TerminalCaptureEventKind::Prefs(value) => {
+            let bytes = serde_json::to_vec(&value).map_err(|_| ())?;
+            terminal_ws_frame(TERMINAL_WS_SERVER_PREFS, &bytes)
+        }
+        TerminalCaptureEventKind::Exit(exit_code) => {
+            let bytes = serde_json::to_vec(&serde_json::json!({
+                "event": "exit",
+                "exit_code": exit_code,
+            }))
+            .map_err(|_| ())?;
+            terminal_ws_frame(TERMINAL_WS_SERVER_PREFS, &bytes)
+        }
+    };
+    if paused {
+        terminal_ws_buffer_paused_frame(paused_frames, paused_bytes, frame)
+    } else {
+        sender
+            .send(Message::Binary(frame.into()))
+            .await
+            .map_err(|_| ())
+    }
+}
+
+fn terminal_ws_buffer_paused_frame(
+    paused_frames: &mut VecDeque<Vec<u8>>,
+    paused_bytes: &mut usize,
+    frame: Vec<u8>,
+) -> Result<(), ()> {
+    let new_total = paused_bytes.saturating_add(frame.len());
+    if new_total > TERMINAL_WS_PAUSED_BUFFER_BYTES_MAX {
+        return Err(());
+    }
+    *paused_bytes = new_total;
+    paused_frames.push_back(frame);
+    Ok(())
+}
+
+fn terminal_ws_client_payload(message: Message) -> Option<Vec<u8>> {
+    match message {
+        Message::Binary(bytes) => Some(bytes.to_vec()),
+        Message::Text(text) => Some(text.as_bytes().to_vec()),
+        Message::Ping(_) | Message::Pong(_) => Some(Vec::new()),
+        Message::Close(_) => None,
+    }
+}
+
+async fn terminal_ws_send_prefs(
+    sender: &mut SplitSink<WebSocket, Message>,
+    value: serde_json::Value,
+) -> Result<(), axum::Error> {
+    let bytes =
+        serde_json::to_vec(&value).unwrap_or_else(|_| b"{\"event\":\"encode_error\"}".to_vec());
+    terminal_ws_send_frame(sender, TERMINAL_WS_SERVER_PREFS, &bytes).await
+}
+
+async fn terminal_ws_send_frame(
+    sender: &mut SplitSink<WebSocket, Message>,
+    code: u8,
+    payload: &[u8],
+) -> Result<(), axum::Error> {
+    sender
+        .send(Message::Binary(terminal_ws_frame(code, payload).into()))
+        .await
+}
+
+fn terminal_ws_frame(code: u8, payload: &[u8]) -> Vec<u8> {
+    let mut frame = Vec::with_capacity(payload.len() + 1);
+    frame.push(code);
+    frame.extend_from_slice(payload);
+    frame
+}
+
+fn terminal_snapshot_dump(screen_text: &str) -> Vec<u8> {
+    let mut dump = Vec::from(&b"\x1b[H\x1b[2J"[..]);
+    if !screen_text.is_empty() {
+        dump.extend_from_slice(screen_text.replace('\n', "\r\n").as_bytes());
+    }
+    dump
+}
+
+fn terminal_ws_parse_resize(payload: &[u8]) -> Result<(u16, u16), String> {
+    let text = std::str::from_utf8(payload)
+        .map_err(|error| format!("resize payload must be UTF-8: {error}"))?
+        .trim();
+    if text.is_empty() {
+        return Err("resize payload is empty".to_owned());
+    }
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(text) {
+        let cols = value
+            .get("cols")
+            .or_else(|| value.get("columns"))
+            .and_then(serde_json::Value::as_u64)
+            .ok_or_else(|| "resize JSON requires cols/columns".to_owned())?;
+        let rows = value
+            .get("rows")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or_else(|| "resize JSON requires rows".to_owned())?;
+        return terminal_ws_validate_size(cols, rows);
+    }
+    let parts: Vec<&str> = text
+        .split(|ch: char| matches!(ch, 'x' | 'X' | ',' | ' '))
+        .filter(|part| !part.is_empty())
+        .collect();
+    if parts.len() != 2 {
+        return Err("resize payload must be COLSxROWS or JSON".to_owned());
+    }
+    let cols = parts[0]
+        .parse::<u64>()
+        .map_err(|error| format!("resize cols invalid: {error}"))?;
+    let rows = parts[1]
+        .parse::<u64>()
+        .map_err(|error| format!("resize rows invalid: {error}"))?;
+    terminal_ws_validate_size(cols, rows)
+}
+
+fn terminal_ws_validate_size(cols: u64, rows: u64) -> Result<(u16, u16), String> {
+    if !(1..=500).contains(&cols) || !(1..=500).contains(&rows) {
+        return Err("resize dimensions must be in 1..=500".to_owned());
+    }
+    Ok((cols as u16, rows as u16))
+}
+
+fn dashboard_terminal_mode(value: Option<&str>) -> Result<DashboardTerminalMode, Response> {
+    match value
+        .unwrap_or("observer")
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "" | "observer" | "observe" | "read" => Ok(DashboardTerminalMode::Observer),
+        "controller" | "control" | "write" => Ok(DashboardTerminalMode::Controller),
+        other => Err(with_dashboard_security_headers(dashboard_error_response(
+            StatusCode::BAD_REQUEST,
+            "TERMINAL_MODE_INVALID",
+            "terminal WebSocket mode must be observer or controller",
+            Some(serde_json::json!({ "mode": other })),
+        ))),
+    }
+}
+
+fn dashboard_valid_agent_spawn_id(spawn_id: &str) -> bool {
+    spawn_id.starts_with("agent-spawn-")
+        && spawn_id.len() <= 128
+        && spawn_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
 }
 
 async fn dashboard_state(State(state): State<HttpState>, headers: HeaderMap) -> Response {
@@ -3829,12 +4403,12 @@ fn dashboard_unix_time_ms() -> u64 {
         .unwrap_or(u64::MAX)
 }
 
-const DASHBOARD_CSS_FILE: &str = "dashboard-Q9YZZntQ.css";
-const DASHBOARD_JS_FILE: &str = "dashboard-wVoSnP4z.js";
+const DASHBOARD_CSS_FILE: &str = "dashboard-Bpv19k_h.css";
+const DASHBOARD_JS_FILE: &str = "dashboard-Brqc8fmO.js";
 const DASHBOARD_HTML: &str = include_str!("../../../../dashboard/dist/index.html");
 const DASHBOARD_CSS: &str =
-    include_str!("../../../../dashboard/dist/assets/dashboard-Q9YZZntQ.css");
-const DASHBOARD_JS: &str = include_str!("../../../../dashboard/dist/assets/dashboard-wVoSnP4z.js");
+    include_str!("../../../../dashboard/dist/assets/dashboard-Bpv19k_h.css");
+const DASHBOARD_JS: &str = include_str!("../../../../dashboard/dist/assets/dashboard-Brqc8fmO.js");
 #[cfg(test)]
 const DASHBOARD_APP_SOURCE: &str = include_str!("../../../../dashboard/src/app.tsx");
 #[cfg(test)]
@@ -4183,6 +4757,54 @@ mod tests {
         assert!(DASHBOARD_JS.contains("_synapse_dashboard_asset"));
         assert!(DASHBOARD_JS.contains("synapse.dashboard.asset-reload"));
         assert!(DASHBOARD_JS.contains("invalid_server_asset_id"));
+    }
+
+    #[test]
+    fn dashboard_bundle_contains_terminal_ws_contract() {
+        assert!(DASHBOARD_APP_SOURCE.contains("/dashboard/agent-terminal/"));
+        assert!(DASHBOARD_APP_SOURCE.contains("TERMINAL_CLIENT_PAUSE"));
+        assert!(DASHBOARD_APP_SOURCE.contains("TERMINAL_CLIENT_RESUME"));
+        assert!(DASHBOARD_APP_SOURCE.contains("TERMINAL_CLIENT_INPUT"));
+        assert!(DASHBOARD_APP_SOURCE.contains("TERMINAL_SERVER_OUTPUT"));
+        assert!(DASHBOARD_JS.contains("/dashboard/agent-terminal/"));
+    }
+
+    #[test]
+    fn terminal_ws_resize_payload_accepts_text_and_json() {
+        assert_eq!(
+            terminal_ws_parse_resize(b"120x40").expect("text resize"),
+            (120, 40)
+        );
+        assert_eq!(
+            terminal_ws_parse_resize(br#"{"cols":100,"rows":32}"#).expect("json resize"),
+            (100, 32)
+        );
+        assert!(terminal_ws_parse_resize(b"0x40").is_err());
+        assert!(terminal_ws_parse_resize(b"120").is_err());
+    }
+
+    #[test]
+    fn terminal_ws_paused_buffer_preserves_order_and_caps_floods() {
+        let mut frames = VecDeque::new();
+        let mut bytes = 0usize;
+        let first = terminal_ws_frame(TERMINAL_WS_SERVER_OUTPUT, b"first");
+        let second = terminal_ws_frame(TERMINAL_WS_SERVER_OUTPUT, b"second");
+
+        terminal_ws_buffer_paused_frame(&mut frames, &mut bytes, first.clone())
+            .expect("first paused frame should buffer");
+        terminal_ws_buffer_paused_frame(&mut frames, &mut bytes, second.clone())
+            .expect("second paused frame should buffer");
+
+        assert_eq!(bytes, first.len() + second.len());
+        assert_eq!(frames.pop_front(), Some(first.clone()));
+        assert_eq!(frames.pop_front(), Some(second.clone()));
+
+        let mut near_limit = TERMINAL_WS_PAUSED_BUFFER_BYTES_MAX;
+        let mut full = VecDeque::new();
+        full.push_back(vec![TERMINAL_WS_SERVER_OUTPUT; near_limit]);
+        assert!(terminal_ws_buffer_paused_frame(&mut full, &mut near_limit, vec![b'x']).is_err());
+        assert_eq!(near_limit, TERMINAL_WS_PAUSED_BUFFER_BYTES_MAX);
+        assert_eq!(full.len(), 1);
     }
 
     #[test]

@@ -46,6 +46,28 @@ impl ShadowScreen {
         self.rows as u16
     }
 
+    pub(crate) fn resize(&mut self, cols: u16, rows: u16) {
+        let new_cols = (cols as usize).max(1);
+        let new_rows = (rows as usize).max(1);
+        if new_cols == self.cols && new_rows == self.rows {
+            return;
+        }
+        let mut new_cells = vec![' '; new_cols * new_rows];
+        let copy_rows = self.rows.min(new_rows);
+        let copy_cols = self.cols.min(new_cols);
+        for row in 0..copy_rows {
+            let old_start = row * self.cols;
+            let new_start = row * new_cols;
+            new_cells[new_start..new_start + copy_cols]
+                .copy_from_slice(&self.cells[old_start..old_start + copy_cols]);
+        }
+        self.cols = new_cols;
+        self.rows = new_rows;
+        self.cells = new_cells;
+        self.cursor_row = self.cursor_row.min(self.rows - 1);
+        self.cursor_col = self.cursor_col.min(self.cols - 1);
+    }
+
     /// Feeds raw terminal bytes, updating the grid and cursor.
     pub(crate) fn feed(&mut self, bytes: &[u8]) {
         // Drive the byte-level VT state machine, which emits decoded actions.
@@ -185,6 +207,10 @@ enum VtState {
     Escape,
     /// Inside a CSI (`ESC [`) sequence, collecting parameters.
     Csi,
+    /// Inside an OSC (`ESC ]`) sequence, skipped for text-grid rendering.
+    Osc,
+    /// Saw ESC inside OSC; `ESC \` terminates the OSC.
+    OscEscape,
 }
 
 /// Byte-level VT state machine. Decodes UTF-8 printables and the supported C0 /
@@ -241,6 +267,8 @@ impl VtParser {
                     if byte == b'[' {
                         self.state = VtState::Csi;
                         self.csi_params.clear();
+                    } else if byte == b']' {
+                        self.state = VtState::Osc;
                     } else {
                         // Non-CSI escape (e.g. ESC c reset) — not modeled; drop.
                         self.state = VtState::Ground;
@@ -264,6 +292,22 @@ impl VtParser {
                         self.state = VtState::Ground;
                         i += 1;
                     }
+                }
+                VtState::Osc => {
+                    if byte == 0x07 {
+                        self.state = VtState::Ground;
+                    } else if byte == 0x1B {
+                        self.state = VtState::OscEscape;
+                    }
+                    i += 1;
+                }
+                VtState::OscEscape => {
+                    self.state = if byte == b'\\' {
+                        VtState::Ground
+                    } else {
+                        VtState::Osc
+                    };
+                    i += 1;
                 }
             }
         }
@@ -403,6 +447,29 @@ mod tests {
         // Bold red "OK" then reset — SGR must be skipped, leaving just "OK".
         screen.feed(b"\x1b[1;31mOK\x1b[0m");
         assert_eq!(screen.render_text(), "OK");
+    }
+
+    #[test]
+    fn osc_title_sequences_do_not_render_as_text() {
+        let mut screen = ShadowScreen::new(40, 2);
+        screen.feed(b"\x1b]0;window title\x07ready");
+        assert_eq!(screen.render_text(), "ready");
+    }
+
+    #[test]
+    fn split_osc_st_sequence_is_consumed() {
+        let mut screen = ShadowScreen::new(40, 2);
+        screen.feed(b"before\x1b]2;window");
+        screen.feed(b" title\x1b\\after");
+        assert_eq!(screen.render_text(), "beforeafter");
+    }
+
+    #[test]
+    fn resize_preserves_overlapping_cells() {
+        let mut screen = ShadowScreen::new(6, 2);
+        screen.feed(b"abcdef\r\nXYZ");
+        screen.resize(4, 3);
+        assert_eq!(screen.render_text(), "abcd\nXYZ");
     }
 
     #[test]

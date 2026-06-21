@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { flexRender, getCoreRowModel, getSortedRowModel, useReactTable, type ColumnDef, type SortingState } from "@tanstack/react-table";
+import { Terminal as XTerm } from "@xterm/xterm";
 import { Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip as ChartTooltip, XAxis, YAxis } from "recharts";
 import {
   ArrowUpDown,
@@ -14,6 +15,7 @@ import {
   Eraser,
   FileSearch,
   Gauge,
+  Keyboard,
   MonitorUp,
   Moon,
   Network,
@@ -30,11 +32,13 @@ import {
   ShieldCheck,
   SkipForward,
   Sun,
+  TerminalSquare,
   Trash2,
   UserRound,
   X,
   type LucideIcon
 } from "lucide-react";
+import "@xterm/xterm/css/xterm.css";
 import commandMarkUrl from "@/assets/synapse-command-mark.png";
 import emptyStateUrl from "@/assets/synapse-empty-state.webp";
 import statusIconsUrl from "@/assets/synapse-status-icons.webp";
@@ -850,11 +854,260 @@ function AgentView({
         <AgentPeek agent={selectedAgent} />
       </Section>
       <div className="min-w-0">
+        <AgentTerminalPanel agent={selectedAgent} />
         <ToolActivity toolCalls={toolCalls} onAuditKeySelect={onAuditKeySelect} />
         <TranscriptSamples state={state} />
       </div>
     </div>
   );
+}
+
+const TERMINAL_CLIENT_INPUT = "0".charCodeAt(0);
+const TERMINAL_CLIENT_RESIZE = "1".charCodeAt(0);
+const TERMINAL_CLIENT_PAUSE = "2".charCodeAt(0);
+const TERMINAL_CLIENT_RESUME = "3".charCodeAt(0);
+const TERMINAL_CLIENT_AUTH_INIT = "{".charCodeAt(0);
+const TERMINAL_SERVER_OUTPUT = "0".charCodeAt(0);
+const TERMINAL_SERVER_TITLE = "1".charCodeAt(0);
+const TERMINAL_SERVER_PREFS = "2".charCodeAt(0);
+const TERMINAL_FLOW_HIGH_BYTES = 512 * 1024;
+const TERMINAL_FLOW_LOW_BYTES = 128 * 1024;
+
+type AgentTerminalMode = "observer" | "controller";
+
+function AgentTerminalPanel({ agent }: { agent?: AgentSummary }) {
+  const spawnId = agent?.spawnId;
+  const [mode, setMode] = useState<AgentTerminalMode>("observer");
+  const [status, setStatus] = useState<"idle" | "connecting" | "open" | "closed" | "error">("idle");
+  const [title, setTitle] = useState("");
+  const [flow, setFlow] = useState<"open" | "paused">("open");
+  const [lastPrefs, setLastPrefs] = useState<Record<string, unknown> | null>(null);
+  const [stats, setStats] = useState({ bytes: 0, frames: 0 });
+  const containerRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!spawnId || !containerRef.current) {
+      setStatus("idle");
+      return;
+    }
+
+    const container = containerRef.current;
+    const terminal = new XTerm({
+      allowProposedApi: false,
+      convertEol: true,
+      cursorBlink: mode === "controller",
+      disableStdin: mode !== "controller",
+      fontFamily: "var(--font-mono)",
+      fontSize: 13,
+      lineHeight: 1.35,
+      scrollback: 5000,
+      theme: terminalTheme()
+    });
+    terminal.open(container);
+    terminal.clear();
+
+    const socket = new WebSocket(terminalWsUrl(spawnId, mode));
+    socket.binaryType = "arraybuffer";
+    const outputDecoder = new TextDecoder();
+    const textDecoder = new TextDecoder();
+    const textEncoder = new TextEncoder();
+    const pending: string[] = [];
+    const pendingBytes = { value: 0 };
+    const writing = { value: false };
+    const serverPaused = { value: false };
+    let disposed = false;
+
+    const sendFrame = (code: number, payload?: Uint8Array | string) => {
+      if (socket.readyState !== WebSocket.OPEN) return;
+      const bytes = typeof payload === "string" ? textEncoder.encode(payload) : payload ?? new Uint8Array();
+      const frame = new Uint8Array(bytes.length + 1);
+      frame[0] = code;
+      frame.set(bytes, 1);
+      socket.send(frame);
+    };
+
+    const pauseServer = () => {
+      if (serverPaused.value) return;
+      serverPaused.value = true;
+      setFlow("paused");
+      sendFrame(TERMINAL_CLIENT_PAUSE);
+    };
+
+    const resumeServer = () => {
+      if (!serverPaused.value || pendingBytes.value > TERMINAL_FLOW_LOW_BYTES) return;
+      serverPaused.value = false;
+      setFlow("open");
+      sendFrame(TERMINAL_CLIENT_RESUME);
+    };
+
+    const pump = () => {
+      if (disposed || writing.value || pending.length === 0) {
+        resumeServer();
+        return;
+      }
+      const chunk = pending.shift() ?? "";
+      writing.value = true;
+      terminal.write(chunk, () => {
+        pendingBytes.value = Math.max(0, pendingBytes.value - textEncoder.encode(chunk).byteLength);
+        writing.value = false;
+        resumeServer();
+        pump();
+      });
+    };
+
+    const enqueueOutput = (payload: Uint8Array) => {
+      const text = outputDecoder.decode(payload, { stream: true });
+      if (!text) return;
+      pending.push(text);
+      pendingBytes.value += payload.byteLength;
+      setStats((current) => ({
+        bytes: current.bytes + payload.byteLength,
+        frames: current.frames + 1
+      }));
+      if (pendingBytes.value > TERMINAL_FLOW_HIGH_BYTES) pauseServer();
+      pump();
+    };
+
+    const sendResize = () => {
+      const rect = container.getBoundingClientRect();
+      const cols = Math.max(20, Math.min(240, Math.floor((rect.width - 16) / 8)));
+      const rows = Math.max(8, Math.min(80, Math.floor((rect.height - 16) / 18)));
+      terminal.resize(cols, rows);
+      if (mode === "controller") sendFrame(TERMINAL_CLIENT_RESIZE, `${cols}x${rows}`);
+    };
+
+    const dataDisposable = terminal.onData((data) => {
+      if (mode !== "controller") return;
+      sendFrame(TERMINAL_CLIENT_INPUT, textEncoder.encode(data));
+    });
+
+    const resizeObserver = new ResizeObserver(sendResize);
+    resizeObserver.observe(container);
+
+    socket.onopen = () => {
+      setStatus("open");
+      sendFrame(TERMINAL_CLIENT_AUTH_INIT, JSON.stringify({ mode }));
+      sendResize();
+    };
+    socket.onerror = () => setStatus("error");
+    socket.onclose = () => {
+      setStatus((current) => (current === "error" ? "error" : "closed"));
+    };
+    socket.onmessage = (event) => {
+      const bytes = terminalFrameBytes(event.data, textEncoder);
+      if (bytes.length === 0) return;
+      const code = bytes[0];
+      const payload = bytes.slice(1);
+      if (code === TERMINAL_SERVER_OUTPUT) {
+        enqueueOutput(payload);
+      } else if (code === TERMINAL_SERVER_TITLE) {
+        setTitle(textDecoder.decode(payload));
+      } else if (code === TERMINAL_SERVER_PREFS) {
+        const raw = textDecoder.decode(payload);
+        try {
+          const prefs = JSON.parse(raw) as Record<string, unknown>;
+          setLastPrefs(prefs);
+          if (prefs.event === "paused") setFlow("paused");
+          if (prefs.event === "resumed") setFlow("open");
+          if (prefs.event === "exit") setStatus("closed");
+        } catch {
+          setLastPrefs({ raw });
+        }
+      }
+    };
+
+    setStatus("connecting");
+    setStats({ bytes: 0, frames: 0 });
+    setTitle("");
+    setFlow("open");
+    setLastPrefs(null);
+
+    return () => {
+      disposed = true;
+      resizeObserver.disconnect();
+      dataDisposable.dispose();
+      socket.close();
+      terminal.dispose();
+    };
+  }, [mode, spawnId]);
+
+  if (!spawnId) {
+    return (
+      <Section
+        title="Terminal"
+        tier="drill-down"
+        questions={["Which PTY session is selected?", "Can the current screen be attached?", "Is controller input available?"]}
+      >
+        <EmptyStateArt title="No owned PTY terminal selected" />
+      </Section>
+    );
+  }
+
+  return (
+    <Section
+      title="Terminal"
+      tier="drill-down"
+      questions={["Which PTY session is selected?", "Can the current screen be attached?", "Is controller input available?"]}
+      actions={
+        <div className="flex items-center gap-2">
+          <Button type="button" variant={mode === "observer" ? "secondary" : "ghost"} size="sm" onClick={() => setMode("observer")}>
+            <TerminalSquare aria-hidden="true" className="h-4 w-4" />
+            Observer
+          </Button>
+          <Button type="button" variant={mode === "controller" ? "secondary" : "ghost"} size="sm" onClick={() => setMode("controller")}>
+            <Keyboard aria-hidden="true" className="h-4 w-4" />
+            Controller
+          </Button>
+        </div>
+      }
+    >
+      <div className="grid gap-3 md:grid-cols-4">
+        <MetricRow label="Spawn" value={spawnId} />
+        <MetricRow label="Socket" value={status} />
+        <MetricRow label="Flow" value={flow} />
+        <MetricRow label="Frames" value={stats.frames.toLocaleString()} />
+      </div>
+      {title ? <div className="mt-3 truncate font-mono text-xs text-secondary">{title}</div> : null}
+      <div ref={containerRef} className="terminal-shell mt-3 h-[28rem] overflow-hidden rounded-lg border border-border bg-surface-2" />
+      {lastPrefs ? <RawValue value={lastPrefs} label="Terminal prefs" /> : null}
+    </Section>
+  );
+}
+
+function terminalTheme() {
+  return {
+    background: "#050607",
+    foreground: "#d7dde5",
+    cursor: "#f5c542",
+    selectionBackground: "#34506f",
+    black: "#111418",
+    red: "#ff6b6b",
+    green: "#7bd88f",
+    yellow: "#f7c948",
+    blue: "#6ab0ff",
+    magenta: "#d19afe",
+    cyan: "#5ed9d1",
+    white: "#e6edf3",
+    brightBlack: "#667085",
+    brightRed: "#ff8787",
+    brightGreen: "#9be9a8",
+    brightYellow: "#ffd166",
+    brightBlue: "#8cc8ff",
+    brightMagenta: "#e0b3ff",
+    brightCyan: "#8cf0ea",
+    brightWhite: "#ffffff"
+  };
+}
+
+function terminalWsUrl(spawnId: string, mode: AgentTerminalMode): string {
+  const scheme = window.location.protocol === "https:" ? "wss:" : "ws:";
+  return `${scheme}//${window.location.host}/dashboard/agent-terminal/${encodeURIComponent(spawnId)}/ws?mode=${mode}`;
+}
+
+function terminalFrameBytes(data: unknown, encoder: TextEncoder): Uint8Array {
+  if (data instanceof ArrayBuffer) return new Uint8Array(data);
+  if (data instanceof Blob) return new Uint8Array();
+  return encoder.encode(String(data ?? ""));
 }
 
 function TasksView({ agents, attentionCount }: { agents: AgentSummary[]; attentionCount: number }) {

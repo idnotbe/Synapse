@@ -1168,6 +1168,7 @@ pub struct ActSpawnAgentLogPaths {
     pub terminal_asciicast_path: String,
     pub terminal_capture_status_path: String,
     pub terminal_final_screen_path: String,
+    pub terminal_input_audit_path: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub debug_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
