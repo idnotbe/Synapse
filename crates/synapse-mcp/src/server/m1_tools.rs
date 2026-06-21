@@ -7,6 +7,7 @@ use super::{
     BrowserLayoutRelation, BrowserLocateEngine, BrowserLocateParams, BrowserLocateResponse,
     BrowserSetContentParams, BrowserSetContentResponse, BrowserTabEntry, BrowserTabsParams,
     BrowserTabsResponse, BrowserWaitForFunctionParams, BrowserWaitForFunctionResponse,
+    BrowserWaitForLoadStateParams, BrowserWaitForLoadStateResponse, BrowserWaitForLoadStateState,
     BrowserWaitForParams, BrowserWaitForResponse, BrowserWaitForSelectorParams,
     BrowserWaitForSelectorResponse, BrowserWaitForSelectorState, BrowserWaitForState,
     CaptureScreenshotFormat, CaptureScreenshotParams, CaptureScreenshotResponse,
@@ -2059,6 +2060,59 @@ impl SynapseService {
         self.audit_action_started_with_details_for_session(TOOL, &request_details, &session_id)?;
         let result = self
             .browser_wait_for_impl(&session_id, window_hwnd, &cdp_target_id, &wait)
+            .await;
+        self.audit_action_result_for_session(TOOL, &result, &session_id)?;
+        result.map(Json)
+    }
+
+    #[tool(
+        description = "Wait for a page lifecycle state in the calling session's owned browser tab: domcontentloaded, load, or networkidle. networkidle requires load plus no in-flight Network requests for 500 ms, using target-scoped Page lifecycle and Network event readback. Timed-out waits return BROWSER_WAIT_TIMEOUT. Target-scoped and background-safe: never activates the tab, never uses OS foreground input, and never falls back to the human foreground tab. Raw CDP only; the popup-safe normal Chrome extension bridge fails closed."
+    )]
+    pub async fn browser_wait_for_load_state(
+        &self,
+        params: Parameters<BrowserWaitForLoadStateParams>,
+        request_context: RequestContext<RoleServer>,
+    ) -> Result<Json<BrowserWaitForLoadStateResponse>, ErrorData> {
+        const TOOL: &str = "browser_wait_for_load_state";
+        tracing::info!(
+            code = "MCP_TOOL_INVOCATION",
+            kind = TOOL,
+            "tool.invocation kind=browser_wait_for_load_state"
+        );
+        let session_id = require_target_session_id(&request_context)?;
+        let wait = validate_browser_wait_for_load_state_params(&params.0)?;
+        let request_details = json!({
+            "session_id": &session_id,
+            "window_hwnd": params.0.window_hwnd,
+            "requested_cdp_target": cdp_target_id_audit_ref(params.0.cdp_target_id.as_deref()),
+            "state": wait.state,
+            "timeout_ms": wait.timeout_ms,
+            "required_foreground": false,
+            "phase": "target_resolution",
+        });
+        let resolution = self.resolve_cdp_tab_mutation_target(
+            TOOL,
+            &session_id,
+            params.0.window_hwnd,
+            params.0.cdp_target_id.as_deref(),
+        );
+        let (window_hwnd, cdp_target_id) = self.audit_cdp_target_resolution_result(
+            TOOL,
+            &session_id,
+            &request_details,
+            resolution,
+        )?;
+        let request_details = json!({
+            "session_id": &session_id,
+            "window_hwnd": window_hwnd,
+            "cdp_target_id": &cdp_target_id,
+            "state": wait.state,
+            "timeout_ms": wait.timeout_ms,
+            "required_foreground": false,
+        });
+        self.audit_action_started_with_details_for_session(TOOL, &request_details, &session_id)?;
+        let result = self
+            .browser_wait_for_load_state_impl(&session_id, window_hwnd, &cdp_target_id, &wait)
             .await;
         self.audit_action_result_for_session(TOOL, &result, &session_id)?;
         result.map(Json)
@@ -4701,6 +4755,87 @@ impl SynapseService {
     }
 
     #[cfg(windows)]
+    async fn browser_wait_for_load_state_impl(
+        &self,
+        session_id: &str,
+        window_hwnd: i64,
+        cdp_target_id: &str,
+        wait: &NormalizedBrowserWaitForLoadStateParams,
+    ) -> Result<BrowserWaitForLoadStateResponse, ErrorData> {
+        const TOOL: &str = "browser_wait_for_load_state";
+        let Some(endpoint) = synapse_a11y::endpoint_for_window(window_hwnd) else {
+            return Err(browser_raw_cdp_required_error(TOOL, window_hwnd));
+        };
+        let requested_state = browser_wait_for_load_state_to_a11y(wait.state);
+        let waited = synapse_a11y::cdp_wait_for_load_state(
+            &endpoint,
+            cdp_target_id,
+            requested_state,
+            wait.timeout_ms,
+        )
+        .await
+        .map_err(|error| {
+            mcp_error(
+                error.code(),
+                format!("browser_wait_for_load_state raw CDP wait failed: {error}"),
+            )
+        })?;
+        tracing::info!(
+            code = "CDP_BACKGROUND_WAIT_FOR_LOAD_STATE",
+            session_id = %session_id,
+            hwnd = window_hwnd,
+            endpoint = %endpoint,
+            cdp_target_id = %waited.target_id,
+            state = ?wait.state,
+            elapsed_ms = waited.elapsed_ms,
+            event_count = waited.event_count,
+            network_event_count = waited.network_event_count,
+            max_in_flight_requests = waited.max_in_flight_requests,
+            in_flight_requests = waited.in_flight_requests,
+            target_url = %waited.url,
+            "readback=Page.lifecycleEvent+Network.buffer(browser_wait_for_load_state) outcome=wait_satisfied"
+        );
+        Ok(BrowserWaitForLoadStateResponse {
+            session_id: session_id.to_owned(),
+            window_hwnd,
+            transport: "raw_cdp".to_owned(),
+            endpoint,
+            cdp_target_id: waited.target_id,
+            state: wait.state,
+            condition_met: true,
+            elapsed_ms: waited.elapsed_ms,
+            timeout_ms: wait.timeout_ms,
+            event_count: waited.event_count,
+            network_event_count: waited.network_event_count,
+            max_in_flight_requests: waited.max_in_flight_requests,
+            in_flight_requests: waited.in_flight_requests,
+            network_idle_quiet_ms: waited.network_idle_quiet_ms,
+            lifecycle_network_idle_seen: waited.lifecycle_network_idle_seen,
+            url: waited.url,
+            title: waited.title,
+            ready_state: waited.ready_state,
+            readback_backend:
+                "Page.lifecycleEvent + Network event buffer(browser_wait_for_load_state)".to_owned(),
+            backend_tier_used: "cdp".to_owned(),
+            required_foreground: false,
+        })
+    }
+
+    #[cfg(not(windows))]
+    async fn browser_wait_for_load_state_impl(
+        &self,
+        _session_id: &str,
+        _window_hwnd: i64,
+        _cdp_target_id: &str,
+        _wait: &NormalizedBrowserWaitForLoadStateParams,
+    ) -> Result<BrowserWaitForLoadStateResponse, ErrorData> {
+        Err(mcp_error(
+            error_codes::A11Y_NOT_AVAILABLE,
+            "browser_wait_for_load_state is only available on Windows in this build",
+        ))
+    }
+
+    #[cfg(windows)]
     async fn browser_wait_for_selector_impl(
         &self,
         session_id: &str,
@@ -6369,6 +6504,12 @@ struct NormalizedBrowserWaitForParams {
 }
 
 #[derive(Debug)]
+struct NormalizedBrowserWaitForLoadStateParams {
+    state: BrowserWaitForLoadStateState,
+    timeout_ms: u64,
+}
+
+#[derive(Debug)]
 struct NormalizedBrowserWaitForSelectorParams {
     locate: BrowserLocateParams,
     state: BrowserWaitForSelectorState,
@@ -6470,6 +6611,20 @@ fn validate_browser_evaluate_params(params: &BrowserEvaluateParams) -> Result<()
         ));
     }
     Ok(())
+}
+
+fn validate_browser_wait_for_load_state_params(
+    params: &BrowserWaitForLoadStateParams,
+) -> Result<NormalizedBrowserWaitForLoadStateParams, ErrorData> {
+    if let Some(target_id) = params.cdp_target_id.as_deref() {
+        validate_cdp_target_id(target_id)?;
+    }
+    let timeout_ms =
+        validate_browser_wait_timeout("browser_wait_for_load_state", params.timeout_ms)?;
+    Ok(NormalizedBrowserWaitForLoadStateParams {
+        state: params.state.unwrap_or_default(),
+        timeout_ms,
+    })
 }
 
 fn validate_browser_wait_for_selector_params(
@@ -7455,6 +7610,19 @@ fn browser_locate_engine_to_a11y(engine: BrowserLocateEngine) -> synapse_a11y::C
         BrowserLocateEngine::Title => synapse_a11y::CdpLocateEngine::Title,
         BrowserLocateEngine::TestId => synapse_a11y::CdpLocateEngine::TestId,
         BrowserLocateEngine::Layout => synapse_a11y::CdpLocateEngine::Layout,
+    }
+}
+
+#[cfg(windows)]
+fn browser_wait_for_load_state_to_a11y(
+    state: BrowserWaitForLoadStateState,
+) -> synapse_a11y::CdpLoadState {
+    match state {
+        BrowserWaitForLoadStateState::DomContentLoaded => {
+            synapse_a11y::CdpLoadState::DomContentLoaded
+        }
+        BrowserWaitForLoadStateState::Load => synapse_a11y::CdpLoadState::Load,
+        BrowserWaitForLoadStateState::NetworkIdle => synapse_a11y::CdpLoadState::NetworkIdle,
     }
 }
 
@@ -10209,13 +10377,14 @@ mod tests {
         validate_browser_add_init_script_params, validate_browser_add_script_tag_params,
         validate_browser_add_style_tag_params, validate_browser_evaluate_params,
         validate_browser_set_content_params, validate_browser_wait_for_function_params,
-        validate_browser_wait_for_params, validate_browser_wait_for_selector_params,
-        validate_target_window,
+        validate_browser_wait_for_load_state_params, validate_browser_wait_for_params,
+        validate_browser_wait_for_selector_params, validate_target_window,
     };
     use crate::m1::{
         BrowserAddInitScriptParams, BrowserAddScriptTagParams, BrowserAddStyleTagParams,
         BrowserEvaluateParams, BrowserInitScriptOperation, BrowserSetContentParams,
-        BrowserTabEntry, BrowserTabsResponse, BrowserWaitForFunctionParams, BrowserWaitForParams,
+        BrowserTabEntry, BrowserTabsResponse, BrowserWaitForFunctionParams,
+        BrowserWaitForLoadStateParams, BrowserWaitForLoadStateState, BrowserWaitForParams,
         BrowserWaitForSelectorParams, BrowserWaitForSelectorState, BrowserWaitForState,
         CdpActivateTabParams, CdpTargetInfoParams, FindResponse, FindResult, FindResultKind,
         HiddenDesktopPipFrameParams, HiddenDesktopPipStreamStatus,
@@ -10278,6 +10447,30 @@ mod tests {
                 format!("{expected:?}"),
                 "relation {wire:?}"
             );
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn browser_wait_for_load_state_mapping_is_total() {
+        use super::browser_wait_for_load_state_to_a11y;
+        use synapse_a11y::CdpLoadState;
+
+        let states = [
+            (
+                BrowserWaitForLoadStateState::DomContentLoaded,
+                CdpLoadState::DomContentLoaded,
+            ),
+            (BrowserWaitForLoadStateState::Load, CdpLoadState::Load),
+            (
+                BrowserWaitForLoadStateState::NetworkIdle,
+                CdpLoadState::NetworkIdle,
+            ),
+        ];
+        for (wire, expected) in states {
+            let got = browser_wait_for_load_state_to_a11y(wire);
+            println!("readback=load_state_map wire={wire:?} a11y={got:?}");
+            assert_eq!(got.as_str(), expected.as_str(), "load state {wire:?}");
         }
     }
 
@@ -10805,6 +10998,73 @@ mod tests {
 
         println!(
             "readback=browser_wait_for validation edges all rejected with TOOL_PARAMS_INVALID"
+        );
+    }
+
+    #[test]
+    fn browser_wait_for_load_state_params_validation_edges() {
+        let defaulted =
+            validate_browser_wait_for_load_state_params(&BrowserWaitForLoadStateParams {
+                cdp_target_id: Some("target-123".to_owned()),
+                timeout_ms: Some(MAX_BROWSER_WAIT_TIMEOUT_MS),
+                ..Default::default()
+            })
+            .expect("valid waitForLoadState params pass");
+        assert_eq!(defaulted.state, BrowserWaitForLoadStateState::Load);
+        assert_eq!(defaulted.timeout_ms, MAX_BROWSER_WAIT_TIMEOUT_MS);
+
+        for state in [
+            BrowserWaitForLoadStateState::DomContentLoaded,
+            BrowserWaitForLoadStateState::Load,
+            BrowserWaitForLoadStateState::NetworkIdle,
+        ] {
+            let ok = validate_browser_wait_for_load_state_params(&BrowserWaitForLoadStateParams {
+                state: Some(state),
+                timeout_ms: Some(MIN_BROWSER_WAIT_POLLING_INTERVAL_MS),
+                ..Default::default()
+            })
+            .expect("all load states validate");
+            assert_eq!(ok.state, state);
+        }
+
+        let error = validate_browser_wait_for_load_state_params(&BrowserWaitForLoadStateParams {
+            cdp_target_id: Some("   ".to_owned()),
+            ..Default::default()
+        })
+        .expect_err("blank cdp_target_id must be rejected");
+        let code = error
+            .data
+            .as_ref()
+            .and_then(|data| data.get("code"))
+            .and_then(serde_json::Value::as_str);
+        assert_eq!(code, Some(error_codes::TOOL_PARAMS_INVALID));
+
+        let error = validate_browser_wait_for_load_state_params(&BrowserWaitForLoadStateParams {
+            timeout_ms: Some(MAX_BROWSER_WAIT_TIMEOUT_MS + 1),
+            ..Default::default()
+        })
+        .expect_err("oversize timeout must be rejected");
+        let code = error
+            .data
+            .as_ref()
+            .and_then(|data| data.get("code"))
+            .and_then(serde_json::Value::as_str);
+        assert_eq!(code, Some(error_codes::TOOL_PARAMS_INVALID));
+
+        let error = validate_browser_wait_for_load_state_params(&BrowserWaitForLoadStateParams {
+            timeout_ms: Some(0),
+            ..Default::default()
+        })
+        .expect_err("zero timeout must be rejected");
+        let code = error
+            .data
+            .as_ref()
+            .and_then(|data| data.get("code"))
+            .and_then(serde_json::Value::as_str);
+        assert_eq!(code, Some(error_codes::TOOL_PARAMS_INVALID));
+
+        println!(
+            "readback=browser_wait_for_load_state validation edges all rejected with TOOL_PARAMS_INVALID"
         );
     }
 

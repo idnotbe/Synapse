@@ -1438,6 +1438,69 @@ pub struct BrowserWaitForResponse {
     pub required_foreground: bool,
 }
 
+/// Desired page lifecycle state for `browser_wait_for_load_state` (#1130).
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum BrowserWaitForLoadStateState {
+    /// DOMContentLoaded has fired, or `document.readyState` is interactive or complete.
+    DomContentLoaded,
+    /// The page load event has fired, or `document.readyState` is complete.
+    #[default]
+    Load,
+    /// Load has completed and the target has no in-flight network requests for
+    /// at least 500 ms.
+    NetworkIdle,
+}
+
+/// Parameters for `browser_wait_for_load_state` (#1130): wait for a page
+/// lifecycle state in the calling session's owned CDP target.
+#[derive(Clone, Debug, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct BrowserWaitForLoadStateParams {
+    /// Lifecycle state to wait for. Defaults to `load`.
+    #[serde(default)]
+    pub state: Option<BrowserWaitForLoadStateState>,
+    /// CDP TargetID to wait in. Defaults to the active session CDP target. Must
+    /// be owned by this session; the human foreground tab is never an implicit
+    /// fallback.
+    #[serde(default)]
+    pub cdp_target_id: Option<String>,
+    /// Browser HWND that owns the target. Required only with an explicit
+    /// `cdp_target_id` and no active session target.
+    #[serde(default)]
+    pub window_hwnd: Option<i64>,
+    /// Maximum wait budget in milliseconds. Defaults to 30 seconds.
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
+}
+
+/// Response for `browser_wait_for_load_state`.
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct BrowserWaitForLoadStateResponse {
+    pub session_id: String,
+    pub window_hwnd: i64,
+    pub transport: String,
+    pub endpoint: String,
+    pub cdp_target_id: String,
+    pub state: BrowserWaitForLoadStateState,
+    pub condition_met: bool,
+    pub elapsed_ms: u64,
+    pub timeout_ms: u64,
+    pub event_count: u64,
+    pub network_event_count: u64,
+    pub max_in_flight_requests: usize,
+    pub in_flight_requests: usize,
+    pub network_idle_quiet_ms: u64,
+    pub lifecycle_network_idle_seen: bool,
+    pub url: String,
+    pub title: String,
+    pub ready_state: String,
+    pub readback_backend: String,
+    pub backend_tier_used: String,
+    pub required_foreground: bool,
+}
+
 /// Parameters for `browser_wait_for_function` (#1129): poll a JavaScript
 /// predicate/expression until it resolves truthy in the calling session's owned
 /// CDP target.

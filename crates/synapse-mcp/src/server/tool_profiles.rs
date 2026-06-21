@@ -61,6 +61,7 @@ const NORMAL_ALLOWED_EXACT: &[&str] = &[
     "browser_tabs",
     "browser_wait_for",
     "browser_wait_for_function",
+    "browser_wait_for_load_state",
     "browser_wait_for_selector",
     "capture_screenshot",
     "cdp_activate_tab",
@@ -137,6 +138,7 @@ const BROWSER_CONTROL_ALLOWED_EXACT: &[&str] = &[
     "browser_tabs",
     "browser_wait_for",
     "browser_wait_for_function",
+    "browser_wait_for_load_state",
     "browser_wait_for_selector",
     "capture_screenshot",
     "cdp_activate_tab",
@@ -1251,6 +1253,7 @@ mod tests {
                 "browser_set_value",
                 "browser_wait_for",
                 "browser_wait_for_function",
+                "browser_wait_for_load_state",
                 "browser_wait_for_selector",
                 "control_lease_acquire",
                 "control_lease_release",
@@ -1277,6 +1280,7 @@ mod tests {
         assert!(visible.contains(&"browser_set_value".to_owned()));
         assert!(visible.contains(&"browser_wait_for".to_owned()));
         assert!(visible.contains(&"browser_wait_for_function".to_owned()));
+        assert!(visible.contains(&"browser_wait_for_load_state".to_owned()));
         assert!(visible.contains(&"browser_wait_for_selector".to_owned()));
         assert!(visible.contains(&"control_lease_acquire".to_owned()));
         assert!(visible.contains(&"tool_profile_set".to_owned()));
@@ -1341,6 +1345,7 @@ mod tests {
         assert!(visible.contains(&"browser_set_value".to_owned()));
         assert!(visible.contains(&"browser_wait_for".to_owned()));
         assert!(visible.contains(&"browser_wait_for_function".to_owned()));
+        assert!(visible.contains(&"browser_wait_for_load_state".to_owned()));
         assert!(visible.contains(&"browser_wait_for_selector".to_owned()));
         assert!(visible.contains(&"control_lease_acquire".to_owned()));
         assert!(visible.contains(&"control_lease_release".to_owned()));

@@ -13,7 +13,10 @@
 
 #![cfg(windows)]
 
-use std::time::Duration;
+use std::{
+    collections::HashSet,
+    time::{Duration, Instant},
+};
 
 use chromiumoxide::Browser;
 use chromiumoxide::cdp::browser_protocol::dom::{
@@ -23,11 +26,16 @@ use chromiumoxide::cdp::browser_protocol::input::{
     DispatchKeyEventParams, DispatchKeyEventType, DispatchMouseEventParams, DispatchMouseEventType,
     InsertTextParams, MouseButton,
 };
+use chromiumoxide::cdp::browser_protocol::network::{
+    EnableParams as NetworkEnableParams, EventLoadingFailed, EventLoadingFinished,
+    EventRequestWillBeSent, RequestId,
+};
 use chromiumoxide::cdp::browser_protocol::page::{
-    AddScriptToEvaluateOnNewDocumentParams, CaptureScreenshotFormat, GetLayoutMetricsParams,
-    GetNavigationHistoryParams, NavigateParams, NavigateToHistoryEntryParams, ReloadParams,
-    RemoveScriptToEvaluateOnNewDocumentParams, ScriptIdentifier, SetDocumentContentParams,
-    Viewport,
+    AddScriptToEvaluateOnNewDocumentParams, CaptureScreenshotFormat,
+    EnableParams as PageEnableParams, EventDomContentEventFired, EventLifecycleEvent,
+    EventLoadEventFired, GetLayoutMetricsParams, GetNavigationHistoryParams, NavigateParams,
+    NavigateToHistoryEntryParams, ReloadParams, RemoveScriptToEvaluateOnNewDocumentParams,
+    ScriptIdentifier, SetDocumentContentParams, SetLifecycleEventsEnabledParams, Viewport,
 };
 use chromiumoxide::cdp::browser_protocol::target::TargetId;
 use chromiumoxide::cdp::js_protocol::runtime::{CallArgument, CallFunctionOnParams};
@@ -147,6 +155,41 @@ pub struct CdpPageState {
     pub ready_state: String,
     pub history_current_index: i64,
     pub history_entry_count: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub enum CdpLoadState {
+    DomContentLoaded,
+    Load,
+    NetworkIdle,
+}
+
+impl CdpLoadState {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::DomContentLoaded => "domcontentloaded",
+            Self::Load => "load",
+            Self::NetworkIdle => "networkidle",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct CdpLoadStateWaitResult {
+    pub target_id: String,
+    pub requested_state: String,
+    pub observed_state: String,
+    pub elapsed_ms: u64,
+    pub event_count: u64,
+    pub network_event_count: u64,
+    pub max_in_flight_requests: usize,
+    pub in_flight_requests: usize,
+    pub network_idle_quiet_ms: u64,
+    pub lifecycle_network_idle_seen: bool,
+    pub url: String,
+    pub title: String,
+    pub ready_state: String,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -1885,6 +1928,269 @@ fn format_evaluate_exception(
         "{detail} (line {}, column {})",
         exception.line_number, exception.column_number
     )
+}
+
+/// Waits for a page lifecycle state on a specific CDP page target without
+/// activating the browser window.
+///
+/// # Errors
+///
+/// `A11Y_CDP_ATTACH_FAILED` if the endpoint/target cannot be reached;
+/// `A11Y_CDP_AXTREE_FAILED` if lifecycle/network subscription or page-state
+/// readback fails; `BROWSER_WAIT_TIMEOUT` if the requested state is not
+/// observed within `wait_timeout_ms`.
+pub async fn cdp_wait_for_load_state(
+    endpoint: &str,
+    target_id: &str,
+    state: CdpLoadState,
+    wait_timeout_ms: u64,
+) -> A11yResult<CdpLoadStateWaitResult> {
+    const NETWORK_IDLE_QUIET_MS: u64 = 500;
+
+    let target_id = target_id.trim();
+    if target_id.is_empty() {
+        return Err(A11yError::CdpAttachFailed {
+            detail: "CDP target id must not be empty".to_owned(),
+        });
+    }
+    let (browser, mut handler) =
+        Browser::connect(endpoint)
+            .await
+            .map_err(|err| A11yError::CdpAttachFailed {
+                detail: format!("connect {endpoint}: {err}"),
+            })?;
+    let handler_task = tokio::spawn(async move { while handler.next().await.is_some() {} });
+
+    let result = async {
+        let page = get_target_page_with_discovery(&browser, target_id).await?;
+        page.execute(PageEnableParams::default())
+            .await
+            .map_err(|err| A11yError::CdpAxtreeFailed {
+                detail: format!("Page.enable before waitForLoadState: {err}"),
+            })?;
+        page.execute(NetworkEnableParams::default())
+            .await
+            .map_err(|err| A11yError::CdpAxtreeFailed {
+                detail: format!("Network.enable before waitForLoadState: {err}"),
+            })?;
+        page.execute(SetLifecycleEventsEnabledParams::new(true))
+            .await
+            .map_err(|err| A11yError::CdpAxtreeFailed {
+                detail: format!("Page.setLifecycleEventsEnabled before waitForLoadState: {err}"),
+            })?;
+
+        let mut dom_content_loaded = page
+            .event_listener::<EventDomContentEventFired>()
+            .await
+            .map_err(|err| A11yError::CdpAxtreeFailed {
+                detail: format!("subscribe Page.domContentEventFired: {err}"),
+            })?;
+        let mut load = page
+            .event_listener::<EventLoadEventFired>()
+            .await
+            .map_err(|err| A11yError::CdpAxtreeFailed {
+                detail: format!("subscribe Page.loadEventFired: {err}"),
+            })?;
+        let mut lifecycle = page
+            .event_listener::<EventLifecycleEvent>()
+            .await
+            .map_err(|err| A11yError::CdpAxtreeFailed {
+                detail: format!("subscribe Page.lifecycleEvent: {err}"),
+            })?;
+        let mut request_started = page
+            .event_listener::<EventRequestWillBeSent>()
+            .await
+            .map_err(|err| A11yError::CdpAxtreeFailed {
+                detail: format!("subscribe Network.requestWillBeSent: {err}"),
+            })?;
+        let mut request_finished = page
+            .event_listener::<EventLoadingFinished>()
+            .await
+            .map_err(|err| A11yError::CdpAxtreeFailed {
+                detail: format!("subscribe Network.loadingFinished: {err}"),
+            })?;
+        let mut request_failed = page
+            .event_listener::<EventLoadingFailed>()
+            .await
+            .map_err(|err| A11yError::CdpAxtreeFailed {
+                detail: format!("subscribe Network.loadingFailed: {err}"),
+            })?;
+
+        let started = Instant::now();
+        let deadline = std::time::Duration::from_millis(wait_timeout_ms);
+        let quiet_budget = std::time::Duration::from_millis(NETWORK_IDLE_QUIET_MS);
+        let mut observed_dom_content_loaded = false;
+        let mut observed_load = false;
+        let mut lifecycle_network_idle_seen = false;
+        let mut event_count = 0u64;
+        let mut network_event_count = 0u64;
+        let mut in_flight = HashSet::<RequestId>::new();
+        let mut max_in_flight_requests = 0usize;
+        let mut last_network_activity = Instant::now();
+
+        loop {
+            let page_state = read_page_state(&page).await?;
+            if cdp_ready_state_satisfies_load_state(state, &page_state.ready_state) {
+                match state {
+                    CdpLoadState::DomContentLoaded => observed_dom_content_loaded = true,
+                    CdpLoadState::Load | CdpLoadState::NetworkIdle => observed_load = true,
+                }
+            }
+            let quiet_for = last_network_activity.elapsed();
+            if cdp_load_state_satisfied(
+                state,
+                &page_state.ready_state,
+                observed_dom_content_loaded,
+                observed_load,
+                in_flight.len(),
+                quiet_for,
+            ) {
+                return Ok(cdp_load_state_wait_result(
+                    page.target_id().inner().clone(),
+                    state,
+                    &page_state,
+                    started.elapsed(),
+                    event_count,
+                    network_event_count,
+                    max_in_flight_requests,
+                    in_flight.len(),
+                    quiet_for,
+                    lifecycle_network_idle_seen,
+                ));
+            }
+            if started.elapsed() >= deadline {
+                return Err(A11yError::BrowserWaitTimeout {
+                    detail: format!(
+                        "waitForLoadState({}) timed out after {wait_timeout_ms} ms; last url={:?} title={:?} readyState={:?}; event_count={event_count} network_event_count={network_event_count} in_flight_requests={} max_in_flight_requests={} network_idle_quiet_ms={} lifecycle_network_idle_seen={lifecycle_network_idle_seen}",
+                        state.as_str(),
+                        page_state.url,
+                        page_state.title,
+                        page_state.ready_state,
+                        in_flight.len(),
+                        max_in_flight_requests,
+                        duration_millis_u64(quiet_for),
+                    ),
+                });
+            }
+            let remaining = deadline.saturating_sub(started.elapsed());
+            let next_quiet_check = if in_flight.is_empty() && quiet_for < quiet_budget {
+                quiet_budget.saturating_sub(quiet_for)
+            } else {
+                std::time::Duration::from_millis(100)
+            };
+            let sleep_for = remaining
+                .min(next_quiet_check)
+                .min(std::time::Duration::from_millis(100));
+
+            tokio::select! {
+                Some(_) = dom_content_loaded.next() => {
+                    observed_dom_content_loaded = true;
+                    event_count = event_count.saturating_add(1);
+                }
+                Some(_) = load.next() => {
+                    observed_load = true;
+                    event_count = event_count.saturating_add(1);
+                }
+                Some(event) = lifecycle.next() => {
+                    event_count = event_count.saturating_add(1);
+                    match event.name.as_str() {
+                        "DOMContentLoaded" => observed_dom_content_loaded = true,
+                        "load" => observed_load = true,
+                        "networkIdle" => lifecycle_network_idle_seen = true,
+                        _ => {}
+                    }
+                }
+                Some(event) = request_started.next() => {
+                    network_event_count = network_event_count.saturating_add(1);
+                    last_network_activity = Instant::now();
+                    if event.redirect_response.is_some() {
+                        in_flight.remove(&event.request_id);
+                    }
+                    in_flight.insert(event.request_id.clone());
+                    max_in_flight_requests = max_in_flight_requests.max(in_flight.len());
+                }
+                Some(event) = request_finished.next() => {
+                    network_event_count = network_event_count.saturating_add(1);
+                    last_network_activity = Instant::now();
+                    in_flight.remove(&event.request_id);
+                }
+                Some(event) = request_failed.next() => {
+                    network_event_count = network_event_count.saturating_add(1);
+                    last_network_activity = Instant::now();
+                    in_flight.remove(&event.request_id);
+                }
+                _ = tokio::time::sleep(sleep_for) => {}
+            }
+        }
+    }
+    .await;
+
+    handler_task.abort();
+    result
+}
+
+fn cdp_load_state_wait_result(
+    target_id: String,
+    state: CdpLoadState,
+    page_state: &CdpPageState,
+    elapsed: Duration,
+    event_count: u64,
+    network_event_count: u64,
+    max_in_flight_requests: usize,
+    in_flight_requests: usize,
+    quiet_for: Duration,
+    lifecycle_network_idle_seen: bool,
+) -> CdpLoadStateWaitResult {
+    CdpLoadStateWaitResult {
+        target_id,
+        requested_state: state.as_str().to_owned(),
+        observed_state: state.as_str().to_owned(),
+        elapsed_ms: duration_millis_u64(elapsed),
+        event_count,
+        network_event_count,
+        max_in_flight_requests,
+        in_flight_requests,
+        network_idle_quiet_ms: duration_millis_u64(quiet_for),
+        lifecycle_network_idle_seen,
+        url: page_state.url.clone(),
+        title: page_state.title.clone(),
+        ready_state: page_state.ready_state.clone(),
+    }
+}
+
+fn cdp_load_state_satisfied(
+    state: CdpLoadState,
+    ready_state: &str,
+    observed_dom_content_loaded: bool,
+    observed_load: bool,
+    in_flight_requests: usize,
+    quiet_for: Duration,
+) -> bool {
+    match state {
+        CdpLoadState::DomContentLoaded => {
+            observed_dom_content_loaded
+                || cdp_ready_state_satisfies_load_state(CdpLoadState::DomContentLoaded, ready_state)
+        }
+        CdpLoadState::Load => {
+            observed_load || cdp_ready_state_satisfies_load_state(CdpLoadState::Load, ready_state)
+        }
+        CdpLoadState::NetworkIdle => {
+            cdp_ready_state_satisfies_load_state(CdpLoadState::Load, ready_state)
+                && in_flight_requests == 0
+                && quiet_for >= std::time::Duration::from_millis(500)
+        }
+    }
+}
+
+fn cdp_ready_state_satisfies_load_state(state: CdpLoadState, ready_state: &str) -> bool {
+    match state {
+        CdpLoadState::DomContentLoaded => matches!(ready_state, "interactive" | "complete"),
+        CdpLoadState::Load | CdpLoadState::NetworkIdle => ready_state == "complete",
+    }
+}
+
+fn duration_millis_u64(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
 /// Navigates/reloads/history-navigates a specific CDP page target and returns a
@@ -3682,5 +3988,78 @@ mod tests {
             !SYNAPSE_LOCATE_JS.contains('"'),
             "engine must use single quotes"
         );
+    }
+
+    #[test]
+    fn cdp_load_state_conditions_match_playwright_states() {
+        assert!(cdp_ready_state_satisfies_load_state(
+            CdpLoadState::DomContentLoaded,
+            "interactive"
+        ));
+        assert!(cdp_ready_state_satisfies_load_state(
+            CdpLoadState::DomContentLoaded,
+            "complete"
+        ));
+        assert!(!cdp_ready_state_satisfies_load_state(
+            CdpLoadState::DomContentLoaded,
+            "loading"
+        ));
+        assert!(!cdp_ready_state_satisfies_load_state(
+            CdpLoadState::Load,
+            "interactive"
+        ));
+        assert!(cdp_ready_state_satisfies_load_state(
+            CdpLoadState::Load,
+            "complete"
+        ));
+
+        assert!(cdp_load_state_satisfied(
+            CdpLoadState::DomContentLoaded,
+            "loading",
+            true,
+            false,
+            0,
+            Duration::from_millis(0),
+        ));
+        assert!(cdp_load_state_satisfied(
+            CdpLoadState::Load,
+            "loading",
+            false,
+            true,
+            0,
+            Duration::from_millis(0),
+        ));
+        assert!(!cdp_load_state_satisfied(
+            CdpLoadState::NetworkIdle,
+            "interactive",
+            true,
+            false,
+            0,
+            Duration::from_millis(600),
+        ));
+        assert!(!cdp_load_state_satisfied(
+            CdpLoadState::NetworkIdle,
+            "complete",
+            true,
+            true,
+            1,
+            Duration::from_millis(600),
+        ));
+        assert!(!cdp_load_state_satisfied(
+            CdpLoadState::NetworkIdle,
+            "complete",
+            true,
+            true,
+            0,
+            Duration::from_millis(499),
+        ));
+        assert!(cdp_load_state_satisfied(
+            CdpLoadState::NetworkIdle,
+            "complete",
+            true,
+            true,
+            0,
+            Duration::from_millis(500),
+        ));
     }
 }
