@@ -46,6 +46,7 @@ const DEFAULT_SNOOZE_MS: u64 = 15 * 60 * 1_000;
 const MAX_SNOOZE_MS: u64 = 7 * 24 * 60 * 60 * 1_000;
 const ACTIVATION_TOKEN_PREFIX: &str = "act1-";
 const APPROVAL_PROTOCOL_SCHEME: &str = "synapse-approval";
+const TIMEOUT_DECIDER_SESSION: &str = "timeout";
 
 #[derive(
     Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize, JsonSchema,
@@ -822,7 +823,7 @@ pub fn list_approvals(
 ) -> Result<ApprovalListResponse, ErrorData> {
     validate_list(params)?;
     let now = now_unix_ms();
-    let materialized_timeouts = materialize_timeouts(db, now, "approval_list")?;
+    let materialized_timeouts = materialize_timeouts(db, now)?;
     let limit = params.limit.unwrap_or(DEFAULT_LIMIT);
     let limit_usize = usize::try_from(limit).unwrap_or(MAX_LIMIT as usize);
     let status_filter = params
@@ -892,7 +893,7 @@ pub fn decide_approval(
 ) -> Result<ApprovalDecideResponse, ErrorData> {
     validate_decide(params)?;
     let now = now_unix_ms();
-    let _materialized = materialize_timeouts(db, now, "approval_decide")?;
+    let _materialized = materialize_timeouts(db, now)?;
     let key = item_key(&params.approval_id);
     let (mut item, _before_row) = read_item_by_key(db, &key)?.ok_or_else(|| {
         invalid(format!(
@@ -1262,7 +1263,7 @@ fn find_pending_dedupe(
     let Some(dedupe_key) = normalized_optional(dedupe_key) else {
         return Ok(None);
     };
-    materialize_timeouts(db, now, "approval_request_dedupe")?;
+    materialize_timeouts(db, now)?;
     let rows = db
         .scan_cf_prefix(cf::CF_KV, ITEM_PREFIX.as_bytes())
         .map_err(storage_error)?;
@@ -1293,7 +1294,6 @@ fn find_pending_dedupe(
 fn materialize_timeouts(
     db: &Arc<Db>,
     now: u64,
-    by_session: &str,
 ) -> Result<Vec<ApprovalMaterializedTimeout>, ErrorData> {
     let rows = db
         .scan_cf_prefix(cf::CF_KV, ITEM_PREFIX.as_bytes())
@@ -1320,7 +1320,7 @@ fn materialize_timeouts(
         item.status = item.timeout_decision.status();
         item.updated_at_unix_ms = now;
         item.decided_at_unix_ms = Some(now);
-        item.decided_by_session = Some(by_session.to_owned());
+        item.decided_by_session = Some(TIMEOUT_DECIDER_SESSION.to_owned());
         item.decision_note = Some(format!(
             "timeout default materialized as {}",
             item.timeout_decision.as_str()
@@ -1332,7 +1332,7 @@ fn materialize_timeouts(
             &item.approval_id,
             "timeout_default",
             now,
-            by_session,
+            TIMEOUT_DECIDER_SESSION,
             Some(before),
             item.status,
             item.decision_note.clone(),
@@ -2090,6 +2090,13 @@ mod tests {
         assert_eq!(
             listed.materialized_timeouts[0].item.status,
             ApprovalStatus::Ignored
+        );
+        assert_eq!(
+            listed.materialized_timeouts[0]
+                .item
+                .decided_by_session
+                .as_deref(),
+            Some(TIMEOUT_DECIDER_SESSION)
         );
         assert!(
             listed.materialized_timeouts[0]
