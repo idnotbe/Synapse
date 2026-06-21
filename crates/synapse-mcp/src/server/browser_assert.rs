@@ -1125,6 +1125,7 @@ fn cdp_locate_request(params: &NormalizedBrowserAssertParams) -> synapse_a11y::C
         nth: params.locator.nth,
         strict: false,
         root_backend_node_id: params.root_backend_node_id,
+        frame_id: None,
         limit: params.limit,
     }
 }

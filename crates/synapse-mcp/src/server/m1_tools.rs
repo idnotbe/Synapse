@@ -4,18 +4,19 @@ use super::{
     BrowserAdoptActiveTabResponse, BrowserConsoleMessagesParams, BrowserConsoleMessagesResponse,
     BrowserContentParams, BrowserContentResponse, BrowserEvaluateParams, BrowserEvaluateResponse,
     BrowserExposeBindingOperation, BrowserExposeBindingParams, BrowserExposeBindingResponse,
-    BrowserInitScriptOperation, BrowserInspectParams, BrowserInspectResponse,
+    BrowserFrameLocator, BrowserInitScriptOperation, BrowserInspectParams, BrowserInspectResponse,
     BrowserLayoutRelation, BrowserLocateEngine, BrowserLocateParams, BrowserLocateResponse,
-    BrowserNetworkWaitEntry, BrowserSetContentParams, BrowserSetContentResponse, BrowserTabEntry,
-    BrowserTabsParams, BrowserTabsResponse, BrowserWaitForFunctionParams,
-    BrowserWaitForFunctionResponse, BrowserWaitForLoadStateParams, BrowserWaitForLoadStateResponse,
-    BrowserWaitForLoadStateState, BrowserWaitForNetworkResponseParams,
-    BrowserWaitForNetworkResponseResponse, BrowserWaitForParams, BrowserWaitForRequestParams,
-    BrowserWaitForRequestResponse, BrowserWaitForResponse, BrowserWaitForSelectorParams,
-    BrowserWaitForSelectorResponse, BrowserWaitForSelectorState, BrowserWaitForState,
-    BrowserWaitForUrlMatchKind, BrowserWaitForUrlParams, BrowserWaitForUrlResponse,
-    CaptureScreenshotFormat, CaptureScreenshotParams, CaptureScreenshotResponse,
-    CdpActivateTabParams, CdpActivateTabResponse, CdpActiveElementInfo, CdpBridgeHostReadback,
+    BrowserLocatedFrame, BrowserNetworkWaitEntry, BrowserSetContentParams,
+    BrowserSetContentResponse, BrowserTabEntry, BrowserTabsParams, BrowserTabsResponse,
+    BrowserWaitForFunctionParams, BrowserWaitForFunctionResponse, BrowserWaitForLoadStateParams,
+    BrowserWaitForLoadStateResponse, BrowserWaitForLoadStateState,
+    BrowserWaitForNetworkResponseParams, BrowserWaitForNetworkResponseResponse,
+    BrowserWaitForParams, BrowserWaitForRequestParams, BrowserWaitForRequestResponse,
+    BrowserWaitForResponse, BrowserWaitForSelectorParams, BrowserWaitForSelectorResponse,
+    BrowserWaitForSelectorState, BrowserWaitForState, BrowserWaitForUrlMatchKind,
+    BrowserWaitForUrlParams, BrowserWaitForUrlResponse, CaptureScreenshotFormat,
+    CaptureScreenshotParams, CaptureScreenshotResponse, CdpActivateTabParams,
+    CdpActivateTabResponse, CdpActiveElementInfo, CdpBridgeHostReadback,
     CdpBridgeReloadAckReadback, CdpBridgeReloadParams, CdpBridgeReloadResponse, CdpCloseTabParams,
     CdpCloseTabResponse, CdpLargestContentfulPaintInfo, CdpNavigateAction, CdpNavigateTabParams,
     CdpNavigateTabResponse, CdpOpenTabParams, CdpOpenTabResponse, CdpPageTextInfo,
@@ -2414,7 +2415,7 @@ impl SynapseService {
     }
 
     #[tool(
-        description = "Wait for a Playwright-style selector in the calling session's owned browser tab to reach state attached | visible | hidden | detached. Uses the same selector engines/options as browser_locate (css/xpath/text/role/label/placeholder/alttext/title/testid/layout), returns an element_id when the satisfied state has a concrete matched element, and returns BROWSER_WAIT_TIMEOUT on timeout. Target-scoped and background-safe: never activates the tab, never uses OS foreground input, and never falls back to the human foreground tab. Raw CDP only; the popup-safe normal Chrome extension bridge fails closed."
+        description = "Wait for a Playwright-style selector in the calling session's owned browser tab to reach state attached | visible | hidden | detached. Uses the same selector engines/options as browser_locate (css/xpath/text/role/label/placeholder/alttext/title/testid/layout), including frame {frame_id|frame_element_id|name|url|index} scoping for same-target frames and OOPIF child targets; returns an element_id when the satisfied state has a concrete matched element, and returns BROWSER_WAIT_TIMEOUT on timeout. Target-scoped and background-safe: never activates the tab, never uses OS foreground input, and never falls back to the human foreground tab. Raw CDP only; the popup-safe normal Chrome extension bridge fails closed."
     )]
     pub async fn browser_wait_for_selector(
         &self,
@@ -2447,11 +2448,44 @@ impl SynapseService {
                 ),
             ));
         }
+        let frame_element_target = wait
+            .locate
+            .frame
+            .as_ref()
+            .and_then(|frame| frame.frame_element_id.as_deref())
+            .filter(|id| !id.trim().is_empty())
+            .map(parse_browser_evaluate_element)
+            .transpose()?
+            .map(|(_, target)| target);
+        if let (Some((_, root_target)), Some(frame_target)) =
+            (root_element.as_ref(), frame_element_target.as_ref())
+            && !root_target.eq_ignore_ascii_case(frame_target)
+        {
+            return Err(mcp_error(
+                error_codes::ACTION_TARGET_INVALID,
+                format!(
+                    "browser_wait_for_selector root_element_id resolves to CDP target {root_target:?} but frame.frame_element_id resolves to CDP target {frame_target:?}; they must match"
+                ),
+            ));
+        }
+        if let (Some(frame_target), Some(explicit)) = (
+            frame_element_target.as_ref(),
+            wait.locate.cdp_target_id.as_deref(),
+        ) && !frame_target.eq_ignore_ascii_case(explicit)
+        {
+            return Err(mcp_error(
+                error_codes::ACTION_TARGET_INVALID,
+                format!(
+                    "browser_wait_for_selector frame.frame_element_id resolves to CDP target {frame_target:?} but cdp_target_id {explicit:?} was also supplied; they must match"
+                ),
+            ));
+        }
         let resolution_target = wait
             .locate
             .cdp_target_id
             .clone()
-            .or_else(|| root_element.as_ref().map(|(_, target)| target.clone()));
+            .or_else(|| root_element.as_ref().map(|(_, target)| target.clone()))
+            .or(frame_element_target);
         let root_backend_node_id = root_element.as_ref().map(|(backend, _)| *backend);
         let request_details = json!({
             "session_id": &session_id,
@@ -2461,6 +2495,7 @@ impl SynapseService {
             "query_len": wait.locate.query.len(),
             "state": wait.state,
             "root_element_id": wait.locate.root_element_id,
+            "frame": wait.locate.frame,
             "limit": wait.limit,
             "timeout_ms": wait.timeout_ms,
             "polling_interval_ms": wait.polling_interval_ms,
@@ -2487,6 +2522,7 @@ impl SynapseService {
             "query_len": wait.locate.query.len(),
             "state": wait.state,
             "root_element_id": wait.locate.root_element_id,
+            "frame": wait.locate.frame,
             "nth": wait.locate.nth,
             "strict": wait.locate.strict,
             "limit": wait.limit,
@@ -2837,7 +2873,7 @@ impl SynapseService {
     }
 
     #[tool(
-        description = "Resolve any Playwright-style selector to element ids in the calling session's owned background browser tab via raw CDP — the full selector engine. engine ∈ css | xpath | text | role | label | placeholder | alttext | title | testid | layout (default css); `query` is the CSS/XPath text, visible text (getByText), ARIA role token (getByRole), label/placeholder/alt/title text, test-id value, or (layout) the base CSS. Options: exact/regex (text & attribute engines), name/name_exact/name_regex + ARIA state filters checked/pressed/expanded/selected/disabled/level/include_hidden (role), testid_attribute (testid, default data-testid), relation+anchor+max_distance (layout), has_text filter, nth (.first/.last via 0/-1, negative counts from end), strict (error on >1 unless nth), root_element_id (scope/chain within an element). Returns match_count (Playwright count()), the resolved element_ids (capped at limit) that feed directly into browser_inspect / act_* / etc., and url/title. Requires an active session CDP target or an explicit cdp_target_id owned by this session; never the human foreground tab. Read-only, background-safe. Raw CDP only; the popup-safe extension bridge fails closed."
+        description = "Resolve any Playwright-style selector to element ids in the calling session's owned background browser tab via raw CDP — the full selector engine. engine ∈ css | xpath | text | role | label | placeholder | alttext | title | testid | layout (default css); `query` is the CSS/XPath text, visible text (getByText), ARIA role token (getByRole), label/placeholder/alt/title text, test-id value, or (layout) the base CSS. Options: exact/regex (text & attribute engines), name/name_exact/name_regex + ARIA state filters checked/pressed/expanded/selected/disabled/level/include_hidden (role), testid_attribute (testid, default data-testid), relation+anchor+max_distance (layout), has_text filter, nth (.first/.last via 0/-1, negative counts from end), strict (error on >1 unless nth), root_element_id (scope/chain within an element), frame {frame_id|frame_element_id|name|url|index} (scope/chain within a same-target frame or OOPIF child target listed by browser_frames). Returns match_count (Playwright count()), the resolved element_ids (capped at limit) that feed directly into browser_inspect / act_* / etc., frame readback when scoped, and url/title. Requires an active session CDP target or an explicit cdp_target_id owned by this session; never the human foreground tab. Read-only, background-safe. Raw CDP only; the popup-safe extension bridge fails closed."
     )]
     pub async fn browser_locate(
         &self,
@@ -2898,6 +2934,7 @@ impl SynapseService {
                 ));
             }
         }
+        validate_browser_frame_locator(TOOL, params.0.frame.as_ref())?;
         if let Some(target_id) = params.0.cdp_target_id.as_deref() {
             validate_cdp_target_id(target_id)?;
         }
@@ -2921,11 +2958,44 @@ impl SynapseService {
                 ),
             ));
         }
+        let frame_element_target = params
+            .0
+            .frame
+            .as_ref()
+            .and_then(|frame| frame.frame_element_id.as_deref())
+            .filter(|id| !id.trim().is_empty())
+            .map(parse_browser_evaluate_element)
+            .transpose()?
+            .map(|(_, target)| target);
+        if let (Some((_, root_target)), Some(frame_target)) =
+            (root_element.as_ref(), frame_element_target.as_ref())
+            && !root_target.eq_ignore_ascii_case(frame_target)
+        {
+            return Err(mcp_error(
+                error_codes::ACTION_TARGET_INVALID,
+                format!(
+                    "browser_locate root_element_id resolves to CDP target {root_target:?} but frame.frame_element_id resolves to CDP target {frame_target:?}; they must match"
+                ),
+            ));
+        }
+        if let (Some(frame_target), Some(explicit)) = (
+            frame_element_target.as_ref(),
+            params.0.cdp_target_id.as_deref(),
+        ) && !frame_target.eq_ignore_ascii_case(explicit)
+        {
+            return Err(mcp_error(
+                error_codes::ACTION_TARGET_INVALID,
+                format!(
+                    "browser_locate frame.frame_element_id resolves to CDP target {frame_target:?} but cdp_target_id {explicit:?} was also supplied; they must match"
+                ),
+            ));
+        }
         let resolution_target = params
             .0
             .cdp_target_id
             .clone()
-            .or_else(|| root_element.as_ref().map(|(_, target)| target.clone()));
+            .or_else(|| root_element.as_ref().map(|(_, target)| target.clone()))
+            .or(frame_element_target);
         let root_backend_node_id = root_element.as_ref().map(|(backend, _)| *backend);
         let limit = params
             .0
@@ -2939,6 +3009,7 @@ impl SynapseService {
             "engine": params.0.engine,
             "query_len": params.0.query.len(),
             "root_element_id": params.0.root_element_id,
+            "frame": params.0.frame,
             "limit": limit,
             "required_foreground": false,
             "phase": "target_resolution",
@@ -2962,6 +3033,7 @@ impl SynapseService {
             "engine": params.0.engine,
             "query_len": params.0.query.len(),
             "root_element_id": params.0.root_element_id,
+            "frame": params.0.frame,
             "nth": params.0.nth,
             "strict": params.0.strict,
             "limit": limit,
@@ -5841,6 +5913,7 @@ impl SynapseService {
                     visible_count: poll.visible_count,
                     truncated: poll.truncated,
                     element_id: poll.element_id,
+                    frame: poll.frame,
                     url: poll.url,
                     title: poll.title,
                     readback_backend:
@@ -6359,8 +6432,40 @@ impl SynapseService {
                 window_hwnd,
             ));
         };
-        let request = browser_locate_cdp_request(params, root_backend_node_id, limit);
-        let located = synapse_a11y::cdp_locate(&endpoint, cdp_target_id, request)
+        let scope = resolve_browser_locate_scope(
+            &endpoint,
+            window_hwnd,
+            cdp_target_id,
+            params.frame.as_ref(),
+        )
+        .await?;
+        if scope.frame_requested && !scope.frame_resolved {
+            let frame = scope.frame_readback;
+            return Ok(BrowserLocateResponse {
+                session_id: session_id.to_owned(),
+                window_hwnd,
+                transport: "raw_cdp".to_owned(),
+                endpoint,
+                cdp_target_id: cdp_target_id.to_owned(),
+                engine: browser_locate_engine_to_a11y(params.engine)
+                    .as_str()
+                    .to_owned(),
+                query: params.query.clone(),
+                match_count: 0,
+                returned_count: 0,
+                truncated: false,
+                element_ids: Vec::new(),
+                frame,
+                url: scope.page_url.unwrap_or_default(),
+                title: scope.page_title.unwrap_or_default(),
+                readback_backend: "Page.getFrameTree frame locator".to_owned(),
+                required_foreground: false,
+            });
+        }
+
+        let mut request = browser_locate_cdp_request(params, root_backend_node_id, limit);
+        request.frame_id = scope.frame_id.clone();
+        let located = synapse_a11y::cdp_locate(&endpoint, &scope.cdp_target_id, request)
             .await
             .map_err(|error| {
                 mcp_error(
@@ -6391,6 +6496,7 @@ impl SynapseService {
             match_count = located.match_count,
             returned_count = element_ids.len(),
             root_scoped = root_backend_node_id.is_some(),
+            frame_id = ?located.frame_id,
             target_url = %located.url,
             "readback={readback_backend} outcome=located"
         );
@@ -6406,6 +6512,7 @@ impl SynapseService {
             returned_count: element_ids.len(),
             truncated: located.truncated,
             element_ids,
+            frame: scope.frame_readback,
             url: located.url,
             title: located.title,
             readback_backend: readback_backend.to_owned(),
@@ -7623,6 +7730,7 @@ struct BrowserWaitForSelectorPoll {
     visible_count: usize,
     truncated: bool,
     element_id: Option<String>,
+    frame: Option<BrowserLocatedFrame>,
     url: String,
     title: String,
 }
@@ -7975,6 +8083,45 @@ fn validate_browser_locate_like_params(
     if let Some(target_id) = params.cdp_target_id.as_deref() {
         validate_cdp_target_id(target_id)?;
     }
+    validate_browser_frame_locator(tool, params.frame.as_ref())?;
+    Ok(())
+}
+
+fn validate_browser_frame_locator(
+    tool: &str,
+    frame: Option<&BrowserFrameLocator>,
+) -> Result<(), ErrorData> {
+    let Some(frame) = frame else {
+        return Ok(());
+    };
+    let mut selectors = 0_u8;
+    for (field, value) in [
+        ("frame_id", frame.frame_id.as_deref()),
+        ("frame_element_id", frame.frame_element_id.as_deref()),
+        ("name", frame.name.as_deref()),
+        ("url", frame.url.as_deref()),
+    ] {
+        if let Some(value) = value {
+            if value.trim().is_empty() {
+                return Err(mcp_error(
+                    error_codes::TOOL_PARAMS_INVALID,
+                    format!("{tool} frame.{field} must not be empty when supplied"),
+                ));
+            }
+            selectors = selectors.saturating_add(1);
+        }
+    }
+    if frame.index.is_some() {
+        selectors = selectors.saturating_add(1);
+    }
+    if selectors != 1 {
+        return Err(mcp_error(
+            error_codes::TOOL_PARAMS_INVALID,
+            format!(
+                "{tool} frame locator requires exactly one of frame_id, frame_element_id, name, url, or index"
+            ),
+        ));
+    }
     Ok(())
 }
 
@@ -8255,6 +8402,7 @@ fn browser_wait_for_selector_locate_params(
         nth: params.nth,
         strict: params.strict,
         root_element_id: params.root_element_id.clone(),
+        frame: params.frame.clone(),
         cdp_target_id: params.cdp_target_id.clone(),
         window_hwnd: params.window_hwnd,
         limit: params.limit,
@@ -9120,7 +9268,168 @@ fn browser_locate_cdp_request(
         nth: params.nth,
         strict: params.strict.unwrap_or(false),
         root_backend_node_id,
+        frame_id: None,
         limit,
+    }
+}
+
+#[cfg(windows)]
+#[derive(Clone, Debug)]
+struct BrowserLocateScope {
+    cdp_target_id: String,
+    frame_id: Option<String>,
+    frame_readback: Option<BrowserLocatedFrame>,
+    frame_requested: bool,
+    frame_resolved: bool,
+    page_url: Option<String>,
+    page_title: Option<String>,
+}
+
+#[cfg(windows)]
+async fn resolve_browser_locate_scope(
+    endpoint: &str,
+    window_hwnd: i64,
+    cdp_target_id: &str,
+    frame: Option<&BrowserFrameLocator>,
+) -> Result<BrowserLocateScope, ErrorData> {
+    let Some(frame) = frame else {
+        return Ok(BrowserLocateScope {
+            cdp_target_id: cdp_target_id.to_owned(),
+            frame_id: None,
+            frame_readback: None,
+            frame_requested: false,
+            frame_resolved: true,
+            page_url: None,
+            page_title: None,
+        });
+    };
+    let frames = synapse_a11y::cdp_list_frames(endpoint, window_hwnd, cdp_target_id)
+        .await
+        .map_err(|error| {
+            mcp_error(
+                error.code(),
+                format!("browser_locate frame locator enumeration failed: {error}"),
+            )
+        })?;
+    let matches = matching_browser_frames(frame, &frames.frames);
+    let selected = match matches.as_slice() {
+        [] => {
+            return Ok(BrowserLocateScope {
+                cdp_target_id: cdp_target_id.to_owned(),
+                frame_id: None,
+                frame_readback: Some(BrowserLocatedFrame {
+                    resolved: false,
+                    matched_frame_count: 0,
+                    frame_id: None,
+                    parent_frame_id: None,
+                    cdp_target_id: None,
+                    url: None,
+                    name: None,
+                    origin: None,
+                    is_out_of_process: false,
+                    frame_element_id: frame.frame_element_id.clone(),
+                    frame_element_cdp_target_id: None,
+                    frame_element_source: "not_found".to_owned(),
+                }),
+                frame_requested: true,
+                frame_resolved: false,
+                page_url: Some(frames.page_url),
+                page_title: Some(frames.page_title),
+            });
+        }
+        [selected] => *selected,
+        many => {
+            return Err(mcp_error(
+                error_codes::ACTION_TARGET_INVALID,
+                format!(
+                    "browser_locate frame locator matched {} frames; refine by frame_id, frame_element_id, or index",
+                    many.len()
+                ),
+            ));
+        }
+    };
+    let min_target_depth = frames
+        .frames
+        .iter()
+        .filter(|frame| {
+            frame
+                .cdp_target_id
+                .eq_ignore_ascii_case(&selected.cdp_target_id)
+        })
+        .map(|frame| frame.depth)
+        .min()
+        .unwrap_or(selected.depth);
+    let frame_id = (selected.depth > min_target_depth).then(|| selected.frame_id.clone());
+    Ok(BrowserLocateScope {
+        cdp_target_id: selected.cdp_target_id.clone(),
+        frame_id,
+        frame_readback: Some(browser_located_frame(selected, matches.len())),
+        frame_requested: true,
+        frame_resolved: true,
+        page_url: Some(frames.page_url),
+        page_title: Some(frames.page_title),
+    })
+}
+
+#[cfg(windows)]
+fn matching_browser_frames<'a>(
+    locator: &BrowserFrameLocator,
+    frames: &'a [synapse_a11y::CdpFrameTreeEntry],
+) -> Vec<&'a synapse_a11y::CdpFrameTreeEntry> {
+    if let Some(index) = locator.index {
+        return frames.get(index).into_iter().collect();
+    }
+    if let Some(frame_id) = trimmed_frame_locator_value(locator.frame_id.as_deref()) {
+        return frames
+            .iter()
+            .filter(|frame| frame.frame_id == frame_id)
+            .collect();
+    }
+    if let Some(frame_element_id) = trimmed_frame_locator_value(locator.frame_element_id.as_deref())
+    {
+        return frames
+            .iter()
+            .filter(|frame| frame.frame_element_id.as_deref() == Some(frame_element_id.as_str()))
+            .collect();
+    }
+    if let Some(name) = trimmed_frame_locator_value(locator.name.as_deref()) {
+        return frames
+            .iter()
+            .filter(|frame| frame.name.as_deref() == Some(name.as_str()))
+            .collect();
+    }
+    if let Some(url) = trimmed_frame_locator_value(locator.url.as_deref()) {
+        return frames.iter().filter(|frame| frame.url == url).collect();
+    }
+    Vec::new()
+}
+
+#[cfg(windows)]
+fn trimmed_frame_locator_value(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+#[cfg(windows)]
+fn browser_located_frame(
+    frame: &synapse_a11y::CdpFrameTreeEntry,
+    matched_frame_count: usize,
+) -> BrowserLocatedFrame {
+    BrowserLocatedFrame {
+        resolved: true,
+        matched_frame_count,
+        frame_id: Some(frame.frame_id.clone()),
+        parent_frame_id: frame.parent_frame_id.clone(),
+        cdp_target_id: Some(frame.cdp_target_id.clone()),
+        url: Some(frame.url.clone()),
+        name: frame.name.clone(),
+        origin: Some(frame.origin.clone()),
+        is_out_of_process: frame.is_out_of_process,
+        frame_element_id: frame.frame_element_id.clone(),
+        frame_element_cdp_target_id: frame.frame_element_cdp_target_id.clone(),
+        frame_element_source: frame.frame_element_source.clone(),
     }
 }
 
@@ -9269,8 +9578,37 @@ async fn browser_wait_for_selector_poll(
     wait: &NormalizedBrowserWaitForSelectorParams,
     root_backend_node_id: Option<i64>,
 ) -> Result<BrowserWaitForSelectorPoll, ErrorData> {
-    let request = browser_locate_cdp_request(&wait.locate, root_backend_node_id, wait.limit);
-    let located = synapse_a11y::cdp_locate(endpoint, cdp_target_id, request)
+    let scope = resolve_browser_locate_scope(
+        endpoint,
+        window_hwnd,
+        cdp_target_id,
+        wait.locate.frame.as_ref(),
+    )
+    .await?;
+    if scope.frame_requested && !scope.frame_resolved {
+        let observation = BrowserWaitForSelectorObservation::default();
+        let (condition_met, _) = browser_wait_for_selector_condition(wait.state, &observation);
+        return Ok(BrowserWaitForSelectorPoll {
+            condition_met,
+            cdp_target_id: cdp_target_id.to_owned(),
+            engine: browser_locate_engine_to_a11y(wait.locate.engine)
+                .as_str()
+                .to_owned(),
+            query: wait.locate.query.clone(),
+            match_count: 0,
+            returned_count: 0,
+            visible_count: 0,
+            truncated: false,
+            element_id: None,
+            frame: scope.frame_readback,
+            url: scope.page_url.unwrap_or_default(),
+            title: scope.page_title.unwrap_or_default(),
+        });
+    }
+
+    let mut request = browser_locate_cdp_request(&wait.locate, root_backend_node_id, wait.limit);
+    request.frame_id = scope.frame_id.clone();
+    let located = synapse_a11y::cdp_locate(endpoint, &scope.cdp_target_id, request)
         .await
         .map_err(|error| {
             mcp_error(
@@ -9288,8 +9626,12 @@ async fn browser_wait_for_selector_poll(
         BrowserWaitForSelectorState::Visible | BrowserWaitForSelectorState::Hidden
     ) {
         for backend_node_id in &located.backend_node_ids {
-            if browser_wait_for_selector_backend_visible(endpoint, cdp_target_id, *backend_node_id)
-                .await?
+            if browser_wait_for_selector_backend_visible(
+                endpoint,
+                &located.target_id,
+                *backend_node_id,
+            )
+            .await?
             {
                 observation.visible_backend_node_ids.push(*backend_node_id);
             } else {
@@ -9313,6 +9655,7 @@ async fn browser_wait_for_selector_poll(
         visible_count: observation.visible_backend_node_ids.len(),
         truncated: located.truncated,
         element_id,
+        frame: scope.frame_readback,
         url: located.url,
         title: located.title,
     })
@@ -11841,18 +12184,18 @@ mod tests {
         target_wire, template_value, unavailable_page_vitals_info,
         validate_browser_add_init_script_params, validate_browser_add_script_tag_params,
         validate_browser_add_style_tag_params, validate_browser_evaluate_params,
-        validate_browser_expose_binding_params, validate_browser_set_content_params,
-        validate_browser_tabs_params, validate_browser_wait_for_function_params,
-        validate_browser_wait_for_load_state_params, validate_browser_wait_for_params,
-        validate_browser_wait_for_request_params, validate_browser_wait_for_response_params,
-        validate_browser_wait_for_selector_params, validate_browser_wait_for_url_params,
-        validate_target_window,
+        validate_browser_expose_binding_params, validate_browser_frame_locator,
+        validate_browser_set_content_params, validate_browser_tabs_params,
+        validate_browser_wait_for_function_params, validate_browser_wait_for_load_state_params,
+        validate_browser_wait_for_params, validate_browser_wait_for_request_params,
+        validate_browser_wait_for_response_params, validate_browser_wait_for_selector_params,
+        validate_browser_wait_for_url_params, validate_target_window,
     };
     use crate::m1::{
         BrowserAddInitScriptParams, BrowserAddScriptTagParams, BrowserAddStyleTagParams,
         BrowserEvaluateParams, BrowserExposeBindingOperation, BrowserExposeBindingParams,
-        BrowserInitScriptOperation, BrowserSetContentParams, BrowserTabEntry, BrowserTabsOperation,
-        BrowserTabsParams, BrowserTabsResponse, BrowserWaitForFunctionParams,
+        BrowserFrameLocator, BrowserInitScriptOperation, BrowserSetContentParams, BrowserTabEntry,
+        BrowserTabsOperation, BrowserTabsParams, BrowserTabsResponse, BrowserWaitForFunctionParams,
         BrowserWaitForLoadStateParams, BrowserWaitForLoadStateState,
         BrowserWaitForNetworkResponseParams, BrowserWaitForParams, BrowserWaitForRequestParams,
         BrowserWaitForSelectorParams, BrowserWaitForSelectorState, BrowserWaitForState,
@@ -11918,6 +12261,201 @@ mod tests {
                 format!("{expected:?}"),
                 "relation {wire:?}"
             );
+        }
+    }
+
+    #[test]
+    fn browser_frame_locator_validation_requires_exactly_one_selector() {
+        validate_browser_frame_locator(
+            "browser_locate",
+            Some(&BrowserFrameLocator {
+                frame_id: Some("frame-1".to_owned()),
+                ..BrowserFrameLocator::default()
+            }),
+        )
+        .expect("single frame_id selector is valid");
+
+        let missing =
+            validate_browser_frame_locator("browser_locate", Some(&BrowserFrameLocator::default()))
+                .expect_err("missing frame selector must fail");
+        assert_eq!(
+            missing
+                .data
+                .as_ref()
+                .and_then(|data| data.get("code"))
+                .and_then(serde_json::Value::as_str),
+            Some(error_codes::TOOL_PARAMS_INVALID)
+        );
+
+        let ambiguous = validate_browser_frame_locator(
+            "browser_locate",
+            Some(&BrowserFrameLocator {
+                name: Some("checkout".to_owned()),
+                url: Some("https://pay.example/frame".to_owned()),
+                ..BrowserFrameLocator::default()
+            }),
+        )
+        .expect_err("multiple frame selectors must fail");
+        assert_eq!(
+            ambiguous
+                .data
+                .as_ref()
+                .and_then(|data| data.get("code"))
+                .and_then(serde_json::Value::as_str),
+            Some(error_codes::TOOL_PARAMS_INVALID)
+        );
+
+        let blank = validate_browser_frame_locator(
+            "browser_locate",
+            Some(&BrowserFrameLocator {
+                name: Some("   ".to_owned()),
+                ..BrowserFrameLocator::default()
+            }),
+        )
+        .expect_err("blank frame selector must fail");
+        assert_eq!(
+            blank
+                .data
+                .as_ref()
+                .and_then(|data| data.get("code"))
+                .and_then(serde_json::Value::as_str),
+            Some(error_codes::TOOL_PARAMS_INVALID)
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn browser_frame_locator_matches_frame_metadata() {
+        let frames = vec![
+            test_frame_entry("main", None, "root-target", "https://app.example/", None, 0),
+            test_frame_entry(
+                "child-a",
+                Some("main"),
+                "child-target-a",
+                "https://pay.example/frame",
+                Some("checkout"),
+                1,
+            ),
+            test_frame_entry(
+                "child-b",
+                Some("main"),
+                "child-target-b",
+                "https://help.example/frame",
+                Some("support"),
+                2,
+            ),
+        ];
+
+        assert_eq!(
+            super::matching_browser_frames(
+                &BrowserFrameLocator {
+                    frame_id: Some("child-a".to_owned()),
+                    ..BrowserFrameLocator::default()
+                },
+                &frames,
+            )
+            .len(),
+            1
+        );
+        assert_eq!(
+            super::matching_browser_frames(
+                &BrowserFrameLocator {
+                    frame_element_id: Some("0000000000002200:cdcd00000000002a".to_owned()),
+                    ..BrowserFrameLocator::default()
+                },
+                &frames,
+            )
+            .first()
+            .map(|frame| frame.frame_id.as_str()),
+            Some("child-a")
+        );
+        assert_eq!(
+            super::matching_browser_frames(
+                &BrowserFrameLocator {
+                    name: Some("support".to_owned()),
+                    ..BrowserFrameLocator::default()
+                },
+                &frames,
+            )
+            .first()
+            .map(|frame| frame.frame_id.as_str()),
+            Some("child-b")
+        );
+        assert_eq!(
+            super::matching_browser_frames(
+                &BrowserFrameLocator {
+                    url: Some("https://pay.example/frame".to_owned()),
+                    ..BrowserFrameLocator::default()
+                },
+                &frames,
+            )
+            .first()
+            .map(|frame| frame.frame_id.as_str()),
+            Some("child-a")
+        );
+        assert_eq!(
+            super::matching_browser_frames(
+                &BrowserFrameLocator {
+                    index: Some(2),
+                    ..BrowserFrameLocator::default()
+                },
+                &frames,
+            )
+            .first()
+            .map(|frame| frame.frame_id.as_str()),
+            Some("child-b")
+        );
+        assert!(
+            super::matching_browser_frames(
+                &BrowserFrameLocator {
+                    frame_id: Some("missing".to_owned()),
+                    ..BrowserFrameLocator::default()
+                },
+                &frames,
+            )
+            .is_empty()
+        );
+    }
+
+    #[cfg(windows)]
+    fn test_frame_entry(
+        frame_id: &str,
+        parent_frame_id: Option<&str>,
+        cdp_target_id: &str,
+        url: &str,
+        name: Option<&str>,
+        sibling_index: u32,
+    ) -> synapse_a11y::CdpFrameTreeEntry {
+        synapse_a11y::CdpFrameTreeEntry {
+            frame_id: frame_id.to_owned(),
+            parent_frame_id: parent_frame_id.map(ToOwned::to_owned),
+            cdp_target_id: cdp_target_id.to_owned(),
+            target_type: if cdp_target_id == "root-target" {
+                "page".to_owned()
+            } else {
+                "iframe".to_owned()
+            },
+            target_attached: Some(true),
+            url: url.to_owned(),
+            name: name.map(ToOwned::to_owned),
+            origin: url
+                .split_once("/frame")
+                .map_or_else(|| url.to_owned(), |(origin, _)| origin.to_owned()),
+            security_origin: None,
+            loader_id: Some(format!("loader-{frame_id}")),
+            depth: parent_frame_id.map_or(0, |_| 1),
+            sibling_index,
+            child_count: 0,
+            is_out_of_process: parent_frame_id.is_some(),
+            frame_element_id: (frame_id == "child-a")
+                .then(|| "0000000000002200:cdcd00000000002a".to_owned()),
+            frame_element_backend_node_id: (frame_id == "child-a").then_some(42),
+            frame_element_cdp_target_id: (frame_id == "child-a").then(|| "root-target".to_owned()),
+            frame_element_source: if frame_id == "main" {
+                "main_frame".to_owned()
+            } else {
+                "DOM.Node.frameId".to_owned()
+            },
         }
     }
 

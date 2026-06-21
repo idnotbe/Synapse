@@ -408,6 +408,8 @@ pub struct CdpLocateRequest {
     pub strict: bool,
     /// Resolve only within this element (`backendNodeId`); chaining/scoping.
     pub root_backend_node_id: Option<i64>,
+    /// Resolve in this Page.FrameId's execution context.
+    pub frame_id: Option<String>,
     /// Maximum element ids to return. `match_count` always reports the true total.
     pub limit: usize,
 }
@@ -422,6 +424,7 @@ pub struct CdpLocateResult {
     pub title: String,
     pub engine: String,
     pub query: String,
+    pub frame_id: Option<String>,
     pub match_count: usize,
     pub backend_node_ids: Vec<i64>,
     pub returned_count: usize,
@@ -1884,6 +1887,7 @@ pub async fn cdp_locate(
             title: state.title,
             engine: request.engine.as_str().to_owned(),
             query: request.query.clone(),
+            frame_id: request.frame_id.clone(),
             match_count,
             backend_node_ids,
             returned_count,
@@ -1932,13 +1936,17 @@ async fn locate_via_injected_js(
     };
 
     let spec = locate_spec_json(request);
+    let frame_context = locate_frame_context(page, request.frame_id.as_deref()).await?;
 
     // Evaluate the engine, yielding the `{count, elements}` result object id.
     let (result_object_id, _) = if let Some(root_backend) = request.root_backend_node_id {
-        let resolve = ResolveNodeParams::builder()
+        let mut resolve = ResolveNodeParams::builder()
             .backend_node_id(BackendNodeId::new(root_backend))
-            .object_group(SYNAPSE_LOCATE_OBJECT_GROUP)
-            .build();
+            .object_group(SYNAPSE_LOCATE_OBJECT_GROUP);
+        if let Some(context) = frame_context.clone() {
+            resolve = resolve.execution_context_id(context);
+        }
+        let resolve = resolve.build();
         let resolved = page
             .execute(resolve)
             .await
@@ -1985,15 +1993,17 @@ async fn locate_via_injected_js(
             detail: format!("locate spec serialize: {err}"),
         })?;
         let expression = String::from("(") + SYNAPSE_LOCATE_JS + ")(document, " + &spec_json + ")";
-        let params = EvaluateParams::builder()
+        let mut params = EvaluateParams::builder()
             .expression(expression)
             .object_group(SYNAPSE_LOCATE_OBJECT_GROUP)
             .return_by_value(false)
-            .await_promise(false)
-            .build()
-            .map_err(|err| A11yError::CdpAxtreeFailed {
-                detail: format!("locate Runtime.evaluate params build: {err}"),
-            })?;
+            .await_promise(false);
+        if let Some(context) = frame_context {
+            params = params.context_id(context);
+        }
+        let params = params.build().map_err(|err| A11yError::CdpAxtreeFailed {
+            detail: format!("locate Runtime.evaluate params build: {err}"),
+        })?;
         let returns = page
             .execute(params)
             .await
@@ -2125,10 +2135,43 @@ async fn locate_role(
 ) -> A11yResult<(Vec<i64>, usize)> {
     use chromiumoxide::cdp::browser_protocol::accessibility::QueryAxTreeParams;
     use chromiumoxide::cdp::browser_protocol::dom::{BackendNodeId, GetDocumentParams};
+    use chromiumoxide::cdp::js_protocol::runtime::EvaluateParams;
 
     let mut builder = QueryAxTreeParams::builder().role(request.query.clone());
     builder = if let Some(root_backend) = request.root_backend_node_id {
         builder.backend_node_id(BackendNodeId::new(root_backend))
+    } else if let Some(context) = locate_frame_context(page, request.frame_id.as_deref()).await? {
+        let document = page
+            .execute(
+                EvaluateParams::builder()
+                    .expression("document")
+                    .context_id(context)
+                    .object_group(SYNAPSE_LOCATE_OBJECT_GROUP)
+                    .return_by_value(false)
+                    .build()
+                    .map_err(|err| A11yError::CdpAxtreeFailed {
+                        detail: format!("locate role frame document evaluate params build: {err}"),
+                    })?,
+            )
+            .await
+            .map_err(|err| A11yError::CdpAxtreeFailed {
+                detail: format!("locate role frame document evaluate: {err}"),
+            })?
+            .result;
+        if let Some(exception) = document.exception_details.as_ref() {
+            return Err(A11yError::CdpAxtreeFailed {
+                detail: format!(
+                    "locate role frame document evaluate threw: {}",
+                    format_evaluate_exception(exception)
+                ),
+            });
+        }
+        let Some(object_id) = document.result.object_id else {
+            return Err(A11yError::CdpAxtreeFailed {
+                detail: "locate role frame document evaluate returned no objectId".to_owned(),
+            });
+        };
+        builder.object_id(object_id)
     } else {
         let document = page
             .execute(GetDocumentParams::builder().depth(0).build())
@@ -2176,6 +2219,35 @@ async fn locate_role(
     let match_count = all.len();
     let selected = apply_nth_and_limit(all, request.nth, request.limit);
     Ok((selected, match_count))
+}
+
+async fn locate_frame_context(
+    page: &chromiumoxide::Page,
+    frame_id: Option<&str>,
+) -> A11yResult<Option<chromiumoxide::cdp::js_protocol::runtime::ExecutionContextId>> {
+    use chromiumoxide::cdp::browser_protocol::page::{CreateIsolatedWorldParams, FrameId};
+
+    let Some(frame_id) = frame_id
+        .map(str::trim)
+        .filter(|frame_id| !frame_id.is_empty())
+    else {
+        return Ok(None);
+    };
+    let context = page
+        .execute(
+            CreateIsolatedWorldParams::builder()
+                .frame_id(FrameId::new(frame_id.to_owned()))
+                .world_name(SYNAPSE_LOCATE_OBJECT_GROUP)
+                .build()
+                .map_err(|err| A11yError::CdpAxtreeFailed {
+                    detail: format!("locate frame {frame_id} isolated world params build: {err}"),
+                })?,
+        )
+        .await
+        .map_err(|err| A11yError::CdpAxtreeFailed {
+            detail: format!("locate frame {frame_id} Page.createIsolatedWorld: {err}"),
+        })?;
+    Ok(Some(context.result.execution_context_id))
 }
 
 /// Accessible-name / attribute-text matcher mirroring the injected engine's

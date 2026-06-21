@@ -2037,6 +2037,10 @@ pub struct BrowserWaitForSelectorParams {
     /// Resolve only within this element id (chaining / scoping).
     #[serde(default)]
     pub root_element_id: Option<String>,
+    /// Resolve inside a specific frame selected by exactly one of frame_id,
+    /// frame_element_id, name, url, or index.
+    #[serde(default)]
+    pub frame: Option<BrowserFrameLocator>,
     /// CDP TargetID to query. Defaults to the active session CDP target.
     #[serde(default)]
     pub cdp_target_id: Option<String>,
@@ -2079,6 +2083,8 @@ pub struct BrowserWaitForSelectorResponse {
     /// and detached can resolve with no element when the selector is absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub element_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frame: Option<BrowserLocatedFrame>,
     pub url: String,
     pub title: String,
     pub readback_backend: String,
@@ -2472,6 +2478,10 @@ pub struct BrowserLocateParams {
     /// target must match the resolved target.
     #[serde(default)]
     pub root_element_id: Option<String>,
+    /// Resolve inside a specific frame selected by exactly one of frame_id,
+    /// frame_element_id, name, url, or index.
+    #[serde(default)]
+    pub frame: Option<BrowserFrameLocator>,
     /// CDP TargetID to query. Defaults to the active session CDP target. Must be
     /// owned by this session; the human foreground tab is never a fallback.
     #[serde(default)]
@@ -2484,6 +2494,53 @@ pub struct BrowserLocateParams {
     /// always reports the full number of matches.
     #[serde(default)]
     pub limit: Option<usize>,
+}
+
+/// Frame selector for `browser_locate` / `browser_wait_for_selector`.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct BrowserFrameLocator {
+    /// Exact CDP Page.FrameId from `browser_frames`.
+    #[serde(default)]
+    pub frame_id: Option<String>,
+    /// Owning iframe/frame element id from `browser_frames`.
+    #[serde(default)]
+    pub frame_element_id: Option<String>,
+    /// Exact frame name.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Exact frame URL.
+    #[serde(default)]
+    pub url: Option<String>,
+    /// Zero-based index into the `browser_frames` returned frame list.
+    #[serde(default)]
+    pub index: Option<usize>,
+}
+
+/// Readback for frame-scoped locator resolution.
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct BrowserLocatedFrame {
+    pub resolved: bool,
+    pub matched_frame_count: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frame_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_frame_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cdp_target_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<String>,
+    pub is_out_of_process: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frame_element_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frame_element_cdp_target_id: Option<String>,
+    pub frame_element_source: String,
 }
 
 /// Response for `browser_locate`.
@@ -2507,6 +2564,8 @@ pub struct BrowserLocateResponse {
     pub truncated: bool,
     /// Resolved element ids — feed directly into `browser_inspect`, `act_*`, etc.
     pub element_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frame: Option<BrowserLocatedFrame>,
     pub url: String,
     pub title: String,
     pub readback_backend: String,
