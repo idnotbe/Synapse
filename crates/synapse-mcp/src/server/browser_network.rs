@@ -19,6 +19,7 @@ use synapse_core::error_codes;
 
 const REQUESTS_TOOL: &str = "browser_network_requests";
 const REQUEST_TOOL: &str = "browser_network_request";
+const OVERRIDES_TOOL: &str = "browser_network_overrides";
 const ROUTE_TOOL: &str = "browser_route";
 const DEFAULT_NETWORK_REQUEST_LIMIT: usize = 100;
 const MAX_NETWORK_REQUEST_LIMIT: usize = 1000;
@@ -32,6 +33,7 @@ const MAX_ROUTE_HEADER_COUNT: usize = 128;
 const MAX_ROUTE_HEADER_NAME_CHARS: usize = 256;
 const MAX_ROUTE_HEADER_VALUE_CHARS: usize = 8192;
 const MAX_ROUTE_BODY_CHARS: usize = 1_048_576;
+const MAX_NETWORK_USER_AGENT_CHARS: usize = 4096;
 
 /// Parameters for `browser_network_requests` (#1081): return captured Network
 /// request records for the calling session's owned CDP target.
@@ -256,6 +258,67 @@ pub struct BrowserNetworkResponseBody {
     pub body: String,
     pub base64_encoded: bool,
     pub body_len_chars: usize,
+}
+
+/// Operation for `browser_network_overrides` (#1087).
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BrowserNetworkOverridesOperation {
+    /// Replace target-scoped headers and optional User-Agent override.
+    #[default]
+    Set,
+    /// Read current tracked override state.
+    Get,
+    /// Clear headers and restore the captured original User-Agent.
+    Clear,
+}
+
+/// Parameters for `browser_network_overrides` (#1087).
+#[derive(Clone, Debug, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct BrowserNetworkOverridesParams {
+    /// CDP TargetID to configure. Defaults to the active session CDP target.
+    /// Must be owned by this session; the human foreground tab is never an implicit fallback.
+    #[serde(default)]
+    pub cdp_target_id: Option<String>,
+    /// Browser HWND that owns the target. Required only with an explicit
+    /// `cdp_target_id` and no active session target.
+    #[serde(default)]
+    pub window_hwnd: Option<i64>,
+    /// Operation. Defaults to `set`.
+    #[serde(default)]
+    pub operation: BrowserNetworkOverridesOperation,
+    /// Replacement extra HTTP headers for `set`. An empty list clears headers.
+    #[serde(default)]
+    pub headers: Vec<BrowserRouteHeader>,
+    /// Replacement User-Agent for `set`. Omit to clear a prior UA override.
+    #[serde(default)]
+    pub user_agent: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct BrowserNetworkOverridesResponse {
+    pub session_id: String,
+    pub window_hwnd: i64,
+    pub transport: String,
+    pub endpoint: String,
+    pub cdp_target_id: String,
+    pub operation: BrowserNetworkOverridesOperation,
+    pub override_active: bool,
+    pub newly_armed: bool,
+    pub cleared: bool,
+    pub armed_at_unix_ms: u64,
+    pub applied_at_unix_ms: u64,
+    pub header_count: usize,
+    pub headers: Vec<BrowserRouteHeader>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_agent: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original_user_agent: Option<String>,
+    pub readback_backend: String,
+    pub backend_tier_used: String,
+    pub required_foreground: bool,
 }
 
 /// Operation for `browser_route` (#1084).
@@ -491,6 +554,13 @@ struct NormalizedBrowserNetworkRequestParams {
 }
 
 #[derive(Debug)]
+struct NormalizedBrowserNetworkOverridesParams {
+    operation: BrowserNetworkOverridesOperation,
+    headers: Vec<(String, String)>,
+    user_agent: Option<String>,
+}
+
+#[derive(Debug)]
 struct NormalizedBrowserRouteParams {
     operation: BrowserRouteOperation,
     route_id: Option<String>,
@@ -620,6 +690,64 @@ impl SynapseService {
             .browser_network_request_impl(&session_id, window_hwnd, &cdp_target_id, &request)
             .await;
         self.audit_action_result_for_session(REQUEST_TOOL, &result, &session_id)?;
+        result.map(Json)
+    }
+
+    #[tool(
+        description = "Set/get/clear target-scoped extra HTTP headers and User-Agent override for the calling session's owned browser tab. Uses raw CDP Network.setExtraHTTPHeaders and Emulation.setUserAgentOverride, keeps a target-scoped override session alive for readback/clear, and never activates the tab, uses OS foreground input, or falls back to the human foreground tab. Raw CDP only; the popup-safe normal Chrome extension bridge fails closed."
+    )]
+    pub async fn browser_network_overrides(
+        &self,
+        params: Parameters<BrowserNetworkOverridesParams>,
+        request_context: RequestContext<RoleServer>,
+    ) -> Result<Json<BrowserNetworkOverridesResponse>, ErrorData> {
+        tracing::info!(
+            code = "MCP_TOOL_INVOCATION",
+            kind = OVERRIDES_TOOL,
+            "tool.invocation kind=browser_network_overrides"
+        );
+        let session_id = require_target_session_id(&request_context)?;
+        let overrides = validate_browser_network_overrides_params(&params.0)?;
+        let request_details = json!({
+            "session_id": &session_id,
+            "window_hwnd": params.0.window_hwnd,
+            "requested_cdp_target": cdp_target_id_audit_ref(params.0.cdp_target_id.as_deref()),
+            "operation": overrides.operation,
+            "header_count": overrides.headers.len(),
+            "user_agent_len": overrides.user_agent.as_deref().map(str::len),
+            "required_foreground": false,
+            "phase": "target_resolution",
+        });
+        let resolution = self.resolve_cdp_tab_mutation_target(
+            OVERRIDES_TOOL,
+            &session_id,
+            params.0.window_hwnd,
+            params.0.cdp_target_id.as_deref(),
+        );
+        let (window_hwnd, cdp_target_id) = self.audit_cdp_target_resolution_result(
+            OVERRIDES_TOOL,
+            &session_id,
+            &request_details,
+            resolution,
+        )?;
+        let request_details = json!({
+            "session_id": &session_id,
+            "window_hwnd": window_hwnd,
+            "cdp_target_id": &cdp_target_id,
+            "operation": overrides.operation,
+            "header_count": overrides.headers.len(),
+            "user_agent_len": overrides.user_agent.as_deref().map(str::len),
+            "required_foreground": false,
+        });
+        self.audit_action_started_with_details_for_session(
+            OVERRIDES_TOOL,
+            &request_details,
+            &session_id,
+        )?;
+        let result = self
+            .browser_network_overrides_impl(&session_id, window_hwnd, &cdp_target_id, &overrides)
+            .await;
+        self.audit_action_result_for_session(OVERRIDES_TOOL, &result, &session_id)?;
         result.map(Json)
     }
 
@@ -882,6 +1010,88 @@ impl SynapseService {
     }
 
     #[cfg(windows)]
+    async fn browser_network_overrides_impl(
+        &self,
+        session_id: &str,
+        window_hwnd: i64,
+        cdp_target_id: &str,
+        overrides: &NormalizedBrowserNetworkOverridesParams,
+    ) -> Result<BrowserNetworkOverridesResponse, ErrorData> {
+        let Some(endpoint) = synapse_a11y::endpoint_for_window(window_hwnd) else {
+            return Err(browser_raw_cdp_required_error(OVERRIDES_TOOL, window_hwnd));
+        };
+        let (status, cleared) = match overrides.operation {
+            BrowserNetworkOverridesOperation::Set => {
+                let status = synapse_a11y::network_overrides_apply(
+                    &endpoint,
+                    cdp_target_id,
+                    synapse_a11y::CdpNetworkOverrideConfig {
+                        headers: overrides.headers.clone(),
+                        user_agent: overrides.user_agent.clone(),
+                    },
+                )
+                .await
+                .map_err(|error| {
+                    mcp_error(
+                        error.code(),
+                        format!("{OVERRIDES_TOOL} raw CDP override apply failed: {error}"),
+                    )
+                })?;
+                (Some(status), false)
+            }
+            BrowserNetworkOverridesOperation::Get => {
+                (synapse_a11y::network_overrides_status(cdp_target_id), false)
+            }
+            BrowserNetworkOverridesOperation::Clear => {
+                let status = synapse_a11y::network_overrides_clear(cdp_target_id)
+                    .await
+                    .map_err(|error| {
+                        mcp_error(
+                            error.code(),
+                            format!("{OVERRIDES_TOOL} raw CDP override clear failed: {error}"),
+                        )
+                    })?;
+                let cleared = status.is_some();
+                (status, cleared)
+            }
+        };
+        tracing::info!(
+            code = "CDP_BACKGROUND_NETWORK_OVERRIDES",
+            session_id = %session_id,
+            hwnd = window_hwnd,
+            endpoint = %endpoint,
+            cdp_target_id,
+            operation = ?overrides.operation,
+            override_active = status.is_some(),
+            cleared,
+            "readback=Network.setExtraHTTPHeaders+Emulation.setUserAgentOverride outcome=overrides_returned"
+        );
+        Ok(browser_network_overrides_response(
+            session_id,
+            window_hwnd,
+            endpoint,
+            cdp_target_id,
+            overrides.operation,
+            status,
+            cleared,
+        ))
+    }
+
+    #[cfg(not(windows))]
+    async fn browser_network_overrides_impl(
+        &self,
+        _session_id: &str,
+        _window_hwnd: i64,
+        _cdp_target_id: &str,
+        _overrides: &NormalizedBrowserNetworkOverridesParams,
+    ) -> Result<BrowserNetworkOverridesResponse, ErrorData> {
+        Err(mcp_error(
+            error_codes::A11Y_NOT_AVAILABLE,
+            "browser_network_overrides is only available on Windows in this build",
+        ))
+    }
+
+    #[cfg(windows)]
     async fn browser_route_impl(
         &self,
         session_id: &str,
@@ -1071,6 +1281,73 @@ impl NormalizedBrowserNetworkRequestsParams {
 
 fn default_true() -> bool {
     true
+}
+
+fn validate_browser_network_overrides_params(
+    params: &BrowserNetworkOverridesParams,
+) -> Result<NormalizedBrowserNetworkOverridesParams, ErrorData> {
+    if let Some(target_id) = params.cdp_target_id.as_deref() {
+        validate_cdp_target_id(target_id)?;
+    }
+    match params.operation {
+        BrowserNetworkOverridesOperation::Set => {
+            let headers = validate_route_headers(&params.headers)?;
+            let user_agent = validate_network_user_agent(params.user_agent.as_deref())?;
+            Ok(NormalizedBrowserNetworkOverridesParams {
+                operation: params.operation,
+                headers,
+                user_agent,
+            })
+        }
+        BrowserNetworkOverridesOperation::Get | BrowserNetworkOverridesOperation::Clear => {
+            if !params.headers.is_empty() || params.user_agent.is_some() {
+                return Err(mcp_error(
+                    error_codes::TOOL_PARAMS_INVALID,
+                    format!(
+                        "{OVERRIDES_TOOL} headers and user_agent are only valid for operation=set"
+                    ),
+                ));
+            }
+            Ok(NormalizedBrowserNetworkOverridesParams {
+                operation: params.operation,
+                headers: Vec::new(),
+                user_agent: None,
+            })
+        }
+    }
+}
+
+fn validate_network_user_agent(value: Option<&str>) -> Result<Option<String>, ErrorData> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    if value.is_empty() {
+        return Err(mcp_error(
+            error_codes::TOOL_PARAMS_INVALID,
+            format!("{OVERRIDES_TOOL} user_agent must not be empty"),
+        ));
+    }
+    if value.trim() != value {
+        return Err(mcp_error(
+            error_codes::TOOL_PARAMS_INVALID,
+            format!("{OVERRIDES_TOOL} user_agent must not contain leading or trailing whitespace"),
+        ));
+    }
+    if value.contains(['\r', '\n', '\0']) {
+        return Err(mcp_error(
+            error_codes::TOOL_PARAMS_INVALID,
+            format!("{OVERRIDES_TOOL} user_agent must not contain line breaks or NUL"),
+        ));
+    }
+    if value.chars().count() > MAX_NETWORK_USER_AGENT_CHARS {
+        return Err(mcp_error(
+            error_codes::TOOL_PARAMS_INVALID,
+            format!(
+                "{OVERRIDES_TOOL} user_agent must be at most {MAX_NETWORK_USER_AGENT_CHARS} Unicode scalar values"
+            ),
+        ));
+    }
+    Ok(Some(value.to_owned()))
 }
 
 fn validate_browser_route_params(
@@ -1952,6 +2229,65 @@ fn browser_network_post_data_to_wire(
     }
 }
 
+fn browser_network_overrides_response(
+    session_id: &str,
+    window_hwnd: i64,
+    endpoint: String,
+    cdp_target_id: &str,
+    operation: BrowserNetworkOverridesOperation,
+    status: Option<synapse_a11y::CdpNetworkOverrideStatus>,
+    cleared: bool,
+) -> BrowserNetworkOverridesResponse {
+    match status {
+        Some(status) => BrowserNetworkOverridesResponse {
+            session_id: session_id.to_owned(),
+            window_hwnd,
+            transport: "raw_cdp".to_owned(),
+            endpoint,
+            cdp_target_id: cdp_target_id.to_owned(),
+            operation,
+            override_active: !status.headers.is_empty() || status.user_agent.is_some(),
+            newly_armed: status.newly_armed,
+            cleared,
+            armed_at_unix_ms: status.armed_at_unix_ms,
+            applied_at_unix_ms: status.applied_at_unix_ms,
+            header_count: status.header_count,
+            headers: status
+                .headers
+                .into_iter()
+                .map(|(name, value)| BrowserRouteHeader { name, value })
+                .collect(),
+            user_agent: status.user_agent,
+            original_user_agent: status.original_user_agent,
+            readback_backend: "Network.setExtraHTTPHeaders + Emulation.setUserAgentOverride"
+                .to_owned(),
+            backend_tier_used: "cdp".to_owned(),
+            required_foreground: false,
+        },
+        None => BrowserNetworkOverridesResponse {
+            session_id: session_id.to_owned(),
+            window_hwnd,
+            transport: "raw_cdp".to_owned(),
+            endpoint,
+            cdp_target_id: cdp_target_id.to_owned(),
+            operation,
+            override_active: false,
+            newly_armed: false,
+            cleared,
+            armed_at_unix_ms: 0,
+            applied_at_unix_ms: 0,
+            header_count: 0,
+            headers: Vec::new(),
+            user_agent: None,
+            original_user_agent: None,
+            readback_backend: "Network.setExtraHTTPHeaders + Emulation.setUserAgentOverride"
+                .to_owned(),
+            backend_tier_used: "cdp".to_owned(),
+            required_foreground: false,
+        },
+    }
+}
+
 fn require_response_body_available(entry: &synapse_a11y::CdpNetworkEntry) -> Result<(), ErrorData> {
     if !entry.response_received {
         return Err(mcp_error(
@@ -2314,6 +2650,106 @@ mod tests {
                 .and_then(serde_json::Value::as_str);
             assert_eq!(code, Some(error_codes::TOOL_PARAMS_INVALID));
         }
+    }
+
+    #[test]
+    fn browser_network_overrides_validation_edges() {
+        let ok = validate_browser_network_overrides_params(&BrowserNetworkOverridesParams {
+            cdp_target_id: Some("target-123".to_owned()),
+            headers: vec![BrowserRouteHeader {
+                name: "x-synapse-test".to_owned(),
+                value: "enabled".to_owned(),
+            }],
+            user_agent: Some("SynapseTest/1.0".to_owned()),
+            ..Default::default()
+        })
+        .expect("valid override params pass");
+        assert_eq!(ok.operation, BrowserNetworkOverridesOperation::Set);
+        assert_eq!(ok.headers[0].0, "x-synapse-test");
+        assert_eq!(ok.user_agent.as_deref(), Some("SynapseTest/1.0"));
+
+        for error in [
+            validate_browser_network_overrides_params(&BrowserNetworkOverridesParams {
+                headers: vec![BrowserRouteHeader {
+                    name: "bad header".to_owned(),
+                    value: "value".to_owned(),
+                }],
+                ..Default::default()
+            })
+            .expect_err("bad header name must be rejected"),
+            validate_browser_network_overrides_params(&BrowserNetworkOverridesParams {
+                user_agent: Some(" bad ".to_owned()),
+                ..Default::default()
+            })
+            .expect_err("bad user-agent whitespace must be rejected"),
+            validate_browser_network_overrides_params(&BrowserNetworkOverridesParams {
+                operation: BrowserNetworkOverridesOperation::Get,
+                user_agent: Some("SynapseTest/1.0".to_owned()),
+                ..Default::default()
+            })
+            .expect_err("get rejects set-only fields"),
+            validate_browser_network_overrides_params(&BrowserNetworkOverridesParams {
+                operation: BrowserNetworkOverridesOperation::Clear,
+                headers: vec![BrowserRouteHeader {
+                    name: "x-test".to_owned(),
+                    value: "yes".to_owned(),
+                }],
+                ..Default::default()
+            })
+            .expect_err("clear rejects set-only fields"),
+        ] {
+            let code = error
+                .data
+                .as_ref()
+                .and_then(|data| data.get("code"))
+                .and_then(serde_json::Value::as_str);
+            assert_eq!(code, Some(error_codes::TOOL_PARAMS_INVALID));
+        }
+    }
+
+    #[test]
+    fn browser_network_overrides_response_maps_active_and_inactive_state() {
+        let active = browser_network_overrides_response(
+            "session-1",
+            100,
+            "http://127.0.0.1:9222".to_owned(),
+            "target-123",
+            BrowserNetworkOverridesOperation::Set,
+            Some(synapse_a11y::CdpNetworkOverrideStatus {
+                newly_armed: true,
+                endpoint: "http://127.0.0.1:9222".to_owned(),
+                cdp_target_id: "target-123".to_owned(),
+                armed_at_unix_ms: 10,
+                applied_at_unix_ms: 20,
+                header_count: 1,
+                headers: vec![("x-synapse-test".to_owned(), "enabled".to_owned())],
+                user_agent: Some("SynapseTest/1.0".to_owned()),
+                original_user_agent: Some("Chrome/Default".to_owned()),
+            }),
+            false,
+        );
+        assert!(active.override_active);
+        assert!(active.newly_armed);
+        assert_eq!(active.header_count, 1);
+        assert_eq!(active.headers[0].name, "x-synapse-test");
+        assert_eq!(active.user_agent.as_deref(), Some("SynapseTest/1.0"));
+        assert_eq!(
+            active.original_user_agent.as_deref(),
+            Some("Chrome/Default")
+        );
+
+        let inactive = browser_network_overrides_response(
+            "session-1",
+            100,
+            "http://127.0.0.1:9222".to_owned(),
+            "target-123",
+            BrowserNetworkOverridesOperation::Get,
+            None,
+            false,
+        );
+        assert!(!inactive.override_active);
+        assert_eq!(inactive.header_count, 0);
+        assert!(inactive.headers.is_empty());
     }
 
     #[test]

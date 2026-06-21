@@ -11,6 +11,7 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use chromiumoxide::cdp::browser_protocol::emulation::SetUserAgentOverrideParams as EmulationSetUserAgentOverrideParams;
 use chromiumoxide::cdp::browser_protocol::fetch::{
     ContinueRequestParams as FetchContinueRequestParams, DisableParams as FetchDisableParams,
     EnableParams as FetchEnableParams, EventRequestPaused as FetchEventRequestPaused,
@@ -22,6 +23,7 @@ use chromiumoxide::cdp::browser_protocol::network::{
     EnableParams as NetworkEnableParams, ErrorReason as NetworkErrorReason, EventLoadingFailed,
     EventLoadingFinished, EventRequestWillBeSent, EventResponseReceived, GetRequestPostDataParams,
     GetResponseBodyParams, Headers, ResourceType as NetworkResourceType, Response,
+    SetExtraHttpHeadersParams as NetworkSetExtraHttpHeadersParams,
 };
 use chromiumoxide::{Browser, Page};
 use futures_util::StreamExt as _;
@@ -182,6 +184,27 @@ pub struct CdpNetworkResponseBody {
 pub struct CdpNetworkRequestPostData {
     pub request_id: String,
     pub post_data: String,
+}
+
+/// Target-scoped Network/Emulation override state (#1087).
+#[derive(Clone, Debug, Default, Serialize, PartialEq, Eq)]
+pub struct CdpNetworkOverrideConfig {
+    pub headers: Vec<(String, String)>,
+    pub user_agent: Option<String>,
+}
+
+/// Readback after applying or clearing target-scoped network overrides.
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+pub struct CdpNetworkOverrideStatus {
+    pub newly_armed: bool,
+    pub endpoint: String,
+    pub cdp_target_id: String,
+    pub armed_at_unix_ms: u64,
+    pub applied_at_unix_ms: u64,
+    pub header_count: usize,
+    pub headers: Vec<(String, String)>,
+    pub user_agent: Option<String>,
+    pub original_user_agent: Option<String>,
 }
 
 /// Fetch interception stage for [`CdpFetchInterceptionPattern`].
@@ -463,6 +486,13 @@ struct FetchInterceptionSlot {
     listener_task: JoinHandle<()>,
 }
 
+struct NetworkOverrideSlot {
+    state: Arc<Mutex<CdpNetworkOverrideStatus>>,
+    page: Page,
+    _browser: Browser,
+    handler_task: JoinHandle<()>,
+}
+
 enum FetchRouteApplied {
     Fulfilled,
     Failed,
@@ -476,9 +506,20 @@ impl Drop for FetchInterceptionSlot {
     }
 }
 
+impl Drop for NetworkOverrideSlot {
+    fn drop(&mut self) {
+        self.handler_task.abort();
+    }
+}
+
 #[derive(Default)]
 struct FetchInterceptionRegistry {
     slots: Mutex<HashMap<String, Arc<FetchInterceptionSlot>>>,
+}
+
+#[derive(Default)]
+struct NetworkOverrideRegistry {
+    slots: Mutex<HashMap<String, Arc<NetworkOverrideSlot>>>,
 }
 
 fn registry() -> &'static NetworkCaptureRegistry {
@@ -489,6 +530,11 @@ fn registry() -> &'static NetworkCaptureRegistry {
 fn fetch_registry() -> &'static FetchInterceptionRegistry {
     static REGISTRY: OnceLock<FetchInterceptionRegistry> = OnceLock::new();
     REGISTRY.get_or_init(FetchInterceptionRegistry::default)
+}
+
+fn override_registry() -> &'static NetworkOverrideRegistry {
+    static REGISTRY: OnceLock<NetworkOverrideRegistry> = OnceLock::new();
+    REGISTRY.get_or_init(NetworkOverrideRegistry::default)
 }
 
 /// Arms (or re-arms) persistent CDP Network capture for `target_id`.
@@ -763,6 +809,118 @@ pub async fn network_request_post_data(
         request_id: request_id.to_owned(),
         post_data: post_data.post_data.clone(),
     })
+}
+
+/// Applies target-scoped extra HTTP headers and optional User-Agent override.
+/// The live CDP slot is kept so readback and clearing have a stable source.
+pub async fn network_overrides_apply(
+    endpoint: &str,
+    target_id: &str,
+    config: CdpNetworkOverrideConfig,
+) -> A11yResult<CdpNetworkOverrideStatus> {
+    let target_id = target_id.trim();
+    if target_id.is_empty() {
+        return Err(A11yError::CdpAttachFailed {
+            detail: "network override target id must not be empty".to_owned(),
+        });
+    }
+    validate_network_override_config(&config)?;
+    let (slot, newly_armed) = network_override_ensure(endpoint, target_id).await?;
+
+    let headers_params = network_override_headers_params(&config.headers)?;
+    slot.page
+        .execute(headers_params)
+        .await
+        .map_err(|err| A11yError::CdpAxtreeFailed {
+            detail: format!("Network.setExtraHTTPHeaders for target {target_id}: {err}"),
+        })?;
+
+    let (original_user_agent, had_user_agent_override) = {
+        let state = slot.state.lock().ok();
+        (
+            state.as_ref().and_then(|s| s.original_user_agent.clone()),
+            state.as_ref().is_some_and(|s| s.user_agent.is_some()),
+        )
+    };
+    if let Some(user_agent) = config.user_agent.as_deref() {
+        slot.page
+            .execute(network_override_user_agent_params(user_agent)?)
+            .await
+            .map_err(|err| A11yError::CdpAxtreeFailed {
+                detail: format!("Emulation.setUserAgentOverride for target {target_id}: {err}"),
+            })?;
+    } else if had_user_agent_override && let Some(original) = original_user_agent.as_deref() {
+        slot.page
+            .execute(network_override_user_agent_params(original)?)
+            .await
+            .map_err(|err| A11yError::CdpAxtreeFailed {
+                detail: format!(
+                    "Emulation.setUserAgentOverride restore for target {target_id}: {err}"
+                ),
+            })?;
+    }
+
+    let mut status = slot.state.lock().map_err(|_| A11yError::CdpAttachFailed {
+        detail: "network override state lock is poisoned".to_owned(),
+    })?;
+    status.newly_armed = newly_armed;
+    status.applied_at_unix_ms = now_unix_ms() as u64;
+    status.header_count = config.headers.len();
+    status.headers = config.headers;
+    status.user_agent = config.user_agent;
+    Ok(status.clone())
+}
+
+/// Returns the current tracked Network/Emulation override state for a target.
+#[must_use]
+pub fn network_overrides_status(target_id: &str) -> Option<CdpNetworkOverrideStatus> {
+    let slot = lookup_override_live(target_id.trim())?;
+    slot.state.lock().ok().map(|state| state.clone())
+}
+
+/// Clears target-scoped extra headers and restores the captured original UA.
+/// Returns `None` if no override slot is active.
+pub async fn network_overrides_clear(
+    target_id: &str,
+) -> A11yResult<Option<CdpNetworkOverrideStatus>> {
+    let target_id = target_id.trim();
+    let slot = override_registry()
+        .slots
+        .lock()
+        .ok()
+        .and_then(|mut slots| slots.remove(target_id));
+    let Some(slot) = slot else {
+        return Ok(None);
+    };
+    slot.page
+        .execute(network_override_headers_params(&[])?)
+        .await
+        .map_err(|err| A11yError::CdpAxtreeFailed {
+            detail: format!("Network.setExtraHTTPHeaders clear for target {target_id}: {err}"),
+        })?;
+    let original_user_agent = {
+        let state = slot.state.lock().ok();
+        state.as_ref().and_then(|s| s.original_user_agent.clone())
+    };
+    if let Some(original) = original_user_agent.as_deref() {
+        slot.page
+            .execute(network_override_user_agent_params(original)?)
+            .await
+            .map_err(|err| A11yError::CdpAxtreeFailed {
+                detail: format!(
+                    "Emulation.setUserAgentOverride restore for target {target_id}: {err}"
+                ),
+            })?;
+    }
+    let mut status = slot.state.lock().map_err(|_| A11yError::CdpAttachFailed {
+        detail: "network override state lock is poisoned".to_owned(),
+    })?;
+    status.newly_armed = false;
+    status.applied_at_unix_ms = now_unix_ms() as u64;
+    status.header_count = 0;
+    status.headers.clear();
+    status.user_agent = None;
+    Ok(Some(status.clone()))
 }
 
 /// Enables the Fetch domain for a target and continues every paused request by
@@ -1097,6 +1255,77 @@ fn lookup_fetch_live(target_id: &str) -> Option<Arc<FetchInterceptionSlot>> {
     }
 }
 
+fn lookup_override_live(target_id: &str) -> Option<Arc<NetworkOverrideSlot>> {
+    let mut slots = override_registry().slots.lock().ok()?;
+    match slots.get(target_id) {
+        Some(slot) if !slot.handler_task.is_finished() => Some(Arc::clone(slot)),
+        Some(_) => {
+            slots.remove(target_id);
+            None
+        }
+        None => None,
+    }
+}
+
+async fn network_override_ensure(
+    endpoint: &str,
+    target_id: &str,
+) -> A11yResult<(Arc<NetworkOverrideSlot>, bool)> {
+    if let Some(slot) = lookup_override_live(target_id) {
+        return Ok((slot, false));
+    }
+
+    let (browser, mut handler) =
+        Browser::connect(endpoint)
+            .await
+            .map_err(|err| A11yError::CdpAttachFailed {
+                detail: format!("network override connect {endpoint}: {err}"),
+            })?;
+    let handler_task = tokio::spawn(async move { while handler.next().await.is_some() {} });
+
+    let page = match crate::cdp_action::get_target_page_with_discovery(&browser, target_id).await {
+        Ok(page) => page,
+        Err(err) => {
+            handler_task.abort();
+            return Err(err);
+        }
+    };
+    let original_user_agent = match read_page_user_agent(&page).await {
+        Ok(user_agent) => Some(user_agent),
+        Err(err) => {
+            handler_task.abort();
+            return Err(err);
+        }
+    };
+    let armed_at_unix_ms = now_unix_ms() as u64;
+    let status = CdpNetworkOverrideStatus {
+        newly_armed: true,
+        endpoint: endpoint.to_owned(),
+        cdp_target_id: target_id.to_owned(),
+        armed_at_unix_ms,
+        applied_at_unix_ms: armed_at_unix_ms,
+        header_count: 0,
+        headers: Vec::new(),
+        user_agent: None,
+        original_user_agent,
+    };
+    let slot = Arc::new(NetworkOverrideSlot {
+        state: Arc::new(Mutex::new(status)),
+        page,
+        _browser: browser,
+        handler_task,
+    });
+    if let Ok(mut slots) = override_registry().slots.lock() {
+        if let Some(existing) = slots.get(target_id)
+            && !existing.handler_task.is_finished()
+        {
+            return Ok((Arc::clone(existing), false));
+        }
+        slots.insert(target_id.to_owned(), Arc::clone(&slot));
+    }
+    Ok((slot, true))
+}
+
 fn fetch_interception_status_from_slot(
     slot: &FetchInterceptionSlot,
     newly_armed: bool,
@@ -1170,6 +1399,77 @@ fn fetch_pattern_to_cdp(pattern: &CdpFetchInterceptionPattern) -> A11yResult<Fet
 
 fn fetch_request_id_string(request_id: &FetchRequestId) -> String {
     <FetchRequestId as std::borrow::Borrow<str>>::borrow(request_id).to_owned()
+}
+
+async fn read_page_user_agent(page: &Page) -> A11yResult<String> {
+    page.evaluate_expression("navigator.userAgent")
+        .await
+        .map_err(|err| A11yError::CdpAxtreeFailed {
+            detail: format!("Runtime.evaluate navigator.userAgent: {err}"),
+        })?
+        .into_value::<String>()
+        .map_err(|err| A11yError::CdpAxtreeFailed {
+            detail: format!("Runtime.evaluate navigator.userAgent decode: {err}"),
+        })
+}
+
+fn network_override_headers_params(
+    headers: &[(String, String)],
+) -> A11yResult<NetworkSetExtraHttpHeadersParams> {
+    for (name, value) in headers {
+        validate_header_name(name)?;
+        validate_header_value(value)?;
+    }
+    let headers_value = Value::Object(
+        headers
+            .iter()
+            .map(|(name, value)| (name.clone(), Value::String(value.clone())))
+            .collect(),
+    );
+    NetworkSetExtraHttpHeadersParams::builder()
+        .headers(Headers::new(headers_value))
+        .build()
+        .map_err(|detail| A11yError::CdpAttachFailed {
+            detail: format!("Network.setExtraHTTPHeaders params: {detail}"),
+        })
+}
+
+fn network_override_user_agent_params(
+    user_agent: &str,
+) -> A11yResult<EmulationSetUserAgentOverrideParams> {
+    validate_user_agent(user_agent)?;
+    EmulationSetUserAgentOverrideParams::builder()
+        .user_agent(user_agent.to_owned())
+        .build()
+        .map_err(|detail| A11yError::CdpAttachFailed {
+            detail: format!("Emulation.setUserAgentOverride params: {detail}"),
+        })
+}
+
+fn validate_network_override_config(config: &CdpNetworkOverrideConfig) -> A11yResult<()> {
+    for (name, value) in &config.headers {
+        validate_header_name(name)?;
+        validate_header_value(value)?;
+    }
+    if let Some(user_agent) = config.user_agent.as_deref() {
+        validate_user_agent(user_agent)?;
+    }
+    Ok(())
+}
+
+fn validate_user_agent(value: &str) -> A11yResult<()> {
+    if value.trim() != value || value.is_empty() {
+        return Err(A11yError::CdpAttachFailed {
+            detail: "network override user_agent must be non-empty without surrounding whitespace"
+                .to_owned(),
+        });
+    }
+    if value.contains(['\r', '\n', '\0']) {
+        return Err(A11yError::CdpAttachFailed {
+            detail: "network override user_agent must not contain line breaks or NUL".to_owned(),
+        });
+    }
+    Ok(())
 }
 
 fn fetch_route_match(
@@ -1886,6 +2186,43 @@ mod tests {
     fn fetch_request_id_string_round_trips_generated_id() {
         let request_id = FetchRequestId::from("intercept-1".to_owned());
         assert_eq!(fetch_request_id_string(&request_id), "intercept-1");
+    }
+
+    #[test]
+    fn network_override_headers_params_serializes_header_map() {
+        let params =
+            network_override_headers_params(&[("x-synapse-test".to_owned(), "enabled".to_owned())])
+                .expect("headers params");
+        let value = serde_json::to_value(params).expect("params json");
+
+        assert_eq!(value["headers"]["x-synapse-test"], "enabled");
+    }
+
+    #[test]
+    fn network_override_user_agent_params_serializes_ua() {
+        let params =
+            network_override_user_agent_params("SynapseTest/1.0").expect("user-agent params");
+        let value = serde_json::to_value(params).expect("params json");
+
+        assert_eq!(value["userAgent"], "SynapseTest/1.0");
+    }
+
+    #[test]
+    fn network_override_config_rejects_invalid_values() {
+        assert!(
+            validate_network_override_config(&CdpNetworkOverrideConfig {
+                headers: vec![("bad header".to_owned(), "value".to_owned())],
+                user_agent: None,
+            })
+            .is_err()
+        );
+        assert!(
+            validate_network_override_config(&CdpNetworkOverrideConfig {
+                headers: Vec::new(),
+                user_agent: Some("bad\nua".to_owned()),
+            })
+            .is_err()
+        );
     }
 
     #[test]
