@@ -1,4 +1,4 @@
-//! Target-scoped raw-CDP browser emulation helpers (#1173/#1174).
+//! Target-scoped raw-CDP browser emulation helpers (#1173/#1174/#1175).
 
 use std::{
     collections::HashMap,
@@ -13,6 +13,7 @@ pub const CDP_DEVICE_METRICS_MAX_DIMENSION: u32 = 10_000_000;
 pub const CDP_DEVICE_SCALE_FACTOR_MAX: f64 = 1000.0;
 pub const CDP_DEVICE_MAX_TOUCH_POINTS: u32 = 16;
 pub const CDP_DEVICE_MAX_USER_AGENT_CHARS: usize = 4096;
+pub const CDP_GEOLOCATION_MAX_ACCURACY_METERS: f64 = 1_000_000_000.0;
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct CdpViewportOverride {
@@ -83,6 +84,56 @@ pub struct CdpDeviceResult {
     pub readback: CdpDeviceReadback,
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct CdpGeolocationOverride {
+    pub latitude: f64,
+    pub longitude: f64,
+    pub accuracy: f64,
+    pub altitude: Option<f64>,
+    pub altitude_accuracy: Option<f64>,
+    pub heading: Option<f64>,
+    pub speed: Option<f64>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct CdpGeolocationCoordinatesReadback {
+    pub latitude: f64,
+    pub longitude: f64,
+    pub accuracy: f64,
+    pub altitude: Option<f64>,
+    pub altitude_accuracy: Option<f64>,
+    pub heading: Option<f64>,
+    pub speed: Option<f64>,
+    pub timestamp: f64,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct CdpGeolocationErrorReadback {
+    pub code: i64,
+    pub message: String,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct CdpGeolocationReadback {
+    pub permission_state: String,
+    pub position: Option<CdpGeolocationCoordinatesReadback>,
+    pub error: Option<CdpGeolocationErrorReadback>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct CdpGeolocationResult {
+    pub endpoint: String,
+    pub cdp_target_id: String,
+    pub operation: String,
+    pub origin: String,
+    pub requested: Option<CdpGeolocationOverride>,
+    pub permission_setting: String,
+    pub page_url: String,
+    pub page_title: String,
+    pub ready_state: String,
+    pub readback: CdpGeolocationReadback,
+}
+
 enum DeviceMetricsCommand {
     Set(CdpViewportOverride),
     Reset,
@@ -91,6 +142,34 @@ enum DeviceMetricsCommand {
 enum DeviceDescriptorCommand {
     Set(CdpDeviceDescriptor),
     Reset { original_user_agent: Option<String> },
+}
+
+enum GeolocationCommand {
+    Set {
+        geolocation: CdpGeolocationOverride,
+        permission_setting: GeolocationPermissionSetting,
+        origin: String,
+    },
+    Reset {
+        origin: String,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum GeolocationPermissionSetting {
+    Granted,
+    Denied,
+    Prompt,
+}
+
+impl GeolocationPermissionSetting {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Granted => "granted",
+            Self::Denied => "denied",
+            Self::Prompt => "prompt",
+        }
+    }
 }
 
 fn original_user_agents() -> &'static Mutex<HashMap<String, String>> {
@@ -226,6 +305,76 @@ pub async fn cdp_reset_device_descriptor(
     })
 }
 
+/// Applies `Emulation.setGeolocationOverride` to one CDP page target and sets
+/// the current page origin's geolocation permission to granted or denied.
+pub async fn cdp_set_geolocation_override(
+    endpoint: &str,
+    target_id: &str,
+    geolocation: CdpGeolocationOverride,
+    grant_permission: bool,
+) -> A11yResult<CdpGeolocationResult> {
+    validate_geolocation_override(&geolocation)?;
+    let origin = geolocation_origin(endpoint, target_id).await?;
+    let permission_setting = if grant_permission {
+        GeolocationPermissionSetting::Granted
+    } else {
+        GeolocationPermissionSetting::Denied
+    };
+    run_geolocation_command(
+        endpoint,
+        target_id,
+        GeolocationCommand::Set {
+            geolocation: geolocation.clone(),
+            permission_setting,
+            origin: origin.clone(),
+        },
+    )
+    .await?;
+    let readback = geolocation_readback(endpoint, target_id).await?;
+    Ok(CdpGeolocationResult {
+        endpoint: endpoint.to_owned(),
+        cdp_target_id: readback.target_id,
+        operation: "set".to_owned(),
+        origin,
+        requested: Some(geolocation),
+        permission_setting: permission_setting.as_str().to_owned(),
+        page_url: readback.url,
+        page_title: readback.title,
+        ready_state: readback.ready_state,
+        readback: readback.metrics,
+    })
+}
+
+/// Clears the active geolocation override for one CDP page target and restores
+/// the current page origin's geolocation permission to the default prompt state.
+pub async fn cdp_reset_geolocation_override(
+    endpoint: &str,
+    target_id: &str,
+) -> A11yResult<CdpGeolocationResult> {
+    let origin = geolocation_origin(endpoint, target_id).await?;
+    run_geolocation_command(
+        endpoint,
+        target_id,
+        GeolocationCommand::Reset {
+            origin: origin.clone(),
+        },
+    )
+    .await?;
+    let readback = geolocation_readback(endpoint, target_id).await?;
+    Ok(CdpGeolocationResult {
+        endpoint: endpoint.to_owned(),
+        cdp_target_id: readback.target_id,
+        operation: "reset".to_owned(),
+        origin,
+        requested: None,
+        permission_setting: GeolocationPermissionSetting::Prompt.as_str().to_owned(),
+        page_url: readback.url,
+        page_title: readback.title,
+        ready_state: readback.ready_state,
+        readback: readback.metrics,
+    })
+}
+
 fn validate_viewport_override(width: u32, height: u32, device_scale_factor: f64) -> A11yResult<()> {
     if width == 0 || width > CDP_DEVICE_METRICS_MAX_DIMENSION {
         return Err(A11yError::CdpAxtreeFailed {
@@ -301,6 +450,64 @@ fn validate_user_agent(value: &str) -> A11yResult<()> {
                 "device descriptor user_agent must be at most {CDP_DEVICE_MAX_USER_AGENT_CHARS} Unicode scalar values"
             ),
         });
+    }
+    Ok(())
+}
+
+fn validate_geolocation_override(geolocation: &CdpGeolocationOverride) -> A11yResult<()> {
+    validate_geolocation_range("latitude", geolocation.latitude, -90.0, 90.0)?;
+    validate_geolocation_range("longitude", geolocation.longitude, -180.0, 180.0)?;
+    validate_geolocation_range(
+        "accuracy",
+        geolocation.accuracy,
+        0.0,
+        CDP_GEOLOCATION_MAX_ACCURACY_METERS,
+    )?;
+    validate_geolocation_optional_finite("altitude", geolocation.altitude)?;
+    validate_geolocation_optional_range(
+        "altitude_accuracy",
+        geolocation.altitude_accuracy,
+        0.0,
+        CDP_GEOLOCATION_MAX_ACCURACY_METERS,
+    )?;
+    validate_geolocation_optional_range("heading", geolocation.heading, 0.0, 360.0)?;
+    validate_geolocation_optional_range(
+        "speed",
+        geolocation.speed,
+        0.0,
+        CDP_GEOLOCATION_MAX_ACCURACY_METERS,
+    )?;
+    Ok(())
+}
+
+fn validate_geolocation_range(field: &str, value: f64, min: f64, max: f64) -> A11yResult<()> {
+    if !value.is_finite() || value < min || value > max {
+        return Err(A11yError::CdpAxtreeFailed {
+            detail: format!("geolocation {field} must be finite and in {min}..={max}, got {value}"),
+        });
+    }
+    Ok(())
+}
+
+fn validate_geolocation_optional_range(
+    field: &str,
+    value: Option<f64>,
+    min: f64,
+    max: f64,
+) -> A11yResult<()> {
+    if let Some(value) = value {
+        validate_geolocation_range(field, value, min, max)?;
+    }
+    Ok(())
+}
+
+fn validate_geolocation_optional_finite(field: &str, value: Option<f64>) -> A11yResult<()> {
+    if let Some(value) = value {
+        if !value.is_finite() {
+            return Err(A11yError::CdpAxtreeFailed {
+                detail: format!("geolocation {field} must be finite, got {value}"),
+            });
+        }
     }
     Ok(())
 }
@@ -494,6 +701,113 @@ async fn run_device_descriptor_command(
     result
 }
 
+async fn run_geolocation_command(
+    endpoint: &str,
+    target_id: &str,
+    command: GeolocationCommand,
+) -> A11yResult<()> {
+    use chromiumoxide::Browser;
+    use chromiumoxide::cdp::browser_protocol::emulation::{
+        ClearGeolocationOverrideParams, SetGeolocationOverrideParams,
+    };
+    use futures_util::StreamExt as _;
+
+    let (browser, mut handler) =
+        Browser::connect(endpoint)
+            .await
+            .map_err(|err| A11yError::CdpAttachFailed {
+                detail: format!("connect {endpoint}: {err}"),
+            })?;
+    let handler_task = tokio::spawn(async move { while handler.next().await.is_some() {} });
+
+    let result = async {
+        let page = crate::cdp_action::get_target_page_with_discovery(&browser, target_id).await?;
+        match command {
+            GeolocationCommand::Set {
+                geolocation,
+                permission_setting,
+                origin,
+            } => {
+                let permission = geolocation_permission_params(&origin, permission_setting)?;
+                browser
+                    .execute(permission)
+                    .await
+                    .map_err(|err| A11yError::CdpAxtreeFailed {
+                        detail: format!(
+                            "Browser.setPermission geolocation={}: {err}",
+                            permission_setting.as_str()
+                        ),
+                    })?;
+
+                let mut params = SetGeolocationOverrideParams::builder()
+                    .latitude(geolocation.latitude)
+                    .longitude(geolocation.longitude)
+                    .accuracy(geolocation.accuracy);
+                if let Some(value) = geolocation.altitude {
+                    params = params.altitude(value);
+                }
+                if let Some(value) = geolocation.altitude_accuracy {
+                    params = params.altitude_accuracy(value);
+                }
+                if let Some(value) = geolocation.heading {
+                    params = params.heading(value);
+                }
+                if let Some(value) = geolocation.speed {
+                    params = params.speed(value);
+                }
+                page.execute(params.build())
+                    .await
+                    .map_err(|err| A11yError::CdpAxtreeFailed {
+                        detail: format!("Emulation.setGeolocationOverride: {err}"),
+                    })?;
+            }
+            GeolocationCommand::Reset { origin } => {
+                page.execute(ClearGeolocationOverrideParams::default())
+                    .await
+                    .map_err(|err| A11yError::CdpAxtreeFailed {
+                        detail: format!("Emulation.clearGeolocationOverride: {err}"),
+                    })?;
+                let permission =
+                    geolocation_permission_params(&origin, GeolocationPermissionSetting::Prompt)?;
+                browser
+                    .execute(permission)
+                    .await
+                    .map_err(|err| A11yError::CdpAxtreeFailed {
+                        detail: format!("Browser.setPermission geolocation=prompt: {err}"),
+                    })?;
+            }
+        }
+        Ok(())
+    }
+    .await;
+
+    handler_task.abort();
+    result
+}
+
+fn geolocation_permission_params(
+    origin: &str,
+    permission_setting: GeolocationPermissionSetting,
+) -> A11yResult<chromiumoxide::cdp::browser_protocol::browser::SetPermissionParams> {
+    use chromiumoxide::cdp::browser_protocol::browser::{
+        PermissionDescriptor, PermissionSetting, SetPermissionParams,
+    };
+
+    let setting = match permission_setting {
+        GeolocationPermissionSetting::Granted => PermissionSetting::Granted,
+        GeolocationPermissionSetting::Denied => PermissionSetting::Denied,
+        GeolocationPermissionSetting::Prompt => PermissionSetting::Prompt,
+    };
+    SetPermissionParams::builder()
+        .permission(PermissionDescriptor::new("geolocation"))
+        .setting(setting)
+        .origin(origin.to_owned())
+        .build()
+        .map_err(|err| A11yError::CdpAxtreeFailed {
+            detail: format!("Browser.setPermission geolocation params: {err}"),
+        })
+}
+
 struct ViewportReadback {
     target_id: String,
     url: String,
@@ -508,6 +822,14 @@ struct DeviceReadback {
     title: String,
     ready_state: String,
     metrics: CdpDeviceReadback,
+}
+
+struct GeolocationReadback {
+    target_id: String,
+    url: String,
+    title: String,
+    ready_state: String,
+    metrics: CdpGeolocationReadback,
 }
 
 async fn viewport_readback(endpoint: &str, target_id: &str) -> A11yResult<ViewportReadback> {
@@ -558,6 +880,55 @@ async fn device_readback(endpoint: &str, target_id: &str) -> A11yResult<DeviceRe
     })
 }
 
+async fn geolocation_origin(endpoint: &str, target_id: &str) -> A11yResult<String> {
+    let evaluated = crate::cdp_action::cdp_evaluate_expression(
+        endpoint,
+        target_id,
+        GEOLOCATION_ORIGIN_JS,
+        false,
+        true,
+    )
+    .await?;
+    let origin = serde_json::from_value::<String>(evaluated.value).map_err(|error| {
+        A11yError::CdpAxtreeFailed {
+            detail: format!("geolocation origin readback decode: {error}"),
+        }
+    })?;
+    if origin.is_empty() {
+        return Err(A11yError::CdpAxtreeFailed {
+            detail: format!(
+                "geolocation permission requires a page with a non-opaque origin, current URL: {}",
+                evaluated.url
+            ),
+        });
+    }
+    Ok(origin)
+}
+
+async fn geolocation_readback(endpoint: &str, target_id: &str) -> A11yResult<GeolocationReadback> {
+    let evaluated = crate::cdp_action::cdp_evaluate_expression(
+        endpoint,
+        target_id,
+        GEOLOCATION_READBACK_JS,
+        true,
+        true,
+    )
+    .await?;
+    let metrics =
+        serde_json::from_value::<CdpGeolocationReadback>(evaluated.value).map_err(|error| {
+            A11yError::CdpAxtreeFailed {
+                detail: format!("geolocation readback decode: {error}"),
+            }
+        })?;
+    Ok(GeolocationReadback {
+        target_id: evaluated.target_id,
+        url: evaluated.url,
+        title: evaluated.title,
+        ready_state: evaluated.ready_state,
+        metrics,
+    })
+}
+
 const VIEWPORT_READBACK_JS: &str = r#"(() => {
   const viewport = globalThis.visualViewport || null;
   return {
@@ -598,6 +969,84 @@ const DEVICE_READBACK_JS: &str = r#"(() => {
     any_pointer_coarse: media("(any-pointer: coarse)"),
     hover_none: media("(hover: none)"),
     any_hover_none: media("(any-hover: none)")
+  };
+})()"#;
+
+const GEOLOCATION_ORIGIN_JS: &str = r#"(() => {
+  const location = globalThis.location || null;
+  const origin = location ? String(location.origin || "") : "";
+  return origin && origin !== "null" ? origin : "";
+})()"#;
+
+const GEOLOCATION_READBACK_JS: &str = r#"(async () => {
+  const permissionState = await (async () => {
+    try {
+      if (!globalThis.navigator || !navigator.permissions || !navigator.permissions.query) {
+        return "unsupported";
+      }
+      const status = await navigator.permissions.query({ name: "geolocation" });
+      return String(status.state || "unknown");
+    } catch (error) {
+      const name = error && error.name ? error.name : error;
+      return `error:${String(name)}`;
+    }
+  })();
+
+  const result = await new Promise(resolve => {
+    if (!globalThis.navigator || !navigator.geolocation) {
+      resolve({
+        position: null,
+        error: { code: -1, message: "navigator.geolocation unavailable" }
+      });
+      return;
+    }
+    let settled = false;
+    const finish = value => {
+      if (!settled) {
+        settled = true;
+        resolve(value);
+      }
+    };
+    const timer = globalThis.setTimeout(() => finish({
+      position: null,
+      error: { code: 3, message: "timeout waiting for geolocation callback" }
+    }), 1500);
+    navigator.geolocation.getCurrentPosition(
+      position => {
+        globalThis.clearTimeout(timer);
+        const coords = position.coords || {};
+        finish({
+          position: {
+            latitude: Number(coords.latitude),
+            longitude: Number(coords.longitude),
+            accuracy: Number(coords.accuracy),
+            altitude: coords.altitude == null ? null : Number(coords.altitude),
+            altitude_accuracy: coords.altitudeAccuracy == null ? null : Number(coords.altitudeAccuracy),
+            heading: coords.heading == null || Number.isNaN(Number(coords.heading)) ? null : Number(coords.heading),
+            speed: coords.speed == null || Number.isNaN(Number(coords.speed)) ? null : Number(coords.speed),
+            timestamp: Number(position.timestamp || 0)
+          },
+          error: null
+        });
+      },
+      error => {
+        globalThis.clearTimeout(timer);
+        finish({
+          position: null,
+          error: {
+            code: Number(error && error.code || 0),
+            message: String(error && error.message || "")
+          }
+        });
+      },
+      { enableHighAccuracy: false, maximumAge: 0, timeout: 1000 }
+    );
+  });
+
+  return {
+    permission_state: permissionState,
+    position: result.position,
+    error: result.error
   };
 })()"#;
 
@@ -653,5 +1102,39 @@ mod tests {
         let mut desktop_with_touch_points = desktop;
         desktop_with_touch_points.max_touch_points = 1;
         assert!(validate_device_descriptor(&desktop_with_touch_points).is_err());
+    }
+
+    #[test]
+    fn geolocation_override_validation_edges() {
+        let valid = CdpGeolocationOverride {
+            latitude: 37.7749,
+            longitude: -122.4194,
+            accuracy: 12.5,
+            altitude: Some(25.0),
+            altitude_accuracy: Some(4.0),
+            heading: Some(180.0),
+            speed: Some(1.5),
+        };
+        assert!(validate_geolocation_override(&valid).is_ok());
+
+        let mut bad_latitude = valid.clone();
+        bad_latitude.latitude = 91.0;
+        assert!(validate_geolocation_override(&bad_latitude).is_err());
+
+        let mut bad_longitude = valid.clone();
+        bad_longitude.longitude = -181.0;
+        assert!(validate_geolocation_override(&bad_longitude).is_err());
+
+        let mut bad_accuracy = valid.clone();
+        bad_accuracy.accuracy = -1.0;
+        assert!(validate_geolocation_override(&bad_accuracy).is_err());
+
+        let mut bad_heading = valid.clone();
+        bad_heading.heading = Some(361.0);
+        assert!(validate_geolocation_override(&bad_heading).is_err());
+
+        let mut bad_speed = valid;
+        bad_speed.speed = Some(f64::INFINITY);
+        assert!(validate_geolocation_override(&bad_speed).is_err());
     }
 }

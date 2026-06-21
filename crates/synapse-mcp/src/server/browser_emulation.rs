@@ -1,4 +1,4 @@
-//! Browser emulation tools (#1173).
+//! Browser emulation tools (#1173/#1174/#1175).
 
 use super::{
     ErrorData, Json, Parameters, SynapseService,
@@ -16,6 +16,7 @@ use synapse_core::error_codes;
 
 const RESIZE_TOOL: &str = "browser_resize";
 const DEVICE_TOOL: &str = "browser_device";
+const GEOLOCATION_TOOL: &str = "browser_geolocation";
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -29,6 +30,19 @@ pub enum BrowserResizeOperation {
 pub enum BrowserDeviceOperation {
     Set,
     Reset,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum BrowserGeolocationOperation {
+    Set,
+    Reset,
+}
+
+impl Default for BrowserGeolocationOperation {
+    fn default() -> Self {
+        Self::Set
+    }
 }
 
 impl Default for BrowserDeviceOperation {
@@ -107,6 +121,48 @@ pub struct BrowserDeviceParams {
     pub max_touch_points: Option<u32>,
 }
 
+#[derive(Clone, Debug, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct BrowserGeolocationParams {
+    /// CDP TargetID to emulate. Defaults to the active session CDP target. Must
+    /// be owned by this session; the human foreground tab is never a fallback.
+    #[serde(default)]
+    pub cdp_target_id: Option<String>,
+    /// Browser HWND that owns the target. Required only with an explicit
+    /// `cdp_target_id` and no active session target.
+    #[serde(default)]
+    pub window_hwnd: Option<i64>,
+    /// `set` applies coordinates and an origin-scoped geolocation permission;
+    /// `reset` clears the override and restores the permission to prompt.
+    #[serde(default)]
+    pub operation: BrowserGeolocationOperation,
+    /// Latitude in degrees for operation=set.
+    #[serde(default)]
+    pub latitude: Option<f64>,
+    /// Longitude in degrees for operation=set.
+    #[serde(default)]
+    pub longitude: Option<f64>,
+    /// Accuracy in meters for operation=set. Defaults to 0.
+    #[serde(default)]
+    pub accuracy: Option<f64>,
+    /// Optional altitude in meters for operation=set.
+    #[serde(default)]
+    pub altitude: Option<f64>,
+    /// Optional altitude accuracy in meters for operation=set.
+    #[serde(default)]
+    pub altitude_accuracy: Option<f64>,
+    /// Optional heading in degrees for operation=set.
+    #[serde(default)]
+    pub heading: Option<f64>,
+    /// Optional speed in meters per second for operation=set.
+    #[serde(default)]
+    pub speed: Option<f64>,
+    /// When true, grant geolocation to the page origin. When false, deny it so
+    /// getCurrentPosition rejects even with coordinates set. Defaults true.
+    #[serde(default)]
+    pub grant_permission: Option<bool>,
+}
+
 #[derive(Clone, Debug, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct BrowserViewportOverride {
@@ -126,6 +182,22 @@ pub struct BrowserDeviceDescriptor {
     pub is_mobile: bool,
     pub has_touch: bool,
     pub max_touch_points: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct BrowserGeolocationOverride {
+    pub latitude: f64,
+    pub longitude: f64,
+    pub accuracy: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub altitude: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub altitude_accuracy: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub heading: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speed: Option<f64>,
 }
 
 #[derive(Clone, Debug, Serialize, JsonSchema)]
@@ -180,6 +252,40 @@ pub struct BrowserDeviceReadback {
 
 #[derive(Clone, Debug, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+pub struct BrowserGeolocationCoordinatesReadback {
+    pub latitude: f64,
+    pub longitude: f64,
+    pub accuracy: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub altitude: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub altitude_accuracy: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub heading: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speed: Option<f64>,
+    pub timestamp: f64,
+}
+
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct BrowserGeolocationErrorReadback {
+    pub code: i64,
+    pub message: String,
+}
+
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct BrowserGeolocationReadback {
+    pub permission_state: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub position: Option<BrowserGeolocationCoordinatesReadback>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<BrowserGeolocationErrorReadback>,
+}
+
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct BrowserDeviceResponse {
     pub session_id: String,
     pub window_hwnd: i64,
@@ -201,6 +307,29 @@ pub struct BrowserDeviceResponse {
     pub source_of_truth: String,
 }
 
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct BrowserGeolocationResponse {
+    pub session_id: String,
+    pub window_hwnd: i64,
+    pub transport: String,
+    pub endpoint: String,
+    pub cdp_target_id: String,
+    pub operation: BrowserGeolocationOperation,
+    pub origin: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested: Option<BrowserGeolocationOverride>,
+    pub permission_setting: String,
+    pub page_url: String,
+    pub page_title: String,
+    pub ready_state: String,
+    pub geolocation: BrowserGeolocationReadback,
+    pub readback_backend: String,
+    pub backend_tier_used: String,
+    pub required_foreground: bool,
+    pub source_of_truth: String,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 struct NormalizedBrowserResizeParams {
     operation: BrowserResizeOperation,
@@ -213,6 +342,13 @@ struct NormalizedBrowserResizeParams {
 struct NormalizedBrowserDeviceParams {
     operation: BrowserDeviceOperation,
     descriptor: Option<BrowserDeviceDescriptor>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct NormalizedBrowserGeolocationParams {
+    operation: BrowserGeolocationOperation,
+    geolocation: Option<BrowserGeolocationOverride>,
+    grant_permission: bool,
 }
 
 #[tool_router(router = browser_emulation_tool_router, vis = "pub(super)")]
@@ -333,6 +469,64 @@ impl SynapseService {
         result.map(Json)
     }
 
+    #[tool(
+        description = "Set or reset geolocation emulation for the calling session's owned raw-CDP browser tab. operation=set applies latitude, longitude, optional accuracy/altitude/heading/speed through Emulation.setGeolocationOverride and sets the current page origin's geolocation permission with Browser.setPermission: grant_permission=true grants it, grant_permission=false denies it so getCurrentPosition rejects. operation=reset clears Emulation.clearGeolocationOverride and restores the origin's permission to prompt. Background-safe: never activates the tab, never uses OS foreground input, and never falls back to the human foreground tab. Raw CDP only; use browser_evaluate as an independent FSV readback for navigator.permissions.query({name:'geolocation'}) and navigator.geolocation.getCurrentPosition."
+    )]
+    pub async fn browser_geolocation(
+        &self,
+        params: Parameters<BrowserGeolocationParams>,
+        request_context: RequestContext<RoleServer>,
+    ) -> Result<Json<BrowserGeolocationResponse>, ErrorData> {
+        tracing::info!(
+            code = "MCP_TOOL_INVOCATION",
+            kind = GEOLOCATION_TOOL,
+            "tool.invocation kind=browser_geolocation"
+        );
+        let session_id = require_target_session_id(&request_context)?;
+        let geolocation = validate_browser_geolocation_params(&params.0)?;
+        let request_details = json!({
+            "session_id": &session_id,
+            "window_hwnd": params.0.window_hwnd,
+            "requested_cdp_target": cdp_target_id_audit_ref(params.0.cdp_target_id.as_deref()),
+            "operation": geolocation.operation,
+            "geolocation": &geolocation.geolocation,
+            "grant_permission": geolocation.grant_permission,
+            "required_foreground": false,
+            "phase": "target_resolution",
+        });
+        let resolution = self.resolve_cdp_tab_mutation_target(
+            GEOLOCATION_TOOL,
+            &session_id,
+            params.0.window_hwnd,
+            params.0.cdp_target_id.as_deref(),
+        );
+        let (window_hwnd, cdp_target_id) = self.audit_cdp_target_resolution_result(
+            GEOLOCATION_TOOL,
+            &session_id,
+            &request_details,
+            resolution,
+        )?;
+        let request_details = json!({
+            "session_id": &session_id,
+            "window_hwnd": window_hwnd,
+            "cdp_target_id": &cdp_target_id,
+            "operation": geolocation.operation,
+            "geolocation": &geolocation.geolocation,
+            "grant_permission": geolocation.grant_permission,
+            "required_foreground": false,
+        });
+        self.audit_action_started_with_details_for_session(
+            GEOLOCATION_TOOL,
+            &request_details,
+            &session_id,
+        )?;
+        let result = self
+            .browser_geolocation_impl(&session_id, window_hwnd, &cdp_target_id, &geolocation)
+            .await;
+        self.audit_action_result_for_session(GEOLOCATION_TOOL, &result, &session_id)?;
+        result.map(Json)
+    }
+
     #[cfg(windows)]
     async fn browser_resize_impl(
         &self,
@@ -444,6 +638,72 @@ impl SynapseService {
         Ok(browser_device_response(session_id, window_hwnd, result))
     }
 
+    #[cfg(windows)]
+    async fn browser_geolocation_impl(
+        &self,
+        session_id: &str,
+        window_hwnd: i64,
+        cdp_target_id: &str,
+        params: &NormalizedBrowserGeolocationParams,
+    ) -> Result<BrowserGeolocationResponse, ErrorData> {
+        let Some(endpoint) = synapse_a11y::endpoint_for_window(window_hwnd) else {
+            return Err(browser_raw_cdp_required_error(
+                GEOLOCATION_TOOL,
+                window_hwnd,
+            ));
+        };
+        let result = match params.operation {
+            BrowserGeolocationOperation::Set => {
+                let geolocation = params
+                    .geolocation
+                    .as_ref()
+                    .expect("validated geolocation override");
+                synapse_a11y::cdp_set_geolocation_override(
+                    &endpoint,
+                    cdp_target_id,
+                    synapse_a11y::CdpGeolocationOverride {
+                        latitude: geolocation.latitude,
+                        longitude: geolocation.longitude,
+                        accuracy: geolocation.accuracy,
+                        altitude: geolocation.altitude,
+                        altitude_accuracy: geolocation.altitude_accuracy,
+                        heading: geolocation.heading,
+                        speed: geolocation.speed,
+                    },
+                    params.grant_permission,
+                )
+                .await
+            }
+            BrowserGeolocationOperation::Reset => {
+                synapse_a11y::cdp_reset_geolocation_override(&endpoint, cdp_target_id).await
+            }
+        }
+        .map_err(|error| {
+            mcp_error(
+                error.code(),
+                format!("{GEOLOCATION_TOOL} raw CDP geolocation emulation failed: {error}"),
+            )
+        })?;
+        tracing::info!(
+            code = "CDP_BACKGROUND_GEOLOCATION_EMULATION",
+            session_id = %session_id,
+            hwnd = window_hwnd,
+            endpoint = %endpoint,
+            cdp_target_id,
+            operation = ?params.operation,
+            origin = %result.origin,
+            permission_state = %result.readback.permission_state,
+            position_returned = result.readback.position.is_some(),
+            error_code = ?result.readback.error.as_ref().map(|error| error.code),
+            "readback=Emulation.geolocation+Browser.setPermission+Runtime.evaluate outcome=geolocation_state"
+        );
+        Ok(browser_geolocation_response(
+            session_id,
+            window_hwnd,
+            result,
+        ))
+    }
+
     #[cfg(not(windows))]
     async fn browser_resize_impl(
         &self,
@@ -469,6 +729,20 @@ impl SynapseService {
         Err(mcp_error(
             error_codes::A11Y_NOT_AVAILABLE,
             "browser_device is only available on Windows in this build",
+        ))
+    }
+
+    #[cfg(not(windows))]
+    async fn browser_geolocation_impl(
+        &self,
+        _session_id: &str,
+        _window_hwnd: i64,
+        _cdp_target_id: &str,
+        _params: &NormalizedBrowserGeolocationParams,
+    ) -> Result<BrowserGeolocationResponse, ErrorData> {
+        Err(mcp_error(
+            error_codes::A11Y_NOT_AVAILABLE,
+            "browser_geolocation is only available on Windows in this build",
         ))
     }
 }
@@ -610,6 +884,79 @@ fn validate_browser_device_params(
     })
 }
 
+fn validate_browser_geolocation_params(
+    params: &BrowserGeolocationParams,
+) -> Result<NormalizedBrowserGeolocationParams, ErrorData> {
+    if let Some(target_id) = params.cdp_target_id.as_deref() {
+        validate_cdp_target_id(target_id)?;
+    }
+    if params.operation == BrowserGeolocationOperation::Reset {
+        reject_geolocation_field(params.latitude, "latitude", "reset")?;
+        reject_geolocation_field(params.longitude, "longitude", "reset")?;
+        reject_geolocation_field(params.accuracy, "accuracy", "reset")?;
+        reject_geolocation_field(params.altitude, "altitude", "reset")?;
+        reject_geolocation_field(params.altitude_accuracy, "altitude_accuracy", "reset")?;
+        reject_geolocation_field(params.heading, "heading", "reset")?;
+        reject_geolocation_field(params.speed, "speed", "reset")?;
+        reject_geolocation_field(params.grant_permission, "grant_permission", "reset")?;
+        return Ok(NormalizedBrowserGeolocationParams {
+            operation: BrowserGeolocationOperation::Reset,
+            geolocation: None,
+            grant_permission: false,
+        });
+    }
+
+    let latitude = params.latitude.ok_or_else(|| {
+        mcp_error(
+            error_codes::TOOL_PARAMS_INVALID,
+            format!("{GEOLOCATION_TOOL} operation=set requires latitude"),
+        )
+    })?;
+    let longitude = params.longitude.ok_or_else(|| {
+        mcp_error(
+            error_codes::TOOL_PARAMS_INVALID,
+            format!("{GEOLOCATION_TOOL} operation=set requires longitude"),
+        )
+    })?;
+    let accuracy = params.accuracy.unwrap_or(0.0);
+    validate_geolocation_range("latitude", latitude, -90.0, 90.0)?;
+    validate_geolocation_range("longitude", longitude, -180.0, 180.0)?;
+    validate_geolocation_range(
+        "accuracy",
+        accuracy,
+        0.0,
+        synapse_a11y::CDP_GEOLOCATION_MAX_ACCURACY_METERS,
+    )?;
+    validate_geolocation_optional_finite("altitude", params.altitude)?;
+    validate_geolocation_optional_range(
+        "altitude_accuracy",
+        params.altitude_accuracy,
+        0.0,
+        synapse_a11y::CDP_GEOLOCATION_MAX_ACCURACY_METERS,
+    )?;
+    validate_geolocation_optional_range("heading", params.heading, 0.0, 360.0)?;
+    validate_geolocation_optional_range(
+        "speed",
+        params.speed,
+        0.0,
+        synapse_a11y::CDP_GEOLOCATION_MAX_ACCURACY_METERS,
+    )?;
+
+    Ok(NormalizedBrowserGeolocationParams {
+        operation: BrowserGeolocationOperation::Set,
+        geolocation: Some(BrowserGeolocationOverride {
+            latitude,
+            longitude,
+            accuracy,
+            altitude: params.altitude,
+            altitude_accuracy: params.altitude_accuracy,
+            heading: params.heading,
+            speed: params.speed,
+        }),
+        grant_permission: params.grant_permission.unwrap_or(true),
+    })
+}
+
 fn validate_dimension(field: &str, value: u32) -> Result<(), ErrorData> {
     if value == 0 || value > synapse_a11y::CDP_DEVICE_METRICS_MAX_DIMENSION {
         return Err(mcp_error(
@@ -632,6 +979,45 @@ fn validate_device_dimension(field: &str, value: u32) -> Result<(), ErrorData> {
                 synapse_a11y::CDP_DEVICE_METRICS_MAX_DIMENSION
             ),
         ));
+    }
+    Ok(())
+}
+
+fn validate_geolocation_range(
+    field: &str,
+    value: f64,
+    min: f64,
+    max: f64,
+) -> Result<(), ErrorData> {
+    if !value.is_finite() || value < min || value > max {
+        return Err(mcp_error(
+            error_codes::TOOL_PARAMS_INVALID,
+            format!("{GEOLOCATION_TOOL} {field} must be finite and in {min}..={max}"),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_geolocation_optional_range(
+    field: &str,
+    value: Option<f64>,
+    min: f64,
+    max: f64,
+) -> Result<(), ErrorData> {
+    if let Some(value) = value {
+        validate_geolocation_range(field, value, min, max)?;
+    }
+    Ok(())
+}
+
+fn validate_geolocation_optional_finite(field: &str, value: Option<f64>) -> Result<(), ErrorData> {
+    if let Some(value) = value {
+        if !value.is_finite() {
+            return Err(mcp_error(
+                error_codes::TOOL_PARAMS_INVALID,
+                format!("{GEOLOCATION_TOOL} {field} must be finite"),
+            ));
+        }
     }
     Ok(())
 }
@@ -685,6 +1071,21 @@ fn reject_device_field<T>(value: Option<T>, field: &str, operation: &str) -> Res
         Err(mcp_error(
             error_codes::TOOL_PARAMS_INVALID,
             format!("{DEVICE_TOOL} {field} is not valid for operation={operation}"),
+        ))
+    }
+}
+
+fn reject_geolocation_field<T>(
+    value: Option<T>,
+    field: &str,
+    operation: &str,
+) -> Result<(), ErrorData> {
+    if value.is_none() {
+        Ok(())
+    } else {
+        Err(mcp_error(
+            error_codes::TOOL_PARAMS_INVALID,
+            format!("{GEOLOCATION_TOOL} {field} is not valid for operation={operation}"),
         ))
     }
 }
@@ -784,6 +1185,66 @@ fn browser_device_response(
         required_foreground: false,
         source_of_truth:
             "raw CDP Runtime.evaluate navigator/userAgent/viewport/touch media queries".to_owned(),
+    }
+}
+
+fn browser_geolocation_response(
+    session_id: &str,
+    window_hwnd: i64,
+    result: synapse_a11y::CdpGeolocationResult,
+) -> BrowserGeolocationResponse {
+    BrowserGeolocationResponse {
+        session_id: session_id.to_owned(),
+        window_hwnd,
+        transport: "raw_cdp".to_owned(),
+        endpoint: result.endpoint,
+        cdp_target_id: result.cdp_target_id,
+        operation: match result.operation.as_str() {
+            "reset" => BrowserGeolocationOperation::Reset,
+            _ => BrowserGeolocationOperation::Set,
+        },
+        origin: result.origin,
+        requested: result.requested.map(|requested| BrowserGeolocationOverride {
+            latitude: requested.latitude,
+            longitude: requested.longitude,
+            accuracy: requested.accuracy,
+            altitude: requested.altitude,
+            altitude_accuracy: requested.altitude_accuracy,
+            heading: requested.heading,
+            speed: requested.speed,
+        }),
+        permission_setting: result.permission_setting,
+        page_url: result.page_url,
+        page_title: result.page_title,
+        ready_state: result.ready_state,
+        geolocation: BrowserGeolocationReadback {
+            permission_state: result.readback.permission_state,
+            position: result
+                .readback
+                .position
+                .map(|position| BrowserGeolocationCoordinatesReadback {
+                    latitude: position.latitude,
+                    longitude: position.longitude,
+                    accuracy: position.accuracy,
+                    altitude: position.altitude,
+                    altitude_accuracy: position.altitude_accuracy,
+                    heading: position.heading,
+                    speed: position.speed,
+                    timestamp: position.timestamp,
+                }),
+            error: result
+                .readback
+                .error
+                .map(|error| BrowserGeolocationErrorReadback {
+                    code: error.code,
+                    message: error.message,
+                }),
+        },
+        readback_backend: "Emulation.setGeolocationOverride / Emulation.clearGeolocationOverride + Browser.setPermission + Runtime.evaluate".to_owned(),
+        backend_tier_used: "cdp".to_owned(),
+        required_foreground: false,
+        source_of_truth:
+            "raw CDP Runtime.evaluate navigator.permissions + navigator.geolocation".to_owned(),
     }
 }
 
@@ -993,6 +1454,128 @@ mod tests {
                 .map(|descriptor| descriptor.max_touch_points),
             Some(5)
         );
+        assert!(!response.required_foreground);
+    }
+
+    #[test]
+    fn browser_geolocation_validation_edges() {
+        let granted = validate_browser_geolocation_params(&BrowserGeolocationParams {
+            latitude: Some(37.7749),
+            longitude: Some(-122.4194),
+            accuracy: None,
+            grant_permission: None,
+            ..BrowserGeolocationParams::default()
+        })
+        .expect("valid geolocation override");
+        let geolocation = granted.geolocation.expect("geolocation");
+        assert_eq!(geolocation.accuracy, 0.0);
+        assert!(granted.grant_permission);
+
+        let denied = validate_browser_geolocation_params(&BrowserGeolocationParams {
+            latitude: Some(37.7749),
+            longitude: Some(-122.4194),
+            grant_permission: Some(false),
+            ..BrowserGeolocationParams::default()
+        })
+        .expect("valid denied geolocation override");
+        assert!(!denied.grant_permission);
+
+        assert!(
+            validate_browser_geolocation_params(&BrowserGeolocationParams {
+                operation: BrowserGeolocationOperation::Reset,
+                latitude: Some(37.7749),
+                ..BrowserGeolocationParams::default()
+            })
+            .is_err()
+        );
+        assert!(
+            validate_browser_geolocation_params(&BrowserGeolocationParams {
+                latitude: Some(91.0),
+                longitude: Some(-122.4194),
+                ..BrowserGeolocationParams::default()
+            })
+            .is_err()
+        );
+        assert!(
+            validate_browser_geolocation_params(&BrowserGeolocationParams {
+                latitude: Some(37.7749),
+                longitude: Some(-181.0),
+                ..BrowserGeolocationParams::default()
+            })
+            .is_err()
+        );
+        assert!(
+            validate_browser_geolocation_params(&BrowserGeolocationParams {
+                latitude: Some(37.7749),
+                longitude: Some(-122.4194),
+                heading: Some(361.0),
+                ..BrowserGeolocationParams::default()
+            })
+            .is_err()
+        );
+
+        let reset = validate_browser_geolocation_params(&BrowserGeolocationParams {
+            operation: BrowserGeolocationOperation::Reset,
+            ..BrowserGeolocationParams::default()
+        })
+        .expect("valid reset");
+        assert_eq!(reset.operation, BrowserGeolocationOperation::Reset);
+        assert!(reset.geolocation.is_none());
+    }
+
+    #[test]
+    fn browser_geolocation_response_maps_readback() {
+        let response = browser_geolocation_response(
+            "session-1",
+            0x2200,
+            synapse_a11y::CdpGeolocationResult {
+                endpoint: "ws://127.0.0.1/devtools/browser/1".to_owned(),
+                cdp_target_id: "target-1".to_owned(),
+                operation: "set".to_owned(),
+                origin: "https://example.test".to_owned(),
+                requested: Some(synapse_a11y::CdpGeolocationOverride {
+                    latitude: 37.7749,
+                    longitude: -122.4194,
+                    accuracy: 9.0,
+                    altitude: None,
+                    altitude_accuracy: None,
+                    heading: Some(180.0),
+                    speed: Some(1.25),
+                }),
+                permission_setting: "granted".to_owned(),
+                page_url: "https://example.test/".to_owned(),
+                page_title: "Example".to_owned(),
+                ready_state: "complete".to_owned(),
+                readback: synapse_a11y::CdpGeolocationReadback {
+                    permission_state: "granted".to_owned(),
+                    position: Some(synapse_a11y::CdpGeolocationCoordinatesReadback {
+                        latitude: 37.7749,
+                        longitude: -122.4194,
+                        accuracy: 9.0,
+                        altitude: None,
+                        altitude_accuracy: None,
+                        heading: Some(180.0),
+                        speed: Some(1.25),
+                        timestamp: 123.0,
+                    }),
+                    error: None,
+                },
+            },
+        );
+
+        assert_eq!(response.operation, BrowserGeolocationOperation::Set);
+        assert_eq!(response.origin, "https://example.test");
+        assert_eq!(response.permission_setting, "granted");
+        assert_eq!(response.geolocation.permission_state, "granted");
+        assert_eq!(
+            response
+                .geolocation
+                .position
+                .as_ref()
+                .map(|position| position.latitude),
+            Some(37.7749)
+        );
+        assert!(response.geolocation.error.is_none());
         assert!(!response.required_foreground);
     }
 }
