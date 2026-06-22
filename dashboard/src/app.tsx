@@ -54,6 +54,7 @@ import {
   FleetRow,
   formatAgentCost,
   formatAgentTokens,
+  formatAgentUsageDetail,
   MetricRow,
   PageHeader,
   RawValue,
@@ -915,22 +916,133 @@ function AgentView({
   toolCalls: ReturnType<typeof buildToolCalls>;
   onAuditKeySelect: (keyHex: string) => void;
 }) {
+  const selectedAgentIds = agentIdentifierSet(selectedAgent);
+  const scopedToolCalls =
+    selectedAgentIds.size > 0
+      ? toolCalls.filter((call) => selectedAgentIds.has(rawText(call.actor)) || selectedAgentIds.has(rawText(call.target)))
+      : toolCalls;
   return (
     <div className="grid gap-6 xl:grid-cols-[minmax(0,0.42fr)_minmax(0,1fr)]">
-      <Section
-        title="Agent Surfaces"
-        tier="drill-down"
-        questions={["Which agent is selected?", "Which state explains the current badge?", "Can raw verification stay collapsed?"]}
-      >
-        <AgentPeek agent={selectedAgent} />
-      </Section>
+      <div className="min-w-0">
+        <Section
+          title="Agent Surfaces"
+          tier="drill-down"
+          questions={["Which agent is selected?", "Which state explains the current badge?", "Can raw verification stay collapsed?"]}
+        >
+          <AgentPeek agent={selectedAgent} />
+        </Section>
+        <AgentContextPanel state={state} agent={selectedAgent} />
+      </div>
       <div className="min-w-0">
         <AgentTerminalPanel agent={selectedAgent} />
-        <ToolActivity toolCalls={toolCalls} onAuditKeySelect={onAuditKeySelect} />
-        <TranscriptSamples state={state} />
+        <ToolActivity toolCalls={scopedToolCalls} onAuditKeySelect={onAuditKeySelect} />
+        <TranscriptSamples state={state} agent={selectedAgent} />
       </div>
     </div>
   );
+}
+
+function AgentContextPanel({ state, agent }: { state?: DashboardState; agent?: AgentSummary }) {
+  const ids = agentIdentifierSet(agent);
+  const sessions = asArray<Record<string, unknown>>(asRecord(panelData(state?.sessions)).sessions);
+  const claims = asArray<Record<string, unknown>>(asRecord(panelData(state?.target_claims)).claims).filter((row) => rowMatchesAgent(row, ids));
+  const cdpAttachments = asArray<Record<string, unknown>>(asRecord(panelData(state?.cdp_attachments)).rows).filter((row) => rowMatchesAgent(row, ids));
+  const hiddenDesktops = asArray<Record<string, unknown>>(asRecord(panelData(state?.hidden_desktops)).rows).filter((row) => rowMatchesAgent(row, ids));
+  const approvals = asArray<Record<string, unknown>>(asRecord(panelData(state?.approvals)).rows).filter((row) => rowMatchesAgent(row, ids));
+  const commandRows = asArray<Record<string, unknown>>(asRecord(panelData(state?.command_audit)).rows).filter((row) => rowMatchesAgent(row, ids));
+  const session = sessions.find((row) => rowMatchesAgent(row, ids));
+  const lease = asRecord(panelData(state?.lease));
+  const leaseOwner = rawText(lease.owner_session_id);
+  const activeTarget = rawText(agent?.target || session?.active_target || claims[0]?.target_key || claims[0]?.target || cdpAttachments[0]?.target_url);
+  const heldByAgent = leaseOwner && ids.has(leaseOwner);
+  const leaseLabel = heldByAgent ? "held by agent" : leaseOwner ? `held by ${leaseOwner}` : "free";
+  const latestTool = commandRows[0];
+  const latestToolLabel = latestTool
+    ? [rawText(latestTool.tool || latestTool.verb), rawText(latestTool.outcome || latestTool.error_code)].filter(Boolean).join(" / ")
+    : "none";
+
+  return (
+    <Section
+      title="Agent Context"
+      tier="drill-down"
+      questions={["Which target does this agent own?", "What control state can block it?", "Which physical rows prove the panel?"]}
+    >
+      {agent ? (
+        <>
+          <div className="grid gap-3">
+            <div className="rounded-lg border border-border bg-surface-1 p-[var(--density-card-padding)]">
+              <h3 className="mb-2 text-md font-medium tracking-normal text-primary">Lifecycle</h3>
+              <MetricRow label="Status" value={agent.status} />
+              <MetricRow label="Lifecycle" value={agent.lifecycle} />
+              <MetricRow label="Reason" value={agent.reason || "none"} />
+              <MetricRow label="Last seen" value={agent.lastSeenMs === undefined ? "unknown" : timeAgo(agent.lastSeenMs)} />
+            </div>
+            <div className="rounded-lg border border-border bg-surface-1 p-[var(--density-card-padding)]">
+              <h3 className="mb-2 text-md font-medium tracking-normal text-primary">Meters</h3>
+              <MetricRow label="Usage" value={formatAgentUsageDetail(agent.usage) || "none"} />
+              <MetricRow label="Cost" value={formatAgentCost(agent.usage) || "none"} />
+              <MetricRow label="Actions" value={agent.diffStats.actions} />
+              <MetricRow label="Transcripts" value={agent.diffStats.transcripts} />
+            </div>
+            <div className="rounded-lg border border-border bg-surface-1 p-[var(--density-card-padding)]">
+              <h3 className="mb-2 text-md font-medium tracking-normal text-primary">Perception</h3>
+              <MetricRow label="Target" value={activeTarget || "none"} />
+              <MetricRow label="CDP" value={rawText(cdpAttachments[0]?.cdp_target_id || cdpAttachments.length)} />
+              <MetricRow label="Hidden Desktop" value={rawText(hiddenDesktops[0]?.desktop_name || hiddenDesktops.length)} />
+              <MetricRow label="Claims" value={claims.length} />
+            </div>
+            <div className="rounded-lg border border-border bg-surface-1 p-[var(--density-card-padding)]">
+              <h3 className="mb-2 text-md font-medium tracking-normal text-primary">Control</h3>
+              <MetricRow label="Lease" value={leaseLabel} />
+              <MetricRow label="Attention" value={approvals.length} />
+              <MetricRow label="Last Tool" value={latestToolLabel} />
+              <MetricRow label="Kill Target" value={agent.killId || "none"} />
+            </div>
+          </div>
+          <div className="mt-3">
+            <RawValue
+              value={{
+                session,
+                claims,
+                cdp_attachments: cdpAttachments,
+                hidden_desktops: hiddenDesktops,
+                approvals,
+                command_audit: commandRows.slice(0, 5)
+              }}
+              label="Agent context readback"
+            />
+          </div>
+        </>
+      ) : (
+        <EmptyState title="No agent selected" />
+      )}
+    </Section>
+  );
+}
+
+function agentIdentifierSet(agent?: AgentSummary): Set<string> {
+  return new Set([agent?.id, agent?.spawnId, agent?.killId].filter((value): value is string => Boolean(value)));
+}
+
+function rowMatchesAgent(row: Record<string, unknown>, ids: Set<string>): boolean {
+  if (ids.size === 0) return false;
+  const item = asRecord(row.item);
+  const values = [
+    row.session_id,
+    row.spawn_id,
+    row.registry_id,
+    row.anchor,
+    row.owner_session_id,
+    row.requested_by_session,
+    row.actor_session_id,
+    row.target_session_id,
+    item.session_id,
+    item.spawn_id,
+    item.owner_session_id,
+    item.requested_by_session,
+    item.decided_by_session
+  ];
+  return values.some((value) => ids.has(rawText(value)));
 }
 
 const TERMINAL_CLIENT_INPUT = "0".charCodeAt(0);
@@ -4125,16 +4237,18 @@ function SystemShape({ state }: { state?: DashboardState }) {
   );
 }
 
-function TranscriptSamples({ state }: { state?: DashboardState }) {
+function TranscriptSamples({ state, agent }: { state?: DashboardState; agent?: AgentSummary }) {
   const allRows = asArray<Record<string, unknown>>(asRecord(panelData(state?.agent_transcripts)).rows);
+  const ids = agentIdentifierSet(agent);
+  const scopedRows = ids.size > 0 ? allRows.filter((row) => rowMatchesAgent(row, ids)) : allRows;
   // The store keeps one row per source line (assistant text, tool calls, tool
   // results, AND session-metadata records like `mode`/`file-history-snapshot`).
   // Only rows with something a human can read are worth a card; metadata rows
   // would otherwise crowd the panel with empty placeholders. The count of what
   // we hide is surfaced, never silently dropped.
-  const renderable = allRows.filter(transcriptRowHasContent);
+  const renderable = scopedRows.filter(transcriptRowHasContent);
   const shown = renderable.slice(0, 6);
-  const hiddenMetadata = allRows.length - renderable.length;
+  const hiddenMetadata = scopedRows.length - renderable.length;
   return (
     <Section title="Transcript Samples" tier="drill-down" questions={["What did recent agents say?", "Was output sanitized before render?", "Where is the source row?"]}>
       {shown.length ? (
@@ -4152,7 +4266,7 @@ function TranscriptSamples({ state }: { state?: DashboardState }) {
           ) : null}
         </>
       ) : (
-        <EmptyStateArt title={allRows.length ? "No transcript content in recent rows" : "No transcript rows"} />
+        <EmptyStateArt title={scopedRows.length ? "No transcript content in recent rows" : "No transcript rows"} />
       )}
     </Section>
   );
