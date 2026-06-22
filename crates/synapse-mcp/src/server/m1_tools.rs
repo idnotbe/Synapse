@@ -2234,7 +2234,7 @@ impl SynapseService {
     }
 
     #[tool(
-        description = "Wait until the calling session's owned browser tab URL matches an exact string, glob, or regex. Uses raw CDP Page navigation events plus target-scoped page-state polling, returning URL/title/readyState from the same target; timeouts return BROWSER_WAIT_TIMEOUT. Target-scoped and background-safe: never activates the tab, never uses OS foreground input, and never falls back to the human foreground tab. Raw CDP only; the popup-safe normal Chrome extension bridge fails closed."
+        description = "Wait until the calling session's owned browser tab URL matches an exact string, glob, or regex. Uses raw CDP Page navigation events plus target-scoped page-state polling when available, or the normal Chrome bridge for chrome-tab:* targets using chrome.tabs URL/status polling plus webNavigation event readback. Timeouts return BROWSER_WAIT_TIMEOUT. Target-scoped and background-safe: never activates the tab, never uses OS foreground input, and never falls back to the human foreground tab."
     )]
     pub async fn browser_wait_for_url(
         &self,
@@ -5837,6 +5837,74 @@ impl SynapseService {
     ) -> Result<BrowserWaitForUrlResponse, ErrorData> {
         const TOOL: &str = "browser_wait_for_url";
         let Some(endpoint) = synapse_a11y::endpoint_for_window(window_hwnd) else {
+            if cdp_target_id.starts_with("chrome-tab:") {
+                let match_kind = browser_wait_for_url_match_kind_bridge_name(wait.match_kind);
+                let waited = crate::chrome_debugger_bridge::wait_for_url(
+                    window_hwnd,
+                    cdp_target_id,
+                    &wait.url,
+                    match_kind,
+                    wait.timeout_ms,
+                    wait.polling_interval_ms,
+                )
+                .await
+                .map_err(|error| {
+                    mcp_error(
+                        error.code(),
+                        format!(
+                            "browser_wait_for_url normal bridge wait failed for target {cdp_target_id:?}: {}",
+                            error.detail()
+                        ),
+                    )
+                })?;
+                if waited.timed_out {
+                    return Err(mcp_error(
+                        error_codes::BROWSER_WAIT_TIMEOUT,
+                        format!(
+                            "browser_wait_for_url timed out after {} ms waiting for {:?} pattern {:?}; poll_count={} navigation_event_count={} last_url={:?}",
+                            wait.timeout_ms,
+                            wait.match_kind,
+                            wait.url,
+                            waited.poll_count,
+                            waited.navigation_event_count,
+                            waited.url
+                        ),
+                    ));
+                }
+                tracing::info!(
+                    code = "CHROME_BRIDGE_BACKGROUND_WAIT_FOR_URL",
+                    session_id = %session_id,
+                    hwnd = window_hwnd,
+                    cdp_target_id = %waited.target_id,
+                    match_kind = ?wait.match_kind,
+                    elapsed_ms = waited.elapsed_ms,
+                    poll_count = waited.poll_count,
+                    navigation_event_count = waited.navigation_event_count,
+                    target_url = %waited.url,
+                    "readback=chrome.tabs+chrome.webNavigation(browser_wait_for_url) outcome=wait_satisfied"
+                );
+                return Ok(BrowserWaitForUrlResponse {
+                    session_id: session_id.to_owned(),
+                    window_hwnd,
+                    transport: "chrome_tabs_extension".to_owned(),
+                    endpoint: "chrome_bridge".to_owned(),
+                    cdp_target_id: waited.target_id,
+                    url_pattern: wait.url.clone(),
+                    match_kind: wait.match_kind,
+                    condition_met: waited.condition_met,
+                    elapsed_ms: waited.elapsed_ms,
+                    timeout_ms: wait.timeout_ms,
+                    polling_interval_ms: wait.polling_interval_ms,
+                    poll_count: waited.poll_count,
+                    navigation_event_count: waited.navigation_event_count,
+                    url: waited.url,
+                    title: waited.title,
+                    ready_state: waited.ready_state,
+                    readback_backend: waited.readback_backend,
+                    backend_tier_used: "chrome_tabs_extension".to_owned(),
+                    required_foreground: false,
+                });
+            }
             return Err(browser_raw_cdp_required_error(TOOL, window_hwnd));
         };
         let waited = synapse_a11y::cdp_wait_for_url(
@@ -10137,6 +10205,14 @@ fn browser_wait_for_url_match_kind_to_a11y(
     }
 }
 
+fn browser_wait_for_url_match_kind_bridge_name(kind: BrowserWaitForUrlMatchKind) -> &'static str {
+    match kind {
+        BrowserWaitForUrlMatchKind::Exact => "exact",
+        BrowserWaitForUrlMatchKind::Glob => "glob",
+        BrowserWaitForUrlMatchKind::Regex => "regex",
+    }
+}
+
 #[cfg(windows)]
 fn browser_locate_cdp_request(
     params: &BrowserLocateParams,
@@ -13430,18 +13506,34 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn browser_wait_for_url_match_kind_mapping_is_total() {
-        use super::browser_wait_for_url_match_kind_to_a11y;
+        use super::{
+            browser_wait_for_url_match_kind_bridge_name, browser_wait_for_url_match_kind_to_a11y,
+        };
         use synapse_a11y::CdpUrlMatchKind;
 
         let kinds = [
-            (BrowserWaitForUrlMatchKind::Exact, CdpUrlMatchKind::Exact),
-            (BrowserWaitForUrlMatchKind::Glob, CdpUrlMatchKind::Glob),
-            (BrowserWaitForUrlMatchKind::Regex, CdpUrlMatchKind::Regex),
+            (
+                BrowserWaitForUrlMatchKind::Exact,
+                CdpUrlMatchKind::Exact,
+                "exact",
+            ),
+            (
+                BrowserWaitForUrlMatchKind::Glob,
+                CdpUrlMatchKind::Glob,
+                "glob",
+            ),
+            (
+                BrowserWaitForUrlMatchKind::Regex,
+                CdpUrlMatchKind::Regex,
+                "regex",
+            ),
         ];
-        for (wire, expected) in kinds {
+        for (wire, expected, bridge_name) in kinds {
             let got = browser_wait_for_url_match_kind_to_a11y(wire);
-            println!("readback=url_match_kind_map wire={wire:?} a11y={got:?}");
+            let bridge = browser_wait_for_url_match_kind_bridge_name(wire);
+            println!("readback=url_match_kind_map wire={wire:?} a11y={got:?} bridge={bridge}");
             assert_eq!(got.as_str(), expected.as_str(), "url match kind {wire:?}");
+            assert_eq!(bridge, bridge_name, "bridge url match kind {wire:?}");
         }
     }
 

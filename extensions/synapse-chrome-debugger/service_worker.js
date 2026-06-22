@@ -1,6 +1,6 @@
 const PROTOCOL_VERSION = 1;
-const BRIDGE_BUILD_ID = "synapse-chrome-bridge-2026-06-22-load-state-v1";
-const BRIDGE_BUILD_SHA256 = "529c1fa8b6bd96cd6494cd28d912d08580592a8fb272d7ef613e8bb0380a1a04";
+const BRIDGE_BUILD_ID = "synapse-chrome-bridge-2026-06-22-url-v1";
+const BRIDGE_BUILD_SHA256 = "197a24a5e5b56699f377bd2990607a9a26c0e368a665f055e4519702df45da7c";
 const COMMAND_CAPABILITIES = Object.freeze([
   "alarmReconnect",
   "externalPopupRiskSuppression",
@@ -22,6 +22,7 @@ const COMMAND_CAPABILITIES = Object.freeze([
   "waitForText",
   "waitForFunction",
   "waitForLoadState",
+  "waitForUrl",
   "waitForSelector",
   "clock",
   "pageEvents",
@@ -782,6 +783,8 @@ async function handleCommand(command) {
       result = await handleWaitForFunction(params);
     } else if (kind === "waitForLoadState") {
       result = await handleWaitForLoadState(params);
+    } else if (kind === "waitForUrl") {
+      result = await handleWaitForUrl(params);
     } else if (kind === "waitForSelector") {
       result = await handleWaitForSelector(params);
     } else if (kind === "clock") {
@@ -1688,7 +1691,6 @@ async function handleWaitForLoadState(params) {
   const initialState = await tabPageState(selected.tabId, selected.target);
   const { buffer } = ensurePageEventBuffer(selected.tabId, initialState);
   let pollCount = 0;
-  let last = null;
   while (true) {
     pollCount += 1;
     const pageState = await tabPageState(selected.tabId, selected.target);
@@ -1722,6 +1724,61 @@ async function handleWaitForLoadState(params) {
         timeoutMs,
         pollingIntervalMs,
         pollCount
+      );
+    }
+    await sleep(Math.min(pollingIntervalMs, Math.max(1, timeoutMs - elapsed)));
+  }
+}
+
+async function handleWaitForUrl(params) {
+  const selected = await selectTabTarget(params, { requireTargetId: true });
+  const urlPattern = String(params.url ?? "");
+  if (urlPattern.trim().length === 0) {
+    throw bridgeError(ERROR_ATTACH_FAILED, "waitForUrl url must be non-empty");
+  }
+  const matchKind = normalizeWaitForUrlMatchKind(params.matchKind);
+  const timeoutMs = normalizeWaitTimeout(params.timeoutMs);
+  const pollingIntervalMs = normalizePollingInterval(params.pollingIntervalMs);
+  const startedAt = Date.now();
+  const initialState = await tabPageState(selected.tabId, selected.target);
+  const { buffer } = ensurePageEventBuffer(selected.tabId, initialState);
+  let pollCount = 0;
+  let last = null;
+  while (true) {
+    pollCount += 1;
+    const pageState = await tabPageState(selected.tabId, selected.target);
+    updatePageSnapshot(buffer, pageState);
+    const navigationEventCount = urlNavigationEventCount(buffer, startedAt);
+    const conditionMet = waitForUrlMatches(pageState.url, urlPattern, matchKind);
+    const elapsed = elapsedSince(startedAt);
+    if (conditionMet) {
+      return waitForUrlResult(
+        selected,
+        pageState,
+        urlPattern,
+        matchKind,
+        true,
+        false,
+        elapsed,
+        timeoutMs,
+        pollingIntervalMs,
+        pollCount,
+        navigationEventCount
+      );
+    }
+    if (elapsed >= timeoutMs) {
+      return waitForUrlResult(
+        selected,
+        pageState,
+        urlPattern,
+        matchKind,
+        false,
+        true,
+        elapsed,
+        timeoutMs,
+        pollingIntervalMs,
+        pollCount,
+        navigationEventCount
       );
     }
     await sleep(Math.min(pollingIntervalMs, Math.max(1, timeoutMs - elapsed)));
@@ -3412,6 +3469,91 @@ function waitForLoadStateResult(
     network_idle_quiet_ms: current.network_idle_quiet_ms || 0,
     lifecycle_network_idle_seen: Boolean(current.lifecycle_network_idle_seen),
     readback_backend: "chrome.webNavigation + chrome.scripting.executeScript(MAIN load-state/fetch/XHR/resource-timing polling)",
+    backend_tier_used: "chrome_tabs_extension",
+    required_foreground: false,
+    target_candidate_count: selected.targetCandidateCount,
+    target_selection_reason: selected.selectionReason
+  };
+}
+
+function urlNavigationEventCount(buffer, startedAt) {
+  if (!Array.isArray(buffer?.entries)) {
+    return 0;
+  }
+  return buffer.entries.filter((entry) => {
+    if (Number(entry.observed_at_unix_ms || 0) < startedAt) {
+      return false;
+    }
+    const kind = String(entry.event_kind || "").toLowerCase();
+    return kind === "framenavigated" || kind === "domcontentloaded" || kind === "load";
+  }).length;
+}
+
+function waitForUrlMatches(candidateUrl, pattern, matchKind) {
+  const candidate = String(candidateUrl || "");
+  if (matchKind === "exact") {
+    return candidate === pattern;
+  }
+  const regexSource = matchKind === "glob" ? globToRegexSource(pattern) : pattern;
+  try {
+    return new RegExp(regexSource).test(candidate);
+  } catch (error) {
+    throw bridgeError(
+      ERROR_ATTACH_FAILED,
+      `waitForUrl ${matchKind} pattern is invalid: ${errorMessage(error)}`
+    );
+  }
+}
+
+function globToRegexSource(glob) {
+  let source = "^";
+  for (const ch of String(glob || "")) {
+    if (ch === "*") {
+      source += ".*";
+    } else if (ch === "?") {
+      source += ".";
+    } else {
+      source += regexEscape(ch);
+    }
+  }
+  return source + "$";
+}
+
+function regexEscape(value) {
+  return String(value).replace(/[\\^$.*+?()[\]{}|]/g, "\\$&");
+}
+
+function waitForUrlResult(
+  selected,
+  pageState,
+  urlPattern,
+  matchKind,
+  conditionMet,
+  timedOut,
+  elapsedMs,
+  timeoutMs,
+  pollingIntervalMs,
+  pollCount,
+  navigationEventCount
+) {
+  return {
+    extension_id: chrome.runtime.id,
+    target_id: pageState.target_id || selected.target.id,
+    tab_id: selected.tabId,
+    chrome_window_id: pageState.chrome_window_id,
+    url_pattern: urlPattern,
+    match_kind: matchKind,
+    condition_met: Boolean(conditionMet),
+    timed_out: Boolean(timedOut),
+    elapsed_ms: elapsedMs,
+    timeout_ms: timeoutMs,
+    polling_interval_ms: pollingIntervalMs,
+    poll_count: pollCount,
+    navigation_event_count: navigationEventCount,
+    url: pageState.url || "",
+    title: pageState.title || "",
+    ready_state: pageState.ready_state || "",
+    readback_backend: "chrome.tabs.get + chrome.webNavigation URL polling",
     backend_tier_used: "chrome_tabs_extension",
     required_foreground: false,
     target_candidate_count: selected.targetCandidateCount,
@@ -9997,6 +10139,14 @@ function normalizeWaitForLoadStateState(value) {
     return state;
   }
   throw bridgeError(ERROR_ATTACH_FAILED, `unsupported waitForLoadState state ${JSON.stringify(state)}`);
+}
+
+function normalizeWaitForUrlMatchKind(value) {
+  const matchKind = String(value || "exact").toLowerCase();
+  if (matchKind === "exact" || matchKind === "glob" || matchKind === "regex") {
+    return matchKind;
+  }
+  throw bridgeError(ERROR_ATTACH_FAILED, `unsupported waitForUrl matchKind ${JSON.stringify(matchKind)}`);
 }
 
 function normalizeWaitForSelectorState(value) {
