@@ -174,27 +174,23 @@ are not accepted as live session proof.
   them as FSV substitutes. If the already-running Codex process was launched
   before `SYNAPSE_BEARER_TOKEN` existed or changed, Windows cannot update that
   process environment after the fact; setup reports
-  `SYNAPSE_CODEX_CURRENT_PROCESS_ENV_STALE` and the current chat cannot claim
-  direct `mcp__synapse` FSV until a fresh Codex process initializes with the
-  token loader.
+  nonfatal `SYNAPSE_CODEX_CURRENT_PROCESS_ENV_STALE_*` warnings. Do not assume
+  the current MCP client is disconnected from that warning alone; call the real
+  `mcp__synapse.health` tool from the same Codex process and use that daemon
+  PID/tool-surface readback as the reconnect source of truth.
 - **Codex exposes stale `mcp__synapse` tool schemas after setup/restart** —
   setup snapshots the daemon's sanitized `tools/list` at
   `%APPDATA%\synapse\codex-tool-surface.json` and each patched Codex launcher
   copies that file to an immutable per-process start snapshot under
   `%LOCALAPPDATA%\synapse\codex-start-snapshots`. If setup later sees the live
-  daemon schema hash differ from `SYNAPSE_TOOL_SURFACE_HASH_AT_CODEX_START`, it
-  fails with `SYNAPSE_CODEX_CURRENT_PROCESS_SCHEMA_STALE` and reports
-  added/removed/schema-changed tools. It also writes a same-agent restart
-  handoff under `%LOCALAPPDATA%\synapse\codex-restart-handoffs` in JSON and
-  Markdown. The handoff names the stale Codex PID, daemon PID/bind, current
-  snapshot, start snapshot, required wake-up files, GitHub issue reads, and
-  post-restart verification steps. Restart Codex through the patched launcher
-  so the real wired `mcp__synapse` client loads the new schema, then read the
-  active shell/Codex parent chain and prove the active `codex.exe` PID is not
-  the stale PID named in the handoff before resuming issue work. Typing
-  `continue` into the same PID is not a restart. Read the handoff plus
-  `STATE/RECOVERY_NOTES.md` before resuming. Direct HTTP or stdio probes remain
-  diagnostics only and are not D1/client-parity FSV.
+  daemon schema hash differ from `SYNAPSE_TOOL_SURFACE_HASH_AT_CODEX_START`,
+  it logs a nonfatal `SYNAPSE_CODEX_CURRENT_PROCESS_SCHEMA_STALE_*` warning
+  with added/removed/schema-changed tools, then keeps the current Codex process
+  on the live Streamable HTTP MCP session. Recovery is same-process: call the
+  real `mcp__synapse.health` tool, confirm the daemon PID and
+  `tool_surface_sha256`, run tool discovery for any newly exposed tool, and
+  retry through the real wired `mcp__synapse` tool namespace. Direct HTTP or
+  stdio probes remain diagnostics only and are not D1/client-parity FSV.
 - **WSL Codex/Claude leaves `synapse-mcp --mode connect` children under
   `wsl.exe`** — this is a configuration error. Reconfigure the WSL client to
   HTTP transport with bearer auth. The bridge now refuses direct WSL interop

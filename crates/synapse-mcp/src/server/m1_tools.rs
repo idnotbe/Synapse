@@ -3288,7 +3288,10 @@ impl SynapseService {
         }
     }
 
-    fn register_cdp_target_owner(&self, owner: CdpTargetOwner) -> Result<String, ErrorData> {
+    pub(super) fn register_cdp_target_owner(
+        &self,
+        owner: CdpTargetOwner,
+    ) -> Result<String, ErrorData> {
         let owner_key =
             cdp_target_owner_key(owner.window_hwnd, &owner.endpoint, &owner.cdp_target_id);
         {
@@ -4184,18 +4187,6 @@ impl SynapseService {
                 format!(
                     "cdp_open_tab refused target {cdp_target_id:?}: Chrome bridge changed the human OS foreground from {:?} to requested HWND {window_hwnd:#x} while required_foreground=false",
                     human_os_foreground_before_hwnd
-                ),
-            ));
-        }
-        if opened.chrome_window_focused == Some(true) && !requested_window_was_human_foreground {
-            let _ = crate::chrome_debugger_bridge::close_tab(window_hwnd, &cdp_target_id).await;
-            return Err(mcp_error(
-                error_codes::ACTION_POSTCONDITION_FAILED,
-                format!(
-                    "cdp_open_tab refused target {cdp_target_id:?}: Chrome bridge selected focused Chrome window {:?} while requested HWND {window_hwnd:#x} was not the human foreground before the call; before_hwnd={:?} after_hwnd={:?}",
-                    chrome_window_id,
-                    human_os_foreground_before_hwnd,
-                    human_os_foreground_after_hwnd
                 ),
             ));
         }
@@ -7714,11 +7705,11 @@ fn cdp_navigate_action_wire(action: CdpNavigateAction) -> &'static str {
     }
 }
 
-fn chrome_debugger_default_endpoint() -> String {
+pub(super) fn chrome_debugger_default_endpoint() -> String {
     chrome_debugger_endpoint("leoocgnkjnplbfdbklajepahofecgfbk")
 }
 
-fn chrome_debugger_endpoint(extension_id: &str) -> String {
+pub(super) fn chrome_debugger_endpoint(extension_id: &str) -> String {
     format!("chrome-extension://{extension_id}/chrome.tabs")
 }
 

@@ -1,6 +1,6 @@
 const PROTOCOL_VERSION = 1;
-const BRIDGE_BUILD_ID = "synapse-chrome-bridge-2026-06-22-assert-aria-v1";
-const BRIDGE_BUILD_SHA256 = "9345734813fc6868554aac23cf5aa05b800edb983982bcc2fc782e8082704f27";
+const BRIDGE_BUILD_ID = "synapse-chrome-bridge-2026-06-22-popup-intent-v4";
+const BRIDGE_BUILD_SHA256 = "c0af1d9073b8b4c7a66996f075bfdc150982675c5990f16cdd9f2dd6bc686154";
 const COMMAND_CAPABILITIES = Object.freeze([
   "alarmReconnect",
   "externalPopupRiskSuppression",
@@ -1538,6 +1538,97 @@ async function handleTypeActiveElement(params) {
   };
 }
 
+async function createDomActionPopupTabs(selected, beforeState, actionResult) {
+  const intents = [];
+  const seen = new Set();
+  const pushIntent = (intent, fallbackKind) => {
+    if (!intent || typeof intent !== "object") {
+      return;
+    }
+    const kind = String(intent.kind || fallbackKind || "").trim();
+    const requestedUrl = String(intent.resolved_url || intent.url || "").trim();
+    if (!kind || !requestedUrl || intent.opened === true) {
+      return;
+    }
+    const key = `${kind}\n${requestedUrl}\n${String(intent.target || "")}`;
+    if (seen.has(key)) {
+      return;
+    }
+    seen.add(key);
+    intents.push({ ...intent, kind, requested_url: requestedUrl });
+  };
+
+  const actionReadback = actionResult?.action_readback || {};
+  const popupIntents = Array.isArray(actionResult?.popup_intents)
+    ? actionResult.popup_intents
+    : Array.isArray(actionReadback.popup_intents)
+      ? actionReadback.popup_intents
+      : [];
+  for (const intent of popupIntents) {
+    pushIntent(intent, "window_open");
+  }
+  pushIntent(
+    actionResult?.anchor_target_blank_intent || actionReadback.anchor_target_blank_intent,
+    "anchor_target_blank"
+  );
+
+  const created = [];
+  for (const intent of intents) {
+    const createParams = {
+      url: normalizeOpenUrl(intent.requested_url) || "about:blank",
+      active: false,
+      openerTabId: selected.tabId
+    };
+    if (Number.isInteger(beforeState?.chrome_window_id)) {
+      createParams.windowId = beforeState.chrome_window_id;
+    }
+    let tab;
+    try {
+      tab = await chrome.tabs.create(createParams);
+    } catch (error) {
+      throw bridgeError(
+        ERROR_AXTREE_FAILED,
+        `domAction popup intent create failed kind=${intent.kind} url=${JSON.stringify(createParams.url)} opener_tab_id=${selected.tabId}: ${errorMessage(error)}`
+      );
+    }
+    if (!tab || typeof tab.id !== "number") {
+      throw bridgeError(
+        ERROR_AXTREE_FAILED,
+        `domAction popup intent create returned no numeric tab id kind=${intent.kind} opener_tab_id=${selected.tabId}`
+      );
+    }
+    const target = await waitForTabTarget(tab.id, 10000);
+    const state = await tabPageState(tab.id, target);
+    pushPageEvent(selected.tabId, {
+      event_kind: "page_created",
+      target_id: selected.target.id,
+      target_type: "page",
+      target_attached: false,
+      page_target_id: target.id,
+      opener_id: selected.target.id,
+      can_access_opener: true,
+      url: state.url || target.url || tab.url || createParams.url,
+      title: state.title || target.title || tab.title || "",
+      observed_at_unix_ms: Date.now()
+    });
+    created.push({
+      kind: intent.kind,
+      opener_tab_id: selected.tabId,
+      tab_id: tab.id,
+      target_id: target.id,
+      chrome_window_id: state.chrome_window_id,
+      url: state.url || target.url || tab.url || createParams.url,
+      title: state.title || target.title || tab.title || "",
+      target_attached: Boolean(target.attached),
+      active: Boolean(state.active),
+      highlighted: Boolean(state.highlighted),
+      source_opened_by_browser: Boolean(intent.opened),
+      source_was_blocked: intent.opened === false
+    });
+  }
+  return created;
+}
+
 async function handleNavigateTab(params) {
   const selected = await selectTabTarget(params, { requireTargetId: true });
   const action = normalizeNavigateAction(params.action);
@@ -1743,6 +1834,7 @@ async function handleDomAction(params) {
   try {
     actionInjected = await chrome.scripting.executeScript({
       target: { tabId: selected.tabId, frameIds: [first.frame_id] },
+      world: "MAIN",
       func: performDomActionInPage,
       args: [request]
     });
@@ -1769,6 +1861,7 @@ async function handleDomAction(params) {
     );
   }
 
+  const createdPopupTabs = await createDomActionPopupTabs(selected, before, actionResult);
   const after = await waitForTabPageState(selected.tabId, selected.target, waitTimeoutMs);
   const afterPageText = await tabPageTextState(selected.tabId);
   return {
@@ -1781,6 +1874,7 @@ async function handleDomAction(params) {
     after_page: after,
     before_page_text: beforePageText,
     after_page_text: afterPageText,
+    created_popup_tabs: createdPopupTabs,
     readback_backend: "chrome.scripting.executeScript+chrome.tabs.get",
     required_foreground: false,
     frame_id: first.frame_id,
@@ -5194,53 +5288,143 @@ function performDomActionInPage(request) {
     const button = options?.button || "left";
     const modifiers = Array.isArray(options?.modifiers) ? options.modifiers : [];
     const needsSyntheticEvents = actionName === "dblclick" || bounded !== 1 || button !== "left" || modifiers.length > 0 || Boolean(options?.position);
-    if (!needsSyntheticEvents && typeof element.click === "function") {
-      element.click();
-      events.push("click");
-      return {
-        click_count: 1,
-        button,
-        modifiers,
-        position: null,
-        activation_event: "click",
-        native_click_method: true
-      };
-    }
-    const point = elementClickPoint(element, options?.position || null);
-    let activationEvent = "click";
-    for (let index = 0; index < bounded; index += 1) {
-      const detail = index + 1;
-      dispatchPointerLikeEvent(element, "pointerdown", point, button, modifiers, detail, true);
-      events.push("pointerdown");
-      dispatchMouseLikeEvent(element, "mousedown", point, button, modifiers, detail, true);
-      events.push("mousedown");
-      dispatchPointerLikeEvent(element, "pointerup", point, button, modifiers, detail, false);
-      events.push("pointerup");
-      dispatchMouseLikeEvent(element, "mouseup", point, button, modifiers, detail, false);
-      events.push("mouseup");
-      activationEvent = activationEventForButton(button);
-      dispatchMouseLikeEvent(element, activationEvent, point, button, modifiers, detail, false);
-      events.push(activationEvent);
-      if (button === "left" && detail === 2 && (actionName === "dblclick" || bounded >= 2)) {
-        dispatchMouseLikeEvent(element, "dblclick", point, button, modifiers, detail, false);
-        events.push("dblclick");
+    const popupIntents = [];
+    const restoreWindowOpen = installWindowOpenCapture(popupIntents);
+    const anchorIntent = captureAnchorTargetBlankIntent(element);
+    let readback;
+    try {
+      if (!needsSyntheticEvents && typeof element.click === "function") {
+        element.click();
+        events.push("click");
+        readback = {
+          click_count: 1,
+          button,
+          modifiers,
+          position: null,
+          activation_event: "click",
+          native_click_method: true
+        };
+      } else {
+        const point = elementClickPoint(element, options?.position || null);
+        let activationEvent = "click";
+        for (let index = 0; index < bounded; index += 1) {
+          const detail = index + 1;
+          dispatchPointerLikeEvent(element, "pointerdown", point, button, modifiers, detail, true);
+          events.push("pointerdown");
+          dispatchMouseLikeEvent(element, "mousedown", point, button, modifiers, detail, true);
+          events.push("mousedown");
+          dispatchPointerLikeEvent(element, "pointerup", point, button, modifiers, detail, false);
+          events.push("pointerup");
+          dispatchMouseLikeEvent(element, "mouseup", point, button, modifiers, detail, false);
+          events.push("mouseup");
+          activationEvent = activationEventForButton(button);
+          dispatchMouseLikeEvent(element, activationEvent, point, button, modifiers, detail, false);
+          events.push(activationEvent);
+          if (button === "left" && detail === 2 && (actionName === "dblclick" || bounded >= 2)) {
+            dispatchMouseLikeEvent(element, "dblclick", point, button, modifiers, detail, false);
+            events.push("dblclick");
+          }
+        }
+        readback = {
+          click_count: bounded,
+          button,
+          modifiers,
+          position: options?.position || null,
+          viewport_point: {
+            client_x: point.client_x,
+            client_y: point.client_y
+          },
+          element_point: {
+            x: point.element_x,
+            y: point.element_y
+          },
+          activation_event: activationEvent
+        };
       }
+    } finally {
+      restoreWindowOpen();
     }
     return {
-      click_count: bounded,
-      button,
-      modifiers,
-      position: options?.position || null,
-      viewport_point: {
-        client_x: point.client_x,
-        client_y: point.client_y
-      },
-      element_point: {
-        x: point.element_x,
-        y: point.element_y
-      },
-      activation_event: activationEvent
+      ...readback,
+      popup_intents: popupIntents,
+      anchor_target_blank_intent: anchorIntent
     };
+  }
+
+  function installWindowOpenCapture(intents) {
+    if (typeof window.open !== "function") {
+      return () => {};
+    }
+    const originalOpen = window.open;
+    const capturedOpen = function capturedSynapseWindowOpen(url, target, features) {
+      let opened = false;
+      let thrown = null;
+      try {
+        const result = originalOpen.apply(window, arguments);
+        opened = Boolean(result);
+        return result;
+      } catch (error) {
+        thrown = errorMessageLocal(error);
+        throw error;
+      } finally {
+        intents.push({
+          kind: "window_open",
+          url: stringifyPopupArg(url),
+          resolved_url: resolvePopupUrl(url),
+          target: stringifyPopupArg(target),
+          features: stringifyPopupArg(features),
+          opened,
+          error: thrown
+        });
+      }
+    };
+    window.open = capturedOpen;
+    return () => {
+      try {
+        if (window.open === capturedOpen) {
+          window.open = originalOpen;
+        }
+      } catch (_) {
+        // Best-effort restore; the action result still reports captured intent.
+      }
+    };
+  }
+
+  function captureAnchorTargetBlankIntent(element) {
+    const anchor = typeof element.closest === "function" ? element.closest("a[href]") : null;
+    if (!(anchor instanceof HTMLAnchorElement)) {
+      return null;
+    }
+    const target = String(anchor.getAttribute("target") || "").trim();
+    const normalizedTarget = target.toLowerCase();
+    if (!normalizedTarget || normalizedTarget === "_self") {
+      return null;
+    }
+    return {
+      kind: "anchor_target_blank",
+      url: String(anchor.getAttribute("href") || ""),
+      resolved_url: String(anchor.href || ""),
+      target,
+      rel: String(anchor.getAttribute("rel") || ""),
+      opened: false,
+      text: trimForReadback(anchor.innerText || anchor.textContent || "", 200)
+    };
+  }
+
+  function stringifyPopupArg(value) {
+    return value === null || value === undefined ? "" : String(value);
+  }
+
+  function resolvePopupUrl(value) {
+    const raw = stringifyPopupArg(value);
+    if (!raw) {
+      return "about:blank";
+    }
+    try {
+      return new URL(raw, location.href).href;
+    } catch (_) {
+      return raw;
+    }
   }
 
   function elementClickPoint(element, position) {
@@ -6911,15 +7095,40 @@ function readPageEventBuffer(buffer, filters) {
 
 function updatePageEventTabState(tabId, tab, changeInfo = {}) {
   const buffer = pageEventBuffers.get(tabId);
-  if (!buffer || !tab) {
+  if (!tab) {
     return;
   }
-  updatePageSnapshot(buffer, tabPageStateFromTab(tab));
-  if (changeInfo.title) {
-    pushPageEvent(tabId, {
+  if (buffer) {
+    updatePageSnapshot(buffer, tabPageStateFromTab(tab));
+    if (changeInfo.title) {
+      pushPageEvent(tabId, {
+        event_kind: "page_info_changed",
+        target_id: targetIdForTabId(tabId),
+        page_target_id: targetIdForTabId(tabId),
+        target_type: "page",
+        target_attached: false,
+        url: String(tab.pendingUrl || tab.url || ""),
+        title: String(tab.title || ""),
+        observed_at_unix_ms: Date.now()
+      });
+    }
+  }
+  updateRelatedPageEventTabState(tabId, tab, changeInfo);
+}
+
+function updateRelatedPageEventTabState(tabId, tab, changeInfo = {}) {
+  const targetId = targetIdForTabId(tabId);
+  if (!changeInfo?.url && !changeInfo?.title && changeInfo?.status !== "complete") {
+    return;
+  }
+  for (const [ownerTabId, buffer] of pageEventBuffers.entries()) {
+    if (ownerTabId === tabId || !buffer.pages.has(targetId)) {
+      continue;
+    }
+    pushPageEvent(ownerTabId, {
       event_kind: "page_info_changed",
-      target_id: targetIdForTabId(tabId),
-      page_target_id: targetIdForTabId(tabId),
+      target_id: buffer.targetId,
+      page_target_id: targetId,
       target_type: "page",
       target_attached: false,
       url: String(tab.pendingUrl || tab.url || ""),

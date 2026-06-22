@@ -2117,140 +2117,6 @@ function Get-SynapseHandoffGitReadback {
     }
 }
 
-function New-SynapseCodexRestartHandoff {
-    param(
-        [Parameter(Mandatory=$true)]$CodexAncestor,
-        [Parameter(Mandatory=$true)][string]$Reason,
-        [Parameter(Mandatory=$true)]$CurrentSurface,
-        [AllowNull()]$StartSurface,
-        [AllowNull()][string]$ProcessHashAtStart,
-        [AllowNull()][string]$ProcessSnapshotAtStart,
-        [Parameter(Mandatory=$true)][string]$SnapshotPath,
-        [Parameter(Mandatory=$true)][string]$DiffSummary,
-        [AllowNull()][string]$SourceDir,
-        [AllowNull()][string]$Bind,
-        [AllowNull()][string]$TokenPath
-    )
-
-    $handoffRoot = Join-Path $env:LOCALAPPDATA 'synapse\codex-restart-handoffs'
-    $stamp = (Get-Date).ToUniversalTime().ToString('yyyyMMddTHHmmssfffZ')
-    $codexPid = try { [int]$CodexAncestor.ProcessId } catch { 0 }
-    $baseName = "codex-restart-handoff-$codexPid-$stamp"
-    $jsonPath = Join-Path $handoffRoot "$baseName.json"
-    $markdownPath = Join-Path $handoffRoot "$baseName.md"
-    $startSnapshotStatus = if ($null -eq $StartSurface) {
-        'missing'
-    } elseif ($StartSurface.unreadable) {
-        'unreadable'
-    } else {
-        'read'
-    }
-
-    $repoRoot = if ([string]::IsNullOrWhiteSpace($SourceDir)) { 'C:\code\Synapse' } else { $SourceDir }
-    $requiredReads = @(
-        (Join-Path $repoRoot 'docs2\AICodingAgentSuperPrompt.md'),
-        'C:\Users\hotra\Downloads\AICodingAgentSuperPrompt.md',
-        (Join-Path $repoRoot 'docs\compressionprompt.md'),
-        (Join-Path $repoRoot 'AGENTS.md'),
-        (Join-Path $repoRoot 'STATE\ACTIVE_OBJECTIVE.md'),
-        (Join-Path $repoRoot 'STATE\CURRENT_STATE.md'),
-        (Join-Path $repoRoot 'STATE\RECOVERY_NOTES.md'),
-        (Join-Path $repoRoot 'STATE\DECISION_LOG.md'),
-        (Join-Path $repoRoot 'STATE\HEARTBEAT.md')
-    )
-
-    $handoff = [ordered]@{
-        schema_version = 1
-        artifact_kind = 'synapse_codex_restart_handoff'
-        created_at_utc = [DateTime]::UtcNow.ToString('o')
-        reason_code = 'SYNAPSE_CODEX_CURRENT_PROCESS_SCHEMA_STALE'
-        reason = $Reason
-        required_restart = $true
-        no_in_process_hot_refresh = $true
-        explanation = 'The already-running Codex process cannot mutate its loaded MCP callable metadata; restart through the patched Codex launcher is the only same-agent recovery boundary.'
-        codex_process = [ordered]@{
-            pid = $codexPid
-            name = [string]$CodexAncestor.Name
-            command_line = [string]$CodexAncestor.CommandLine
-        }
-        daemon = [ordered]@{
-            bind = $Bind
-            pid = $CurrentSurface.daemon_pid
-            tool_count = $CurrentSurface.tool_count
-            tool_surface_sha256 = [string]$CurrentSurface.tool_surface_sha256
-            snapshot_path = $SnapshotPath
-        }
-        current_process_start_surface = [ordered]@{
-            env_hash_present = -not [string]::IsNullOrWhiteSpace($ProcessHashAtStart)
-            env_hash = $ProcessHashAtStart
-            env_snapshot_path = $ProcessSnapshotAtStart
-            snapshot_status = $startSnapshotStatus
-        }
-        diff = [ordered]@{
-            summary = $DiffSummary
-        }
-        post_restart_required_reads = $requiredReads
-        github_reads = @(
-            'gh issue view 351 --repo ChrisRoyse/Synapse --comments',
-            'gh issue view 1213 --repo ChrisRoyse/Synapse --comments',
-            'gh issue view 1212 --repo ChrisRoyse/Synapse --comments',
-            'gh issue view 1211 --repo ChrisRoyse/Synapse --comments',
-            'gh issue list --repo ChrisRoyse/Synapse --state open --limit 50'
-        )
-        post_restart_verification = @(
-            'Run git status --short --branch and confirm the working tree matches STATE/RECOVERY_NOTES.md.',
-            "Read the active shell/Codex process parent chain and confirm the active codex.exe PID is not stale PID $codexPid from this handoff.",
-            'Call real mcp__synapse.health and verify daemon pid/tool_surface_sha256 matches or intentionally supersedes this handoff.',
-            'Run tool discovery for the previously missing tool, for example tool_search browser_evaluate.',
-            'If the callable tool is exposed, resume the issue recorded in STATE/RECOVERY_NOTES.md and perform manual real-MCP FSV; do not use direct helper calls as acceptance.'
-        )
-        restart_command_hint = "Close this Codex session completely, start a new Codex session through the patched Codex launcher, verify the active codex.exe PID is not $codexPid, then say: continue your work, you are the only agent working."
-        repo_readback = Get-SynapseHandoffGitReadback -SourceDir $SourceDir
-        token_path = $TokenPath
-    }
-
-    $jsonText = $handoff | ConvertTo-Json -Depth 12
-    Write-SynapseUtf8NoBomFile -Path $jsonPath -Text $jsonText
-
-    $markdownLines = @(
-        '# Synapse Codex Restart Handoff',
-        '',
-        "- Reason: SYNAPSE_CODEX_CURRENT_PROCESS_SCHEMA_STALE ($Reason)",
-        "- Created UTC: $($handoff.created_at_utc)",
-        "- Codex PID: $codexPid",
-        "- Daemon: pid=$($CurrentSurface.daemon_pid) bind=$Bind tool_count=$($CurrentSurface.tool_count) tool_surface_sha256=$($CurrentSurface.tool_surface_sha256)",
-        "- Current process start snapshot: status=$startSnapshotStatus hash=$ProcessHashAtStart path=$ProcessSnapshotAtStart",
-        "- Current daemon snapshot: $SnapshotPath",
-        "- Diff: $DiffSummary",
-        '',
-        '## Required Restart',
-        "The running Codex process cannot hot-add newly installed MCP tools or mutate cached tool schemas. Close this stale Codex process completely (PID $codexPid), restart Codex through the patched launcher, and prove the active codex.exe parent PID changed before continuing. Typing `continue` into the same PID is not a restart.",
-        '',
-        '## Read After Restart'
-    )
-    $markdownLines += ($requiredReads | ForEach-Object { "- $_" })
-    $markdownLines += @(
-        '',
-        '## GitHub Reads'
-    )
-    $markdownLines += ($handoff.github_reads | ForEach-Object { "- $_" })
-    $markdownLines += @(
-        '',
-        '## Verification'
-    )
-    $markdownLines += ($handoff.post_restart_verification | ForEach-Object { "- $_" })
-    $markdownLines += @(
-        '',
-        "JSON artifact: $jsonPath"
-    )
-    Write-SynapseUtf8NoBomFile -Path $markdownPath -Text ($markdownLines -join "`n")
-
-    return [pscustomobject]@{
-        JsonPath = $jsonPath
-        MarkdownPath = $markdownPath
-    }
-}
-
 function Assert-CodexCandidateHandoffPreservesCurrentProcess {
     param(
         [AllowNull()]$CodexAncestor,
@@ -3051,7 +2917,7 @@ Info "Candidate daemon accepted for handoff sha256=$installSourceHash tool_count
 
 $codexAncestorBeforeHandoff = Get-SynapseCurrentCodexAncestor
 if ($codexAncestorBeforeHandoff -and $processTokenAtStart -ne $token) {
-    Die ("SYNAPSE_CODEX_CURRENT_PROCESS_ENV_STALE_PRE_HANDOFF codex_pid={0} token_at_process_start={1} token_file={2} remediation=setup refused before touching the live daemon because this already-running Codex process cannot authenticate Synapse with the token that setup will install. Restart Codex through the patched launcher, then rerun setup." -f `
+    Info ("WARN: SYNAPSE_CODEX_CURRENT_PROCESS_ENV_STALE_PRE_HANDOFF_NONFATAL codex_pid={0} token_at_process_start={1} token_file={2} remediation=setup will keep the replacement handoff path available; after handoff call real mcp__synapse.health from this same Codex session before assuming reconnect failed. The patched launcher has been updated for future clients, and direct HTTP/token probes remain diagnostics only." -f `
         $codexAncestorBeforeHandoff.ProcessId,
         ($(if ([string]::IsNullOrWhiteSpace($processTokenAtStart)) { 'missing' } else { 'mismatch' })),
         $TokenPath)
@@ -3323,7 +3189,7 @@ if (-not $SkipClientWiring) {
 if (-not $SkipClientWiring) {
     $codexAncestor = Get-SynapseCurrentCodexAncestor
     if ($codexAncestor -and $processTokenAtStart -ne $token) {
-        Die ("SYNAPSE_CODEX_CURRENT_PROCESS_ENV_STALE codex_pid={0} token_at_process_start={1} token_file={2} remediation=restart Codex through the patched codex launcher; Windows cannot update an already-running Codex process environment, so this current session cannot authenticate mcp__synapse yet." -f $codexAncestor.ProcessId, ($(if ([string]::IsNullOrWhiteSpace($processTokenAtStart)) { 'missing' } else { 'mismatch' })), $TokenPath)
+        Info ("WARN: SYNAPSE_CODEX_CURRENT_PROCESS_ENV_STALE_NONFATAL codex_pid={0} token_at_process_start={1} token_file={2} remediation=do not assume the current Codex process is disconnected; first call real mcp__synapse.health from this same session and verify daemon PID/tool_surface readback. The patched launcher has been updated for future clients; if this already-running process has no authenticated MCP connection, use the existing live daemon and token file as diagnostics until the client can refresh its environment." -f $codexAncestor.ProcessId, ($(if ([string]::IsNullOrWhiteSpace($processTokenAtStart)) { 'missing' } else { 'mismatch' })), $TokenPath)
     }
     Assert-CodexCurrentProcessToolSurfaceFresh `
         -CodexAncestor $codexAncestor `

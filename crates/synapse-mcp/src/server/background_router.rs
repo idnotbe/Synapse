@@ -13,7 +13,12 @@
 //! target but cannot seize the human foreground.
 
 use super::browser_field::BrowserSetValueParams;
-use super::{ErrorData, Json, Parameters, SessionTarget, SynapseService, tool, tool_router};
+use super::m1_tools::{
+    chrome_debugger_default_endpoint, chrome_debugger_endpoint, validate_cdp_target_id,
+};
+use super::{
+    CdpTargetOwner, ErrorData, Json, Parameters, SessionTarget, SynapseService, tool, tool_router,
+};
 use crate::m1::{
     CaptureScreenshotParams, CdpActivateTabParams, CdpNavigateAction, CdpNavigateTabParams,
     CdpTargetInfoParams, ObserveParams, mcp_error,
@@ -32,7 +37,7 @@ use std::{
     collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use synapse_core::{AccessibleNode, ElementId, Point, Rect, UiaPattern, error_codes};
 
@@ -2824,7 +2829,7 @@ async fn target_act_browser_dom_action(
                 format!("target_act select options encode failed: {error}"),
             )
         })?;
-    let result = crate::chrome_debugger_bridge::dom_action(
+    let mut result = crate::chrome_debugger_bridge::dom_action(
         crate::chrome_debugger_bridge::ChromeDebuggerDomActionRequest {
             hwnd: window_hwnd,
             target_id: &cdp_target_id,
@@ -2850,6 +2855,13 @@ async fn target_act_browser_dom_action(
     )
     .await
     .map_err(|error| mcp_error(error.code(), error.detail().to_owned()));
+    if let Ok(value) = result.as_mut() {
+        if let Err(error) =
+            target_act_register_created_popup_tabs(service, &session_id, window_hwnd, value)
+        {
+            result = Err(error);
+        }
+    }
     service.audit_action_result_for_session("target_act", &result, &session_id)?;
     match result {
         Ok(value) => Ok((
@@ -2865,6 +2877,90 @@ async fn target_act_browser_dom_action(
             target_act_error_result("chrome_debugger_bridge.domAction", error),
         )),
     }
+}
+
+fn target_act_register_created_popup_tabs(
+    service: &SynapseService,
+    session_id: &str,
+    window_hwnd: i64,
+    action_value: &mut Value,
+) -> Result<(), ErrorData> {
+    let tabs = action_value
+        .get("created_popup_tabs")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    if tabs.is_empty() {
+        return Ok(());
+    }
+
+    let endpoint = action_value
+        .get("extension_id")
+        .and_then(Value::as_str)
+        .filter(|extension_id| !extension_id.trim().is_empty())
+        .map(chrome_debugger_endpoint)
+        .unwrap_or_else(chrome_debugger_default_endpoint);
+    let mut registered = Vec::with_capacity(tabs.len());
+    for (index, tab) in tabs.iter().enumerate() {
+        let target_id = tab
+            .get("target_id")
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| {
+                mcp_error(
+                    error_codes::ACTION_POSTCONDITION_FAILED,
+                    format!(
+                        "target_act DOM action created popup tab at index {index}, but the bridge did not return target_id"
+                    ),
+                )
+            })?;
+        validate_cdp_target_id(target_id)?;
+        let target_url = tab
+            .get("url")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        let chrome_window_id = tab.get("chrome_window_id").and_then(Value::as_i64);
+        let owner_key = service.register_cdp_target_owner(CdpTargetOwner {
+            session_id: session_id.to_owned(),
+            window_hwnd,
+            endpoint: endpoint.clone(),
+            chrome_window_id,
+            capture_window_hwnd: None,
+            cdp_target_id: target_id.to_owned(),
+            requested_url: target_url.clone(),
+            target_url,
+            created_at_unix_ms: target_act_unix_ms_now(),
+        })?;
+        tracing::info!(
+            code = "TARGET_ACT_POPUP_TAB_OWNER_REGISTERED",
+            session_id = %session_id,
+            hwnd = window_hwnd,
+            endpoint = %endpoint,
+            cdp_target_id = %target_id,
+            owner_key = %owner_key,
+            chrome_window_id = chrome_window_id.unwrap_or_default(),
+            "target_act registered bridge-created popup tab owner"
+        );
+        registered.push(json!({
+            "target_id": target_id,
+            "owner_key": owner_key,
+            "endpoint": endpoint,
+            "window_hwnd": window_hwnd,
+            "chrome_window_id": chrome_window_id,
+        }));
+    }
+    if let Some(object) = action_value.as_object_mut() {
+        object.insert("created_popup_tab_owners".to_owned(), json!(registered));
+    }
+    Ok(())
+}
+
+fn target_act_unix_ms_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 async fn target_act_coordinate_click(
