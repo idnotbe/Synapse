@@ -1415,9 +1415,9 @@ if ($staleSynapseActivePermissions.Count -gt 0) {
     daemon_bridge_transport = 'direct_localhost_websocket'
     daemon_bridge_origin = "chrome-extension://$ExtensionId"
     bridge_self_reload_command = 'cdp_bridge_reload'
-    bridge_build_id_expected = 'synapse-chrome-bridge-2026-06-22-page-events-v6'
-    bridge_build_sha256_expected = '9244ce49a2c34dd02dd6a98d479601f20869750d9330d8c7b564d35f5d823f9a'
-    bridge_required_capabilities = @('alarmReconnect', 'activateTab', 'closeTab', 'clock', 'coordinateClick', 'domAction', 'externalPopupRiskSuppression', 'listTabs', 'navigateTab', 'openTab', 'pageEvents', 'pageVitals', 'pageContent', 'setContent', 'reloadSelf', 'targetInfo', 'targetInfoPageText', 'typeActiveElement', 'setFieldValue')
+    bridge_build_id_expected = 'synapse-chrome-bridge-2026-06-22-assert-aria-v1'
+    bridge_build_sha256_expected = '9345734813fc6868554aac23cf5aa05b800edb983982bcc2fc782e8082704f27'
+    bridge_required_capabilities = @('alarmReconnect', 'activateTab', 'ariaSnapshot', 'assertPoll', 'closeTab', 'clock', 'coordinateClick', 'domAction', 'externalPopupRiskSuppression', 'listTabs', 'navigateTab', 'openTab', 'pageEvents', 'pageVitals', 'pageContent', 'setContent', 'reloadSelf', 'targetInfo', 'targetInfoPageText', 'typeActiveElement', 'setFieldValue')
     background_navigation_backend = 'chrome.tabs_plus_chrome.scripting_executeScript_for_typed_dom_actions_no_debugger_no_native_messaging_plus_chrome.management_external_popup_suppression'
     reconnect_driver = 'bounded_websocket_reconnect_with_chrome_alarms_mv3_wake'
     attach_popup_prevention = 'normal_bridge_debugger_free_no_chrome.debugger_permission_no_helper_windows_no_nativeMessaging_permission_plus_daemon_side_attach_disabled_for_debugger_commands'

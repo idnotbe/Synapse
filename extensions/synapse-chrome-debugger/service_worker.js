@@ -1,6 +1,6 @@
 const PROTOCOL_VERSION = 1;
-const BRIDGE_BUILD_ID = "synapse-chrome-bridge-2026-06-22-page-events-v6";
-const BRIDGE_BUILD_SHA256 = "9244ce49a2c34dd02dd6a98d479601f20869750d9330d8c7b564d35f5d823f9a";
+const BRIDGE_BUILD_ID = "synapse-chrome-bridge-2026-06-22-assert-aria-v1";
+const BRIDGE_BUILD_SHA256 = "9345734813fc6868554aac23cf5aa05b800edb983982bcc2fc782e8082704f27";
 const COMMAND_CAPABILITIES = Object.freeze([
   "alarmReconnect",
   "externalPopupRiskSuppression",
@@ -14,6 +14,8 @@ const COMMAND_CAPABILITIES = Object.freeze([
   "pageVitals",
   "pageContent",
   "setContent",
+  "ariaSnapshot",
+  "assertPoll",
   "clock",
   "pageEvents",
   "domAction",
@@ -310,6 +312,8 @@ function commandRequiresExternalPopupSuppression(kind) {
     "pageVitals",
     "pageContent",
     "setContent",
+    "ariaSnapshot",
+    "assertPoll",
     "clock",
     "pageEvents",
     "navigateTab",
@@ -749,6 +753,10 @@ async function handleCommand(command) {
       result = await handlePageContent(params);
     } else if (kind === "setContent") {
       result = await handleSetContent(params);
+    } else if (kind === "ariaSnapshot") {
+      result = await handleAriaSnapshot(params);
+    } else if (kind === "assertPoll") {
+      result = await handleAssertPoll(params);
     } else if (kind === "clock") {
       result = await handleClock(params);
     } else if (kind === "pageEvents") {
@@ -1168,6 +1176,150 @@ function isScriptingAccessDeniedError(error) {
     message.includes("Cannot access chrome://") ||
     message.includes("The extensions gallery cannot be scripted")
   );
+}
+
+async function handleAriaSnapshot(params) {
+  const selected = await selectTabTarget(params, { requireTargetId: true });
+  const state = await tabPageState(selected.tabId, selected.target);
+  const maxNodes = normalizeAriaMaxNodes(params.maxNodes);
+  const maxDepth = normalizeAriaMaxDepth(params.maxDepth);
+  const root = parseChromeBridgeElementId(params.rootElementId, selected.tabId, "ariaSnapshot");
+  if (!chrome.scripting || typeof chrome.scripting.executeScript !== "function") {
+    throw bridgeError(
+      ERROR_AXTREE_FAILED,
+      "chrome.scripting.executeScript unavailable; extension is missing scripting permission"
+    );
+  }
+  let results;
+  try {
+    results = await chrome.scripting.executeScript({
+      target: root.frameId === null ? { tabId: selected.tabId } : { tabId: selected.tabId, frameIds: [root.frameId] },
+      func: runAriaSnapshotInPage,
+      args: [{ rootPath: root.path, maxNodes, maxDepth }]
+    });
+  } catch (error) {
+    throw bridgeError(
+      ERROR_AXTREE_FAILED,
+      `chrome.scripting.executeScript ariaSnapshot(${selected.tabId}) failed: ${errorMessage(error)}`
+    );
+  }
+  const frames = frameExecutionResults(results);
+  const selectedFrame =
+    frames.find((frame) => frame.result?.ok) ||
+    frames.find((frame) => frame.result) ||
+    null;
+  const result = selectedFrame?.result;
+  if (!result || typeof result !== "object") {
+    throw bridgeError(ERROR_AXTREE_FAILED, "chrome.scripting.executeScript ariaSnapshot returned no structured result");
+  }
+  if (!result.ok) {
+    throw bridgeError(
+      String(result.error_code || ERROR_AXTREE_FAILED),
+      `ariaSnapshot failed: ${String(result.error_detail || "")}`
+    );
+  }
+  const frameId = Number.isSafeInteger(selectedFrame.frame_id) ? selectedFrame.frame_id : 0;
+  const nodes = Array.isArray(result.nodes)
+    ? result.nodes.map((node) => prefixAriaSnapshotNode(node, selected.tabId, frameId))
+    : [];
+  return {
+    extension_id: chrome.runtime.id,
+    target_id: state.target_id || selected.target.id,
+    tab_id: selected.tabId,
+    chrome_window_id: state.chrome_window_id,
+    url: result.url || state.url || "",
+    title: result.title || state.title || "",
+    ready_state: result.ready_state || state.ready_state || "",
+    root_element_id: root.raw || null,
+    snapshot: renderPrefixedAriaSnapshot(nodes),
+    nodes,
+    node_count: nodes.length,
+    total_ax_nodes: Number.isSafeInteger(result.total_ax_nodes) ? result.total_ax_nodes : nodes.length,
+    max_nodes: maxNodes,
+    max_depth: maxDepth,
+    truncated_by_max_nodes: Boolean(result.truncated_by_max_nodes),
+    truncated_by_depth: Boolean(result.truncated_by_depth),
+    frame_tree_frame_count: 1,
+    attached_frame_target_count: 0,
+    blocked_frame_targets: [],
+    frame_snapshot_errors: [],
+    readback_backend: "chrome.scripting.executeScript(debugger-free DOM/ARIA snapshot)",
+    backend_tier_used: "chrome_tabs_extension",
+    required_foreground: false,
+    frame_id: frameId,
+    frame_document_id: selectedFrame.document_id,
+    frame_result_count: frames.length,
+    frame_results: frames.map(summarizeFrameExecutionResult),
+    target_candidate_count: selected.targetCandidateCount,
+    target_selection_reason: selected.selectionReason
+  };
+}
+
+async function handleAssertPoll(params) {
+  const selected = await selectTabTarget(params, { requireTargetId: true });
+  const state = await tabPageState(selected.tabId, selected.target);
+  const locator = plainObjectOrEmpty(params.locator);
+  const limit = normalizeAssertLimit(params.limit);
+  const root = parseChromeBridgeElementId(locator.root_element_id, selected.tabId, "assertPoll");
+  if (!chrome.scripting || typeof chrome.scripting.executeScript !== "function") {
+    throw bridgeError(
+      ERROR_CHROME_SCRIPTING_EXECUTE_FAILED,
+      "chrome.scripting.executeScript unavailable; extension is missing scripting permission"
+    );
+  }
+  let results;
+  try {
+    results = await chrome.scripting.executeScript({
+      target: root.frameId === null ? { tabId: selected.tabId, allFrames: true } : { tabId: selected.tabId, frameIds: [root.frameId] },
+      func: runAssertPollInPage,
+      args: [{ locator, limit, rootPath: root.path }]
+    });
+  } catch (error) {
+    throw bridgeError(
+      ERROR_CHROME_SCRIPTING_EXECUTE_FAILED,
+      `chrome.scripting.executeScript assertPoll(${selected.tabId}) failed: ${errorMessage(error)}`
+    );
+  }
+  const frames = frameExecutionResults(results);
+  const resultFrames = frames.filter((frame) => frame.result && typeof frame.result === "object");
+  if (resultFrames.length === 0) {
+    throw bridgeError(ERROR_CHROME_SCRIPTING_EXECUTE_FAILED, "chrome.scripting.executeScript assertPoll returned no structured result");
+  }
+  const failingFrame = resultFrames.find((frame) => frame.result && frame.result.ok === false);
+  if (failingFrame) {
+    throw bridgeError(
+      String(failingFrame.result.error_code || ERROR_CHROME_SCRIPTING_EXECUTE_FAILED),
+      `assertPoll failed: ${String(failingFrame.result.error_detail || "")}`
+    );
+  }
+  const matchCount = resultFrames.reduce((sum, frame) => {
+    const value = frame.result?.match_count;
+    return sum + (Number.isSafeInteger(value) && value > 0 ? value : 0);
+  }, 0);
+  const elementFrame = resultFrames.find((frame) => frame.result?.element_state) || null;
+  const elementState = elementFrame?.result?.element_state || null;
+  const elementId = elementFrame && elementFrame.result?.local_element_id
+    ? chromeBridgeElementId(selected.tabId, Number.isSafeInteger(elementFrame.frame_id) ? elementFrame.frame_id : 0, String(elementFrame.result.local_element_id))
+    : null;
+  return {
+    extension_id: chrome.runtime.id,
+    target_id: state.target_id || selected.target.id,
+    tab_id: selected.tabId,
+    chrome_window_id: state.chrome_window_id,
+    url: elementFrame?.result?.url || state.url || "",
+    title: elementFrame?.result?.title || state.title || "",
+    ready_state: elementFrame?.result?.ready_state || state.ready_state || "",
+    match_count: matchCount,
+    element_id: elementId,
+    state: elementState,
+    readback_backend: "chrome.scripting.executeScript(debugger-free DOM assertion poll)",
+    backend_tier_used: "chrome_tabs_extension",
+    required_foreground: false,
+    frame_result_count: frames.length,
+    frame_results: frames.map(summarizeFrameExecutionResult),
+    target_candidate_count: selected.targetCandidateCount,
+    target_selection_reason: selected.selectionReason
+  };
 }
 
 async function handleClock(params) {
@@ -2638,6 +2790,625 @@ function readPageContentInPage(maxBytes) {
   };
 }
 
+function runAssertPollInPage(request) {
+  const ERROR_SELECTOR_INVALID = "CHROME_DOM_SELECTOR_INVALID";
+  const ERROR_ELEMENT_NOT_FOUND = "CHROME_DOM_ELEMENT_NOT_FOUND";
+  const loc = request && typeof request.locator === "object" && !Array.isArray(request.locator)
+    ? request.locator
+    : {};
+  const limit = Number.isSafeInteger(request?.limit) ? Math.max(1, Math.min(request.limit, 500)) : 2;
+  const root = elementByPath(request?.rootPath) || document.documentElement;
+  if (!root) {
+    return fail(ERROR_ELEMENT_NOT_FOUND, `root element path ${JSON.stringify(request?.rootPath)} was not found`);
+  }
+  const resolved = resolveLocator(root, loc);
+  if (!resolved.ok) {
+    return resolved;
+  }
+  const candidates = resolved.elements;
+  const selected = candidates.slice(0, limit)[0] || null;
+  return {
+    ok: true,
+    match_count: candidates.length,
+    local_element_id: selected ? domPath(selected) : null,
+    element_state: selected ? elementState(selected) : null,
+    url: String(location.href || ""),
+    title: String(document.title || ""),
+    ready_state: String(document.readyState || "")
+  };
+
+  function resolveLocator(rootElement, locator) {
+    const engine = String(locator.engine || "css").toLowerCase();
+    let candidates;
+    try {
+      if (engine === "css") {
+        candidates = cssCandidates(rootElement, String(locator.query || ""));
+      } else if (engine === "xpath") {
+        candidates = xpathCandidates(rootElement, String(locator.query || ""));
+      } else if (engine === "text") {
+        candidates = allElements(rootElement).filter((element) =>
+          matchText(elementVisibleText(element), String(locator.query || ""), locator.exact, locator.regex)
+        );
+      } else if (engine === "role") {
+        candidates = roleCandidates(rootElement, locator);
+      } else if (engine === "label") {
+        candidates = allElements(rootElement).filter((element) =>
+          isFormLike(element) && matchText(accessibleName(element), String(locator.query || ""), locator.exact, locator.regex)
+        );
+      } else if (engine === "placeholder") {
+        candidates = allElements(rootElement).filter((element) =>
+          matchText(element.getAttribute("placeholder") || "", String(locator.query || ""), locator.exact, locator.regex)
+        );
+      } else if (engine === "alttext") {
+        candidates = allElements(rootElement).filter((element) =>
+          matchText(element.getAttribute("alt") || "", String(locator.query || ""), locator.exact, locator.regex)
+        );
+      } else if (engine === "title") {
+        candidates = allElements(rootElement).filter((element) =>
+          matchText(element.getAttribute("title") || "", String(locator.query || ""), locator.exact, locator.regex)
+        );
+      } else if (engine === "testid") {
+        const attr = String(locator.testid_attribute || "data-testid");
+        candidates = allElements(rootElement).filter((element) =>
+          matchText(element.getAttribute(attr) || "", String(locator.query || ""), locator.exact ?? true, locator.regex)
+        );
+      } else if (engine === "layout") {
+        candidates = layoutCandidates(rootElement, locator);
+      } else {
+        return fail(ERROR_SELECTOR_INVALID, `unsupported locator engine ${JSON.stringify(engine)}`);
+      }
+    } catch (error) {
+      return fail(ERROR_SELECTOR_INVALID, errorMessageLocal(error));
+    }
+    if (locator.has_text != null && String(locator.has_text).trim()) {
+      const expected = normalizeText(String(locator.has_text));
+      candidates = candidates.filter((element) => normalizeText(elementVisibleText(element)).includes(expected));
+    }
+    candidates = applyNth(candidates, locator.nth);
+    return { ok: true, elements: candidates };
+  }
+
+  function cssCandidates(rootElement, query) {
+    if (!query.trim()) {
+      return [];
+    }
+    const found = Array.from(rootElement.querySelectorAll(query));
+    if (rootElement.matches?.(query)) {
+      found.unshift(rootElement);
+    }
+    return uniqueElements(found);
+  }
+
+  function xpathCandidates(rootElement, query) {
+    if (!query.trim()) {
+      return [];
+    }
+    const snapshot = document.evaluate(query, rootElement, null, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null);
+    const out = [];
+    for (let index = 0; index < snapshot.snapshotLength; index += 1) {
+      const node = snapshot.snapshotItem(index);
+      if (node instanceof Element) {
+        out.push(node);
+      }
+    }
+    return out;
+  }
+
+  function roleCandidates(rootElement, locator) {
+    const role = normalizeText(locator.query);
+    const name = locator.name == null ? null : String(locator.name);
+    return allElements(rootElement).filter((element) => {
+      if (!locator.include_hidden && !isElementVisible(element)) {
+        return false;
+      }
+      if (normalizeText(inferRole(element)) !== role) {
+        return false;
+      }
+      if (name !== null && !matchText(accessibleName(element), name, locator.name_exact, locator.name_regex)) {
+        return false;
+      }
+      if (locator.checked !== null && locator.checked !== undefined && checkedState(element) !== Boolean(locator.checked)) {
+        return false;
+      }
+      if (locator.disabled !== null && locator.disabled !== undefined && isElementEnabled(element) === Boolean(locator.disabled)) {
+        return false;
+      }
+      if (locator.selected !== null && locator.selected !== undefined && boolAttr(element, "aria-selected") !== Boolean(locator.selected)) {
+        return false;
+      }
+      if (locator.pressed !== null && locator.pressed !== undefined && boolAttr(element, "aria-pressed") !== Boolean(locator.pressed)) {
+        return false;
+      }
+      if (locator.expanded !== null && locator.expanded !== undefined && boolAttr(element, "aria-expanded") !== Boolean(locator.expanded)) {
+        return false;
+      }
+      if (locator.level !== null && locator.level !== undefined) {
+        const level = Number(element.getAttribute("aria-level") || headingLevel(element) || NaN);
+        if (level !== Number(locator.level)) {
+          return false;
+        }
+      }
+      return true;
+    });
+  }
+
+  function layoutCandidates(rootElement, locator) {
+    const base = cssCandidates(rootElement, String(locator.query || ""));
+    const anchors = cssCandidates(rootElement, String(locator.anchor || ""));
+    if (anchors.length === 0) {
+      return [];
+    }
+    const relation = String(locator.relation || "near").toLowerCase();
+    const maxDistance = Number.isFinite(Number(locator.max_distance)) ? Number(locator.max_distance) : 50;
+    const anchorRects = anchors.map((anchor) => anchor.getBoundingClientRect());
+    return base
+      .map((element) => ({ element, score: layoutScore(element.getBoundingClientRect(), anchorRects, relation) }))
+      .filter((entry) => Number.isFinite(entry.score) && (relation !== "near" || entry.score <= maxDistance))
+      .sort((a, b) => a.score - b.score)
+      .map((entry) => entry.element);
+  }
+
+  function layoutScore(rect, anchorRects, relation) {
+    let best = Infinity;
+    for (const anchor of anchorRects) {
+      let ok = true;
+      let dx = 0;
+      let dy = 0;
+      if (relation === "right-of") {
+        ok = rect.left >= anchor.right;
+        dx = rect.left - anchor.right;
+      } else if (relation === "left-of") {
+        ok = rect.right <= anchor.left;
+        dx = anchor.left - rect.right;
+      } else if (relation === "above") {
+        ok = rect.bottom <= anchor.top;
+        dy = anchor.top - rect.bottom;
+      } else if (relation === "below") {
+        ok = rect.top >= anchor.bottom;
+        dy = rect.top - anchor.bottom;
+      } else {
+        dx = Math.max(anchor.left - rect.right, rect.left - anchor.right, 0);
+        dy = Math.max(anchor.top - rect.bottom, rect.top - anchor.bottom, 0);
+      }
+      if (!ok) {
+        continue;
+      }
+      best = Math.min(best, Math.hypot(dx, dy));
+    }
+    return best;
+  }
+
+  function applyNth(elements, nth) {
+    if (!Number.isSafeInteger(nth)) {
+      return elements;
+    }
+    const index = nth < 0 ? elements.length + nth : nth;
+    return index >= 0 && index < elements.length ? [elements[index]] : [];
+  }
+
+  function elementState(element) {
+    const attributes = {};
+    for (const attr of Array.from(element.attributes || [])) {
+      attributes[attr.name] = String(attr.value ?? "");
+    }
+    return {
+      tag_name: tag(element),
+      text: String(element.innerText || element.textContent || ""),
+      value: "value" in element ? String(element.value ?? "") : null,
+      attributes,
+      is_visible: isElementVisible(element),
+      is_enabled: isElementEnabled(element),
+      is_checked: checkedState(element)
+    };
+  }
+
+  function allElements(rootElement) {
+    const list = Array.from(rootElement.querySelectorAll("*"));
+    if (rootElement instanceof Element) {
+      list.unshift(rootElement);
+    }
+    return uniqueElements(list);
+  }
+
+  function uniqueElements(elements) {
+    const seen = new Set();
+    const out = [];
+    for (const element of elements) {
+      if (!(element instanceof Element) || seen.has(element)) {
+        continue;
+      }
+      seen.add(element);
+      out.push(element);
+    }
+    return out;
+  }
+
+  function matchText(actual, expected, exact, regex) {
+    const source = normalizeText(actual);
+    const needle = String(expected || "");
+    if (regex) {
+      try {
+        return new RegExp(needle).test(String(actual || ""));
+      } catch (_) {
+        return false;
+      }
+    }
+    const normalizedNeedle = normalizeText(needle);
+    return exact ? source === normalizedNeedle : source.includes(normalizedNeedle);
+  }
+
+  function normalizeText(value) {
+    return String(value || "").replace(/\s+/g, " ").trim().toLowerCase();
+  }
+
+  function elementVisibleText(element) {
+    return String(element.innerText || element.textContent || "");
+  }
+
+  function isFormLike(element) {
+    return ["input", "textarea", "select", "button", "output"].includes(tag(element)) || element.hasAttribute("contenteditable");
+  }
+
+  function checkedState(element) {
+    if ("checked" in element) {
+      return Boolean(element.checked);
+    }
+    const aria = String(element.getAttribute("aria-checked") || "").toLowerCase();
+    if (aria === "true") {
+      return true;
+    }
+    if (aria === "false") {
+      return false;
+    }
+    return null;
+  }
+
+  function boolAttr(element, name) {
+    const value = String(element.getAttribute(name) || "").toLowerCase();
+    if (value === "true") {
+      return true;
+    }
+    if (value === "false") {
+      return false;
+    }
+    return null;
+  }
+
+  function headingLevel(element) {
+    const lower = tag(element);
+    return /^h[1-6]$/.test(lower) ? Number(lower.slice(1)) : null;
+  }
+
+  function accessibleName(element) {
+    const labelledBy = String(element.getAttribute("aria-labelledby") || "").trim();
+    if (labelledBy) {
+      const text = labelledBy
+        .split(/\s+/)
+        .map((id) => document.getElementById(id)?.textContent || "")
+        .join(" ")
+        .trim();
+      if (text) {
+        return text;
+      }
+    }
+    for (const attr of ["aria-label", "alt", "title", "placeholder", "value"]) {
+      const value = String(element.getAttribute(attr) || "").trim();
+      if (value) {
+        return value;
+      }
+    }
+    if (element.id) {
+      const label = document.querySelector(`label[for="${cssEscapeLocal(element.id)}"]`);
+      if (label?.textContent?.trim()) {
+        return label.textContent;
+      }
+    }
+    const wrappingLabel = element.closest?.("label");
+    if (wrappingLabel?.textContent?.trim()) {
+      return wrappingLabel.textContent;
+    }
+    return element.textContent || "";
+  }
+
+  function inferRole(element) {
+    const explicit = String(element.getAttribute("role") || "").trim().toLowerCase();
+    if (explicit) {
+      return explicit;
+    }
+    const lower = tag(element);
+    if (lower === "a" && element.hasAttribute("href")) return "link";
+    if (lower === "button") return "button";
+    if (lower === "select") return "combobox";
+    if (lower === "textarea") return "textbox";
+    if (lower === "form") return "form";
+    if (/^h[1-6]$/.test(lower)) return "heading";
+    if (lower === "main") return "main";
+    if (lower === "nav") return "navigation";
+    if (lower === "section") return "region";
+    if (lower === "img") return "img";
+    if (lower === "input") {
+      const type = String(element.getAttribute("type") || "text").toLowerCase();
+      if (["button", "submit", "reset", "image"].includes(type)) return "button";
+      if (type === "checkbox") return "checkbox";
+      if (type === "radio") return "radio";
+      return "textbox";
+    }
+    return lower === "body" ? "document" : "generic";
+  }
+
+  function isElementEnabled(element) {
+    if (Boolean(element.disabled)) {
+      return false;
+    }
+    return String(element.getAttribute("aria-disabled") || "").toLowerCase() !== "true";
+  }
+
+  function isElementVisible(element) {
+    if (!(element instanceof Element) || !element.isConnected) {
+      return false;
+    }
+    const style = window.getComputedStyle(element);
+    if (!style || style.display === "none" || style.visibility === "hidden" || style.visibility === "collapse") {
+      return false;
+    }
+    if (Number(style.opacity) === 0) {
+      return false;
+    }
+    const rects = element.getClientRects();
+    return rects && rects.length > 0 && Array.from(rects).some((rect) => rect.width > 0 && rect.height > 0);
+  }
+
+  function elementByPath(path) {
+    if (!path) {
+      return null;
+    }
+    const parts = String(path).split(".").map((part) => Number(part));
+    let current = document.documentElement;
+    if (parts[0] !== 0) {
+      return null;
+    }
+    for (const index of parts.slice(1)) {
+      if (!current || !Number.isSafeInteger(index) || index < 0) {
+        return null;
+      }
+      current = current.children[index] || null;
+    }
+    return current instanceof Element ? current : null;
+  }
+
+  function domPath(element) {
+    const parts = [];
+    let current = element;
+    while (current && current instanceof Element && current !== document.documentElement) {
+      const parent = current.parentElement;
+      if (!parent) {
+        break;
+      }
+      parts.unshift(Array.prototype.indexOf.call(parent.children, current));
+      current = parent;
+    }
+    parts.unshift(0);
+    return parts.join(".");
+  }
+
+  function tag(element) {
+    return String(element?.tagName || "").toLowerCase();
+  }
+
+  function cssEscapeLocal(value) {
+    if (typeof CSS !== "undefined" && typeof CSS.escape === "function") {
+      return CSS.escape(value);
+    }
+    return String(value).replace(/["\\]/g, "\\$&");
+  }
+
+  function errorMessageLocal(error) {
+    return error && error.message ? String(error.message) : String(error);
+  }
+
+  function fail(errorCode, errorDetail, extra = {}) {
+    return {
+      ok: false,
+      error_code: errorCode,
+      error_detail: errorDetail,
+      ...extra
+    };
+  }
+}
+
+function runAriaSnapshotInPage(request) {
+  const ERROR_ELEMENT_NOT_FOUND = "CHROME_DOM_ELEMENT_NOT_FOUND";
+  const maxNodes = Number.isSafeInteger(request?.maxNodes) ? Math.max(1, Math.min(request.maxNodes, 5000)) : 500;
+  const maxDepth = Number.isSafeInteger(request?.maxDepth) ? Math.max(1, Math.min(request.maxDepth, 128)) : 32;
+  const root = elementByPath(request?.rootPath) || document.body || document.documentElement;
+  if (!root) {
+    return fail(ERROR_ELEMENT_NOT_FOUND, `root element path ${JSON.stringify(request?.rootPath)} was not found`);
+  }
+  const nodes = [];
+  let truncatedByMaxNodes = false;
+  let truncatedByDepth = false;
+  walk(root, null, 0);
+  return {
+    ok: true,
+    nodes,
+    total_ax_nodes: nodes.length,
+    truncated_by_max_nodes: truncatedByMaxNodes,
+    truncated_by_depth: truncatedByDepth,
+    url: String(location.href || ""),
+    title: String(document.title || ""),
+    ready_state: String(document.readyState || "")
+  };
+
+  function walk(element, parentPath, depth) {
+    if (!(element instanceof Element)) {
+      return;
+    }
+    if (depth > maxDepth) {
+      truncatedByDepth = true;
+      return;
+    }
+    if (nodes.length >= maxNodes) {
+      truncatedByMaxNodes = true;
+      return;
+    }
+    const path = domPath(element);
+    const children = Array.from(element.children || []);
+    nodes.push({
+      element_id: path,
+      parent_element_id: parentPath,
+      depth,
+      role: inferRole(element),
+      name: accessibleName(element).replace(/\s+/g, " ").trim(),
+      value: elementValue(element),
+      enabled: isElementEnabled(element),
+      focused: document.activeElement === element,
+      children_count: children.length
+    });
+    for (const child of children) {
+      walk(child, path, depth + 1);
+      if (nodes.length >= maxNodes) {
+        truncatedByMaxNodes = true;
+        break;
+      }
+    }
+  }
+
+  function accessibleName(element) {
+    const labelledBy = String(element.getAttribute("aria-labelledby") || "").trim();
+    if (labelledBy) {
+      const text = labelledBy
+        .split(/\s+/)
+        .map((id) => document.getElementById(id)?.textContent || "")
+        .join(" ")
+        .trim();
+      if (text) {
+        return text;
+      }
+    }
+    for (const attr of ["aria-label", "alt", "title", "placeholder", "value"]) {
+      const value = String(element.getAttribute(attr) || "").trim();
+      if (value) {
+        return value;
+      }
+    }
+    if (element.id) {
+      const label = document.querySelector(`label[for="${cssEscapeLocal(element.id)}"]`);
+      if (label?.textContent?.trim()) {
+        return label.textContent;
+      }
+    }
+    const wrappingLabel = element.closest?.("label");
+    if (wrappingLabel?.textContent?.trim()) {
+      return wrappingLabel.textContent;
+    }
+    const role = inferRole(element);
+    if (["button", "link", "heading", "checkbox", "radio", "textbox"].includes(role)) {
+      return element.textContent || "";
+    }
+    return "";
+  }
+
+  function inferRole(element) {
+    const explicit = String(element.getAttribute("role") || "").trim().toLowerCase();
+    if (explicit) {
+      return explicit;
+    }
+    const lower = tag(element);
+    if (lower === "html" || lower === "body") return "document";
+    if (lower === "a" && element.hasAttribute("href")) return "link";
+    if (lower === "button") return "button";
+    if (lower === "select") return "combobox";
+    if (lower === "textarea") return "textbox";
+    if (lower === "form") return "form";
+    if (/^h[1-6]$/.test(lower)) return "heading";
+    if (lower === "main") return "main";
+    if (lower === "nav") return "navigation";
+    if (lower === "section") return "region";
+    if (lower === "img") return "img";
+    if (lower === "input") {
+      const type = String(element.getAttribute("type") || "text").toLowerCase();
+      if (["button", "submit", "reset", "image"].includes(type)) return "button";
+      if (type === "checkbox") return "checkbox";
+      if (type === "radio") return "radio";
+      return "textbox";
+    }
+    return "generic";
+  }
+
+  function elementValue(element) {
+    if ("value" in element) {
+      return String(element.value ?? "");
+    }
+    for (const attr of ["aria-valuetext", "aria-valuenow"]) {
+      const value = String(element.getAttribute(attr) || "").trim();
+      if (value) {
+        return value;
+      }
+    }
+    return null;
+  }
+
+  function isElementEnabled(element) {
+    if (Boolean(element.disabled)) {
+      return false;
+    }
+    return String(element.getAttribute("aria-disabled") || "").toLowerCase() !== "true";
+  }
+
+  function elementByPath(path) {
+    if (!path) {
+      return null;
+    }
+    const parts = String(path).split(".").map((part) => Number(part));
+    let current = document.documentElement;
+    if (parts[0] !== 0) {
+      return null;
+    }
+    for (const index of parts.slice(1)) {
+      if (!current || !Number.isSafeInteger(index) || index < 0) {
+        return null;
+      }
+      current = current.children[index] || null;
+    }
+    return current instanceof Element ? current : null;
+  }
+
+  function domPath(element) {
+    const parts = [];
+    let current = element;
+    while (current && current instanceof Element && current !== document.documentElement) {
+      const parent = current.parentElement;
+      if (!parent) {
+        break;
+      }
+      parts.unshift(Array.prototype.indexOf.call(parent.children, current));
+      current = parent;
+    }
+    parts.unshift(0);
+    return parts.join(".");
+  }
+
+  function tag(element) {
+    return String(element?.tagName || "").toLowerCase();
+  }
+
+  function cssEscapeLocal(value) {
+    if (typeof CSS !== "undefined" && typeof CSS.escape === "function") {
+      return CSS.escape(value);
+    }
+    return String(value).replace(/["\\]/g, "\\$&");
+  }
+
+  function fail(errorCode, errorDetail, extra = {}) {
+    return {
+      ok: false,
+      error_code: errorCode,
+      error_detail: errorDetail,
+      ...extra
+    };
+  }
+}
+
 async function setContentInPage(request) {
   const html = String((request && request.html) ?? "");
   const waitTimeoutMs = Number.isSafeInteger(request?.waitTimeoutMs)
@@ -3911,6 +4682,112 @@ function stringOrNull(value) {
   }
   const text = String(value).trim();
   return text ? text : null;
+}
+
+function plainObjectOrEmpty(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return {};
+  }
+  return value;
+}
+
+function normalizeAriaMaxNodes(value) {
+  if (value === undefined || value === null) {
+    return 500;
+  }
+  const number = Number(value);
+  if (!Number.isSafeInteger(number) || number < 1 || number > 5000) {
+    throw bridgeError(ERROR_ATTACH_FAILED, "ariaSnapshot maxNodes must be an integer from 1 through 5000");
+  }
+  return number;
+}
+
+function normalizeAriaMaxDepth(value) {
+  if (value === undefined || value === null) {
+    return 32;
+  }
+  const number = Number(value);
+  if (!Number.isSafeInteger(number) || number < 1 || number > 128) {
+    throw bridgeError(ERROR_ATTACH_FAILED, "ariaSnapshot maxDepth must be an integer from 1 through 128");
+  }
+  return number;
+}
+
+function normalizeAssertLimit(value) {
+  if (value === undefined || value === null) {
+    return 2;
+  }
+  const number = Number(value);
+  if (!Number.isSafeInteger(number) || number < 1 || number > 500) {
+    throw bridgeError(ERROR_ATTACH_FAILED, "assertPoll limit must be an integer from 1 through 500");
+  }
+  return number;
+}
+
+function parseChromeBridgeElementId(value, expectedTabId, commandName) {
+  const raw = stringOrNull(value);
+  if (!raw) {
+    return { raw: null, frameId: null, path: null };
+  }
+  const match = /^chrome-tab:(\d+):frame:(\d+):path:([0-9.]+)$/.exec(raw);
+  if (!match) {
+    throw bridgeError(
+      ERROR_ATTACH_FAILED,
+      `${commandName} root element id must be a normal bridge element id like chrome-tab:<tabId>:frame:<frameId>:path:<domPath>; got ${JSON.stringify(raw)}`
+    );
+  }
+  const tabId = Number(match[1]);
+  const frameId = Number(match[2]);
+  if (tabId !== expectedTabId) {
+    throw bridgeError(
+      ERROR_ATTACH_FAILED,
+      `${commandName} root element id tab ${tabId} does not match selected tab ${expectedTabId}`
+    );
+  }
+  return { raw, frameId, path: match[3] };
+}
+
+function chromeBridgeElementId(tabId, frameId, localPath) {
+  return `chrome-tab:${tabId}:frame:${frameId}:path:${String(localPath || "0")}`;
+}
+
+function prefixAriaSnapshotNode(node, tabId, frameId) {
+  const localId = String(node?.element_id || "0");
+  const localParent = node?.parent_element_id == null ? null : String(node.parent_element_id);
+  return {
+    element_id: chromeBridgeElementId(tabId, frameId, localId),
+    parent_element_id: localParent ? chromeBridgeElementId(tabId, frameId, localParent) : null,
+    depth: Number.isSafeInteger(node?.depth) ? node.depth : 0,
+    role: String(node?.role || "generic"),
+    name: String(node?.name || ""),
+    value: node?.value == null ? null : String(node.value),
+    enabled: node?.enabled !== false,
+    focused: Boolean(node?.focused),
+    children_count: Number.isSafeInteger(node?.children_count) ? node.children_count : 0
+  };
+}
+
+function renderPrefixedAriaSnapshot(nodes) {
+  return nodes.map((node) => {
+    let line = `${"  ".repeat(Math.max(0, node.depth))}- ${node.role || "generic"}`;
+    if (node.name) {
+      line += ` "${escapeSnapshotScalar(node.name)}"`;
+    }
+    if (node.value) {
+      line += `: "${escapeSnapshotScalar(node.value)}"`;
+    }
+    if (!node.enabled) {
+      line += " [disabled]";
+    }
+    if (node.focused) {
+      line += " [focused]";
+    }
+    return line;
+  }).join("\n");
+}
+
+function escapeSnapshotScalar(value) {
+  return String(value || "").replace(/\\/g, "\\\\").replace(/"/g, "\\\"");
 }
 
 function normalizeClickCount(value, action = "click") {

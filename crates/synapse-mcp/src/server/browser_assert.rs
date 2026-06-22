@@ -116,7 +116,7 @@ struct NormalizedAriaSnapshotParams {
     max_depth: u32,
 }
 
-#[derive(Clone, Debug, Default, Deserialize, JsonSchema)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct BrowserAssertLocator {
     /// The primary query: CSS/XPath text, visible text, ARIA role token, label /
@@ -346,7 +346,7 @@ struct AriaSnapshotBuild {
 #[tool_router(router = browser_assert_tool_router, vis = "pub(super)")]
 impl SynapseService {
     #[tool(
-        description = "Emit a Playwright-style ARIA snapshot for the calling session's owned raw-CDP browser tab. Reads the live Accessibility.getFullAXTree-backed role/name/value tree, returns a stable YAML-like snapshot plus structured node entries, and can scope to a subtree by CDP element id. Background-safe: never activates the tab, never uses OS foreground input, and never falls back to the human foreground tab. Raw CDP only."
+        description = "Emit a Playwright-style ARIA snapshot for the calling session's owned browser tab. Raw-CDP targets use Accessibility.getFullAXTree; normal Chrome bridge targets use debugger-free chrome.scripting DOM/ARIA readback. Returns a stable YAML-like role/name/value tree plus structured node entries, and can scope to a subtree by element id. Background-safe: never activates the tab, never uses OS foreground input, and never falls back to the human foreground tab."
     )]
     pub async fn browser_aria_snapshot(
         &self,
@@ -409,7 +409,7 @@ impl SynapseService {
     }
 
     #[tool(
-        description = "Assert a Playwright-style locator against the calling session's owned raw-CDP browser tab with bounded retry. Supports to_be_visible, to_have_text, to_have_value, to_be_checked, to_be_enabled, to_have_attribute, and to_have_count, returning pass/fail plus actual vs expected diagnostics after polling until pass or timeout. Background-safe: never activates the tab, never uses OS foreground input, and never falls back to the human foreground tab. Raw CDP only."
+        description = "Assert a Playwright-style locator against the calling session's owned browser tab with bounded retry. Supports to_be_visible, to_have_text, to_have_value, to_be_checked, to_be_enabled, to_have_attribute, and to_have_count, returning pass/fail plus actual vs expected diagnostics after polling until pass or timeout. Raw-CDP targets use CDP locator/Runtime readback; normal Chrome bridge targets use debugger-free chrome.scripting DOM readback. Background-safe: never activates the tab, never uses OS foreground input, and never falls back to the human foreground tab."
     )]
     pub async fn browser_assert(
         &self,
@@ -485,6 +485,10 @@ impl SynapseService {
         cdp_target_id: &str,
         params: &NormalizedAriaSnapshotParams,
     ) -> Result<BrowserAriaSnapshotResponse, ErrorData> {
+        if is_chrome_bridge_target_id(cdp_target_id) {
+            return browser_aria_snapshot_bridge(session_id, window_hwnd, cdp_target_id, params)
+                .await;
+        }
         let Some(endpoint) = synapse_a11y::endpoint_for_window(window_hwnd) else {
             return Err(browser_raw_cdp_required_error(ARIA_TOOL, window_hwnd));
         };
@@ -582,6 +586,10 @@ impl SynapseService {
         cdp_target_id: &str,
         params: &NormalizedBrowserAssertParams,
     ) -> Result<BrowserAssertResponse, ErrorData> {
+        if is_chrome_bridge_target_id(cdp_target_id) {
+            return browser_assert_bridge_loop(session_id, window_hwnd, cdp_target_id, params)
+                .await;
+        }
         let Some(endpoint) = synapse_a11y::endpoint_for_window(window_hwnd) else {
             return Err(browser_raw_cdp_required_error(ASSERT_TOOL, window_hwnd));
         };
@@ -614,6 +622,9 @@ impl SynapseService {
                     poll_count,
                     elapsed_ms,
                     false,
+                    "raw_cdp",
+                    "cdp_locate + Runtime.callFunctionOn",
+                    "cdp",
                 ));
             }
             if elapsed_ms >= params.timeout_ms {
@@ -639,6 +650,9 @@ impl SynapseService {
                     poll_count,
                     elapsed_ms,
                     true,
+                    "raw_cdp",
+                    "cdp_locate + Runtime.callFunctionOn",
+                    "cdp",
                 ));
             }
             let remaining = params.timeout_ms.saturating_sub(elapsed_ms);
@@ -671,7 +685,7 @@ fn validate_aria_snapshot_params(
         .root_element_id
         .as_deref()
         .filter(|id| !id.trim().is_empty())
-        .map(parse_cdp_element_id)
+        .map(parse_root_element_target)
         .transpose()?
         .map(|(_, target)| target);
     if let (Some(explicit), Some(root_target)) = (params.cdp_target_id.as_deref(), &root_target_id)
@@ -727,11 +741,9 @@ fn validate_browser_assert_params(
         .root_element_id
         .as_deref()
         .filter(|id| !id.trim().is_empty())
-        .map(parse_cdp_element_id)
+        .map(parse_root_element_target)
         .transpose()?
-        .map_or((None, None), |(backend, target)| {
-            (Some(backend), Some(target))
-        });
+        .map_or((None, None), |(backend, target)| (backend, Some(target)));
     if let (Some(explicit), Some(root_target)) = (params.cdp_target_id.as_deref(), &root_target_id)
         && !explicit.eq_ignore_ascii_case(root_target)
     {
@@ -980,6 +992,279 @@ fn parse_cdp_element_id(element_id: &str) -> Result<(i64, String), ErrorData> {
     Ok((backend, target))
 }
 
+fn parse_root_element_target(element_id: &str) -> Result<(Option<i64>, String), ErrorData> {
+    if let Some(target) = chrome_bridge_target_id_from_element_id(element_id) {
+        return Ok((None, target));
+    }
+    let (backend, target) = parse_cdp_element_id(element_id)?;
+    Ok((Some(backend), target))
+}
+
+fn is_chrome_bridge_target_id(target_id: &str) -> bool {
+    target_id
+        .strip_prefix("chrome-tab:")
+        .is_some_and(|suffix| !suffix.is_empty() && suffix.chars().all(|ch| ch.is_ascii_digit()))
+}
+
+fn chrome_bridge_target_id_from_element_id(element_id: &str) -> Option<String> {
+    let suffix = element_id.strip_prefix("chrome-tab:")?;
+    let digit_count = suffix.chars().take_while(|ch| ch.is_ascii_digit()).count();
+    if digit_count == 0 {
+        return None;
+    }
+    let (tab_id, remainder) = suffix.split_at(digit_count);
+    if !remainder.starts_with(":frame:") {
+        return None;
+    }
+    Some(format!("chrome-tab:{tab_id}"))
+}
+
+#[cfg(windows)]
+async fn browser_aria_snapshot_bridge(
+    session_id: &str,
+    window_hwnd: i64,
+    cdp_target_id: &str,
+    params: &NormalizedAriaSnapshotParams,
+) -> Result<BrowserAriaSnapshotResponse, ErrorData> {
+    let snapshot = crate::chrome_debugger_bridge::aria_snapshot(
+        window_hwnd,
+        cdp_target_id,
+        params.root_element_id.as_deref(),
+        params.max_nodes,
+        params.max_depth,
+    )
+    .await
+    .map_err(|error| {
+        let code = error.code();
+        let detail = error.detail().to_owned();
+        mcp_error(
+            code,
+            format!("{ARIA_TOOL} normal Chrome bridge ariaSnapshot failed: {detail}"),
+        )
+    })?;
+    tracing::info!(
+        code = "CHROME_BRIDGE_ARIA_SNAPSHOT",
+        session_id = %session_id,
+        hwnd = window_hwnd,
+        cdp_target_id = %snapshot.target_id,
+        node_count = snapshot.nodes.len(),
+        root_scoped = params.root_element_id.is_some(),
+        target_url = %snapshot.url,
+        "readback=chrome.scripting.executeScript outcome=aria_snapshot"
+    );
+    Ok(BrowserAriaSnapshotResponse {
+        session_id: session_id.to_owned(),
+        window_hwnd,
+        transport: "chrome_tabs_extension".to_owned(),
+        endpoint: "chrome_bridge".to_owned(),
+        cdp_target_id: snapshot.target_id,
+        url: snapshot.url,
+        title: snapshot.title,
+        ready_state: snapshot.ready_state,
+        root_element_id: snapshot
+            .root_element_id
+            .or_else(|| params.root_element_id.clone()),
+        snapshot: snapshot.snapshot,
+        node_count: snapshot.nodes.len(),
+        nodes: snapshot
+            .nodes
+            .into_iter()
+            .map(|node| BrowserAriaSnapshotNode {
+                element_id: node.element_id,
+                parent_element_id: node.parent_element_id,
+                depth: node.depth,
+                role: node.role,
+                name: node.name,
+                value: node.value,
+                enabled: node.enabled,
+                focused: node.focused,
+                children_count: node.children_count,
+            })
+            .collect(),
+        total_ax_nodes: snapshot.total_ax_nodes,
+        max_nodes: snapshot.max_nodes,
+        max_depth: snapshot.max_depth,
+        truncated_by_max_nodes: snapshot.truncated_by_max_nodes,
+        truncated_by_depth: snapshot.truncated_by_depth,
+        frame_tree_frame_count: snapshot.frame_tree_frame_count,
+        attached_frame_target_count: snapshot.attached_frame_target_count,
+        blocked_frame_targets: snapshot.blocked_frame_targets,
+        frame_snapshot_errors: snapshot.frame_snapshot_errors,
+        readback_backend: snapshot.readback_backend,
+        backend_tier_used: snapshot.backend_tier_used,
+        required_foreground: snapshot.required_foreground,
+    })
+}
+
+#[cfg(windows)]
+async fn browser_assert_bridge_loop(
+    session_id: &str,
+    window_hwnd: i64,
+    cdp_target_id: &str,
+    params: &NormalizedBrowserAssertParams,
+) -> Result<BrowserAssertResponse, ErrorData> {
+    let started = Instant::now();
+    let mut poll_count = 0_u32;
+    loop {
+        poll_count = poll_count.saturating_add(1);
+        let poll = browser_assert_bridge_poll(window_hwnd, cdp_target_id, params).await?;
+        let elapsed_ms = duration_millis(started.elapsed());
+        if poll.pass {
+            tracing::info!(
+                code = "CHROME_BRIDGE_ASSERT",
+                session_id = %session_id,
+                hwnd = window_hwnd,
+                cdp_target_id = %cdp_target_id,
+                matcher = ?params.matcher,
+                pass = true,
+                poll_count,
+                elapsed_ms,
+                "readback=chrome.scripting.executeScript outcome=assertion_passed"
+            );
+            return Ok(browser_assert_response(
+                session_id,
+                window_hwnd,
+                "chrome_bridge".to_owned(),
+                cdp_target_id,
+                params,
+                poll,
+                poll_count,
+                elapsed_ms,
+                false,
+                "chrome_tabs_extension",
+                "chrome.scripting.executeScript(assertPoll)",
+                "chrome_tabs_extension",
+            ));
+        }
+        if elapsed_ms >= params.timeout_ms {
+            tracing::info!(
+                code = "CHROME_BRIDGE_ASSERT",
+                session_id = %session_id,
+                hwnd = window_hwnd,
+                cdp_target_id = %cdp_target_id,
+                matcher = ?params.matcher,
+                pass = false,
+                poll_count,
+                elapsed_ms,
+                "readback=chrome.scripting.executeScript outcome=assertion_timeout"
+            );
+            return Ok(browser_assert_response(
+                session_id,
+                window_hwnd,
+                "chrome_bridge".to_owned(),
+                cdp_target_id,
+                params,
+                poll,
+                poll_count,
+                elapsed_ms,
+                true,
+                "chrome_tabs_extension",
+                "chrome.scripting.executeScript(assertPoll)",
+                "chrome_tabs_extension",
+            ));
+        }
+        let remaining = params.timeout_ms.saturating_sub(elapsed_ms);
+        tokio::time::sleep(Duration::from_millis(params.interval_ms.min(remaining))).await;
+    }
+}
+
+#[cfg(windows)]
+async fn browser_assert_bridge_poll(
+    window_hwnd: i64,
+    cdp_target_id: &str,
+    params: &NormalizedBrowserAssertParams,
+) -> Result<AssertPoll, ErrorData> {
+    let locator = serde_json::to_value(&params.locator).map_err(|error| {
+        mcp_error(
+            error_codes::OBSERVE_INTERNAL,
+            format!("{ASSERT_TOOL} locator serialization failed: {error}"),
+        )
+    })?;
+    let located = crate::chrome_debugger_bridge::assert_poll(
+        window_hwnd,
+        cdp_target_id,
+        locator,
+        params.limit,
+    )
+    .await
+    .map_err(|error| {
+        let code = error.code();
+        let detail = error.detail().to_owned();
+        mcp_error(
+            code,
+            format!("{ASSERT_TOOL} normal Chrome bridge assertPoll failed: {detail}"),
+        )
+    })?;
+    if matches!(params.matcher, BrowserAssertMatcher::ToHaveCount) {
+        return Ok(assert_count_poll_from_count(
+            located.match_count,
+            located.url,
+            located.title,
+            located.ready_state,
+            params,
+        ));
+    }
+    if located.match_count == 0 {
+        return Ok(AssertPoll {
+            pass: false,
+            url: located.url,
+            title: located.title,
+            ready_state: located.ready_state,
+            match_count: 0,
+            element_id: None,
+            actual: json!({"match_count": 0}),
+            expected: expected_value(params),
+            message: format!("{ASSERT_TOOL} locator matched no elements"),
+        });
+    }
+    if params.strict && located.match_count != 1 {
+        return Ok(AssertPoll {
+            pass: apply_negate(false, params.negate),
+            url: located.url,
+            title: located.title,
+            ready_state: located.ready_state,
+            match_count: located.match_count,
+            element_id: None,
+            actual: json!({"match_count": located.match_count}),
+            expected: json!({"match_count": 1, "strict": true}),
+            message: format!(
+                "{ASSERT_TOOL} strict locator expected exactly one element but matched {}",
+                located.match_count
+            ),
+        });
+    }
+    let Some(state) = located.state else {
+        return Ok(AssertPoll {
+            pass: false,
+            url: located.url,
+            title: located.title,
+            ready_state: located.ready_state,
+            match_count: located.match_count,
+            element_id: None,
+            actual: json!({"match_count": located.match_count, "returned_count": 0}),
+            expected: expected_value(params),
+            message: format!("{ASSERT_TOOL} locator returned no inspectable element state"),
+        });
+    };
+    Ok(assert_element_poll(
+        params,
+        AssertElementState {
+            tag_name: state.tag_name,
+            text: state.text,
+            value: state.value,
+            attributes: state.attributes,
+            is_visible: state.is_visible,
+            is_enabled: state.is_enabled,
+            is_checked: state.is_checked,
+        },
+        located.match_count,
+        located.element_id,
+        located.url,
+        located.title,
+        located.ready_state,
+    ))
+}
+
 #[cfg(windows)]
 async fn browser_assert_poll(
     endpoint: &str,
@@ -1162,25 +1447,35 @@ fn assert_count_poll(
     located: &synapse_a11y::CdpLocateResult,
     params: &NormalizedBrowserAssertParams,
 ) -> AssertPoll {
+    assert_count_poll_from_count(
+        located.match_count,
+        located.url.clone(),
+        located.title.clone(),
+        String::new(),
+        params,
+    )
+}
+
+fn assert_count_poll_from_count(
+    match_count: usize,
+    url: String,
+    title: String,
+    ready_state: String,
+    params: &NormalizedBrowserAssertParams,
+) -> AssertPoll {
     let expected_count = params.expected_count.expect("validated expected_count");
-    let base_pass = located.match_count == expected_count;
+    let base_pass = match_count == expected_count;
     let pass = apply_negate(base_pass, params.negate);
     AssertPoll {
         pass,
-        url: located.url.clone(),
-        title: located.title.clone(),
-        ready_state: String::new(),
-        match_count: located.match_count,
+        url,
+        title,
+        ready_state,
+        match_count,
         element_id: None,
-        actual: json!({"count": located.match_count}),
+        actual: json!({"count": match_count}),
         expected: json!({"count": expected_count}),
-        message: assertion_message(
-            pass,
-            params.negate,
-            "count",
-            located.match_count,
-            expected_count,
-        ),
+        message: assertion_message(pass, params.negate, "count", match_count, expected_count),
     }
 }
 
@@ -1402,11 +1697,14 @@ fn browser_assert_response(
     poll_count: u32,
     elapsed_ms: u64,
     timed_out: bool,
+    transport: &str,
+    readback_backend: &str,
+    backend_tier_used: &str,
 ) -> BrowserAssertResponse {
     BrowserAssertResponse {
         session_id: session_id.to_owned(),
         window_hwnd,
-        transport: "raw_cdp".to_owned(),
+        transport: transport.to_owned(),
         endpoint,
         cdp_target_id: cdp_target_id.to_owned(),
         url: poll.url,
@@ -1425,8 +1723,8 @@ fn browser_assert_response(
         actual: poll.actual,
         expected: poll.expected,
         message: poll.message,
-        readback_backend: "cdp_locate + Runtime.callFunctionOn".to_owned(),
-        backend_tier_used: "cdp".to_owned(),
+        readback_backend: readback_backend.to_owned(),
+        backend_tier_used: backend_tier_used.to_owned(),
         required_foreground: false,
     }
 }

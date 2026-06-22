@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeSet, HashMap, VecDeque},
+    collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
     ffi::OsString,
     path::PathBuf,
     process::ExitCode,
@@ -40,9 +40,9 @@ const NATIVE_HOST_NAME: &str = "com.synapse.chrome_debugger";
 const EXTENSION_ORIGIN: &str = "chrome-extension://leoocgnkjnplbfdbklajepahofecgfbk";
 const BRIDGE_TOKEN_HEADER: &str = "x-synapse-bridge-token";
 const BRIDGE_PROTOCOL_VERSION: u32 = 1;
-const EXPECTED_EXTENSION_BUILD_ID: &str = "synapse-chrome-bridge-2026-06-22-page-events-v6";
+const EXPECTED_EXTENSION_BUILD_ID: &str = "synapse-chrome-bridge-2026-06-22-assert-aria-v1";
 const EXPECTED_EXTENSION_BUILD_SHA256: &str =
-    "9244ce49a2c34dd02dd6a98d479601f20869750d9330d8c7b564d35f5d823f9a";
+    "9345734813fc6868554aac23cf5aa05b800edb983982bcc2fc782e8082704f27";
 const SYNAPSE_CHROME_BLOCKED_INSTALL_MESSAGE: &str = "Synapse blocked this extension on this host because debugger/nativeMessaging permissions can surface Chrome debugger or native-host popups during background automation.";
 const REQUIRED_DIRECT_HTTP_CAPABILITIES: &[&str] = &[
     "alarmReconnect",
@@ -57,6 +57,8 @@ const REQUIRED_DIRECT_HTTP_CAPABILITIES: &[&str] = &[
     "pageVitals",
     "pageContent",
     "setContent",
+    "ariaSnapshot",
+    "assertPoll",
     "clock",
     "pageEvents",
     "reloadSelf",
@@ -1704,6 +1706,125 @@ pub(crate) struct ChromeDebuggerSetContentResult {
     pub frame_result_count: u32,
     pub target_candidate_count: u32,
     pub target_selection_reason: String,
+    pub extension_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub(crate) struct ChromeDebuggerAriaSnapshotNode {
+    pub element_id: String,
+    #[serde(default)]
+    pub parent_element_id: Option<String>,
+    #[serde(default)]
+    pub depth: u32,
+    #[serde(default)]
+    pub role: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub value: Option<String>,
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub focused: bool,
+    #[serde(default)]
+    pub children_count: u32,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub(crate) struct ChromeDebuggerAriaSnapshotResult {
+    pub target_id: String,
+    pub tab_id: u32,
+    #[serde(default)]
+    pub chrome_window_id: Option<i64>,
+    #[serde(default)]
+    pub url: String,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub ready_state: String,
+    #[serde(default)]
+    pub root_element_id: Option<String>,
+    #[serde(default)]
+    pub snapshot: String,
+    #[serde(default)]
+    pub nodes: Vec<ChromeDebuggerAriaSnapshotNode>,
+    #[serde(default)]
+    pub node_count: usize,
+    #[serde(default)]
+    pub total_ax_nodes: u32,
+    #[serde(default)]
+    pub max_nodes: usize,
+    #[serde(default)]
+    pub max_depth: u32,
+    #[serde(default)]
+    pub truncated_by_max_nodes: bool,
+    #[serde(default)]
+    pub truncated_by_depth: bool,
+    #[serde(default)]
+    pub frame_tree_frame_count: u32,
+    #[serde(default)]
+    pub attached_frame_target_count: u32,
+    #[serde(default)]
+    pub blocked_frame_targets: Vec<String>,
+    #[serde(default)]
+    pub frame_snapshot_errors: Vec<String>,
+    #[serde(default)]
+    pub readback_backend: String,
+    #[serde(default)]
+    pub backend_tier_used: String,
+    #[serde(default)]
+    pub required_foreground: bool,
+    pub target_candidate_count: u32,
+    pub target_selection_reason: String,
+    #[serde(default)]
+    pub extension_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub(crate) struct ChromeDebuggerAssertElementState {
+    #[serde(default)]
+    pub tag_name: String,
+    #[serde(default)]
+    pub text: String,
+    #[serde(default)]
+    pub value: Option<String>,
+    #[serde(default)]
+    pub attributes: BTreeMap<String, String>,
+    #[serde(default)]
+    pub is_visible: bool,
+    #[serde(default)]
+    pub is_enabled: bool,
+    #[serde(default)]
+    pub is_checked: Option<bool>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub(crate) struct ChromeDebuggerAssertPollResult {
+    pub target_id: String,
+    pub tab_id: u32,
+    #[serde(default)]
+    pub chrome_window_id: Option<i64>,
+    #[serde(default)]
+    pub url: String,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub ready_state: String,
+    #[serde(default)]
+    pub match_count: usize,
+    #[serde(default)]
+    pub element_id: Option<String>,
+    #[serde(default)]
+    pub state: Option<ChromeDebuggerAssertElementState>,
+    #[serde(default)]
+    pub readback_backend: String,
+    #[serde(default)]
+    pub backend_tier_used: String,
+    #[serde(default)]
+    pub required_foreground: bool,
+    pub target_candidate_count: u32,
+    pub target_selection_reason: String,
+    #[serde(default)]
     pub extension_id: Option<String>,
 }
 
@@ -4014,6 +4135,58 @@ pub(crate) async fn set_content(
     serde_json::from_value::<ChromeDebuggerSetContentResult>(result).map_err(|error| {
         ChromeDebuggerBridgeError::protocol(format!(
             "decode Chrome debugger setContent response: {error}"
+        ))
+    })
+}
+
+pub(crate) async fn aria_snapshot(
+    hwnd: i64,
+    target_id: &str,
+    root_element_id: Option<&str>,
+    max_nodes: usize,
+    max_depth: u32,
+) -> Result<ChromeDebuggerAriaSnapshotResult, ChromeDebuggerBridgeError> {
+    ensure_normal_bridge_external_popup_suppressed(hwnd, "ariaSnapshot")?;
+    let result = bridge()
+        .send_command(
+            "ariaSnapshot",
+            json!({
+                "hwnd": hwnd,
+                "targetIdHint": target_id,
+                "rootElementId": root_element_id,
+                "maxNodes": max_nodes,
+                "maxDepth": max_depth,
+            }),
+        )
+        .await?;
+    serde_json::from_value::<ChromeDebuggerAriaSnapshotResult>(result).map_err(|error| {
+        ChromeDebuggerBridgeError::protocol(format!(
+            "decode Chrome debugger ariaSnapshot response: {error}"
+        ))
+    })
+}
+
+pub(crate) async fn assert_poll(
+    hwnd: i64,
+    target_id: &str,
+    locator: Value,
+    limit: usize,
+) -> Result<ChromeDebuggerAssertPollResult, ChromeDebuggerBridgeError> {
+    ensure_normal_bridge_external_popup_suppressed(hwnd, "assertPoll")?;
+    let result = bridge()
+        .send_command(
+            "assertPoll",
+            json!({
+                "hwnd": hwnd,
+                "targetIdHint": target_id,
+                "locator": locator,
+                "limit": limit,
+            }),
+        )
+        .await?;
+    serde_json::from_value::<ChromeDebuggerAssertPollResult>(result).map_err(|error| {
+        ChromeDebuggerBridgeError::protocol(format!(
+            "decode Chrome debugger assertPoll response: {error}"
         ))
     })
 }
