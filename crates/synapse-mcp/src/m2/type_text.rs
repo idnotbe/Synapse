@@ -13,6 +13,7 @@ use synapse_core::{
 };
 
 use crate::m1::mcp_error;
+use crate::m2::default_auto_wait_timeout_ms;
 use crate::m2::postcondition::{
     ActPostcondition, no_observed_delta_error, postcondition_failed_error,
     postcondition_not_requested, postcondition_observed_delta, text_signature,
@@ -84,6 +85,15 @@ pub struct ActTypeParams {
         range(min = 50, max = 5000)
     )]
     pub verify_timeout_ms: u32,
+    #[serde(default)]
+    #[schemars(
+        default,
+        description = "Opt in to pre-action CDP actionability polling for into_element web targets. When true, Synapse scrolls the node into view and waits until it is attached, visible, stable, enabled, editable, and receiving events before typing. Default false preserves existing typing semantics."
+    )]
+    pub auto_wait: bool,
+    #[serde(default = "default_auto_wait_timeout_ms")]
+    #[schemars(default = "default_auto_wait_timeout_ms", range(min = 50, max = 30000))]
+    pub auto_wait_timeout_ms: u32,
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Deserialize, Serialize, JsonSchema)]
@@ -1310,6 +1320,8 @@ mod tests {
             verify_delta: false,
             expected_browser_url_regex: None,
             verify_timeout_ms: default_verify_timeout_ms(),
+            auto_wait: false,
+            auto_wait_timeout_ms: crate::m2::default_auto_wait_timeout_ms(),
         };
         let before = recording.events();
         println!("readback=act_type_recording edge=natural_fast before={before:?}");
@@ -1379,6 +1391,11 @@ mod tests {
             params.verify_timeout_ms
         );
         assert_eq!(params.verify_timeout_ms, DEFAULT_ACT_TYPE_VERIFY_TIMEOUT_MS);
+        assert!(!params.auto_wait);
+        assert_eq!(
+            params.auto_wait_timeout_ms,
+            crate::m2::default_auto_wait_timeout_ms()
+        );
     }
 
     #[test]
@@ -1405,6 +1422,8 @@ mod tests {
             verify_delta: false,
             expected_browser_url_regex: None,
             verify_timeout_ms: default_verify_timeout_ms(),
+            auto_wait: false,
+            auto_wait_timeout_ms: crate::m2::default_auto_wait_timeout_ms(),
         };
 
         let error = match action_from_type_params(&params) {
@@ -1445,6 +1464,8 @@ mod tests {
             verify_delta: true,
             expected_browser_url_regex: None,
             verify_timeout_ms: default_verify_timeout_ms(),
+            auto_wait: false,
+            auto_wait_timeout_ms: crate::m2::default_auto_wait_timeout_ms(),
         };
 
         let error = match action_from_type_params(&params) {
@@ -1475,6 +1496,8 @@ mod tests {
             verify_delta: false,
             expected_browser_url_regex: None,
             verify_timeout_ms: default_verify_timeout_ms(),
+            auto_wait: false,
+            auto_wait_timeout_ms: crate::m2::default_auto_wait_timeout_ms(),
         };
 
         let action = match action_from_type_params(&params) {
@@ -1509,6 +1532,8 @@ mod tests {
             verify_delta: true,
             expected_browser_url_regex: None,
             verify_timeout_ms: 1,
+            auto_wait: false,
+            auto_wait_timeout_ms: crate::m2::default_auto_wait_timeout_ms(),
         };
 
         let error = validate_type_params(&params)
@@ -1535,6 +1560,8 @@ mod tests {
             verify_delta: false,
             expected_browser_url_regex: None,
             verify_timeout_ms: default_verify_timeout_ms(),
+            auto_wait: false,
+            auto_wait_timeout_ms: crate::m2::default_auto_wait_timeout_ms(),
         };
 
         let error = match action_from_type_params(&params) {

@@ -32,6 +32,9 @@ async fn recording_backend_readback_orders_chord_and_default_hold() {
         verify_timeout_ms: crate::m2::default_verify_timeout_ms(),
         window_hwnd: None,
         cdp_target_id: None,
+        auto_wait: false,
+        auto_wait_timeout_ms: crate::m2::default_auto_wait_timeout_ms(),
+        auto_wait_element_id: None,
     };
     let before = recording.events();
     println!("readback=act_press_recording edge=ordered_chord before={before:?}");
@@ -250,6 +253,16 @@ fn profile_with_keymap<const N: usize>(entries: [(&str, &str); N]) -> Profile {
 fn defaults_are_issue_required_values() {
     assert_eq!(default_hold_ms(), 33);
     assert_eq!(default_press_backend(), PressBackend::Auto);
+    let params: ActPressParams = serde_json::from_value(serde_json::json!({
+        "keys": ["Enter"]
+    }))
+    .expect("minimal act_press params should deserialize");
+    assert!(!params.auto_wait);
+    assert_eq!(
+        params.auto_wait_timeout_ms,
+        crate::m2::default_auto_wait_timeout_ms()
+    );
+    assert!(params.auto_wait_element_id.is_none());
 }
 
 #[test]

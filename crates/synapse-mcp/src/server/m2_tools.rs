@@ -145,7 +145,7 @@ const fn default_queue_blocker_duration_ms() -> u32 {
 #[tool_router(router = m2_tool_router, vis = "pub(super)")]
 impl SynapseService {
     #[tool(
-        description = "Click a screen coordinate or UI Automation element. Default element delivery uses background UIA control patterns (Invoke, Toggle, SelectionItem, ExpandCollapse, LegacyIAccessible.DoDefaultAction). When element coordinate delivery is needed, Synapse tries a background HWND PostMessage click to the resolved child window before escalating to the leased foreground coordinate tier; enabled keyboard-focusable edit/document/text or Value/Text targets bypass PostMessage and use the leased foreground coordinate tier so the real caret/focus state is placed. verify_delta reads the target window SoT for element clicks. coordinate_fallback_on_unsupported=true allows bbox-center coordinate delivery only for enabled keyboard-focusable edit/document/text targets or elements exposing Value/Text patterns; set false to fail closed with ACTION_ELEMENT_PATTERN_UNSUPPORTED. This mouse click tool does not synthesize WM_CHAR/dead-key keyboard text; use act_type/act_set_value for text. velocity_profile controls coordinate-move timing only, while explicit spatial paths belong to act_stroke. If a previously observed transient element expired before dispatch, returns TRANSIENT_ELEMENT_EXPIRED with re-observe/find guidance."
+        description = "Click a screen coordinate or UI Automation element. Default element delivery uses background UIA control patterns (Invoke, Toggle, SelectionItem, ExpandCollapse, LegacyIAccessible.DoDefaultAction). For CDP web element targets, auto_wait=true scrolls into view and polls actionability before dispatch; timeout returns BROWSER_WAIT_TIMEOUT with precise unmet predicates. When element coordinate delivery is needed, Synapse tries a background HWND PostMessage click to the resolved child window before escalating to the leased foreground coordinate tier; enabled keyboard-focusable edit/document/text or Value/Text targets bypass PostMessage and use the leased foreground coordinate tier so the real caret/focus state is placed. verify_delta reads the target window SoT for element clicks. coordinate_fallback_on_unsupported=true allows bbox-center coordinate delivery only for enabled keyboard-focusable edit/document/text targets or elements exposing Value/Text patterns; set false to fail closed with ACTION_ELEMENT_PATTERN_UNSUPPORTED. This mouse click tool does not synthesize WM_CHAR/dead-key keyboard text; use act_type/act_set_value for text. velocity_profile controls coordinate-move timing only, while explicit spatial paths belong to act_stroke. If a previously observed transient element expired before dispatch, returns TRANSIENT_ELEMENT_EXPIRED with re-observe/find guidance."
     )]
     pub async fn act_click(
         &self,
@@ -181,6 +181,23 @@ impl SynapseService {
             &request_context,
         ) {
             return audit_target_claim_denial(self, "act_click", error, &request_context);
+        }
+        if let Err(error) = maybe_auto_wait_for_actionability(
+            self,
+            "act_click",
+            &request_context,
+            params.auto_wait,
+            click_auto_wait_element_id(&params),
+            params.auto_wait_timeout_ms,
+            None,
+            None,
+            ActionabilityAutoWaitRequirement::Action,
+        )
+        .await
+        {
+            let result: Result<ActClickResponse, ErrorData> = Err(error);
+            self.audit_action_result_for_request("act_click", &result, &request_context)?;
+            return result.map(Json);
         }
         let target_window_hwnd = if params.verify_delta {
             match click_target_root_hwnd(&params) {
@@ -293,7 +310,7 @@ impl SynapseService {
     }
 
     #[tool(
-        description = "Type text. With into_element, routes through background CDP insertText for web nodes, foreground-safe native HWND text messages for UIA-resolved edit controls, UIA ValuePattern.SetValue with value readback for native elements without a native edit HWND, or a leased foreground click/type fallback for verified Chromium UIA editable targets when CDP is unavailable and the target window is already foreground. Without into_element, types through the leased foreground keyboard backend."
+        description = "Type text. With into_element, routes through background CDP insertText for web nodes, foreground-safe native HWND text messages for UIA-resolved edit controls, UIA ValuePattern.SetValue with value readback for native elements without a native edit HWND, or a leased foreground click/type fallback for verified Chromium UIA editable targets when CDP is unavailable and the target window is already foreground. For CDP into_element targets, auto_wait=true scrolls into view and waits for editable actionability before typing; timeout returns BROWSER_WAIT_TIMEOUT with precise unmet predicates. Without into_element, types through the leased foreground keyboard backend."
     )]
     pub async fn act_type(
         &self,
@@ -324,6 +341,23 @@ impl SynapseService {
             &request_context,
         ) {
             return audit_target_claim_denial(self, "act_type", error, &request_context);
+        }
+        if let Err(error) = maybe_auto_wait_for_actionability(
+            self,
+            "act_type",
+            &request_context,
+            params.auto_wait,
+            params.into_element.as_ref(),
+            params.auto_wait_timeout_ms,
+            None,
+            None,
+            ActionabilityAutoWaitRequirement::Editable,
+        )
+        .await
+        {
+            let result: Result<ActTypeResponse, ErrorData> = Err(error);
+            self.audit_action_result_for_request("act_type", &result, &request_context)?;
+            return result.map(Json);
         }
         let browser_url_policy = match act_type_browser_url_policy(&params) {
             Ok(policy) => policy,
@@ -570,7 +604,7 @@ impl SynapseService {
     }
 
     #[tool(
-        description = "Set a field's text by REPLACING its full content — clear + type + verify in one call (the form-filling primitive; #882/#1299). Call with element_id, or with locator {window_hwnd?, role?, name?, name_substring?, automation_id?} so Synapse resolves a fresh UIA element at action time; when a locator-backed action hits A11Y_ELEMENT_STALE, Synapse re-resolves and retries once. CDP web element ids use a background select-all + insertText replace with a separate node-value readback; Chromium UIA editable targets (when CDP is unavailable) use the leased foreground tier — the target window must already be foreground (act_focus_window first), then click, Ctrl+A, type, and a separate UIA value readback; native elements route through the act_set_value background tiers. Empty text clears the field. Every tier fails closed with its own reason code — there is no cross-tier fallback and no append behavior."
+        description = "Set a field's text by REPLACING its full content — clear + type + verify in one call (the form-filling primitive; #882/#1299). Call with element_id, or with locator {window_hwnd?, role?, name?, name_substring?, automation_id?} so Synapse resolves a fresh UIA element at action time; when a locator-backed action hits A11Y_ELEMENT_STALE, Synapse re-resolves and retries once. CDP web element ids use a background select-all + insertText replace with a separate node-value readback; auto_wait=true scrolls CDP web nodes into view and waits for editable actionability before replacement. Chromium UIA editable targets (when CDP is unavailable) use the leased foreground tier — the target window must already be foreground (act_focus_window first), then click, Ctrl+A, type, and a separate UIA value readback; native elements route through the act_set_value background tiers. Empty text clears the field. Every tier fails closed with its own reason code — there is no cross-tier fallback and no append behavior."
     )]
     pub async fn act_set_field_text(
         &self,
@@ -686,6 +720,18 @@ impl SynapseService {
         resolution_phase: &'static str,
     ) -> Result<crate::m2::ActSetFieldTextResponse, ErrorData> {
         let element_id = crate::m2::required_element_id(params)?;
+        maybe_auto_wait_for_actionability(
+            self,
+            "act_set_field_text",
+            request_context,
+            params.auto_wait,
+            Some(element_id),
+            params.auto_wait_timeout_ms,
+            None,
+            None,
+            ActionabilityAutoWaitRequirement::Editable,
+        )
+        .await?;
         let route = match crate::m2::set_field_text_route(element_id) {
             Ok(route) => route,
             Err(error) => {
@@ -891,7 +937,7 @@ impl SynapseService {
     }
 
     #[tool(
-        description = "Press a keyboard key or ordered chord. With an active session target and backend=auto/software, Synapse first uses background delivery: CDP Input.dispatchKeyEvent for CDP targets or HWND PostMessage keyboard messages for window targets. PostMessage delivery is accepted only after a separate target text/selection readback changes; ignored posted keys fail with ACTION_NO_OBSERVED_DELTA. backend=hardware, recording, no active target, or declared foreground-transition verification uses the leased foreground keyboard path."
+        description = "Press a keyboard key or ordered chord. With an active session target and backend=auto/software, Synapse first uses background delivery: CDP Input.dispatchKeyEvent for CDP targets or HWND PostMessage keyboard messages for window targets. auto_wait=true with auto_wait_element_id scrolls that CDP web node into view and waits for actionability before pressing. PostMessage delivery is accepted only after a separate target text/selection readback changes; ignored posted keys fail with ACTION_NO_OBSERVED_DELTA. backend=hardware, recording, no active target, or declared foreground-transition verification uses the leased foreground keyboard path."
     )]
     pub async fn act_press(
         &self,
@@ -917,9 +963,14 @@ impl SynapseService {
             &action_preflight_details(&preflight),
             &request_context,
         )?;
-        if let Err(error) =
-            self.ensure_target_claim_allows_action("act_press", None, &request_context)
-        {
+        if let Err(error) = self.ensure_target_claim_allows_action(
+            "act_press",
+            params
+                .auto_wait_element_id
+                .as_ref()
+                .and_then(element_claim_target),
+            &request_context,
+        ) {
             return audit_target_claim_denial(self, "act_press", error, &request_context);
         }
         let foreground_change_policy = match act_press_foreground_change_policy(&params) {
@@ -931,6 +982,23 @@ impl SynapseService {
             }
         };
         if let Err(error) = action_from_press_params(&params) {
+            let result: Result<ActPressResponse, ErrorData> = Err(error);
+            self.audit_action_result_for_request("act_press", &result, &request_context)?;
+            return result.map(Json);
+        }
+        if let Err(error) = maybe_auto_wait_for_actionability(
+            self,
+            "act_press",
+            &request_context,
+            params.auto_wait,
+            params.auto_wait_element_id.as_ref(),
+            params.auto_wait_timeout_ms,
+            params.window_hwnd,
+            params.cdp_target_id.as_deref(),
+            ActionabilityAutoWaitRequirement::Action,
+        )
+        .await
+        {
             let result: Result<ActPressResponse, ErrorData> = Err(error);
             self.audit_action_result_for_request("act_press", &result, &request_context)?;
             return result.map(Json);
@@ -1872,6 +1940,319 @@ fn element_claim_target(element_id: &ElementId) -> Option<SessionTarget> {
         .parts()
         .ok()
         .map(|parts| super::target_claims::window_session_target(parts.hwnd))
+}
+
+fn click_auto_wait_element_id(params: &ActClickParams) -> Option<&ElementId> {
+    match &params.target {
+        crate::m2::ActClickTarget::Element(element) => Some(&element.element_id),
+        crate::m2::ActClickTarget::Point(_) => None,
+    }
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum ActionabilityAutoWaitRequirement {
+    Action,
+    Editable,
+}
+
+impl ActionabilityAutoWaitRequirement {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Action => "action_ready",
+            Self::Editable => "editable_action_ready",
+        }
+    }
+
+    const fn includes_editable(self) -> bool {
+        matches!(self, Self::Editable)
+    }
+}
+
+async fn maybe_auto_wait_for_actionability(
+    service: &SynapseService,
+    tool: &'static str,
+    request_context: &RequestContext<RoleServer>,
+    enabled: bool,
+    element_id: Option<&ElementId>,
+    timeout_ms: u32,
+    explicit_window_hwnd: Option<i64>,
+    explicit_cdp_target_id: Option<&str>,
+    requirement: ActionabilityAutoWaitRequirement,
+) -> Result<(), ErrorData> {
+    if !enabled {
+        return Ok(());
+    }
+    crate::m2::validate_auto_wait_timeout(tool, enabled, timeout_ms)?;
+    let element_id = element_id.ok_or_else(|| {
+        mcp_error(
+            error_codes::TOOL_PARAMS_INVALID,
+            format!("{tool} auto_wait=true requires a CDP web element_id target"),
+        )
+    })?;
+    #[cfg(windows)]
+    {
+        auto_wait_for_actionability(
+            service,
+            tool,
+            request_context,
+            element_id,
+            timeout_ms,
+            explicit_window_hwnd,
+            explicit_cdp_target_id,
+            requirement,
+        )
+        .await
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (
+            service,
+            request_context,
+            element_id,
+            explicit_window_hwnd,
+            explicit_cdp_target_id,
+            requirement,
+        );
+        Err(mcp_error(
+            error_codes::A11Y_NOT_AVAILABLE,
+            format!("{tool} auto_wait actionability is only available on Windows in this build"),
+        ))
+    }
+}
+
+#[cfg(windows)]
+#[allow(clippy::too_many_arguments)]
+async fn auto_wait_for_actionability(
+    service: &SynapseService,
+    tool: &'static str,
+    request_context: &RequestContext<RoleServer>,
+    element_id: &ElementId,
+    timeout_ms: u32,
+    explicit_window_hwnd: Option<i64>,
+    explicit_cdp_target_id: Option<&str>,
+    requirement: ActionabilityAutoWaitRequirement,
+) -> Result<(), ErrorData> {
+    let backend_node_id =
+        synapse_a11y::cdp_backend_from_element_id(element_id).ok_or_else(|| {
+            mcp_error(
+                error_codes::ACTION_TARGET_INVALID,
+                format!("{tool} auto_wait requires a CDP web element_id, got {element_id}"),
+            )
+        })?;
+    let element_window_hwnd = element_id
+        .parts()
+        .map_err(|error| {
+            mcp_error(
+                error_codes::ACTION_ELEMENT_NOT_RESOLVED,
+                format!("{tool} auto_wait element id is malformed: {error}"),
+            )
+        })?
+        .hwnd;
+    if let Some(window_hwnd) = explicit_window_hwnd
+        && window_hwnd != element_window_hwnd
+    {
+        return Err(mcp_error(
+            error_codes::ACTION_TARGET_INVALID,
+            format!(
+                "{tool} auto_wait element window {element_window_hwnd:#x} does not match explicit action window {window_hwnd:#x}"
+            ),
+        ));
+    }
+    if explicit_cdp_target_id.is_some() && explicit_window_hwnd.is_none() {
+        return Err(mcp_error(
+            error_codes::TOOL_PARAMS_INVALID,
+            format!("{tool} auto_wait with explicit cdp_target_id requires window_hwnd"),
+        ));
+    }
+    let element_target_id = synapse_a11y::cdp_target_from_element_id(element_id);
+    if let (Some(explicit), Some(encoded)) = (explicit_cdp_target_id, element_target_id.as_deref())
+        && !explicit.eq_ignore_ascii_case(encoded)
+    {
+        return Err(mcp_error(
+            error_codes::ACTION_TARGET_INVALID,
+            format!(
+                "{tool} auto_wait element target {encoded:?} does not match explicit action target {explicit:?}"
+            ),
+        ));
+    }
+    let Some(session_id) = super::context::mcp_session_id_from_request_context(request_context)?
+    else {
+        return Err(mcp_error(
+            error_codes::TARGET_NOT_SET,
+            format!(
+                "{tool} auto_wait requires an MCP session target; refusing to use the human foreground tab"
+            ),
+        ));
+    };
+    let target_id_param = explicit_cdp_target_id.or(element_target_id.as_deref());
+    let (window_hwnd, cdp_target_id) = service.resolve_cdp_tab_mutation_target(
+        tool,
+        &session_id,
+        explicit_window_hwnd.or(Some(element_window_hwnd)),
+        target_id_param,
+    )?;
+    let Some(endpoint) = synapse_a11y::endpoint_for_window(window_hwnd) else {
+        return Err(mcp_error(
+            error_codes::A11Y_CDP_UNREACHABLE,
+            format!(
+                "{tool} auto_wait requires a reachable raw CDP endpoint for window_hwnd {window_hwnd:#x}"
+            ),
+        ));
+    };
+    let scroll =
+        synapse_a11y::cdp_scroll_into_view_node(&endpoint, &cdp_target_id, backend_node_id)
+            .await
+            .map_err(|error| {
+                mcp_error(
+                    error.code(),
+                    format!("{tool} auto_wait scrollIntoViewIfNeeded failed: {error}"),
+                )
+            })?;
+    let started = Instant::now();
+    let deadline = started
+        .checked_add(Duration::from_millis(u64::from(timeout_ms)))
+        .ok_or_else(|| {
+            mcp_error(
+                error_codes::TOOL_PARAMS_INVALID,
+                format!("{tool} auto_wait_timeout_ms {timeout_ms} overflowed this host clock"),
+            )
+        })?;
+    let mut poll_count = 0_u32;
+    loop {
+        let actionability =
+            synapse_a11y::cdp_actionability(&endpoint, &cdp_target_id, backend_node_id)
+                .await
+                .map_err(|error| {
+                    mcp_error(
+                        error.code(),
+                        format!("{tool} auto_wait actionability readback failed: {error}"),
+                    )
+                })?;
+        poll_count = poll_count.saturating_add(1);
+        if actionability_satisfies_requirement(&actionability, requirement) {
+            tracing::info!(
+                code = "M2_ACTIONABILITY_AUTO_WAIT_READY",
+                tool,
+                element_id = %element_id,
+                hwnd = window_hwnd,
+                cdp_target_id = %actionability.target_id,
+                backend_node_id,
+                requirement = requirement.label(),
+                poll_count,
+                elapsed_ms = u32::try_from(started.elapsed().as_millis()).unwrap_or(u32::MAX),
+                window_scroll_changed = scroll.window_scroll_changed,
+                container_scroll_changed = scroll.container_scroll_changed,
+                "readback=DOM.scrollIntoViewIfNeeded+CDP.actionability outcome=auto_wait_ready"
+            );
+            return Ok(());
+        }
+        let now = Instant::now();
+        if now >= deadline {
+            return Err(actionability_auto_wait_timeout_error(
+                tool,
+                element_id,
+                backend_node_id,
+                &cdp_target_id,
+                timeout_ms,
+                requirement,
+                poll_count,
+                Some(&actionability),
+                &scroll,
+            ));
+        }
+        let delay = deadline
+            .saturating_duration_since(now)
+            .min(Duration::from_millis(50));
+        tokio::time::sleep(delay).await;
+    }
+}
+
+#[cfg(windows)]
+fn actionability_satisfies_requirement(
+    actionability: &synapse_a11y::CdpActionabilityResult,
+    requirement: ActionabilityAutoWaitRequirement,
+) -> bool {
+    match requirement {
+        ActionabilityAutoWaitRequirement::Action => actionability.action_ready,
+        ActionabilityAutoWaitRequirement::Editable => actionability.editable_action_ready,
+    }
+}
+
+fn actionability_failure_is_relevant(
+    predicate: &str,
+    requirement: ActionabilityAutoWaitRequirement,
+) -> bool {
+    matches!(
+        predicate,
+        "attached" | "visible" | "stable" | "enabled" | "receives_events"
+    ) || (requirement.includes_editable() && predicate == "editable")
+}
+
+#[cfg(windows)]
+fn actionability_relevant_failures(
+    actionability: &synapse_a11y::CdpActionabilityResult,
+    requirement: ActionabilityAutoWaitRequirement,
+) -> Vec<Value> {
+    actionability
+        .failure_reasons
+        .iter()
+        .filter(|failure| actionability_failure_is_relevant(&failure.predicate, requirement))
+        .map(|failure| {
+            json!({
+                "predicate": failure.predicate,
+                "reason": failure.reason,
+                "detail": failure.detail,
+            })
+        })
+        .collect()
+}
+
+#[cfg(windows)]
+#[allow(clippy::too_many_arguments)]
+fn actionability_auto_wait_timeout_error(
+    tool: &'static str,
+    element_id: &ElementId,
+    backend_node_id: i64,
+    cdp_target_id: &str,
+    timeout_ms: u32,
+    requirement: ActionabilityAutoWaitRequirement,
+    poll_count: u32,
+    last_actionability: Option<&synapse_a11y::CdpActionabilityResult>,
+    scroll: &synapse_a11y::CdpScrollIntoViewResult,
+) -> ErrorData {
+    let unmet_predicates = last_actionability
+        .map(|actionability| actionability_relevant_failures(actionability, requirement))
+        .unwrap_or_default();
+    let predicate_labels = unmet_predicates
+        .iter()
+        .filter_map(|failure| failure.get("predicate").and_then(Value::as_str))
+        .collect::<Vec<_>>();
+    let predicate_detail = if predicate_labels.is_empty() {
+        "unknown".to_owned()
+    } else {
+        predicate_labels.join(",")
+    };
+    ErrorData::new(
+        ErrorCode(-32099),
+        format!(
+            "{tool} auto_wait timed out after {timeout_ms} ms waiting for {}; unmet predicates: {predicate_detail}",
+            requirement.label()
+        ),
+        Some(json!({
+            "code": error_codes::BROWSER_WAIT_TIMEOUT,
+            "tool": tool,
+            "element_id": element_id.to_string(),
+            "backend_node_id": backend_node_id,
+            "cdp_target_id": cdp_target_id,
+            "timeout_ms": timeout_ms,
+            "requirement": requirement.label(),
+            "poll_count": poll_count,
+            "unmet_predicates": unmet_predicates,
+            "last_actionability": last_actionability.and_then(|value| serde_json::to_value(value).ok()),
+            "scroll": serde_json::to_value(scroll).ok(),
+            "source_of_truth": "DOM.scrollIntoViewIfNeeded + DOM.getBoxModel + DOM.getNodeForLocation + elementFromPoint",
+        })),
+    )
 }
 
 fn scroll_claim_target(params: &ActScrollParams) -> Option<SessionTarget> {
@@ -8245,6 +8626,39 @@ mod tests {
         assert!(!should_try_next_click_tier(&error));
     }
 
+    #[test]
+    fn auto_wait_failure_filter_matches_action_requirement() {
+        let predicates = [
+            "attached",
+            "visible",
+            "stable",
+            "enabled",
+            "receives_events",
+        ];
+        for predicate in predicates {
+            assert!(actionability_failure_is_relevant(
+                predicate,
+                ActionabilityAutoWaitRequirement::Action
+            ));
+        }
+        assert!(!actionability_failure_is_relevant(
+            "editable",
+            ActionabilityAutoWaitRequirement::Action
+        ));
+    }
+
+    #[test]
+    fn auto_wait_failure_filter_includes_editable_for_text_requirement() {
+        assert!(actionability_failure_is_relevant(
+            "editable",
+            ActionabilityAutoWaitRequirement::Editable
+        ));
+        assert!(actionability_failure_is_relevant(
+            "receives_events",
+            ActionabilityAutoWaitRequirement::Editable
+        ));
+    }
+
     fn foreground_proof(
         hwnd: i64,
         pid: u32,
@@ -8307,6 +8721,9 @@ mod tests {
             verify_timeout_ms: crate::m2::default_verify_timeout_ms(),
             window_hwnd: None,
             cdp_target_id: None,
+            auto_wait: false,
+            auto_wait_timeout_ms: crate::m2::default_auto_wait_timeout_ms(),
+            auto_wait_element_id: None,
         }
     }
 

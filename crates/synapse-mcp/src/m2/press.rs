@@ -205,6 +205,9 @@ pub(crate) fn resolve_keymap_press(
         verify_timeout_ms: crate::m2::default_verify_timeout_ms(),
         window_hwnd: params.window_hwnd,
         cdp_target_id: params.cdp_target_id.clone(),
+        auto_wait: false,
+        auto_wait_timeout_ms: crate::m2::default_auto_wait_timeout_ms(),
+        auto_wait_element_id: None,
     };
     Ok(ResolvedKeymapPress {
         alias,

@@ -1210,6 +1210,8 @@ mod tests {
             coordinate_fallback_on_unsupported: default_coordinate_fallback_on_unsupported(),
             verify_delta: false,
             verify_timeout_ms: default_verify_timeout_ms(),
+            auto_wait: false,
+            auto_wait_timeout_ms: crate::m2::default_auto_wait_timeout_ms(),
             deprecated_curve_alias_used: false,
         };
         let screen_point = Point { x: 320, y: 240 };

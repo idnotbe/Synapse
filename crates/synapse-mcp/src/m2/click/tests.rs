@@ -46,6 +46,8 @@ async fn coordinate_click_leaves_actor_held_state_empty() {
             coordinate_fallback_on_unsupported: default_coordinate_fallback_on_unsupported(),
             verify_delta: false,
             verify_timeout_ms: super::schema::default_verify_timeout_ms(),
+            auto_wait: false,
+            auto_wait_timeout_ms: crate::m2::default_auto_wait_timeout_ms(),
             deprecated_curve_alias_used: false,
         },
         ForegroundClickPolicy::allowed(Some("test-click-coordinate-session".to_owned())),
@@ -102,6 +104,8 @@ async fn element_click_rejects_non_mouse_element_transports_before_delivery() {
                 coordinate_fallback_on_unsupported: default_coordinate_fallback_on_unsupported(),
                 verify_delta: false,
                 verify_timeout_ms: super::schema::default_verify_timeout_ms(),
+                auto_wait: false,
+                auto_wait_timeout_ms: crate::m2::default_auto_wait_timeout_ms(),
                 deprecated_curve_alias_used: false,
             },
         )
@@ -272,6 +276,8 @@ async fn browser_ocr_element_click_uses_coordinate_route_even_when_invoke_defaul
             coordinate_fallback_on_unsupported: default_coordinate_fallback_on_unsupported(),
             verify_delta: false,
             verify_timeout_ms: super::schema::default_verify_timeout_ms(),
+            auto_wait: false,
+            auto_wait_timeout_ms: crate::m2::default_auto_wait_timeout_ms(),
             deprecated_curve_alias_used: false,
         },
     )
@@ -329,6 +335,8 @@ async fn browser_ocr_element_click_rejects_empty_ocr_bbox_before_uia_resolution(
             coordinate_fallback_on_unsupported: default_coordinate_fallback_on_unsupported(),
             verify_delta: false,
             verify_timeout_ms: super::schema::default_verify_timeout_ms(),
+            auto_wait: false,
+            auto_wait_timeout_ms: crate::m2::default_auto_wait_timeout_ms(),
             deprecated_curve_alias_used: false,
         },
     )
@@ -360,6 +368,11 @@ fn click_velocity_profile_accepts_hidden_legacy_curve_alias() {
     }))
     .expect("velocity_profile should parse");
     assert_eq!(new_name.velocity_profile, ClickVelocityProfile::Linear);
+    assert!(!new_name.auto_wait);
+    assert_eq!(
+        new_name.auto_wait_timeout_ms,
+        crate::m2::default_auto_wait_timeout_ms()
+    );
     assert!(!new_name.deprecated_curve_alias_used);
 
     let old_alias: ActClickParams = serde_json::from_value(json!({

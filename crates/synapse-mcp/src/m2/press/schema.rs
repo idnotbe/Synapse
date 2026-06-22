@@ -1,9 +1,10 @@
 use rmcp::schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use synapse_core::Backend;
+use synapse_core::{Backend, ElementId};
 
-use crate::m2::postcondition::{
-    ActPostcondition, default_verify_timeout_ms, postcondition_not_requested,
+use crate::m2::{
+    default_auto_wait_timeout_ms,
+    postcondition::{ActPostcondition, default_verify_timeout_ms, postcondition_not_requested},
 };
 
 const DEFAULT_HOLD_MS: u32 = 33;
@@ -54,6 +55,21 @@ pub struct ActPressParams {
         description = "Explicit per-call CDP target id to route keyboard input to a specific browser tab. Requires window_hwnd. A CDP targetId is a stable routing handle that survives window-handle recycling across multi-agent use."
     )]
     pub cdp_target_id: Option<String>,
+    #[serde(default)]
+    #[schemars(
+        default,
+        description = "Opt in to pre-action CDP actionability polling before pressing keys. Requires auto_wait_element_id and waits until the web node is attached, visible, stable, enabled, and receiving events before dispatch. Default false preserves existing key semantics."
+    )]
+    pub auto_wait: bool,
+    #[serde(default = "default_auto_wait_timeout_ms")]
+    #[schemars(default = "default_auto_wait_timeout_ms", range(min = 50, max = 30000))]
+    pub auto_wait_timeout_ms: u32,
+    #[serde(default)]
+    #[schemars(
+        default,
+        description = "CDP web element whose actionability is polled when auto_wait=true for act_press."
+    )]
+    pub auto_wait_element_id: Option<ElementId>,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema)]

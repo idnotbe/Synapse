@@ -1,3 +1,4 @@
+pub(crate) mod auto_wait;
 mod click;
 mod clipboard;
 mod config;
@@ -36,7 +37,9 @@ pub(crate) const FOREGROUND_CONTEXT_RESTORE_STABILITY_MS: u64 =
 
 pub(crate) use click::ForegroundClickPolicy;
 #[allow(unused_imports)]
-pub use click::{ActClickParams, ActClickPostcondition, ActClickResponse, act_click_with_handle};
+pub use click::{
+    ActClickParams, ActClickPostcondition, ActClickResponse, ActClickTarget, act_click_with_handle,
+};
 pub(crate) use click::{
     ActClickTierAttempt, CLICK_REASON_NO_OBSERVED_DELTA, CLICK_TIER_FOREGROUND,
     CLICK_TIER_POSTMESSAGE, act_click_postmessage_with_params, act_click_with_handle_and_lease,
@@ -93,6 +96,7 @@ pub use type_text::action_from_type_params;
 pub(crate) use type_text::emitted_text;
 pub use type_text::{ActTypeParams, ActTypeResponse, TypeBackend, act_type_with_handle};
 
+pub(crate) use auto_wait::{default_auto_wait_timeout_ms, validate_auto_wait_timeout};
 use config::RECORDING_BACKEND_ENV;
 
 pub type SharedM2State = Arc<Mutex<M2State>>;

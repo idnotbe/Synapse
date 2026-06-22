@@ -3703,7 +3703,7 @@ impl SynapseService {
     /// the human foreground tab: requires either the active CDP session target
     /// or an explicit target id owned by this MCP session. Shared by
     /// cdp_navigate_tab and cdp_activate_tab.
-    pub(super) fn resolve_cdp_tab_mutation_target(
+    pub(crate) fn resolve_cdp_tab_mutation_target(
         &self,
         tool: &str,
         session_id: &str,

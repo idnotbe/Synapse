@@ -537,6 +537,8 @@ impl SynapseService {
                                 locator,
                                 text: params.text.unwrap_or_default(),
                                 verify_timeout_ms: default_verify_timeout_ms(),
+                                auto_wait: false,
+                                auto_wait_timeout_ms: crate::m2::default_auto_wait_timeout_ms(),
                             }),
                             request_context,
                         )

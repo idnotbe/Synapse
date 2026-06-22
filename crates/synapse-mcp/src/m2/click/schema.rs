@@ -2,6 +2,7 @@ use rmcp::schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize, de};
 use synapse_core::{AimCurve, AimNaturalParams, Backend, ElementId, MouseButton};
 
+use crate::m2::default_auto_wait_timeout_ms;
 pub(in crate::m2::click) use crate::m2::postcondition::default_verify_timeout_ms;
 use crate::m2::postcondition::{
     ActPostcondition, postcondition_not_requested as base_postcondition_not_requested,
@@ -45,6 +46,15 @@ pub struct ActClickParams {
     #[serde(default = "default_verify_timeout_ms")]
     #[schemars(default = "default_verify_timeout_ms", range(min = 50, max = 5000))]
     pub verify_timeout_ms: u32,
+    #[serde(default)]
+    #[schemars(
+        default,
+        description = "Opt in to pre-action CDP actionability polling for element targets. When true, Synapse scrolls the web node into view and waits until attached, visible, stable, enabled, and receiving events before dispatch. Default false preserves existing click semantics."
+    )]
+    pub auto_wait: bool,
+    #[serde(default = "default_auto_wait_timeout_ms")]
+    #[schemars(default = "default_auto_wait_timeout_ms", range(min = 50, max = 30000))]
+    pub auto_wait_timeout_ms: u32,
     #[serde(skip)]
     #[schemars(skip)]
     pub deprecated_curve_alias_used: bool,
@@ -151,6 +161,10 @@ impl<'de> Deserialize<'de> for ActClickParams {
             verify_delta: bool,
             #[serde(default = "default_verify_timeout_ms")]
             verify_timeout_ms: u32,
+            #[serde(default)]
+            auto_wait: bool,
+            #[serde(default = "default_auto_wait_timeout_ms")]
+            auto_wait_timeout_ms: u32,
         }
 
         let raw = RawActClickParams::deserialize(deserializer)?;
@@ -179,6 +193,8 @@ impl<'de> Deserialize<'de> for ActClickParams {
             coordinate_fallback_on_unsupported: raw.coordinate_fallback_on_unsupported,
             verify_delta: raw.verify_delta,
             verify_timeout_ms: raw.verify_timeout_ms,
+            auto_wait: raw.auto_wait,
+            auto_wait_timeout_ms: raw.auto_wait_timeout_ms,
             deprecated_curve_alias_used,
         })
     }

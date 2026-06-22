@@ -19,8 +19,9 @@ mod schema;
 #[cfg(test)]
 mod tests;
 
-use schema::ActClickTarget;
-pub use schema::{ActClickParams, ActClickPostcondition, ActClickResponse, ActClickTierAttempt};
+pub use schema::{
+    ActClickParams, ActClickPostcondition, ActClickResponse, ActClickTarget, ActClickTierAttempt,
+};
 
 const MAX_CLICK_HOLD_MS: u32 = 30_000;
 const SUPPORTED_UIA_CLICK_PATTERNS: [&str; 5] = [

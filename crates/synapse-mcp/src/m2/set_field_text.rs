@@ -28,8 +28,11 @@ use serde_json::{Value, json};
 use synapse_core::{ElementId, UiaPattern, error_codes};
 
 use crate::m1::mcp_error;
-use crate::m2::postcondition::{ActPostcondition, default_verify_timeout_ms, text_signature};
 use crate::m2::set_value::{ActSetValueParams, act_set_value};
+use crate::m2::{
+    default_auto_wait_timeout_ms,
+    postcondition::{ActPostcondition, default_verify_timeout_ms, text_signature},
+};
 
 const TOOL: &str = "act_set_field_text";
 pub(crate) const TIER_CDP: &str = "cdp";
@@ -57,6 +60,15 @@ pub struct ActSetFieldTextParams {
     #[serde(default = "default_verify_timeout_ms")]
     #[schemars(default = "default_verify_timeout_ms", range(min = 50, max = 5000))]
     pub verify_timeout_ms: u32,
+    #[serde(default)]
+    #[schemars(
+        default,
+        description = "Opt in to pre-action CDP actionability polling for web element targets. When true, Synapse resolves the element/locator, scrolls the node into view, and waits until it is attached, visible, stable, enabled, editable, and receiving events before replacing text. Default false preserves existing fill semantics."
+    )]
+    pub auto_wait: bool,
+    #[serde(default = "default_auto_wait_timeout_ms")]
+    #[schemars(default = "default_auto_wait_timeout_ms", range(min = 50, max = 30000))]
+    pub auto_wait_timeout_ms: u32,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema)]
@@ -133,6 +145,7 @@ pub(crate) fn validate_set_field_text_params(
             ),
         ));
     }
+    crate::m2::validate_auto_wait_timeout(TOOL, params.auto_wait, params.auto_wait_timeout_ms)?;
     if u32::try_from(params.text.chars().count()).is_err() {
         return Err(mcp_error(
             error_codes::TOOL_PARAMS_INVALID,
@@ -708,6 +721,11 @@ mod tests {
             params.verify_timeout_ms
         );
         assert!(validate_set_field_text_params(&params).is_ok());
+        assert!(!params.auto_wait);
+        assert_eq!(
+            params.auto_wait_timeout_ms,
+            crate::m2::default_auto_wait_timeout_ms()
+        );
     }
 
     #[test]
@@ -738,6 +756,8 @@ mod tests {
             }),
             text: "value".to_owned(),
             verify_timeout_ms: crate::m2::default_verify_timeout_ms(),
+            auto_wait: false,
+            auto_wait_timeout_ms: crate::m2::default_auto_wait_timeout_ms(),
         };
         let error =
             validate_set_field_text_params(&params).expect_err("empty locator must fail closed");
