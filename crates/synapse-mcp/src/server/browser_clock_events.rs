@@ -37,6 +37,18 @@ pub enum BrowserClockOperation {
     PauseAt,
 }
 
+impl BrowserClockOperation {
+    fn wire(self) -> &'static str {
+        match self {
+            BrowserClockOperation::Status => "status",
+            BrowserClockOperation::Install => "install",
+            BrowserClockOperation::SetFixedTime => "setFixedTime",
+            BrowserClockOperation::FastForward => "fastForward",
+            BrowserClockOperation::PauseAt => "pauseAt",
+        }
+    }
+}
+
 impl From<BrowserClockOperation> for synapse_a11y::CdpClockOperation {
     fn from(value: BrowserClockOperation) -> Self {
         match value {
@@ -283,7 +295,7 @@ struct NormalizedBrowserPageEventsParams {
 #[tool_router(router = browser_clock_events_tool_router, vis = "pub(super)")]
 impl SynapseService {
     #[tool(
-        description = "Control a fake Playwright-style page clock in the calling session's owned raw-CDP browser tab. operation=install injects a target-scoped init-script shim for Date, setTimeout/setInterval, and requestAnimationFrame in current/future documents; set_fixed_time changes Date without firing timers; fast_forward advances virtual time and fires due timers; pause_at advances to an epoch-ms timestamp and freezes there; status returns current shim state. Target-scoped and background-safe: never activates the tab, never uses OS foreground input, and never falls back to the human foreground tab. Raw CDP only; use browser_evaluate as an independent page readback for FSV."
+        description = "Control a fake Playwright-style page clock in the calling session's owned browser tab. Raw CDP injects a target-scoped init-script shim for current/future documents; the normal Chrome bridge uses a typed MAIN-world chrome.scripting shim for chrome-tab:* current-document targets. set_fixed_time changes Date without firing timers; fast_forward advances virtual time and fires due timers; pause_at advances to an epoch-ms timestamp and freezes there; status returns current shim state. Target-scoped and background-safe: never activates the tab, never uses OS foreground input, and never falls back to the human foreground tab."
     )]
     pub async fn browser_clock(
         &self,
@@ -409,6 +421,53 @@ impl SynapseService {
         params: &NormalizedBrowserClockParams,
     ) -> Result<BrowserClockResponse, ErrorData> {
         let Some(endpoint) = synapse_a11y::endpoint_for_window(window_hwnd) else {
+            if cdp_target_id.starts_with("chrome-tab:") {
+                let result = crate::chrome_debugger_bridge::clock(
+                    window_hwnd,
+                    cdp_target_id,
+                    params.operation.wire(),
+                    params.time_unix_ms,
+                    params.delta_ms,
+                )
+                .await
+                .map_err(|error| {
+                    mcp_error(
+                        error.code(),
+                        format!(
+                            "{CLOCK_TOOL} normal bridge clock operation failed: {}",
+                            error.detail()
+                        ),
+                    )
+                })?;
+                tracing::info!(
+                    code = "CHROME_BRIDGE_BACKGROUND_CLOCK_READBACK",
+                    session_id = %session_id,
+                    hwnd = window_hwnd,
+                    cdp_target_id = %result.target_id,
+                    operation = ?params.operation,
+                    installed = result.readback.installed,
+                    now_ms = ?result.readback.now_ms,
+                    "readback=chrome.scripting.executeScript(MAIN synapse clock shim) outcome=clock_state"
+                );
+                return Ok(BrowserClockResponse {
+                    session_id: session_id.to_owned(),
+                    window_hwnd,
+                    transport: "chrome_tabs_extension".to_owned(),
+                    endpoint: "chrome-extension://leoocgnkjnplbfdbklajepahofecgfbk/chrome.tabs"
+                        .to_owned(),
+                    cdp_target_id: result.target_id,
+                    operation: params.operation,
+                    time_unix_ms: params.time_unix_ms,
+                    delta_ms: params.delta_ms,
+                    init_script_identifier: result.init_script_identifier,
+                    init_script_newly_added: result.init_script_newly_added,
+                    installed_at_unix_ms: result.installed_at_unix_ms,
+                    clock: browser_bridge_clock_readback(result.readback),
+                    readback_backend: result.readback_backend,
+                    backend_tier_used: "chrome_tabs_extension".to_owned(),
+                    required_foreground: false,
+                });
+            }
             return Err(browser_raw_cdp_required_error(CLOCK_TOOL, window_hwnd));
         };
         let result = synapse_a11y::cdp_clock(
@@ -726,6 +785,22 @@ fn validate_optional_token(
 }
 
 fn browser_clock_readback(readback: synapse_a11y::CdpClockReadback) -> BrowserClockReadback {
+    BrowserClockReadback {
+        installed: readback.installed,
+        version: readback.version,
+        now_ms: readback.now_ms,
+        pending_timer_count: readback.pending_timer_count,
+        fired_timer_count: readback.fired_timer_count,
+        last_timer_id: readback.last_timer_id,
+        next_timer_ms: readback.next_timer_ms,
+        error_count: readback.error_count,
+        last_error: readback.last_error,
+    }
+}
+
+fn browser_bridge_clock_readback(
+    readback: crate::chrome_debugger_bridge::ChromeDebuggerClockReadback,
+) -> BrowserClockReadback {
     BrowserClockReadback {
         installed: readback.installed,
         version: readback.version,

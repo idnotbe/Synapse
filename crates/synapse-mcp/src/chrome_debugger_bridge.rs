@@ -40,9 +40,9 @@ const NATIVE_HOST_NAME: &str = "com.synapse.chrome_debugger";
 const EXTENSION_ORIGIN: &str = "chrome-extension://leoocgnkjnplbfdbklajepahofecgfbk";
 const BRIDGE_TOKEN_HEADER: &str = "x-synapse-bridge-token";
 const BRIDGE_PROTOCOL_VERSION: u32 = 1;
-const EXPECTED_EXTENSION_BUILD_ID: &str = "synapse-chrome-bridge-2026-06-22-set-content-seed-v4";
+const EXPECTED_EXTENSION_BUILD_ID: &str = "synapse-chrome-bridge-2026-06-22-clock-v5";
 const EXPECTED_EXTENSION_BUILD_SHA256: &str =
-    "3ef84d2de247f996a2b92677bae8922e976736058a95699b11446c887e12f906";
+    "7adff60166bf13eed322d5e68adbf82fdf0dcf8b2a8fc0e828913e937227c272";
 const SYNAPSE_CHROME_BLOCKED_INSTALL_MESSAGE: &str = "Synapse blocked this extension on this host because debugger/nativeMessaging permissions can surface Chrome debugger or native-host popups during background automation.";
 const REQUIRED_DIRECT_HTTP_CAPABILITIES: &[&str] = &[
     "alarmReconnect",
@@ -57,6 +57,7 @@ const REQUIRED_DIRECT_HTTP_CAPABILITIES: &[&str] = &[
     "pageVitals",
     "pageContent",
     "setContent",
+    "clock",
     "reloadSelf",
     "targetInfo",
     "targetInfoPageText",
@@ -1690,6 +1691,68 @@ pub(crate) struct ChromeDebuggerSetContentResult {
     pub seeded_from_url: String,
     #[serde(default)]
     pub seeded_reason: String,
+    #[serde(default)]
+    pub readback_backend: String,
+    #[serde(default)]
+    pub backend_tier_used: String,
+    #[serde(default)]
+    pub frame_id: Option<i64>,
+    #[serde(default)]
+    pub frame_document_id: Option<String>,
+    #[serde(default)]
+    pub frame_result_count: u32,
+    pub target_candidate_count: u32,
+    pub target_selection_reason: String,
+    pub extension_id: Option<String>,
+}
+
+/// Readback from the typed normal-bridge `clock` command.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub(crate) struct ChromeDebuggerClockReadback {
+    #[serde(default)]
+    pub installed: bool,
+    #[serde(default)]
+    pub version: Option<String>,
+    #[serde(default)]
+    pub now_ms: Option<u64>,
+    #[serde(default)]
+    pub pending_timer_count: Option<u64>,
+    #[serde(default)]
+    pub fired_timer_count: Option<u64>,
+    #[serde(default)]
+    pub last_timer_id: Option<u64>,
+    #[serde(default)]
+    pub next_timer_ms: Option<u64>,
+    #[serde(default)]
+    pub error_count: Option<u64>,
+    #[serde(default)]
+    pub last_error: Option<String>,
+}
+
+/// Result of the typed `clock` bridge command: Playwright-style page clock
+/// control in the current normal Chrome document without debugger attach.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub(crate) struct ChromeDebuggerClockResult {
+    pub target_id: String,
+    pub tab_id: u32,
+    #[serde(default)]
+    pub chrome_window_id: Option<i64>,
+    #[serde(default)]
+    pub operation: String,
+    #[serde(default)]
+    pub init_script_identifier: Option<String>,
+    #[serde(default)]
+    pub init_script_newly_added: bool,
+    #[serde(default)]
+    pub installed_at_unix_ms: u64,
+    #[serde(default)]
+    pub readback: ChromeDebuggerClockReadback,
+    #[serde(default)]
+    pub url: String,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub ready_state: String,
     #[serde(default)]
     pub readback_backend: String,
     #[serde(default)]
@@ -3788,6 +3851,33 @@ pub(crate) async fn set_content(
     })
 }
 
+pub(crate) async fn clock(
+    hwnd: i64,
+    target_id: &str,
+    operation: &str,
+    time_unix_ms: Option<u64>,
+    delta_ms: Option<u64>,
+) -> Result<ChromeDebuggerClockResult, ChromeDebuggerBridgeError> {
+    ensure_normal_bridge_external_popup_suppressed(hwnd, "clock")?;
+    let result = bridge()
+        .send_command(
+            "clock",
+            json!({
+                "hwnd": hwnd,
+                "targetIdHint": target_id,
+                "operation": operation,
+                "timeMs": time_unix_ms,
+                "deltaMs": delta_ms,
+            }),
+        )
+        .await?;
+    serde_json::from_value::<ChromeDebuggerClockResult>(result).map_err(|error| {
+        ChromeDebuggerBridgeError::protocol(format!(
+            "decode Chrome debugger clock response: {error}"
+        ))
+    })
+}
+
 pub(crate) async fn navigate_tab(
     hwnd: i64,
     target_id: &str,
@@ -4776,6 +4866,24 @@ fn chrome_response_readback_summary(kind: &str, result: Option<&Value>) -> Optio
             "after_title": result.get("after_title"),
             "ready_state": result.get("ready_state"),
             "html_len": result.get("html_len"),
+            "readback_backend": result.get("readback_backend"),
+            "backend_tier_used": result.get("backend_tier_used"),
+            "target_candidate_count": result.get("target_candidate_count"),
+            "target_selection_reason": result.get("target_selection_reason"),
+            "extension_id": result.get("extension_id"),
+        }),
+        "clock" => json!({
+            "target_id": result.get("target_id"),
+            "tab_id": result.get("tab_id"),
+            "chrome_window_id": result.get("chrome_window_id"),
+            "operation": result.get("operation"),
+            "init_script_identifier": result.get("init_script_identifier"),
+            "init_script_newly_added": result.get("init_script_newly_added"),
+            "installed_at_unix_ms": result.get("installed_at_unix_ms"),
+            "readback": result.get("readback"),
+            "url": result.get("url"),
+            "title": result.get("title"),
+            "ready_state": result.get("ready_state"),
             "readback_backend": result.get("readback_backend"),
             "backend_tier_used": result.get("backend_tier_used"),
             "target_candidate_count": result.get("target_candidate_count"),

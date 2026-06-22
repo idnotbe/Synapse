@@ -1,6 +1,6 @@
 const PROTOCOL_VERSION = 1;
-const BRIDGE_BUILD_ID = "synapse-chrome-bridge-2026-06-22-set-content-seed-v4";
-const BRIDGE_BUILD_SHA256 = "3ef84d2de247f996a2b92677bae8922e976736058a95699b11446c887e12f906";
+const BRIDGE_BUILD_ID = "synapse-chrome-bridge-2026-06-22-clock-v5";
+const BRIDGE_BUILD_SHA256 = "7adff60166bf13eed322d5e68adbf82fdf0dcf8b2a8fc0e828913e937227c272";
 const COMMAND_CAPABILITIES = Object.freeze([
   "alarmReconnect",
   "externalPopupRiskSuppression",
@@ -14,6 +14,7 @@ const COMMAND_CAPABILITIES = Object.freeze([
   "pageVitals",
   "pageContent",
   "setContent",
+  "clock",
   "domAction",
   "coordinateClick",
   "reloadSelf",
@@ -306,6 +307,7 @@ function commandRequiresExternalPopupSuppression(kind) {
     "pageVitals",
     "pageContent",
     "setContent",
+    "clock",
     "navigateTab",
     "activateTab",
     "domAction",
@@ -706,6 +708,8 @@ async function handleCommand(command) {
       result = await handlePageContent(params);
     } else if (kind === "setContent") {
       result = await handleSetContent(params);
+    } else if (kind === "clock") {
+      result = await handleClock(params);
     } else if (kind === "typeActiveElement") {
       result = await handleTypeActiveElement(params);
     } else if (kind === "setFieldValue") {
@@ -1121,6 +1125,70 @@ function isScriptingAccessDeniedError(error) {
     message.includes("Cannot access chrome://") ||
     message.includes("The extensions gallery cannot be scripted")
   );
+}
+
+async function handleClock(params) {
+  const selected = await selectTabTarget(params, { requireTargetId: true });
+  const operation = normalizeClockOperation(params.operation);
+  if (!chrome.scripting || typeof chrome.scripting.executeScript !== "function") {
+    throw bridgeError(
+      ERROR_AXTREE_FAILED,
+      "chrome.scripting.executeScript unavailable; extension is missing scripting permission"
+    );
+  }
+  const state = await tabPageState(selected.tabId, selected.target);
+  let injected;
+  try {
+    injected = await chrome.scripting.executeScript({
+      target: { tabId: selected.tabId },
+      world: "MAIN",
+      func: runClockInPage,
+      args: [{
+        operation,
+        timeMs: params.timeMs ?? null,
+        deltaMs: params.deltaMs ?? null,
+        loopLimit: 10000
+      }]
+    });
+  } catch (error) {
+    throw bridgeError(
+      ERROR_AXTREE_FAILED,
+      `chrome.scripting.executeScript clock(${selected.tabId}, ${operation}) failed: ${errorMessage(error)}`
+    );
+  }
+  const frameResults = frameExecutionResults(injected);
+  const first = frameResults.find((frame) => frame.result) || null;
+  const result = first?.result;
+  if (!result || typeof result !== "object") {
+    throw bridgeError(ERROR_AXTREE_FAILED, "chrome.scripting.executeScript clock returned no structured result");
+  }
+  if (!result.ok) {
+    throw bridgeError(
+      String(result.error_code || ERROR_AXTREE_FAILED),
+      `clock failed: ${String(result.error_detail || "")}`
+    );
+  }
+  return {
+    extension_id: chrome.runtime.id,
+    target_id: state.target_id || selected.target.id,
+    tab_id: selected.tabId,
+    chrome_window_id: state.chrome_window_id,
+    operation,
+    init_script_identifier: result.init_script_identifier || "chrome.scripting.executeScript:MAIN:synapse-clock",
+    init_script_newly_added: Boolean(result.init_script_newly_added),
+    installed_at_unix_ms: Number.isSafeInteger(result.installed_at_unix_ms) ? result.installed_at_unix_ms : 0,
+    readback: result.readback || {},
+    url: result.url || state.url || "",
+    title: result.title || state.title || "",
+    ready_state: result.ready_state || state.ready_state || "",
+    readback_backend: "chrome.scripting.executeScript(MAIN synapse clock shim)",
+    backend_tier_used: "chrome_tabs_extension",
+    frame_id: Number.isSafeInteger(first.frame_id) ? first.frame_id : null,
+    frame_document_id: first.document_id,
+    frame_result_count: frameResults.length,
+    target_candidate_count: selected.targetCandidateCount,
+    target_selection_reason: selected.selectionReason
+  };
 }
 
 async function handleCapturePageScreenshot(params) {
@@ -2467,6 +2535,288 @@ async function setContentInPage(request) {
       error_code: "CHROME_SCRIPTING_EXECUTE_FAILED",
       error_detail: error && error.message ? String(error.message) : String(error)
     };
+  }
+}
+
+function runClockInPage(request) {
+  const VERSION = "synapse-clock-2026-06-21-v1";
+  const operation = String(request?.operation || "status");
+  const timeMs = request?.timeMs;
+  const deltaMs = request?.deltaMs;
+  const loopLimit = Number.isSafeInteger(request?.loopLimit) ? request.loopLimit : 10000;
+
+  function errorDetail(error) {
+    return error && error.stack ? String(error.stack) : String(error);
+  }
+
+  try {
+    const clock = ensureSynapseClock();
+    let readback;
+    if (operation === "install") {
+      readback = clock.call("install", { nowMs: timeMs, loopLimit });
+    } else if (operation === "status") {
+      readback = clock.call("status", {});
+    } else if (operation === "setFixedTime") {
+      readback = clock.call("setFixedTime", { timeMs });
+    } else if (operation === "fastForward") {
+      readback = clock.call("fastForward", { deltaMs });
+    } else if (operation === "pauseAt") {
+      readback = clock.call("pauseAt", { timeMs });
+    } else {
+      throw new Error("Unknown Synapse browser clock method: " + operation);
+    }
+    return {
+      ok: true,
+      init_script_identifier: "chrome.scripting.executeScript:MAIN:synapse-clock",
+      init_script_newly_added: Boolean(clock.lastInstallNewlyAdded),
+      installed_at_unix_ms: Number.isSafeInteger(clock.installedAtUnixMs) ? clock.installedAtUnixMs : 0,
+      readback,
+      url: String(location.href || ""),
+      title: String(document.title || ""),
+      ready_state: String(document.readyState || "")
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      error_code: "CHROME_CLOCK_FAILED",
+      error_detail: errorDetail(error)
+    };
+  }
+
+  function ensureSynapseClock() {
+    if (globalThis.__synapseClock && globalThis.__synapseClock.version === VERSION) {
+      return globalThis.__synapseClock;
+    }
+
+    const NativeDate = globalThis.Date;
+    const nativePerformanceNow = globalThis.performance && globalThis.performance.now
+      ? globalThis.performance.now.bind(globalThis.performance)
+      : () => 0;
+    const state = {
+      installed: false,
+      nowMs: NativeDate.now(),
+      timers: new Map(),
+      nextTimerId: 1,
+      firedTimerCount: 0,
+      errorCount: 0,
+      lastError: null,
+      loopLimit: 10000,
+      performanceOriginMs: NativeDate.now() - nativePerformanceNow(),
+      installedAtUnixMs: 0
+    };
+
+    function toFiniteMs(value, fallback) {
+      const n = Number(value);
+      return Number.isFinite(n) ? Math.max(0, n) : fallback;
+    }
+
+    function timerDelay(value) {
+      const n = Number(value);
+      if (!Number.isFinite(n)) {
+        return 0;
+      }
+      return Math.max(0, n);
+    }
+
+    function status() {
+      let next = null;
+      for (const timer of state.timers.values()) {
+        if (next === null || timer.due < next) {
+          next = timer.due;
+        }
+      }
+      return {
+        installed: state.installed,
+        version: VERSION,
+        now_ms: Math.floor(state.nowMs),
+        pending_timer_count: state.timers.size,
+        fired_timer_count: state.firedTimerCount,
+        last_timer_id: state.nextTimerId - 1,
+        next_timer_ms: next === null ? null : Math.floor(next),
+        error_count: state.errorCount,
+        last_error: state.lastError
+      };
+    }
+
+    function recordError(error) {
+      state.errorCount += 1;
+      state.lastError = error && error.stack ? String(error.stack) : String(error);
+    }
+
+    function runHandler(timer) {
+      try {
+        if (typeof timer.handler === "function") {
+          timer.handler.apply(globalThis, timer.args);
+        } else {
+          (0, eval)(String(timer.handler));
+        }
+      } catch (error) {
+        recordError(error);
+      }
+    }
+
+    function drainUntil(targetMs) {
+      const target = toFiniteMs(targetMs, state.nowMs);
+      let guard = 0;
+      while (true) {
+        let next = null;
+        for (const timer of state.timers.values()) {
+          if (
+            timer.due <= target &&
+            (next === null || timer.due < next.due || (timer.due === next.due && timer.id < next.id))
+          ) {
+            next = timer;
+          }
+        }
+        if (!next) {
+          break;
+        }
+        if (++guard > state.loopLimit) {
+          throw new Error("Synapse browser clock loop limit exceeded while draining timers");
+        }
+        state.nowMs = next.due;
+        state.timers.delete(next.id);
+        state.firedTimerCount += 1;
+        runHandler(next);
+        if (next.kind === "interval" && !next.cancelled) {
+          const step = Math.max(1, next.delay);
+          next.due = state.nowMs + step;
+          state.timers.set(next.id, next);
+        }
+      }
+      state.nowMs = target;
+    }
+
+    function schedule(kind, handler, delay, args) {
+      const id = state.nextTimerId++;
+      const normalizedDelay = timerDelay(delay);
+      state.timers.set(id, {
+        id,
+        kind,
+        handler,
+        args,
+        delay: normalizedDelay,
+        due: state.nowMs + normalizedDelay,
+        cancelled: false
+      });
+      return id;
+    }
+
+    function clear(id) {
+      const timer = state.timers.get(Number(id));
+      if (timer) {
+        timer.cancelled = true;
+      }
+      state.timers.delete(Number(id));
+    }
+
+    function SynapseDate(...args) {
+      if (this instanceof SynapseDate) {
+        if (args.length === 0) {
+          return new NativeDate(state.nowMs);
+        }
+        return new NativeDate(...args);
+      }
+      return new NativeDate(state.nowMs).toString();
+    }
+
+    Object.setPrototypeOf(SynapseDate, NativeDate);
+    SynapseDate.prototype = NativeDate.prototype;
+    SynapseDate.now = () => Math.floor(state.nowMs);
+    SynapseDate.parse = NativeDate.parse.bind(NativeDate);
+    SynapseDate.UTC = NativeDate.UTC.bind(NativeDate);
+
+    function install(args) {
+      if (args && Object.prototype.hasOwnProperty.call(args, "nowMs") && args.nowMs !== null) {
+        state.nowMs = toFiniteMs(args.nowMs, state.nowMs);
+      }
+      if (args && Object.prototype.hasOwnProperty.call(args, "loopLimit")) {
+        state.loopLimit = Math.max(1, Math.floor(Number(args.loopLimit) || state.loopLimit));
+      }
+      api.lastInstallNewlyAdded = !state.installed;
+      if (!state.installed) {
+        globalThis.Date = SynapseDate;
+        globalThis.setTimeout = (handler, delay, ...rest) => schedule("timeout", handler, delay, rest);
+        globalThis.clearTimeout = clear;
+        globalThis.setInterval = (handler, delay, ...rest) => schedule("interval", handler, delay, rest);
+        globalThis.clearInterval = clear;
+        globalThis.requestAnimationFrame = (handler) =>
+          schedule("raf", (ts) => handler(ts), 16, [Math.max(0, state.nowMs - state.performanceOriginMs)]);
+        globalThis.cancelAnimationFrame = clear;
+        if (globalThis.performance) {
+          try {
+            Object.defineProperty(globalThis.performance, "now", {
+              configurable: true,
+              value: () => Math.max(0, state.nowMs - state.performanceOriginMs)
+            });
+          } catch (_) {}
+        }
+        state.installed = true;
+        state.installedAtUnixMs = NativeDate.now();
+        api.installedAtUnixMs = state.installedAtUnixMs;
+      }
+      return status();
+    }
+
+    function setFixedTime(args) {
+      if (!state.installed) {
+        throw new Error("Synapse browser clock is not installed");
+      }
+      state.nowMs = toFiniteMs(args && args.timeMs, state.nowMs);
+      return status();
+    }
+
+    function fastForward(args) {
+      if (!state.installed) {
+        throw new Error("Synapse browser clock is not installed");
+      }
+      const delta = toFiniteMs(args && args.deltaMs, 0);
+      drainUntil(state.nowMs + delta);
+      return status();
+    }
+
+    function pauseAt(args) {
+      if (!state.installed) {
+        throw new Error("Synapse browser clock is not installed");
+      }
+      const target = toFiniteMs(args && args.timeMs, state.nowMs);
+      if (target < state.nowMs) {
+        throw new Error("Synapse browser clock pauseAt cannot move backwards");
+      }
+      drainUntil(target);
+      return status();
+    }
+
+    const api = {
+      version: VERSION,
+      installedAtUnixMs: 0,
+      lastInstallNewlyAdded: false,
+      call(method, args) {
+        if (method === "install") {
+          return install(args || {});
+        }
+        if (method === "status") {
+          api.lastInstallNewlyAdded = false;
+          return status();
+        }
+        if (method === "setFixedTime") {
+          api.lastInstallNewlyAdded = false;
+          return setFixedTime(args || {});
+        }
+        if (method === "fastForward") {
+          api.lastInstallNewlyAdded = false;
+          return fastForward(args || {});
+        }
+        if (method === "pauseAt") {
+          api.lastInstallNewlyAdded = false;
+          return pauseAt(args || {});
+        }
+        throw new Error("Unknown Synapse browser clock method: " + method);
+      }
+    };
+
+    globalThis.__synapseClock = api;
+    return api;
   }
 }
 
@@ -5182,6 +5532,14 @@ function normalizeWaitTimeout(value) {
     throw bridgeError(ERROR_ATTACH_FAILED, "waitTimeoutMs must be an integer from 1 through 30000");
   }
   return number;
+}
+
+function normalizeClockOperation(value) {
+  const operation = String(value || "status");
+  if (["status", "install", "setFixedTime", "fastForward", "pauseAt"].includes(operation)) {
+    return operation;
+  }
+  throw bridgeError(ERROR_ATTACH_FAILED, `unsupported clock operation ${JSON.stringify(operation)}`);
 }
 
 function normalizeMaxContentBytes(value) {

@@ -97,7 +97,7 @@ registration for the expected Synapse extension so the worker can report its
 with `A11Y_CDP_DEBUGGER_WARNING_UNSUPPRESSED` before queueing any browser work.
 
 Background tab commands (`listTabs`, `openTab`, `closeTab`, `navigateTab`, `activateTab`,
-`targetInfoPageText`, `pageVitals`, `pageContent`, `setContent`, `domAction`, `setFieldValue`, and
+`targetInfoPageText`, `pageVitals`, `pageContent`, `setContent`, `clock`, `domAction`, `setFieldValue`, and
 `typeActiveElement`) use `chrome.windows.getAll`,
 `chrome.tabs.query`, `chrome.tabs.create`, `chrome.tabs.remove`, `chrome.tabs.update`,
 `chrome.tabs.reload`, `chrome.tabs.goBack`, `chrome.tabs.goForward`, and
@@ -120,9 +120,12 @@ changes viewport/layout and breaks coordinate truth. `evaluateScript` is also
 not a normal-bridge capability: arbitrary string evaluation needs raw CDP
 Runtime.evaluate, while `chrome.scripting.executeScript` can safely provide only
 typed, precompiled DOM helpers under normal page/extension CSP. Use
-`targetInfoPageText`, `pageVitals`, `pageContent`, `setContent`, `domAction`, `setFieldValue`, and
+`targetInfoPageText`, `pageVitals`, `pageContent`, `setContent`, `clock`, `domAction`, `setFieldValue`, and
 `typeActiveElement` for popup-free normal-profile read/action work, and use raw
 CDP in a dedicated silent automation profile for arbitrary JavaScript eval.
+`clock` uses the same typed MAIN-world execution model for current-document
+Date/timer control in an owned tab; future-document init-script clock injection
+remains a raw-CDP-only capability.
 `pageVitals` and `targetInfoPageText` read the page Performance Timeline for LCP
 plus document visibility state. No command calls `chrome.debugger.getTargets` or
 `chrome.debugger.attach`; target IDs returned by this path are synthetic
