@@ -3,7 +3,7 @@ source: crates/synapse-mcp/tests/m4_tools_list.rs
 expression: snapshot
 ---
 {
-  "count": 232,
+  "count": 233,
   "m4_defaults": [
     {
       "actual": 33,
@@ -289,6 +289,7 @@ expression: snapshot
     "browser_page_events",
     "browser_resize",
     "browser_route",
+    "browser_scroll_into_view",
     "browser_set_content",
     "browser_set_value",
     "browser_tabs",

@@ -2358,6 +2358,39 @@ pub struct BrowserInspectResponse {
     pub required_foreground: bool,
 }
 
+/// Parameters for `browser_scroll_into_view` (#1123): scroll a resolved DOM
+/// element into the viewport using raw CDP.
+#[derive(Clone, Debug, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct BrowserScrollIntoViewParams {
+    /// Element id (from `find`/`observe`/`browser_locate`) of a CDP web element.
+    pub element_id: String,
+    /// CDP TargetID; defaults to the element's embedded target. When supplied it
+    /// must match the element's target.
+    #[serde(default)]
+    pub cdp_target_id: Option<String>,
+    /// Browser HWND that owns the target. Required only when the active session
+    /// target is absent.
+    #[serde(default)]
+    pub window_hwnd: Option<i64>,
+}
+
+/// Response for `browser_scroll_into_view`.
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct BrowserScrollIntoViewResponse {
+    pub session_id: String,
+    pub window_hwnd: i64,
+    pub transport: String,
+    pub endpoint: String,
+    pub cdp_target_id: String,
+    pub element_id: String,
+    /// Structured `synapse_a11y::CdpScrollIntoViewResult` readback.
+    pub scroll: serde_json::Value,
+    pub readback_backend: String,
+    pub required_foreground: bool,
+}
+
 /// Selector engine for `browser_locate` (#1110) — the full Playwright locator
 /// surface. Each engine resolves to Synapse element ids consumable by every
 /// action tool.

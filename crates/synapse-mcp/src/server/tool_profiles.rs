@@ -77,6 +77,7 @@ const NORMAL_ALLOWED_EXACT: &[&str] = &[
     "browser_page_events",
     "browser_route",
     "browser_resize",
+    "browser_scroll_into_view",
     "browser_set_content",
     "browser_set_value",
     "browser_tabs",
@@ -177,6 +178,7 @@ const BROWSER_CONTROL_ALLOWED_EXACT: &[&str] = &[
     "browser_page_events",
     "browser_route",
     "browser_resize",
+    "browser_scroll_into_view",
     "browser_set_content",
     "browser_set_value",
     "browser_tabs",
@@ -1311,6 +1313,7 @@ mod tests {
                 "browser_network_websockets",
                 "browser_route",
                 "browser_resize",
+                "browser_scroll_into_view",
                 "browser_set_content",
                 "browser_set_value",
                 "browser_wait_for",
@@ -1356,6 +1359,7 @@ mod tests {
         assert!(visible.contains(&"browser_network_websockets".to_owned()));
         assert!(visible.contains(&"browser_route".to_owned()));
         assert!(visible.contains(&"browser_resize".to_owned()));
+        assert!(visible.contains(&"browser_scroll_into_view".to_owned()));
         assert!(visible.contains(&"browser_set_content".to_owned()));
         assert!(visible.contains(&"browser_set_value".to_owned()));
         assert!(visible.contains(&"browser_wait_for".to_owned()));
@@ -1439,6 +1443,7 @@ mod tests {
         assert!(visible.contains(&"browser_network_websockets".to_owned()));
         assert!(visible.contains(&"browser_route".to_owned()));
         assert!(visible.contains(&"browser_resize".to_owned()));
+        assert!(visible.contains(&"browser_scroll_into_view".to_owned()));
         assert!(visible.contains(&"browser_set_content".to_owned()));
         assert!(visible.contains(&"browser_set_value".to_owned()));
         assert!(visible.contains(&"browser_wait_for".to_owned()));

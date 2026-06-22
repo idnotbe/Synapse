@@ -128,6 +128,52 @@ pub struct CdpScrollState {
     pub node_rect_height: f64,
 }
 
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct CdpScrollIntoViewRect {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct CdpScrollIntoViewContainer {
+    pub is_root: bool,
+    pub tag_name: String,
+    pub id: String,
+    pub scroll_left: f64,
+    pub scroll_top: f64,
+    pub scroll_width: f64,
+    pub scroll_height: f64,
+    pub client_width: f64,
+    pub client_height: f64,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct CdpScrollIntoViewSnapshot {
+    pub is_connected: bool,
+    pub viewport_width: f64,
+    pub viewport_height: f64,
+    pub node_rect: CdpScrollIntoViewRect,
+    pub node_fully_in_viewport: bool,
+    pub window_scroll_x: f64,
+    pub window_scroll_y: f64,
+    pub container: CdpScrollIntoViewContainer,
+    pub box_model_content: Option<CdpScrollIntoViewRect>,
+    pub box_model_error: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct CdpScrollIntoViewResult {
+    pub target_id: String,
+    pub backend_node_id: i64,
+    pub before: CdpScrollIntoViewSnapshot,
+    pub after: CdpScrollIntoViewSnapshot,
+    pub window_scroll_changed: bool,
+    pub container_scroll_changed: bool,
+    pub node_fully_in_viewport_after: bool,
+}
+
 /// Active-element Source-of-Truth read from a CDP page target.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct CdpActiveElementState {
@@ -3082,6 +3128,66 @@ pub async fn cdp_set_document_content_target(
     .await
 }
 
+/// Scrolls a resolved web node into view with `DOM.scrollIntoViewIfNeeded` and
+/// returns before/after Source-of-Truth readback for the viewport and nearest
+/// scroll container. Background-safe: no tab activation and no OS foreground
+/// input.
+///
+/// # Errors
+///
+/// `A11Y_CDP_ATTACH_FAILED` if the endpoint/target cannot be reached;
+/// `A11Y_CDP_AXTREE_FAILED` if the node cannot be resolved, the scroll command
+/// fails, or the post-scroll readback cannot be decoded.
+pub async fn cdp_scroll_into_view_node(
+    endpoint: &str,
+    target_id: &str,
+    backend_node_id: i64,
+) -> A11yResult<CdpScrollIntoViewResult> {
+    with_target_page(endpoint, target_id, |page| async move {
+        let target_id = page.target_id().inner().clone();
+        let before = read_scroll_into_view_snapshot(&page, backend_node_id).await?;
+        if !before.is_connected {
+            return Err(A11yError::CdpAxtreeFailed {
+                detail: format!("backendNodeId {backend_node_id} resolved to a detached DOM node"),
+            });
+        }
+        let scroll = ScrollIntoViewIfNeededParams::builder()
+            .backend_node_id(BackendNodeId::new(backend_node_id))
+            .build();
+        page.execute(scroll)
+            .await
+            .map_err(|err| A11yError::CdpAxtreeFailed {
+                detail: format!(
+                    "DOM.scrollIntoViewIfNeeded for backendNodeId {backend_node_id}: {err}"
+                ),
+            })?;
+        let after = read_scroll_into_view_snapshot(&page, backend_node_id).await?;
+        if !after.is_connected {
+            return Err(A11yError::CdpAxtreeFailed {
+                detail: format!(
+                    "backendNodeId {backend_node_id} detached after DOM.scrollIntoViewIfNeeded"
+                ),
+            });
+        }
+        Ok(CdpScrollIntoViewResult {
+            target_id,
+            backend_node_id,
+            window_scroll_changed: scroll_value_changed(
+                before.window_scroll_x,
+                after.window_scroll_x,
+            ) || scroll_value_changed(
+                before.window_scroll_y,
+                after.window_scroll_y,
+            ),
+            container_scroll_changed: container_scroll_changed(&before, &after),
+            node_fully_in_viewport_after: after.node_fully_in_viewport,
+            before,
+            after,
+        })
+    })
+    .await
+}
+
 /// Dispatches wheel events over a web node after scrolling it into view.
 ///
 /// # Errors
@@ -3132,6 +3238,135 @@ pub async fn cdp_scroll_node(
         },
     )
     .await
+}
+
+const SCROLL_INTO_VIEW_STATE_JS: &str = r#"function() {
+    const node = this;
+    const doc = (node && node.ownerDocument) || document;
+    const win = doc.defaultView || window;
+    const root = doc.scrollingElement || doc.documentElement || doc.body;
+    function isElement(value) {
+        return Boolean(value && value.nodeType === 1);
+    }
+    function isScrollable(element) {
+        if (!isElement(element)) { return false; }
+        const style = win.getComputedStyle(element);
+        const overflowY = style.overflowY || '';
+        const overflowX = style.overflowX || '';
+        const canY = /(auto|scroll|overlay)/.test(overflowY)
+            && element.scrollHeight > element.clientHeight;
+        const canX = /(auto|scroll|overlay)/.test(overflowX)
+            && element.scrollWidth > element.clientWidth;
+        return canY || canX;
+    }
+    let container = isElement(node) ? node.parentElement : null;
+    while (container && container !== root && !isScrollable(container)) {
+        container = container.parentElement;
+    }
+    const target = (container && isScrollable(container)) ? container : root;
+    const rect = node && node.getBoundingClientRect
+        ? node.getBoundingClientRect()
+        : { left: 0, top: 0, width: 0, height: 0, right: 0, bottom: 0 };
+    const viewportWidth = Number(win.innerWidth || doc.documentElement.clientWidth || 0);
+    const viewportHeight = Number(win.innerHeight || doc.documentElement.clientHeight || 0);
+    const fullyInViewport = Boolean(
+        node && node.isConnected &&
+        rect.width > 0 && rect.height > 0 &&
+        rect.left >= 0 && rect.top >= 0 &&
+        rect.right <= viewportWidth &&
+        rect.bottom <= viewportHeight
+    );
+    const rootScrollLeft = Number(win.scrollX || root.scrollLeft || 0);
+    const rootScrollTop = Number(win.scrollY || root.scrollTop || 0);
+    return {
+        is_connected: Boolean(node && node.isConnected),
+        viewport_width: viewportWidth,
+        viewport_height: viewportHeight,
+        node_rect: {
+            x: Number(rect.left || 0),
+            y: Number(rect.top || 0),
+            width: Number(rect.width || 0),
+            height: Number(rect.height || 0)
+        },
+        node_fully_in_viewport: fullyInViewport,
+        window_scroll_x: rootScrollLeft,
+        window_scroll_y: rootScrollTop,
+        container: {
+            is_root: target === root,
+            tag_name: String(target && target.tagName || 'DOCUMENT'),
+            id: String(target && target.id || ''),
+            scroll_left: target === root ? rootScrollLeft : Number(target.scrollLeft || 0),
+            scroll_top: target === root ? rootScrollTop : Number(target.scrollTop || 0),
+            scroll_width: Number(target && target.scrollWidth || 0),
+            scroll_height: Number(target && target.scrollHeight || 0),
+            client_width: Number(target && target.clientWidth || viewportWidth),
+            client_height: Number(target && target.clientHeight || viewportHeight)
+        },
+        box_model_content: null,
+        box_model_error: null
+    };
+}"#;
+
+async fn read_scroll_into_view_snapshot(
+    page: &chromiumoxide::Page,
+    backend_node_id: i64,
+) -> A11yResult<CdpScrollIntoViewSnapshot> {
+    let resolve = ResolveNodeParams::builder()
+        .backend_node_id(BackendNodeId::new(backend_node_id))
+        .object_group("synapse_scroll_into_view")
+        .build();
+    let resolved = page
+        .execute(resolve)
+        .await
+        .map_err(|err| A11yError::CdpAxtreeFailed {
+            detail: format!("resolveNode for backendNodeId {backend_node_id}: {err}"),
+        })?;
+    let object_id =
+        resolved
+            .object
+            .object_id
+            .clone()
+            .ok_or_else(|| A11yError::CdpAxtreeFailed {
+                detail: format!(
+                    "resolveNode for backendNodeId {backend_node_id} returned no objectId"
+                ),
+            })?;
+    let call = CallFunctionOnParams::builder()
+        .function_declaration(SCROLL_INTO_VIEW_STATE_JS)
+        .object_id(object_id)
+        .object_group("synapse_scroll_into_view")
+        .return_by_value(true)
+        .silent(true)
+        .build()
+        .map_err(|err| A11yError::CdpAxtreeFailed {
+            detail: format!("build Runtime.callFunctionOn scroll-into-view params: {err}"),
+        })?;
+    let mut snapshot: CdpScrollIntoViewSnapshot =
+        call_function_on_value(page, call, "scroll-into-view").await?;
+    match node_content_rect(page, backend_node_id).await {
+        Ok(rect) => {
+            snapshot.box_model_content = Some(CdpScrollIntoViewRect {
+                x: f64::from(rect.x),
+                y: f64::from(rect.y),
+                width: f64::from(rect.w),
+                height: f64::from(rect.h),
+            })
+        }
+        Err(error) => snapshot.box_model_error = Some(error.to_string()),
+    }
+    Ok(snapshot)
+}
+
+fn container_scroll_changed(
+    before: &CdpScrollIntoViewSnapshot,
+    after: &CdpScrollIntoViewSnapshot,
+) -> bool {
+    scroll_value_changed(before.container.scroll_left, after.container.scroll_left)
+        || scroll_value_changed(before.container.scroll_top, after.container.scroll_top)
+}
+
+fn scroll_value_changed(before: f64, after: f64) -> bool {
+    (before - after).abs() > 0.25
 }
 
 async fn dispatch_dom_scroll(
@@ -4948,5 +5183,50 @@ mod tests {
             CdpUrlMatcher::new("(", CdpUrlMatchKind::Regex).expect_err("invalid regex must fail");
         println!("readback=wait_for_url invalid_regex err={err}");
         assert!(err.to_string().contains("waitForURL regex"));
+    }
+
+    #[test]
+    fn scroll_into_view_change_detection_distinguishes_window_and_container() {
+        fn snapshot(window_y: f64, container_top: f64, is_root: bool) -> CdpScrollIntoViewSnapshot {
+            CdpScrollIntoViewSnapshot {
+                is_connected: true,
+                viewport_width: 800.0,
+                viewport_height: 600.0,
+                node_rect: CdpScrollIntoViewRect {
+                    x: 10.0,
+                    y: 700.0 - window_y - container_top,
+                    width: 40.0,
+                    height: 20.0,
+                },
+                node_fully_in_viewport: false,
+                window_scroll_x: 0.0,
+                window_scroll_y: window_y,
+                container: CdpScrollIntoViewContainer {
+                    is_root,
+                    tag_name: "DIV".to_owned(),
+                    id: "scrollbox".to_owned(),
+                    scroll_left: 0.0,
+                    scroll_top: container_top,
+                    scroll_width: 800.0,
+                    scroll_height: 1400.0,
+                    client_width: 800.0,
+                    client_height: 300.0,
+                },
+                box_model_content: None,
+                box_model_error: None,
+            }
+        }
+
+        let before = snapshot(0.0, 0.0, false);
+        let container_after = snapshot(0.0, 320.0, false);
+        let window_after = snapshot(320.0, 0.0, true);
+
+        assert!(container_scroll_changed(&before, &container_after));
+        assert!(!container_scroll_changed(&before, &window_after));
+        assert!(scroll_value_changed(
+            before.window_scroll_y,
+            window_after.window_scroll_y
+        ));
+        assert!(!scroll_value_changed(10.0, 10.1));
     }
 }

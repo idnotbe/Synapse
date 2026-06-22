@@ -6,17 +6,17 @@ use super::{
     BrowserExposeBindingOperation, BrowserExposeBindingParams, BrowserExposeBindingResponse,
     BrowserFrameLocator, BrowserInitScriptOperation, BrowserInspectParams, BrowserInspectResponse,
     BrowserLayoutRelation, BrowserLocateEngine, BrowserLocateParams, BrowserLocateResponse,
-    BrowserLocatedFrame, BrowserNetworkWaitEntry, BrowserSetContentParams,
-    BrowserSetContentResponse, BrowserTabEntry, BrowserTabsParams, BrowserTabsResponse,
-    BrowserWaitForFunctionParams, BrowserWaitForFunctionResponse, BrowserWaitForLoadStateParams,
-    BrowserWaitForLoadStateResponse, BrowserWaitForLoadStateState,
-    BrowserWaitForNetworkResponseParams, BrowserWaitForNetworkResponseResponse,
-    BrowserWaitForParams, BrowserWaitForRequestParams, BrowserWaitForRequestResponse,
-    BrowserWaitForResponse, BrowserWaitForSelectorParams, BrowserWaitForSelectorResponse,
-    BrowserWaitForSelectorState, BrowserWaitForState, BrowserWaitForUrlMatchKind,
-    BrowserWaitForUrlParams, BrowserWaitForUrlResponse, CaptureScreenshotFormat,
-    CaptureScreenshotParams, CaptureScreenshotResponse, CdpActivateTabParams,
-    CdpActivateTabResponse, CdpActiveElementInfo, CdpBridgeHostReadback,
+    BrowserLocatedFrame, BrowserNetworkWaitEntry, BrowserScrollIntoViewParams,
+    BrowserScrollIntoViewResponse, BrowserSetContentParams, BrowserSetContentResponse,
+    BrowserTabEntry, BrowserTabsParams, BrowserTabsResponse, BrowserWaitForFunctionParams,
+    BrowserWaitForFunctionResponse, BrowserWaitForLoadStateParams, BrowserWaitForLoadStateResponse,
+    BrowserWaitForLoadStateState, BrowserWaitForNetworkResponseParams,
+    BrowserWaitForNetworkResponseResponse, BrowserWaitForParams, BrowserWaitForRequestParams,
+    BrowserWaitForRequestResponse, BrowserWaitForResponse, BrowserWaitForSelectorParams,
+    BrowserWaitForSelectorResponse, BrowserWaitForSelectorState, BrowserWaitForState,
+    BrowserWaitForUrlMatchKind, BrowserWaitForUrlParams, BrowserWaitForUrlResponse,
+    CaptureScreenshotFormat, CaptureScreenshotParams, CaptureScreenshotResponse,
+    CdpActivateTabParams, CdpActivateTabResponse, CdpActiveElementInfo, CdpBridgeHostReadback,
     CdpBridgeReloadAckReadback, CdpBridgeReloadParams, CdpBridgeReloadResponse, CdpCloseTabParams,
     CdpCloseTabResponse, CdpLargestContentfulPaintInfo, CdpNavigateAction, CdpNavigateTabParams,
     CdpNavigateTabResponse, CdpOpenTabParams, CdpOpenTabResponse, CdpPageTextInfo,
@@ -2866,6 +2866,81 @@ impl SynapseService {
                 &params.0.element_id,
                 backend_node_id,
                 max_html_bytes,
+            )
+            .await;
+        self.audit_action_result_for_session(TOOL, &result, &session_id)?;
+        result.map(Json)
+    }
+
+    #[tool(
+        description = "Scroll a resolved DOM element in the calling session's owned background browser tab into view via raw CDP `DOM.scrollIntoViewIfNeeded`, returning before/after viewport, box-model, and nearest scroll-container readback. Handles off-screen nodes and nested scroll containers without activating the tab or using OS foreground input. The element id carries its CDP target and must belong to this session; raw CDP only."
+    )]
+    pub async fn browser_scroll_into_view(
+        &self,
+        params: Parameters<BrowserScrollIntoViewParams>,
+        request_context: RequestContext<RoleServer>,
+    ) -> Result<Json<BrowserScrollIntoViewResponse>, ErrorData> {
+        const TOOL: &str = "browser_scroll_into_view";
+        tracing::info!(
+            code = "MCP_TOOL_INVOCATION",
+            kind = TOOL,
+            "tool.invocation kind=browser_scroll_into_view"
+        );
+        let session_id = require_target_session_id(&request_context)?;
+        if params.0.element_id.trim().is_empty() {
+            return Err(mcp_error(
+                error_codes::TOOL_PARAMS_INVALID,
+                "browser_scroll_into_view requires a non-empty element_id",
+            ));
+        }
+        let (backend_node_id, element_target) =
+            parse_browser_evaluate_element(&params.0.element_id)?;
+        if let Some(explicit) = params.0.cdp_target_id.as_deref() {
+            validate_cdp_target_id(explicit)?;
+            if !element_target.eq_ignore_ascii_case(explicit) {
+                return Err(mcp_error(
+                    error_codes::ACTION_TARGET_INVALID,
+                    format!(
+                        "browser_scroll_into_view element_id resolves to CDP target {element_target:?} but cdp_target_id {explicit:?} was also supplied; they must match"
+                    ),
+                ));
+            }
+        }
+        let request_details = json!({
+            "session_id": &session_id,
+            "window_hwnd": params.0.window_hwnd,
+            "element_id": &params.0.element_id,
+            "requested_cdp_target": cdp_target_id_audit_ref(Some(element_target.as_str())),
+            "required_foreground": false,
+            "phase": "target_resolution",
+        });
+        let resolution = self.resolve_cdp_tab_mutation_target(
+            TOOL,
+            &session_id,
+            params.0.window_hwnd,
+            Some(element_target.as_str()),
+        );
+        let (window_hwnd, cdp_target_id) = self.audit_cdp_target_resolution_result(
+            TOOL,
+            &session_id,
+            &request_details,
+            resolution,
+        )?;
+        let request_details = json!({
+            "session_id": &session_id,
+            "window_hwnd": window_hwnd,
+            "cdp_target_id": &cdp_target_id,
+            "element_id": &params.0.element_id,
+            "required_foreground": false,
+        });
+        self.audit_action_started_with_details_for_session(TOOL, &request_details, &session_id)?;
+        let result = self
+            .browser_scroll_into_view_impl(
+                &session_id,
+                window_hwnd,
+                &cdp_target_id,
+                &params.0.element_id,
+                backend_node_id,
             )
             .await;
         self.audit_action_result_for_session(TOOL, &result, &session_id)?;
@@ -6428,6 +6503,76 @@ impl SynapseService {
         Err(mcp_error(
             error_codes::A11Y_NOT_AVAILABLE,
             "browser_inspect is only available on Windows in this build",
+        ))
+    }
+
+    #[cfg(windows)]
+    async fn browser_scroll_into_view_impl(
+        &self,
+        session_id: &str,
+        window_hwnd: i64,
+        cdp_target_id: &str,
+        element_id: &str,
+        backend_node_id: i64,
+    ) -> Result<BrowserScrollIntoViewResponse, ErrorData> {
+        let Some(endpoint) = synapse_a11y::endpoint_for_window(window_hwnd) else {
+            return Err(browser_raw_cdp_required_error(
+                "browser_scroll_into_view",
+                window_hwnd,
+            ));
+        };
+        let scrolled =
+            synapse_a11y::cdp_scroll_into_view_node(&endpoint, cdp_target_id, backend_node_id)
+                .await
+                .map_err(|error| {
+                    mcp_error(
+                        error.code(),
+                        format!("browser_scroll_into_view raw CDP scroll failed: {error}"),
+                    )
+                })?;
+        tracing::info!(
+            code = "CDP_BACKGROUND_SCROLL_INTO_VIEW",
+            session_id = %session_id,
+            hwnd = window_hwnd,
+            endpoint = %endpoint,
+            cdp_target_id = %scrolled.target_id,
+            element_id = element_id,
+            window_scroll_changed = scrolled.window_scroll_changed,
+            container_scroll_changed = scrolled.container_scroll_changed,
+            node_fully_in_viewport_after = scrolled.node_fully_in_viewport_after,
+            "readback=DOM.scrollIntoViewIfNeeded+Runtime.callFunctionOn+DOM.getBoxModel outcome=element_scrolled_into_view"
+        );
+        Ok(BrowserScrollIntoViewResponse {
+            session_id: session_id.to_owned(),
+            window_hwnd,
+            transport: "raw_cdp".to_owned(),
+            endpoint,
+            cdp_target_id: scrolled.target_id.clone(),
+            element_id: element_id.to_owned(),
+            scroll: serde_json::to_value(&scrolled).map_err(|error| {
+                mcp_error(
+                    error_codes::OBSERVE_INTERNAL,
+                    format!("browser_scroll_into_view payload encode failed: {error}"),
+                )
+            })?,
+            readback_backend:
+                "DOM.scrollIntoViewIfNeeded + Runtime.callFunctionOn + DOM.getBoxModel".to_owned(),
+            required_foreground: false,
+        })
+    }
+
+    #[cfg(not(windows))]
+    async fn browser_scroll_into_view_impl(
+        &self,
+        _session_id: &str,
+        _window_hwnd: i64,
+        _cdp_target_id: &str,
+        _element_id: &str,
+        _backend_node_id: i64,
+    ) -> Result<BrowserScrollIntoViewResponse, ErrorData> {
+        Err(mcp_error(
+            error_codes::A11Y_NOT_AVAILABLE,
+            "browser_scroll_into_view is only available on Windows in this build",
         ))
     }
 
