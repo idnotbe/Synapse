@@ -40,9 +40,9 @@ const NATIVE_HOST_NAME: &str = "com.synapse.chrome_debugger";
 const EXTENSION_ORIGIN: &str = "chrome-extension://leoocgnkjnplbfdbklajepahofecgfbk";
 const BRIDGE_TOKEN_HEADER: &str = "x-synapse-bridge-token";
 const BRIDGE_PROTOCOL_VERSION: u32 = 1;
-const EXPECTED_EXTENSION_BUILD_ID: &str = "synapse-chrome-bridge-2026-06-22-actionability-v11";
+const EXPECTED_EXTENSION_BUILD_ID: &str = "synapse-chrome-bridge-2026-06-22-waits-v1";
 const EXPECTED_EXTENSION_BUILD_SHA256: &str =
-    "0f7195ec4fa4b0a38ee3aba9da66c3f4c97105fa151c2cbbed012352f573de80";
+    "46ca3905f1c8a9ad3c24d06a79cd3c0aa6124328bf3157c779e32bc17eb0117a";
 const SYNAPSE_CHROME_BLOCKED_INSTALL_MESSAGE: &str = "Synapse blocked this extension on this host because debugger/nativeMessaging permissions can surface Chrome debugger or native-host popups during background automation.";
 const REQUIRED_DIRECT_HTTP_CAPABILITIES: &[&str] = &[
     "alarmReconnect",
@@ -62,6 +62,8 @@ const REQUIRED_DIRECT_HTTP_CAPABILITIES: &[&str] = &[
     "locateElements",
     "inspectElement",
     "scrollIntoView",
+    "waitForText",
+    "waitForSelector",
     "clock",
     "pageEvents",
     "reloadSelf",
@@ -1856,6 +1858,102 @@ pub(crate) struct ChromeDebuggerLocateElementsResult {
     pub truncated: bool,
     #[serde(default)]
     pub element_ids: Vec<String>,
+    #[serde(default)]
+    pub readback_backend: String,
+    #[serde(default)]
+    pub backend_tier_used: String,
+    #[serde(default)]
+    pub required_foreground: bool,
+    #[serde(default)]
+    pub frame_result_count: u32,
+    pub target_candidate_count: u32,
+    pub target_selection_reason: String,
+    #[serde(default)]
+    pub extension_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub(crate) struct ChromeDebuggerWaitForTextResult {
+    pub target_id: String,
+    pub tab_id: u32,
+    #[serde(default)]
+    pub chrome_window_id: Option<i64>,
+    #[serde(default)]
+    pub url: String,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub ready_state: String,
+    #[serde(default)]
+    pub state: String,
+    #[serde(default)]
+    pub text: Option<String>,
+    #[serde(default)]
+    pub condition_met: bool,
+    #[serde(default)]
+    pub timed_out: bool,
+    #[serde(default)]
+    pub elapsed_ms: u64,
+    #[serde(default)]
+    pub timeout_ms: u64,
+    #[serde(default)]
+    pub polling_interval_ms: u64,
+    #[serde(default)]
+    pub poll_count: u64,
+    #[serde(default)]
+    pub observed_text_len: usize,
+    #[serde(default)]
+    pub readback_backend: String,
+    #[serde(default)]
+    pub backend_tier_used: String,
+    #[serde(default)]
+    pub required_foreground: bool,
+    pub target_candidate_count: u32,
+    pub target_selection_reason: String,
+    #[serde(default)]
+    pub extension_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub(crate) struct ChromeDebuggerWaitForSelectorResult {
+    pub target_id: String,
+    pub tab_id: u32,
+    #[serde(default)]
+    pub chrome_window_id: Option<i64>,
+    #[serde(default)]
+    pub url: String,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub ready_state: String,
+    #[serde(default)]
+    pub engine: String,
+    #[serde(default)]
+    pub query: String,
+    #[serde(default)]
+    pub state: String,
+    #[serde(default)]
+    pub condition_met: bool,
+    #[serde(default)]
+    pub timed_out: bool,
+    #[serde(default)]
+    pub elapsed_ms: u64,
+    #[serde(default)]
+    pub timeout_ms: u64,
+    #[serde(default)]
+    pub polling_interval_ms: u64,
+    #[serde(default)]
+    pub poll_count: u64,
+    #[serde(default)]
+    pub match_count: usize,
+    #[serde(default)]
+    pub returned_count: usize,
+    #[serde(default)]
+    pub visible_count: usize,
+    #[serde(default)]
+    pub truncated: bool,
+    #[serde(default)]
+    pub element_id: Option<String>,
     #[serde(default)]
     pub readback_backend: String,
     #[serde(default)]
@@ -4370,6 +4468,66 @@ pub(crate) async fn scroll_into_view(
     serde_json::from_value::<ChromeDebuggerScrollIntoViewResult>(result).map_err(|error| {
         ChromeDebuggerBridgeError::protocol(format!(
             "decode Chrome debugger scrollIntoView response: {error}"
+        ))
+    })
+}
+
+pub(crate) async fn wait_for_text(
+    hwnd: i64,
+    target_id: &str,
+    state: &str,
+    text: Option<&str>,
+    timeout_ms: u64,
+    polling_interval_ms: u64,
+) -> Result<ChromeDebuggerWaitForTextResult, ChromeDebuggerBridgeError> {
+    ensure_normal_bridge_external_popup_suppressed(hwnd, "waitForText")?;
+    let result = bridge()
+        .send_command(
+            "waitForText",
+            json!({
+                "hwnd": hwnd,
+                "targetIdHint": target_id,
+                "state": state,
+                "text": text,
+                "timeoutMs": timeout_ms,
+                "pollingIntervalMs": polling_interval_ms,
+            }),
+        )
+        .await?;
+    serde_json::from_value::<ChromeDebuggerWaitForTextResult>(result).map_err(|error| {
+        ChromeDebuggerBridgeError::protocol(format!(
+            "decode Chrome debugger waitForText response: {error}"
+        ))
+    })
+}
+
+pub(crate) async fn wait_for_selector(
+    hwnd: i64,
+    target_id: &str,
+    locator: Value,
+    limit: usize,
+    state: &str,
+    timeout_ms: u64,
+    polling_interval_ms: u64,
+) -> Result<ChromeDebuggerWaitForSelectorResult, ChromeDebuggerBridgeError> {
+    ensure_normal_bridge_external_popup_suppressed(hwnd, "waitForSelector")?;
+    let result = bridge()
+        .send_command(
+            "waitForSelector",
+            json!({
+                "hwnd": hwnd,
+                "targetIdHint": target_id,
+                "locator": locator,
+                "limit": limit,
+                "state": state,
+                "timeoutMs": timeout_ms,
+                "pollingIntervalMs": polling_interval_ms,
+            }),
+        )
+        .await?;
+    serde_json::from_value::<ChromeDebuggerWaitForSelectorResult>(result).map_err(|error| {
+        ChromeDebuggerBridgeError::protocol(format!(
+            "decode Chrome debugger waitForSelector response: {error}"
         ))
     })
 }

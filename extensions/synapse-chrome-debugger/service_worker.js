@@ -1,6 +1,6 @@
 const PROTOCOL_VERSION = 1;
-const BRIDGE_BUILD_ID = "synapse-chrome-bridge-2026-06-22-actionability-v11";
-const BRIDGE_BUILD_SHA256 = "0f7195ec4fa4b0a38ee3aba9da66c3f4c97105fa151c2cbbed012352f573de80";
+const BRIDGE_BUILD_ID = "synapse-chrome-bridge-2026-06-22-waits-v1";
+const BRIDGE_BUILD_SHA256 = "46ca3905f1c8a9ad3c24d06a79cd3c0aa6124328bf3157c779e32bc17eb0117a";
 const COMMAND_CAPABILITIES = Object.freeze([
   "alarmReconnect",
   "externalPopupRiskSuppression",
@@ -19,6 +19,8 @@ const COMMAND_CAPABILITIES = Object.freeze([
   "locateElements",
   "inspectElement",
   "scrollIntoView",
+  "waitForText",
+  "waitForSelector",
   "clock",
   "pageEvents",
   "domAction",
@@ -320,6 +322,8 @@ function commandRequiresExternalPopupSuppression(kind) {
     "locateElements",
     "inspectElement",
     "scrollIntoView",
+    "waitForText",
+    "waitForSelector",
     "clock",
     "pageEvents",
     "navigateTab",
@@ -769,6 +773,10 @@ async function handleCommand(command) {
       result = await handleInspectElement(params);
     } else if (kind === "scrollIntoView") {
       result = await handleScrollIntoView(params);
+    } else if (kind === "waitForText") {
+      result = await handleWaitForText(params);
+    } else if (kind === "waitForSelector") {
+      result = await handleWaitForSelector(params);
     } else if (kind === "clock") {
       result = await handleClock(params);
     } else if (kind === "pageEvents") {
@@ -1547,6 +1555,96 @@ async function handleScrollIntoView(params) {
     target_candidate_count: selected.targetCandidateCount,
     target_selection_reason: selected.selectionReason
   };
+}
+
+async function handleWaitForText(params) {
+  const selected = await selectTabTarget(params, { requireTargetId: true });
+  const state = normalizeWaitForTextState(params.state);
+  const expectedText = String(params.text ?? "");
+  const timeoutMs = normalizeWaitTimeout(params.timeoutMs);
+  const pollingIntervalMs = normalizePollingInterval(params.pollingIntervalMs);
+  if (state !== "timeout" && expectedText.length === 0) {
+    throw bridgeError(ERROR_ATTACH_FAILED, "waitForText text must be non-empty unless state=timeout");
+  }
+  if (state === "timeout" && expectedText.length > 0) {
+    throw bridgeError(ERROR_ATTACH_FAILED, "waitForText state=timeout does not accept text");
+  }
+  const startedAt = Date.now();
+  let pollCount = 0;
+  let lastTextLen = 0;
+  let lastPageText = null;
+  while (true) {
+    if (state === "timeout") {
+      await sleep(timeoutMs);
+      lastPageText = await tabPageTextState(selected.tabId);
+      lastTextLen = Number.isSafeInteger(lastPageText?.text_len) ? lastPageText.text_len : 0;
+      break;
+    }
+    pollCount += 1;
+    lastPageText = await tabPageTextState(selected.tabId);
+    if (!lastPageText.available) {
+      throw bridgeError(
+        String(lastPageText.error_code || ERROR_CHROME_SCRIPTING_EXECUTE_FAILED),
+        `waitForText page text read failed: ${String(lastPageText.error_detail || "")}`
+      );
+    }
+    const pageText = String(lastPageText.text || "");
+    lastTextLen = Number.isSafeInteger(lastPageText.text_len) ? lastPageText.text_len : pageText.length;
+    const contains = pageText.includes(expectedText);
+    const conditionMet = state === "text_gone" ? !contains : contains;
+    if (conditionMet) {
+      break;
+    }
+    const elapsed = elapsedSince(startedAt);
+    if (elapsed >= timeoutMs) {
+      const stateNow = await tabPageState(selected.tabId, selected.target);
+      return waitForTextResult(selected, stateNow, lastPageText, state, expectedText, false, true, elapsed, timeoutMs, pollingIntervalMs, pollCount, lastTextLen);
+    }
+    await sleep(Math.min(pollingIntervalMs, Math.max(1, timeoutMs - elapsed)));
+  }
+  const pageState = await tabPageState(selected.tabId, selected.target);
+  return waitForTextResult(
+    selected,
+    pageState,
+    lastPageText,
+    state,
+    expectedText,
+    true,
+    false,
+    elapsedSince(startedAt),
+    timeoutMs,
+    pollingIntervalMs,
+    pollCount,
+    lastTextLen
+  );
+}
+
+async function handleWaitForSelector(params) {
+  const selected = await selectTabTarget(params, { requireTargetId: true });
+  const state = normalizeWaitForSelectorState(params.state);
+  const timeoutMs = normalizeWaitTimeout(params.timeoutMs);
+  const pollingIntervalMs = normalizePollingInterval(params.pollingIntervalMs);
+  const locator = plainObjectOrEmpty(params.locator);
+  const limit = normalizeAssertLimit(params.limit);
+  const root = parseChromeBridgeElementId(locator.root_element_id, selected.tabId, "waitForSelector");
+  const startedAt = Date.now();
+  let pollCount = 0;
+  let last = null;
+  while (true) {
+    pollCount += 1;
+    const poll = await waitForSelectorPoll(selected, locator, limit, root, state);
+    last = poll;
+    if (poll.condition_met) {
+      const pageState = await tabPageState(selected.tabId, selected.target);
+      return waitForSelectorResult(selected, pageState, locator, state, true, false, elapsedSince(startedAt), timeoutMs, pollingIntervalMs, pollCount, poll);
+    }
+    const elapsed = elapsedSince(startedAt);
+    if (elapsed >= timeoutMs) {
+      const pageState = await tabPageState(selected.tabId, selected.target);
+      return waitForSelectorResult(selected, pageState, locator, state, false, true, elapsed, timeoutMs, pollingIntervalMs, pollCount, last);
+    }
+    await sleep(Math.min(pollingIntervalMs, Math.max(1, timeoutMs - elapsed)));
+  }
 }
 
 async function handleClock(params) {
@@ -2973,6 +3071,219 @@ function aggregatePageTextFrames(frames, maxChars) {
   };
 }
 
+function waitForTextResult(
+  selected,
+  pageState,
+  pageText,
+  state,
+  expectedText,
+  conditionMet,
+  timedOut,
+  elapsedMs,
+  timeoutMs,
+  pollingIntervalMs,
+  pollCount,
+  observedTextLen
+) {
+  return {
+    extension_id: chrome.runtime.id,
+    target_id: pageState.target_id || selected.target.id,
+    tab_id: selected.tabId,
+    chrome_window_id: pageState.chrome_window_id,
+    url: pageState.url || pageText?.url || "",
+    title: pageState.title || pageText?.title || "",
+    ready_state: pageText?.ready_state || pageState.ready_state || "",
+    state,
+    text: expectedText || null,
+    condition_met: Boolean(conditionMet),
+    timed_out: Boolean(timedOut),
+    elapsed_ms: elapsedMs,
+    timeout_ms: timeoutMs,
+    polling_interval_ms: pollingIntervalMs,
+    poll_count: pollCount,
+    observed_text_len: observedTextLen,
+    readback_backend: "chrome.scripting.executeScript(page text polling)",
+    backend_tier_used: "chrome_tabs_extension",
+    required_foreground: false,
+    target_candidate_count: selected.targetCandidateCount,
+    target_selection_reason: selected.selectionReason
+  };
+}
+
+async function waitForSelectorPoll(selected, locator, limit, root, state) {
+  if (!chrome.scripting || typeof chrome.scripting.executeScript !== "function") {
+    throw bridgeError(
+      ERROR_CHROME_SCRIPTING_EXECUTE_FAILED,
+      "chrome.scripting.executeScript unavailable; extension is missing scripting permission"
+    );
+  }
+  let injected;
+  try {
+    injected = await chrome.scripting.executeScript({
+      target: root.frameId === null ? { tabId: selected.tabId, allFrames: true } : { tabId: selected.tabId, frameIds: [root.frameId] },
+      func: runAssertPollInPage,
+      args: [{ locator, limit, rootPath: root.path }]
+    });
+  } catch (error) {
+    throw bridgeError(
+      ERROR_CHROME_SCRIPTING_EXECUTE_FAILED,
+      `chrome.scripting.executeScript waitForSelector(${selected.tabId}) failed: ${errorMessage(error)}`
+    );
+  }
+  const frames = frameExecutionResults(injected);
+  const resultFrames = frames.filter((frame) => frame.result && typeof frame.result === "object");
+  if (resultFrames.length === 0) {
+    throw bridgeError(ERROR_CHROME_SCRIPTING_EXECUTE_FAILED, "chrome.scripting.executeScript waitForSelector returned no structured result");
+  }
+  const failingFrame = resultFrames.find((frame) => frame.result && frame.result.ok === false);
+  if (failingFrame) {
+    throw bridgeError(
+      String(failingFrame.result.error_code || ERROR_CHROME_SCRIPTING_EXECUTE_FAILED),
+      `waitForSelector failed: ${String(failingFrame.result.error_detail || "")}`
+    );
+  }
+  const normalized = selectorPollSummary(selected, resultFrames, limit);
+  const condition = waitForSelectorCondition(state, normalized);
+  return {
+    ...normalized,
+    condition_met: condition.conditionMet,
+    element_id: condition.elementId,
+    frame_result_count: frames.length,
+    frame_results: frames.map(summarizeFrameExecutionResult)
+  };
+}
+
+function selectorPollSummary(selected, resultFrames, limit) {
+  let matchCount = 0;
+  let truncated = false;
+  let url = "";
+  let title = "";
+  let readyState = "";
+  const returned = [];
+  for (const frame of resultFrames) {
+    const result = frame.result || {};
+    const frameMatchCount = Number.isSafeInteger(result.match_count) && result.match_count > 0
+      ? result.match_count
+      : 0;
+    matchCount += frameMatchCount;
+    truncated = truncated || Boolean(result.truncated);
+    url = url || String(result.url || "");
+    title = title || String(result.title || "");
+    readyState = readyState || String(result.ready_state || "");
+    const localIds = Array.isArray(result.local_element_ids)
+      ? result.local_element_ids
+      : (result.local_element_id ? [result.local_element_id] : []);
+    const states = Array.isArray(result.element_states)
+      ? result.element_states
+      : (result.element_state ? [result.element_state] : []);
+    for (let index = 0; index < localIds.length && returned.length < limit; index += 1) {
+      if (!Number.isSafeInteger(frame.frame_id)) {
+        continue;
+      }
+      returned.push({
+        elementId: chromeBridgeElementId(selected.tabId, frame.frame_id, String(localIds[index])),
+        state: states[index] && typeof states[index] === "object" ? states[index] : null
+      });
+    }
+  }
+  const visible = returned.filter((item) => item.state?.is_visible === true);
+  return {
+    match_count: matchCount,
+    returned_count: returned.length,
+    visible_count: visible.length,
+    truncated,
+    returned,
+    visible,
+    url,
+    title,
+    ready_state: readyState
+  };
+}
+
+function waitForSelectorCondition(state, poll) {
+  if (state === "attached") {
+    return {
+      conditionMet: poll.match_count > 0,
+      elementId: poll.returned[0]?.elementId || null
+    };
+  }
+  if (state === "visible") {
+    return {
+      conditionMet: poll.visible.length > 0,
+      elementId: poll.visible[0]?.elementId || null
+    };
+  }
+  if (state === "hidden") {
+    const absent = poll.match_count === 0;
+    const hidden = !absent && poll.visible_count === 0 && !poll.truncated;
+    return {
+      conditionMet: absent || hidden,
+      elementId: hidden ? (poll.returned[0]?.elementId || null) : null
+    };
+  }
+  return {
+    conditionMet: poll.match_count === 0,
+    elementId: null
+  };
+}
+
+function waitForSelectorResult(
+  selected,
+  pageState,
+  locator,
+  state,
+  conditionMet,
+  timedOut,
+  elapsedMs,
+  timeoutMs,
+  pollingIntervalMs,
+  pollCount,
+  poll
+) {
+  const current = poll || {
+    match_count: 0,
+    returned_count: 0,
+    visible_count: 0,
+    truncated: false,
+    element_id: null,
+    url: "",
+    title: "",
+    ready_state: "",
+    frame_result_count: 0,
+    frame_results: []
+  };
+  return {
+    extension_id: chrome.runtime.id,
+    target_id: pageState.target_id || selected.target.id,
+    tab_id: selected.tabId,
+    chrome_window_id: pageState.chrome_window_id,
+    url: current.url || pageState.url || "",
+    title: current.title || pageState.title || "",
+    ready_state: current.ready_state || pageState.ready_state || "",
+    engine: String(locator.engine || "css").toLowerCase(),
+    query: String(locator.query || ""),
+    state,
+    condition_met: Boolean(conditionMet),
+    timed_out: Boolean(timedOut),
+    elapsed_ms: elapsedMs,
+    timeout_ms: timeoutMs,
+    polling_interval_ms: pollingIntervalMs,
+    poll_count: pollCount,
+    match_count: current.match_count || 0,
+    returned_count: current.returned_count || 0,
+    visible_count: current.visible_count || 0,
+    truncated: Boolean(current.truncated),
+    element_id: current.element_id || null,
+    readback_backend: "chrome.scripting.executeScript(locator polling)",
+    backend_tier_used: "chrome_tabs_extension",
+    required_foreground: false,
+    frame_result_count: current.frame_result_count || 0,
+    frame_results: current.frame_results || [],
+    target_candidate_count: selected.targetCandidateCount,
+    target_selection_reason: selected.selectionReason
+  };
+}
+
 function optionalInteger(value) {
   if (value === undefined || value === null || value === "") {
     return null;
@@ -3133,12 +3444,14 @@ function runAssertPollInPage(request) {
   const candidates = resolved.elements;
   const returned = candidates.slice(0, limit);
   const selected = returned[0] || null;
+  const elementStates = returned.map(elementState);
   return {
     ok: true,
     match_count: candidates.length,
     returned_count: returned.length,
     local_element_id: selected ? domPath(selected) : null,
     local_element_ids: returned.map(domPath),
+    element_states: elementStates,
     truncated: candidates.length > returned.length && !Number.isSafeInteger(loc.nth),
     element_state: selected ? elementState(selected) : null,
     url: String(location.href || ""),
@@ -9056,6 +9369,33 @@ function normalizeWaitTimeout(value) {
     throw bridgeError(ERROR_ATTACH_FAILED, "waitTimeoutMs must be an integer from 1 through 30000");
   }
   return number;
+}
+
+function normalizePollingInterval(value) {
+  if (value === undefined || value === null) {
+    return 100;
+  }
+  const number = Number(value);
+  if (!Number.isInteger(number) || number < 10 || number > 5000) {
+    throw bridgeError(ERROR_ATTACH_FAILED, "pollingIntervalMs must be an integer from 10 through 5000");
+  }
+  return number;
+}
+
+function normalizeWaitForTextState(value) {
+  const state = String(value || "text_appears");
+  if (state === "text_appears" || state === "text_gone" || state === "timeout") {
+    return state;
+  }
+  throw bridgeError(ERROR_ATTACH_FAILED, `unsupported waitForText state ${JSON.stringify(state)}`);
+}
+
+function normalizeWaitForSelectorState(value) {
+  const state = String(value || "visible");
+  if (state === "attached" || state === "visible" || state === "hidden" || state === "detached") {
+    return state;
+  }
+  throw bridgeError(ERROR_ATTACH_FAILED, `unsupported waitForSelector state ${JSON.stringify(state)}`);
 }
 
 function normalizeDomActionAutoWaitTimeout(value, enabled) {

@@ -2124,7 +2124,7 @@ impl SynapseService {
     }
 
     #[tool(
-        description = "Wait in the calling session's owned browser tab for text to appear, text to disappear, or for a plain timeout. If text is supplied without state, waits for text_appears; if text is omitted, defaults to timeout. Uses raw CDP Runtime.evaluate to poll DOM text in-page and returns URL/title/readyState read back from the same target. Condition failures return BROWSER_WAIT_TIMEOUT. Target-scoped and background-safe: never activates the tab, never uses OS foreground input, and never falls back to the human foreground tab. Raw CDP only; the popup-safe normal Chrome extension bridge fails closed."
+        description = "Wait in the calling session's owned browser tab for text to appear, text to disappear, or for a plain timeout. If text is supplied without state, waits for text_appears; if text is omitted, defaults to timeout. Uses raw CDP Runtime.evaluate when available or the debugger-free normal Chrome bridge page-text polling helper for chrome-tab:* targets, then returns URL/title/readyState read back from the same target. Condition failures return BROWSER_WAIT_TIMEOUT. Target-scoped and background-safe: never activates the tab, never uses OS foreground input, and never falls back to the human foreground tab."
     )]
     pub async fn browser_wait_for(
         &self,
@@ -2415,7 +2415,7 @@ impl SynapseService {
     }
 
     #[tool(
-        description = "Wait for a Playwright-style selector in the calling session's owned browser tab to reach state attached | visible | hidden | detached. Uses the same selector engines/options as browser_locate (css/xpath/text/role/label/placeholder/alttext/title/testid/layout), including frame {frame_id|frame_element_id|name|url|index} scoping for same-target frames and OOPIF child targets; returns an element_id when the satisfied state has a concrete matched element, and returns BROWSER_WAIT_TIMEOUT on timeout. Target-scoped and background-safe: never activates the tab, never uses OS foreground input, and never falls back to the human foreground tab. Raw CDP only; the popup-safe normal Chrome extension bridge fails closed."
+        description = "Wait for a Playwright-style selector in the calling session's owned browser tab to reach state attached | visible | hidden | detached. Uses the same selector engines/options as browser_locate (css/xpath/text/role/label/placeholder/alttext/title/testid/layout), with raw CDP frame scoping when available and debugger-free normal Chrome bridge all-frame polling for chrome-tab:* targets. Returns an element_id when the satisfied state has a concrete matched element, and returns BROWSER_WAIT_TIMEOUT on timeout. Target-scoped and background-safe: never activates the tab, never uses OS foreground input, and never falls back to the human foreground tab."
     )]
     pub async fn browser_wait_for_selector(
         &self,
@@ -5528,6 +5528,71 @@ impl SynapseService {
     ) -> Result<BrowserWaitForResponse, ErrorData> {
         const TOOL: &str = "browser_wait_for";
         let Some(endpoint) = synapse_a11y::endpoint_for_window(window_hwnd) else {
+            if cdp_target_id.starts_with("chrome-tab:") {
+                let state = browser_wait_for_state_bridge_name(wait.state);
+                let waited = crate::chrome_debugger_bridge::wait_for_text(
+                    window_hwnd,
+                    cdp_target_id,
+                    state,
+                    wait.text.as_deref(),
+                    wait.timeout_ms,
+                    wait.polling_interval_ms,
+                )
+                .await
+                .map_err(|error| {
+                    mcp_error(
+                        error.code(),
+                        format!(
+                            "browser_wait_for normal bridge waitForText failed for target {cdp_target_id:?}: {}",
+                            error.detail()
+                        ),
+                    )
+                })?;
+                if waited.timed_out {
+                    return Err(mcp_error(
+                        error_codes::BROWSER_WAIT_TIMEOUT,
+                        format!(
+                            "browser_wait_for timed out after {} ms waiting for {:?}; poll_count={} observed_text_len={}",
+                            wait.timeout_ms,
+                            wait.state,
+                            waited.poll_count,
+                            waited.observed_text_len
+                        ),
+                    ));
+                }
+                tracing::info!(
+                    code = "CHROME_BRIDGE_BACKGROUND_WAIT_FOR",
+                    session_id = %session_id,
+                    hwnd = window_hwnd,
+                    cdp_target_id = %waited.target_id,
+                    state = ?wait.state,
+                    elapsed_ms = waited.elapsed_ms,
+                    poll_count = waited.poll_count,
+                    target_url = %waited.url,
+                    "readback=chrome.scripting.executeScript(page text polling) outcome=wait_satisfied"
+                );
+                return Ok(BrowserWaitForResponse {
+                    session_id: session_id.to_owned(),
+                    window_hwnd,
+                    transport: "chrome_tabs_extension".to_owned(),
+                    endpoint: "chrome_bridge".to_owned(),
+                    cdp_target_id: waited.target_id,
+                    state: wait.state,
+                    text: wait.text.clone(),
+                    condition_met: waited.condition_met,
+                    elapsed_ms: waited.elapsed_ms,
+                    timeout_ms: wait.timeout_ms,
+                    polling_interval_ms: wait.polling_interval_ms,
+                    poll_count: waited.poll_count,
+                    observed_text_len: waited.observed_text_len,
+                    url: waited.url,
+                    title: waited.title,
+                    ready_state: waited.ready_state,
+                    readback_backend: waited.readback_backend,
+                    backend_tier_used: "chrome_tabs_extension".to_owned(),
+                    required_foreground: false,
+                });
+            }
             return Err(browser_raw_cdp_required_error(TOOL, window_hwnd));
         };
         let expression = build_browser_wait_for_expression(wait)?;
@@ -6002,6 +6067,103 @@ impl SynapseService {
     ) -> Result<BrowserWaitForSelectorResponse, ErrorData> {
         const TOOL: &str = "browser_wait_for_selector";
         let Some(endpoint) = synapse_a11y::endpoint_for_window(window_hwnd) else {
+            if cdp_target_id.starts_with("chrome-tab:") {
+                if wait.locate.frame.is_some() {
+                    return Err(mcp_error(
+                        error_codes::TOOL_PARAMS_INVALID,
+                        "browser_wait_for_selector normal Chrome bridge path does not support explicit frame locator parameters yet; omit frame for bridge all-frame search or use a raw-CDP target for explicit frame scoping",
+                    ));
+                }
+                if root_backend_node_id.is_some() {
+                    return Err(mcp_error(
+                        error_codes::TOOL_PARAMS_INVALID,
+                        "browser_wait_for_selector normal Chrome bridge path does not support raw-CDP root backend ids; use a bridge DOM-path root_element_id or omit root scoping",
+                    ));
+                }
+                let locator = serde_json::to_value(&wait.locate).map_err(|error| {
+                    mcp_error(
+                        error_codes::OBSERVE_INTERNAL,
+                        format!(
+                            "browser_wait_for_selector normal bridge locator serialization failed: {error}"
+                        ),
+                    )
+                })?;
+                let waited = crate::chrome_debugger_bridge::wait_for_selector(
+                    window_hwnd,
+                    cdp_target_id,
+                    locator,
+                    wait.limit,
+                    browser_wait_for_selector_state_bridge_name(wait.state),
+                    wait.timeout_ms,
+                    wait.polling_interval_ms,
+                )
+                .await
+                .map_err(|error| {
+                    mcp_error(
+                        error.code(),
+                        format!(
+                            "browser_wait_for_selector normal bridge waitForSelector failed for target {cdp_target_id:?}: {}",
+                            error.detail()
+                        ),
+                    )
+                })?;
+                if waited.timed_out {
+                    return Err(mcp_error(
+                        error_codes::BROWSER_WAIT_TIMEOUT,
+                        format!(
+                            "browser_wait_for_selector timed out after {} ms waiting for {:?}; elapsed_ms={} poll_count={} match_count={} returned_count={} visible_count={} truncated={}",
+                            wait.timeout_ms,
+                            wait.state,
+                            waited.elapsed_ms,
+                            waited.poll_count,
+                            waited.match_count,
+                            waited.returned_count,
+                            waited.visible_count,
+                            waited.truncated
+                        ),
+                    ));
+                }
+                tracing::info!(
+                    code = "CHROME_BRIDGE_BACKGROUND_WAIT_FOR_SELECTOR",
+                    session_id = %session_id,
+                    hwnd = window_hwnd,
+                    cdp_target_id = %waited.target_id,
+                    engine = %waited.engine,
+                    state = ?wait.state,
+                    match_count = waited.match_count,
+                    returned_count = waited.returned_count,
+                    visible_count = waited.visible_count,
+                    poll_count = waited.poll_count,
+                    target_url = %waited.url,
+                    "readback=chrome.scripting.executeScript(locator polling) outcome=wait_satisfied"
+                );
+                return Ok(BrowserWaitForSelectorResponse {
+                    session_id: session_id.to_owned(),
+                    window_hwnd,
+                    transport: "chrome_tabs_extension".to_owned(),
+                    endpoint: "chrome_bridge".to_owned(),
+                    cdp_target_id: waited.target_id,
+                    engine: waited.engine,
+                    query: waited.query,
+                    state: wait.state,
+                    condition_met: waited.condition_met,
+                    elapsed_ms: waited.elapsed_ms,
+                    timeout_ms: wait.timeout_ms,
+                    polling_interval_ms: wait.polling_interval_ms,
+                    poll_count: waited.poll_count,
+                    match_count: waited.match_count,
+                    returned_count: waited.returned_count,
+                    visible_count: waited.visible_count,
+                    truncated: waited.truncated,
+                    element_id: waited.element_id,
+                    frame: None,
+                    url: waited.url,
+                    title: waited.title,
+                    readback_backend: waited.readback_backend,
+                    backend_tier_used: "chrome_tabs_extension".to_owned(),
+                    required_foreground: false,
+                });
+            }
             return Err(browser_raw_cdp_required_error(TOOL, window_hwnd));
         };
         let started = Instant::now();
@@ -9788,6 +9950,23 @@ fn browser_wait_for_load_state_to_a11y(
         }
         BrowserWaitForLoadStateState::Load => synapse_a11y::CdpLoadState::Load,
         BrowserWaitForLoadStateState::NetworkIdle => synapse_a11y::CdpLoadState::NetworkIdle,
+    }
+}
+
+fn browser_wait_for_state_bridge_name(state: BrowserWaitForState) -> &'static str {
+    match state {
+        BrowserWaitForState::TextAppears => "text_appears",
+        BrowserWaitForState::TextGone => "text_gone",
+        BrowserWaitForState::Timeout => "timeout",
+    }
+}
+
+fn browser_wait_for_selector_state_bridge_name(state: BrowserWaitForSelectorState) -> &'static str {
+    match state {
+        BrowserWaitForSelectorState::Attached => "attached",
+        BrowserWaitForSelectorState::Visible => "visible",
+        BrowserWaitForSelectorState::Hidden => "hidden",
+        BrowserWaitForSelectorState::Detached => "detached",
     }
 }
 
