@@ -90,6 +90,7 @@ import {
   fetchTimelineRows,
   forceReleaseLease,
   handoffLease,
+  injectAgentContext,
   dispatchAgentTaskOnce,
   inspectRoutine,
   killAgent,
@@ -103,6 +104,7 @@ import {
   saveDashboardView,
   searchTimelineRows,
   spawnAgent,
+  updateAgentPlan,
   updateAgentTask,
   updateRoutine,
   type AgentTaskAttempt,
@@ -114,6 +116,9 @@ import {
   type AuditQueryResponse,
   type AuditQueryRow,
   type AgentTemplateRow,
+  type ContextInjectChannel,
+  type ContextInjectResponse,
+  type ContextPlanResponse,
   type DashboardControlResponse,
   type DashboardRouteReadback,
   type DashboardSavedView,
@@ -157,6 +162,7 @@ type RouteDefinition = {
 const routeDefinitions: RouteDefinition[] = [
   { id: "fleet", label: "Fleet", title: "Fleet Overview", icon: Gauge },
   { id: "agent", label: "Agent", title: "Agent Detail", icon: UserRound },
+  { id: "context", label: "Context", title: "Context Inspector", icon: FileSearch },
   { id: "tasks", label: "Tasks", title: "Task Board", icon: ClipboardList },
   { id: "system", label: "System", title: "System, Storage & Activity", icon: ServerCog },
   { id: "audit", label: "Audit", title: "Audit Explorer", icon: ShieldCheck }
@@ -539,6 +545,9 @@ export function App() {
         />
       ) : null}
       {normalizedRoute === "agent" ? <AgentView state={state} selectedAgent={selectedAgent} toolCalls={toolCalls} onAuditKeySelect={focusAuditKey} /> : null}
+      {normalizedRoute === "context" ? (
+        <ContextView state={state} agents={agents} selectedAgent={selectedAgent} setSelectedAgentId={setSelectedAgentId} onRefresh={() => query.refetch()} />
+      ) : null}
       {normalizedRoute === "tasks" ? (
         <TasksView
           state={state}
@@ -1059,6 +1068,235 @@ function AgentContextPanel({ state, agent }: { state?: DashboardState; agent?: A
       )}
     </Section>
   );
+}
+
+function ContextView({
+  state,
+  agents,
+  selectedAgent,
+  setSelectedAgentId,
+  onRefresh
+}: {
+  state?: DashboardState;
+  agents: AgentSummary[];
+  selectedAgent?: AgentSummary;
+  setSelectedAgentId: (id: string | null) => void;
+  onRefresh: () => void | Promise<unknown>;
+}) {
+  const sessionId = agentSessionId(selectedAgent);
+  const ids = agentIdentifierSet(selectedAgent);
+  if (sessionId) ids.add(sessionId);
+  const contextData = asRecord(panelData(state?.context));
+  const workspace = asRecord(contextData.workspace);
+  const workspaceList = asRecord(workspace.list);
+  const workspaceEntries = asArray<Record<string, unknown>>(workspaceList.entries);
+  const inboxRows = asArray<Record<string, unknown>>(contextData.inboxes);
+  const selectedInbox = inboxRows.find((row) => ids.has(rawText(row.session_id)) || ids.has(rawText(row.spawn_id)));
+  const selectedMessages = asArray<Record<string, unknown>>(asRecord(asRecord(selectedInbox).inbox).messages);
+  const planKey = sessionId ? `plan/${sessionId}` : "";
+  const planEntry = workspaceEntries.find((entry) => rawText(entry.key) === planKey);
+  const scopedWorkspace = sessionId
+    ? workspaceEntries.filter((entry) => {
+        const key = rawText(entry.key);
+        return key === planKey || key.includes(sessionId) || ids.has(rawText(entry.writer_session_id));
+      })
+    : workspaceEntries.slice(0, 20);
+  const transcripts = selectedAgentTranscriptRows(state, selectedAgent).slice(0, 8);
+  const [channel, setChannel] = useState<ContextInjectChannel>("steer");
+  const [packet, setPacket] = useState("");
+  const [kind, setKind] = useState("context_packet");
+  const [workspaceKey, setWorkspaceKey] = useState("");
+  const [requestReceipt, setRequestReceipt] = useState(true);
+  const [injectPending, setInjectPending] = useState(false);
+  const [injectError, setInjectError] = useState("");
+  const [injectReadback, setInjectReadback] = useState<ContextInjectResponse | null>(null);
+  const planSeed = useMemo(() => {
+    const value = asRecord(planEntry?.value);
+    const plan = value.plan ?? [];
+    return JSON.stringify(plan, null, 2);
+  }, [planEntry]);
+  const [planText, setPlanText] = useState(planSeed);
+  const [planPending, setPlanPending] = useState(false);
+  const [planError, setPlanError] = useState("");
+  const [planReadback, setPlanReadback] = useState<ContextPlanResponse | null>(null);
+
+  useEffect(() => {
+    setPlanText(planSeed);
+  }, [planSeed, sessionId]);
+
+  const sendPacket = async (event: FormEvent) => {
+    event.preventDefault();
+    if (!sessionId) return;
+    setInjectPending(true);
+    setInjectError("");
+    try {
+      const response = await injectAgentContext({
+        session_id: sessionId,
+        channel,
+        packet,
+        kind: channel === "mailbox" ? kind : undefined,
+        workspace_key: channel === "workspace" ? workspaceKey : undefined,
+        request_receipt: requestReceipt
+      });
+      setInjectReadback(response);
+      setPacket("");
+      await onRefresh();
+    } catch (error) {
+      setInjectError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setInjectPending(false);
+    }
+  };
+
+  const savePlan = async (event: FormEvent) => {
+    event.preventDefault();
+    if (!sessionId) return;
+    setPlanPending(true);
+    setPlanError("");
+    try {
+      const plan = JSON.parse(planText);
+      const version = Number(planEntry?.version);
+      const response = await updateAgentPlan({
+        session_id: sessionId,
+        plan,
+        expected_version: Number.isFinite(version) ? version : undefined,
+        notify_agent: true
+      });
+      setPlanReadback(response);
+      await onRefresh();
+    } catch (error) {
+      setPlanError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setPlanPending(false);
+    }
+  };
+
+  return (
+    <div className="grid gap-6 xl:grid-cols-[minmax(0,0.34fr)_minmax(0,1fr)]">
+      <div className="min-w-0 space-y-6">
+        <Section
+          title="Agent Picker"
+          tier="overview"
+          questions={["Which live session is selected?", "Which target and queue will receive packets?", "Which row is the SoT?"]}
+        >
+          <div className="grid gap-2">
+            {agents.map((agent) => (
+              <button
+                key={agent.id}
+                type="button"
+                onClick={() => setSelectedAgentId(agent.id)}
+                className={cn(
+                  "rounded-md border p-3 text-left text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus-ring",
+                  agent.id === selectedAgent?.id ? "border-accent bg-surface-2 text-primary" : "border-border bg-surface-1 text-secondary"
+                )}
+              >
+                <span className="block truncate font-medium text-primary">{agent.id}</span>
+                <span className="block truncate text-xs text-muted">{agent.status} / {agent.kind}</span>
+              </button>
+            ))}
+          </div>
+        </Section>
+        <Section title="Selected Target" tier="drill-down" questions={["Which ids resolve to this agent?", "Is the mailbox visible?", "What plan key will be edited?"]}>
+          {selectedAgent ? (
+            <div className="grid gap-2">
+              <MetricRow label="Session" value={sessionId || "unresolved"} />
+              <MetricRow label="Spawn" value={selectedAgent.spawnId || "none"} />
+              <MetricRow label="Plan Key" value={planKey || "none"} />
+              <MetricRow label="Inbox Rows" value={selectedMessages.length} />
+              <MetricRow label="Workspace Rows" value={scopedWorkspace.length} />
+            </div>
+          ) : (
+            <EmptyState title="No agent selected" />
+          )}
+        </Section>
+      </div>
+      <div className="min-w-0 space-y-6">
+        <Section title="Inject Packet" tier="drill-down" questions={["Which channel delivers it?", "What readback proves delivery?", "Was a receipt requested?"]}>
+          <form onSubmit={sendPacket} className="grid gap-3">
+            <label className="block text-sm text-secondary">
+              <span className="mb-1 block text-label font-medium uppercase text-muted">Channel</span>
+              <select
+                className="h-10 w-full rounded-md border border-border bg-surface-2 px-3 text-sm text-primary outline-none focus:ring-2 focus:ring-focus-ring"
+                value={channel}
+                onChange={(event) => setChannel(event.target.value as ContextInjectChannel)}
+              >
+                <option value="steer">agent_steer</option>
+                <option value="mailbox">mailbox</option>
+                <option value="workspace">workspace_put</option>
+              </select>
+            </label>
+            {channel === "mailbox" ? <TextField label="Message kind" value={kind} onChange={setKind} mono /> : null}
+            {channel === "workspace" ? <TextField label="Workspace key" value={workspaceKey} onChange={setWorkspaceKey} mono placeholder={sessionId ? `context/${sessionId}/note` : "context/session/note"} /> : null}
+            <label className="block text-sm text-secondary">
+              <span className="mb-1 block text-label font-medium uppercase text-muted">Packet</span>
+              <textarea
+                className="min-h-28 w-full rounded-md border border-border bg-surface-2 px-3 py-2 text-sm text-primary outline-none focus:ring-2 focus:ring-focus-ring"
+                value={packet}
+                onChange={(event) => setPacket(event.target.value)}
+              />
+            </label>
+            <label className="flex items-center gap-2 text-sm text-secondary">
+              <input type="checkbox" checked={requestReceipt} onChange={(event) => setRequestReceipt(event.target.checked)} />
+              Request receipt
+            </label>
+            {injectError ? <div className="rounded-md border border-danger-border bg-danger-bg p-3 text-sm text-danger-fg">{injectError}</div> : null}
+            <div className="flex justify-end">
+              <Button type="submit" variant="primary" disabled={!sessionId || !packet.trim() || injectPending}>
+                <Rocket aria-hidden="true" className="h-4 w-4" />
+                {injectPending ? "Sending" : "Send"}
+              </Button>
+            </div>
+          </form>
+          {injectReadback ? <RawValue value={injectReadback} label="Injection readback" /> : null}
+        </Section>
+        <Section title="Plan Artifact" tier="drill-down" questions={["What structured plan will be written?", "Which version is expected?", "Did the agent receive a notification?"]}>
+          <form onSubmit={savePlan} className="grid gap-3">
+            <label className="block text-sm text-secondary">
+              <span className="mb-1 block text-label font-medium uppercase text-muted">plan/{sessionId || "session"}</span>
+              <textarea
+                className="min-h-44 w-full rounded-md border border-border bg-surface-2 px-3 py-2 font-mono text-sm text-primary outline-none focus:ring-2 focus:ring-focus-ring"
+                value={planText}
+                onChange={(event) => setPlanText(event.target.value)}
+              />
+            </label>
+            {planError ? <div className="rounded-md border border-danger-border bg-danger-bg p-3 text-sm text-danger-fg">{planError}</div> : null}
+            <div className="flex justify-end">
+              <Button type="submit" variant="primary" disabled={!sessionId || planPending}>
+                <Save aria-hidden="true" className="h-4 w-4" />
+                {planPending ? "Saving" : "Save Plan"}
+              </Button>
+            </div>
+          </form>
+          {planReadback ? <RawValue value={planReadback} label="Plan edit readback" /> : null}
+        </Section>
+        <Section title="Context Readback" tier="drill-down" questions={["Which rows are queued?", "Which workspace keys match?", "Which transcript tail proves usage?"]}>
+          <RawValue
+            value={{
+              source_of_truth: contextData.source_of_truth,
+              workspace_error: workspace.error,
+              inbox: selectedInbox,
+              workspace_entries: scopedWorkspace,
+              transcript_tail: transcripts,
+              plan_entry: planEntry
+            }}
+            label="Context inspector rows"
+          />
+        </Section>
+      </div>
+    </div>
+  );
+}
+
+function agentSessionId(agent?: AgentSummary): string {
+  const raw = asRecord(agent?.raw);
+  return rawText(raw.session_id || agent?.id);
+}
+
+function selectedAgentTranscriptRows(state?: DashboardState, agent?: AgentSummary): Record<string, unknown>[] {
+  const ids = agentIdentifierSet(agent);
+  const sessionId = agentSessionId(agent);
+  if (sessionId) ids.add(sessionId);
+  return asArray<Record<string, unknown>>(asRecord(panelData(state?.agent_transcripts)).rows).filter((row) => rowMatchesAgent(row, ids));
 }
 
 function agentIdentifierSet(agent?: AgentSummary): Set<string> {

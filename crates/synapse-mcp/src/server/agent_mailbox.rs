@@ -437,6 +437,44 @@ impl SynapseService {
 }
 
 impl SynapseService {
+    pub(crate) fn dashboard_agent_send(
+        &self,
+        to_session: String,
+        kind: String,
+        payload: Value,
+        request_receipt: bool,
+    ) -> Result<Value, ErrorData> {
+        let response = self.agent_send_impl(
+            AgentSendParams {
+                to_session,
+                kind,
+                payload,
+                artifact_handle: None,
+                ttl_ms: default_message_ttl_ms(),
+                request_receipt,
+            },
+            "dashboard-context",
+        )?;
+        self.mailbox_notify_handle().notify_waiters();
+        dashboard_json_readback(response)
+    }
+
+    pub(crate) fn dashboard_agent_inbox_snapshot(
+        &self,
+        session_id: &str,
+        max_messages: usize,
+        kinds: Vec<String>,
+    ) -> Result<Value, ErrorData> {
+        dashboard_json_readback(self.agent_inbox_impl(
+            AgentInboxParams {
+                drain: false,
+                max_messages,
+                kinds,
+            },
+            session_id,
+        )?)
+    }
+
     pub(super) fn agent_send_impl(
         &self,
         params: AgentSendParams,
@@ -1229,6 +1267,15 @@ fn encode_mailbox_message(message: &AgentMailboxMessage) -> Result<Vec<u8>, Erro
         mcp_error(
             error_codes::STORAGE_WRITE_FAILED,
             format!("encode agent mailbox message: {error}"),
+        )
+    })
+}
+
+fn dashboard_json_readback(value: impl Serialize) -> Result<Value, ErrorData> {
+    serde_json::to_value(value).map_err(|error| {
+        mcp_error(
+            error_codes::TOOL_INTERNAL_ERROR,
+            format!("serialize dashboard mailbox readback: {error}"),
         )
     })
 }

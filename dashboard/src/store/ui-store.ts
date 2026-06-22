@@ -3,7 +3,7 @@ import { persist } from "zustand/middleware";
 
 export type Density = "comfortable" | "compact";
 export type Theme = "dark" | "light";
-export type DashboardRouteId = "fleet" | "agent" | "tasks" | "approvals" | "analytics" | "timeline" | "system" | "audit";
+export type DashboardRouteId = "fleet" | "agent" | "context" | "tasks" | "approvals" | "analytics" | "timeline" | "system" | "audit";
 
 interface UiState {
   density: Density;

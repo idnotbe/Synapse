@@ -29,6 +29,7 @@ function dashboardState(sessionsData: unknown): DashboardState {
     suggestions: panel({}),
     armed_runs: panel({}),
     agent_transcripts: panel({ rows: [] }),
+    context: panel({ workspace: { list: { entries: [] } }, inboxes: [] }),
     hygiene: panel({}),
     local_models: panel({})
   };

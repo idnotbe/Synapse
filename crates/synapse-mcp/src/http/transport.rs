@@ -1,5 +1,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
+    fmt::Write as _,
     io,
     net::SocketAddr,
     process::ExitCode,
@@ -26,6 +27,7 @@ use rmcp::transport::streamable_http_server::{
     session::{SessionState, SessionStore, SessionStoreError, local::LocalSessionManager},
 };
 use serde::{Deserialize, Serialize};
+use sha2::{Digest as _, Sha256};
 #[cfg(test)]
 use synapse_action::ActionHandle;
 use synapse_action::ActionStateSnapshot;
@@ -61,6 +63,7 @@ const M2_EMITTER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 const DRAIN_RESPONSE_GRACE_TIMEOUT: Duration = Duration::from_secs(2);
 const DASHBOARD_LOCAL_MODEL_SPAWN_BODY_LIMIT_BYTES: usize = 256 * 1024;
 const DASHBOARD_SAVED_VIEW_BODY_LIMIT_BYTES: usize = 64 * 1024;
+const DASHBOARD_CONTEXT_BODY_LIMIT_BYTES: usize = 256 * 1024;
 const DASHBOARD_SPAWN_FAN_OUT_MAX: u32 = 5;
 const DASHBOARD_AGENT_KILL_DEFAULT_GRACE_MS: u64 = 3_000;
 
@@ -709,6 +712,16 @@ fn router(
             "/dashboard/approval/decide",
             post(dashboard_approval_decide)
                 .layer(DefaultBodyLimit::max(DASHBOARD_SAVED_VIEW_BODY_LIMIT_BYTES)),
+        )
+        .route(
+            "/dashboard/context/inject",
+            post(dashboard_context_inject)
+                .layer(DefaultBodyLimit::max(DASHBOARD_CONTEXT_BODY_LIMIT_BYTES)),
+        )
+        .route(
+            "/dashboard/context/plan",
+            post(dashboard_context_plan)
+                .layer(DefaultBodyLimit::max(DASHBOARD_CONTEXT_BODY_LIMIT_BYTES)),
         )
         .route("/approval/activate", get(approval_activate));
     let app = Router::new()
@@ -1537,6 +1550,7 @@ struct DashboardStateResponse {
     suggestions: DashboardPanel,
     armed_runs: DashboardPanel,
     agent_transcripts: DashboardPanel,
+    context: DashboardPanel,
     hygiene: DashboardPanel,
     local_models: DashboardPanel,
 }
@@ -2189,6 +2203,97 @@ struct DashboardTranscriptSurface {
     source_of_truth: &'static str,
     row_count: usize,
     rows: Vec<crate::server::AgentTranscriptSnapshotRow>,
+}
+
+#[derive(Serialize)]
+struct DashboardContextSurface {
+    source_of_truth: &'static str,
+    workspace: DashboardContextWorkspaceSurface,
+    inboxes: Vec<DashboardContextInboxSurface>,
+}
+
+#[derive(Serialize)]
+struct DashboardContextWorkspaceSurface {
+    tool: &'static str,
+    available: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    list: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+#[derive(Serialize)]
+struct DashboardContextInboxSurface {
+    session_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    spawn_id: Option<String>,
+    agent_kind: String,
+    lifecycle: String,
+    source_of_truth: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    inbox: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DashboardContextInjectRequest {
+    session_id: String,
+    channel: String,
+    packet: String,
+    #[serde(default)]
+    kind: Option<String>,
+    #[serde(default)]
+    workspace_key: Option<String>,
+    #[serde(default)]
+    request_receipt: bool,
+}
+
+#[derive(Serialize)]
+struct DashboardContextInjectResponse {
+    ok: bool,
+    trigger: &'static str,
+    source_of_truth: &'static str,
+    channel: String,
+    payload_sha256: String,
+    readback: serde_json::Value,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DashboardContextPlanRequest {
+    session_id: String,
+    plan: serde_json::Value,
+    #[serde(default)]
+    expected_version: Option<u64>,
+    #[serde(default)]
+    notify_agent: Option<bool>,
+}
+
+#[derive(Serialize)]
+struct DashboardContextPlanResponse {
+    ok: bool,
+    trigger: &'static str,
+    source_of_truth: &'static str,
+    key: String,
+    payload_sha256: String,
+    workspace_put: serde_json::Value,
+    notification: DashboardContextPlanNotification,
+}
+
+#[derive(Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+enum DashboardContextPlanNotification {
+    Skipped,
+    Delivered {
+        readback: serde_json::Value,
+    },
+    Failed {
+        error_code: String,
+        message: String,
+        data: Option<serde_json::Value>,
+    },
 }
 
 #[derive(Serialize)]
@@ -3144,6 +3249,9 @@ async fn dashboard_state(State(state): State<HttpState>, headers: HeaderMap) -> 
         dashboard_timed_state_segment(&mut timing_segments, "agent_transcripts", || {
             agent_transcript_panel(&state)
         });
+    let context = dashboard_timed_state_segment(&mut timing_segments, "context", || {
+        context_panel(&state, &tool_names)
+    });
     let hygiene = dashboard_timed_state_segment(&mut timing_segments, "hygiene", || {
         hygiene_panel(&state, &tool_names)
     });
@@ -3180,6 +3288,7 @@ async fn dashboard_state(State(state): State<HttpState>, headers: HeaderMap) -> 
         suggestions,
         armed_runs,
         agent_transcripts,
+        context,
         hygiene,
         local_models,
     };
@@ -3722,6 +3831,174 @@ async fn dashboard_approval_decide(
             error.data,
         )),
     }
+}
+
+async fn dashboard_context_inject(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    Json(request): Json<DashboardContextInjectRequest>,
+) -> Response {
+    if let Err(response) = dashboard_local_only(&state, &headers) {
+        return with_dashboard_security_headers(response);
+    }
+    let session_id = match dashboard_context_resolve_live_session_id(&state, &request.session_id) {
+        Ok(session_id) => session_id,
+        Err(response) => return with_dashboard_security_headers(response),
+    };
+    let packet = request.packet.trim();
+    if packet.is_empty() {
+        return with_dashboard_security_headers(dashboard_error_response(
+            StatusCode::BAD_REQUEST,
+            "CONTEXT_PACKET_EMPTY",
+            "packet must be non-empty",
+            None,
+        ));
+    }
+    let channel = request.channel.trim().to_ascii_lowercase();
+    let now_unix_ms = dashboard_unix_time_ms();
+    let payload = serde_json::json!({
+        "schema_version": 1,
+        "source": "dashboard_context",
+        "target_session_id": session_id,
+        "requested_session_id": request.session_id.trim(),
+        "channel": channel,
+        "packet": packet,
+        "created_at_unix_ms": now_unix_ms,
+    });
+    let payload_sha256 = dashboard_payload_sha256(&payload);
+    let result = match channel.as_str() {
+        "steer" => state.health_service.dashboard_agent_steer(
+            session_id.clone(),
+            packet.to_owned(),
+            request.request_receipt,
+        ),
+        "mailbox" => {
+            let kind = request
+                .kind
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .unwrap_or("context_packet")
+                .to_owned();
+            state.health_service.dashboard_agent_send(
+                session_id.clone(),
+                kind,
+                payload.clone(),
+                request.request_receipt,
+            )
+        }
+        "workspace" => {
+            let key = request
+                .workspace_key
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned)
+                .unwrap_or_else(|| format!("context/{session_id}/{now_unix_ms}"));
+            state
+                .health_service
+                .dashboard_workspace_put(key, None, payload.clone())
+        }
+        other => {
+            return with_dashboard_security_headers(dashboard_error_response(
+                StatusCode::BAD_REQUEST,
+                "CONTEXT_CHANNEL_INVALID",
+                &format!("channel {other:?} is not one of steer|mailbox|workspace"),
+                None,
+            ));
+        }
+    };
+
+    match result {
+        Ok(readback) => with_dashboard_security_headers(
+            Json(DashboardContextInjectResponse {
+                ok: true,
+                trigger: "dashboard.context_inject",
+                source_of_truth:
+                    "agent_steer/agent_send/workspace_put command audit rows + tool-specific durable readback",
+                channel,
+                payload_sha256,
+                readback,
+            })
+            .into_response(),
+        ),
+        Err(error) => with_dashboard_security_headers(dashboard_error_response(
+            StatusCode::BAD_REQUEST,
+            &dashboard_error_code(&error),
+            &error.message,
+            error.data,
+        )),
+    }
+}
+
+async fn dashboard_context_plan(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    Json(request): Json<DashboardContextPlanRequest>,
+) -> Response {
+    if let Err(response) = dashboard_local_only(&state, &headers) {
+        return with_dashboard_security_headers(response);
+    }
+    let session_id = match dashboard_context_resolve_live_session_id(&state, &request.session_id) {
+        Ok(session_id) => session_id,
+        Err(response) => return with_dashboard_security_headers(response),
+    };
+    let key = format!("plan/{session_id}");
+    let payload = serde_json::json!({
+        "schema_version": 1,
+        "source": "dashboard_context",
+        "target_session_id": session_id,
+        "requested_session_id": request.session_id.trim(),
+        "plan": request.plan,
+        "updated_at_unix_ms": dashboard_unix_time_ms(),
+    });
+    let payload_sha256 = dashboard_payload_sha256(&payload);
+    let workspace_put = match state.health_service.dashboard_workspace_put(
+        key.clone(),
+        request.expected_version,
+        payload,
+    ) {
+        Ok(readback) => readback,
+        Err(error) => {
+            return with_dashboard_security_headers(dashboard_error_response(
+                StatusCode::BAD_REQUEST,
+                &dashboard_error_code(&error),
+                &error.message,
+                error.data,
+            ));
+        }
+    };
+    let notification = if request.notify_agent.unwrap_or(true) {
+        let instruction = format!(
+            "Plan updated in workspace key {key}. Re-read that plan artifact before continuing and acknowledge the changed step."
+        );
+        match state
+            .health_service
+            .dashboard_agent_steer(session_id, instruction, true)
+        {
+            Ok(readback) => DashboardContextPlanNotification::Delivered { readback },
+            Err(error) => DashboardContextPlanNotification::Failed {
+                error_code: dashboard_error_code(&error),
+                message: error.message.to_string(),
+                data: error.data,
+            },
+        }
+    } else {
+        DashboardContextPlanNotification::Skipped
+    };
+    with_dashboard_security_headers(
+        Json(DashboardContextPlanResponse {
+            ok: true,
+            trigger: "dashboard.context_plan",
+            source_of_truth:
+                "workspace_put CF_KV plan artifact + optional agent_steer notification + CF_ACTION_LOG command audit",
+            key,
+            payload_sha256,
+            workspace_put,
+            notification,
+        })
+        .into_response(),
+    )
 }
 
 async fn dashboard_agent_kill(
@@ -4865,6 +5142,64 @@ fn dashboard_error_code(error: &rmcp::ErrorData) -> String {
         .unwrap_or_else(|| format!("{:?}", error.code))
 }
 
+fn dashboard_context_resolve_live_session_id(
+    state: &HttpState,
+    requested_session_id: &str,
+) -> Result<String, Response> {
+    let requested = requested_session_id.trim();
+    if requested.is_empty() {
+        return Err(dashboard_error_response(
+            StatusCode::BAD_REQUEST,
+            "CONTEXT_TARGET_EMPTY",
+            "session_id must be a non-empty live MCP session id or spawn id",
+            None,
+        ));
+    }
+    let sessions = state
+        .health_service
+        .session_list_impl(false)
+        .map_err(|error| {
+            dashboard_error_response(
+                StatusCode::BAD_REQUEST,
+                &dashboard_error_code(&error),
+                &error.message,
+                error.data,
+            )
+        })?;
+    for row in sessions.sessions {
+        if row.registry.session_id == requested {
+            return Ok(row.registry.session_id);
+        }
+        if row
+            .registry
+            .spawned_agent
+            .as_ref()
+            .is_some_and(|spawn| spawn.spawn_id == requested)
+        {
+            return Ok(row.registry.session_id);
+        }
+    }
+    Err(dashboard_error_response(
+        StatusCode::BAD_REQUEST,
+        "CONTEXT_TARGET_NOT_LIVE",
+        &format!("context target {requested:?} is not a live session/spawn in session_list"),
+        Some(serde_json::json!({
+            "source_of_truth": "session_list live sessions",
+            "requested_session_id": requested,
+        })),
+    ))
+}
+
+fn dashboard_payload_sha256(value: &serde_json::Value) -> String {
+    let bytes = serde_json::to_vec(value).unwrap_or_else(|_| value.to_string().into_bytes());
+    let digest = Sha256::digest(bytes);
+    let mut hex = String::with_capacity(64);
+    for byte in digest {
+        let _ = write!(hex, "{byte:02x}");
+    }
+    hex
+}
+
 fn dashboard_storage_error_response(
     message: &str,
     error: synapse_storage::StorageError,
@@ -5186,6 +5521,94 @@ fn dashboard_shell_jobs_panel() -> DashboardPanel {
     }
 }
 
+fn context_panel(state: &HttpState, tool_names: &BTreeSet<&str>) -> DashboardPanel {
+    let workspace = if tool_names.contains("workspace_list") {
+        match state
+            .health_service
+            .dashboard_workspace_list_snapshot(None, 200, true)
+        {
+            Ok(list) => DashboardContextWorkspaceSurface {
+                tool: "workspace_list",
+                available: true,
+                list: Some(list),
+                error: None,
+            },
+            Err(error) => DashboardContextWorkspaceSurface {
+                tool: "workspace_list",
+                available: true,
+                list: None,
+                error: Some(format!("{error:?}")),
+            },
+        }
+    } else {
+        DashboardContextWorkspaceSurface {
+            tool: "workspace_list",
+            available: false,
+            list: None,
+            error: Some("workspace_list is not visible in the active tool profile".to_owned()),
+        }
+    };
+
+    let mut inboxes = Vec::new();
+    if tool_names.contains("agent_inbox") {
+        match state.health_service.session_list_impl(false) {
+            Ok(sessions) => {
+                for row in sessions.sessions.iter().take(50) {
+                    let spawn_id = row
+                        .registry
+                        .spawned_agent
+                        .as_ref()
+                        .map(|spawn| spawn.spawn_id.clone());
+                    match state.health_service.dashboard_agent_inbox_snapshot(
+                        &row.registry.session_id,
+                        25,
+                        Vec::new(),
+                    ) {
+                        Ok(inbox) => inboxes.push(DashboardContextInboxSurface {
+                            session_id: row.registry.session_id.clone(),
+                            spawn_id,
+                            agent_kind: row.registry.agent_kind.clone(),
+                            lifecycle: row.registry.lifecycle.clone(),
+                            source_of_truth: "CF_KV agent-mailbox/v1 peek via agent_inbox drain=false",
+                            inbox: Some(inbox),
+                            error: None,
+                        }),
+                        Err(error) => inboxes.push(DashboardContextInboxSurface {
+                            session_id: row.registry.session_id.clone(),
+                            spawn_id,
+                            agent_kind: row.registry.agent_kind.clone(),
+                            lifecycle: row.registry.lifecycle.clone(),
+                            source_of_truth: "CF_KV agent-mailbox/v1 peek via agent_inbox drain=false",
+                            inbox: None,
+                            error: Some(format!("{error:?}")),
+                        }),
+                    }
+                }
+            }
+            Err(error) => {
+                inboxes.push(DashboardContextInboxSurface {
+                    session_id: "session_list".to_owned(),
+                    spawn_id: None,
+                    agent_kind: "dashboard".to_owned(),
+                    lifecycle: "error".to_owned(),
+                    source_of_truth: "session_list + CF_KV agent-mailbox/v1",
+                    inbox: None,
+                    error: Some(format!("{error:?}")),
+                });
+            }
+        }
+    }
+
+    DashboardPanel::ok(
+        "workspace_list + agent_inbox drain=false + session_list",
+        DashboardContextSurface {
+            source_of_truth: "workspace_list CF_KV workspace-blackboard/v1 + agent_inbox CF_KV agent-mailbox/v1 + session_list target/session rows",
+            workspace,
+            inboxes,
+        },
+    )
+}
+
 fn approval_panel(
     state: &HttpState,
     tool_names: &BTreeSet<&str>,
@@ -5361,12 +5784,12 @@ fn dashboard_unix_time_ms() -> u64 {
         .unwrap_or(u64::MAX)
 }
 
-const DASHBOARD_CSS_FILE: &str = "dashboard-wxEBnmwL.css";
-const DASHBOARD_JS_FILE: &str = "dashboard-BIabgr0o.js";
+const DASHBOARD_CSS_FILE: &str = "dashboard-BYyrzUYm.css";
+const DASHBOARD_JS_FILE: &str = "dashboard-Bkan6uaj.js";
 const DASHBOARD_HTML: &str = include_str!("../../../../dashboard/dist/index.html");
 const DASHBOARD_CSS: &str =
-    include_str!("../../../../dashboard/dist/assets/dashboard-wxEBnmwL.css");
-const DASHBOARD_JS: &str = include_str!("../../../../dashboard/dist/assets/dashboard-BIabgr0o.js");
+    include_str!("../../../../dashboard/dist/assets/dashboard-BYyrzUYm.css");
+const DASHBOARD_JS: &str = include_str!("../../../../dashboard/dist/assets/dashboard-Bkan6uaj.js");
 #[cfg(test)]
 const DASHBOARD_APP_SOURCE: &str = include_str!("../../../../dashboard/src/app.tsx");
 #[cfg(test)]

@@ -330,6 +330,42 @@ impl SynapseService {
 }
 
 impl SynapseService {
+    pub(crate) fn dashboard_workspace_list_snapshot(
+        &self,
+        prefix: Option<String>,
+        limit: usize,
+        include_values: bool,
+    ) -> Result<Value, ErrorData> {
+        dashboard_json_readback(self.workspace_list_impl(
+            WorkspaceListParams {
+                run_id: None,
+                prefix,
+                limit,
+                include_values,
+            },
+            "dashboard-context",
+        )?)
+    }
+
+    pub(crate) fn dashboard_workspace_put(
+        &self,
+        key: String,
+        expected_version: Option<u64>,
+        value: Value,
+    ) -> Result<Value, ErrorData> {
+        dashboard_json_readback(self.workspace_put_impl(
+            WorkspacePutParams {
+                run_id: None,
+                key,
+                expected_version,
+                value: Some(value),
+                artifact: None,
+                ttl_ms: DEFAULT_WORKSPACE_TTL_MS,
+            },
+            "dashboard-context",
+        )?)
+    }
+
     fn workspace_put_impl(
         &self,
         params: WorkspacePutParams,
@@ -767,6 +803,15 @@ struct WorkspaceRunScan {
     expired_keys: Vec<Vec<u8>>,
     corrupt_rows: Vec<WorkspaceCorruptRow>,
     rows: Vec<DecodedWorkspaceRow>,
+}
+
+fn dashboard_json_readback(value: impl Serialize) -> Result<Value, ErrorData> {
+    serde_json::to_value(value).map_err(|error| {
+        mcp_error(
+            error_codes::TOOL_INTERNAL_ERROR,
+            format!("serialize dashboard workspace readback: {error}"),
+        )
+    })
 }
 
 fn scan_workspace_run(

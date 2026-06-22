@@ -1055,6 +1055,22 @@ impl SynapseService {
         }
     }
 
+    pub(crate) fn dashboard_agent_steer(
+        &self,
+        session_id: String,
+        instruction: String,
+        request_receipt: bool,
+    ) -> Result<Value, ErrorData> {
+        dashboard_json_readback(self.agent_steer_impl(
+            AgentSteerParams {
+                session_id,
+                instruction,
+                request_receipt,
+            },
+            Some("dashboard-context"),
+        )?)
+    }
+
     // ------------------------------------------------------------------
     // agent_steer (#905)
     // ------------------------------------------------------------------
@@ -3429,6 +3445,15 @@ async fn wait_for_tree_exit_async(process_ids: &[u32], grace_ms: u64) -> (Vec<u3
         }
         tokio::time::sleep(Duration::from_millis(GRACE_POLL_INTERVAL_MS)).await;
     }
+}
+
+fn dashboard_json_readback(value: impl Serialize) -> Result<Value, ErrorData> {
+    serde_json::to_value(value).map_err(|error| {
+        mcp_error(
+            error_codes::TOOL_INTERNAL_ERROR,
+            format!("serialize dashboard agent-control readback: {error}"),
+        )
+    })
 }
 
 fn validate_lookup_id(session_id: &str, tool: &str) -> Result<String, ErrorData> {

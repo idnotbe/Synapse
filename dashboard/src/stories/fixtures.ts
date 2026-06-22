@@ -187,6 +187,36 @@ export function dashboardFixture(kind: "populated" | "empty" = "populated"): Das
             transcriptRow("agent-local-002", 2, "assistant", "local.assistant.message", "Local model response sanitized; details are in raw disclosure.")
           ]
     }),
+    context: panel("workspace_list + agent_inbox drain=false + session_list", {
+      source_of_truth: "fixture context rows",
+      workspace: {
+        tool: "workspace_list",
+        available: true,
+        list: {
+          entries: empty
+            ? []
+            : [
+                {
+                  key: "plan/agent-codex-001",
+                  version: 1,
+                  writer_session_id: "dashboard-context",
+                  value: { plan: [{ step: "Wait for approval", status: "pending" }] }
+                }
+              ]
+        }
+      },
+      inboxes: empty
+        ? []
+        : [
+            {
+              session_id: "agent-codex-001",
+              spawn_id: "agent-spawn-codex-001",
+              agent_kind: "codex",
+              lifecycle: "live",
+              inbox: { messages: [] }
+            }
+          ]
+    }),
     hygiene: panel("hygiene_flags", { rows: [], scanned_rows: 0, next_cursor: "" }),
     local_models: panel("local_model_list", {
       enabled_count: 1,

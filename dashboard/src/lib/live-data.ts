@@ -82,7 +82,7 @@ export function initialDashboardLiveState(
 }
 
 export function dashboardLiveScopeForRoute(route: string): DashboardPanelScope {
-  if (route === "agent") return "agent";
+  if (route === "agent" || route === "context") return "agent";
   if (route === "tasks") return "tasks";
   if (route === "audit") return "audit";
   if (route === "system" || route === "timeline" || route === "analytics") return "system";

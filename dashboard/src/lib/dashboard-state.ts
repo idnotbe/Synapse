@@ -30,6 +30,7 @@ export interface DashboardState {
   suggestions: DashboardPanel;
   armed_runs: DashboardPanel;
   agent_transcripts: DashboardPanel;
+  context: DashboardPanel;
   hygiene: DashboardPanel;
   local_models: DashboardPanel;
 }
@@ -883,6 +884,43 @@ export interface ApprovalDecideResponse {
   decision: Record<string, unknown>;
 }
 
+export type ContextInjectChannel = "steer" | "mailbox" | "workspace";
+
+export interface ContextInjectRequest {
+  session_id: string;
+  channel: ContextInjectChannel;
+  packet: string;
+  kind?: string;
+  workspace_key?: string;
+  request_receipt?: boolean;
+}
+
+export interface ContextInjectResponse {
+  ok: boolean;
+  trigger: string;
+  source_of_truth: string;
+  channel: ContextInjectChannel;
+  payload_sha256: string;
+  readback: Record<string, unknown>;
+}
+
+export interface ContextPlanRequest {
+  session_id: string;
+  plan: unknown;
+  expected_version?: number;
+  notify_agent?: boolean;
+}
+
+export interface ContextPlanResponse {
+  ok: boolean;
+  trigger: string;
+  source_of_truth: string;
+  key: string;
+  payload_sha256: string;
+  workspace_put: Record<string, unknown>;
+  notification: Record<string, unknown>;
+}
+
 // Resolve one pending approval from the inbox (#927). For an `agent_permission`
 // row this unblocks the still-running agent's permission_gate call.
 export async function decideApproval(
@@ -896,6 +934,32 @@ export async function decideApproval(
     body: JSON.stringify(request)
   });
   return (await readJsonOrThrow(response)) as unknown as ApprovalDecideResponse;
+}
+
+export async function injectAgentContext(
+  request: ContextInjectRequest
+): Promise<ContextInjectResponse> {
+  const response = await fetch("/dashboard/context/inject", {
+    method: "POST",
+    cache: "no-store",
+    credentials: "same-origin",
+    headers: jsonHeaders(),
+    body: JSON.stringify(request)
+  });
+  return (await readJsonOrThrow(response)) as unknown as ContextInjectResponse;
+}
+
+export async function updateAgentPlan(
+  request: ContextPlanRequest
+): Promise<ContextPlanResponse> {
+  const response = await fetch("/dashboard/context/plan", {
+    method: "POST",
+    cache: "no-store",
+    credentials: "same-origin",
+    headers: jsonHeaders(),
+    body: JSON.stringify(request)
+  });
+  return (await readJsonOrThrow(response)) as unknown as ContextPlanResponse;
 }
 
 export async function pauseTimeline(duration_ms?: number): Promise<TimelineControlResponse> {

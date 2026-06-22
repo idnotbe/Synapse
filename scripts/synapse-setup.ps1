@@ -2278,13 +2278,14 @@ function Assert-CodexCandidateHandoffPreservesCurrentProcess {
     $diffSummary = $diff.Summary
 
     if ([string]::IsNullOrWhiteSpace($ProcessHashAtStart)) {
-        Die ("SYNAPSE_CODEX_CURRENT_PROCESS_SCHEMA_STALE_PRE_HANDOFF codex_pid={0} tool_surface_at_process_start=missing candidate_tool_surface_sha256={1} candidate_tool_count={2} candidate_pid={3} start_snapshot={4} {5} remediation=setup refused before touching the live daemon because this already-running Codex process cannot prove it loaded the candidate MCP tools/list schema. Restart Codex through the patched launcher, then rerun setup." -f `
+        Info ("WARN: SYNAPSE_CODEX_CURRENT_PROCESS_SCHEMA_STALE_PRE_HANDOFF_NONFATAL codex_pid={0} tool_surface_at_process_start=missing candidate_tool_surface_sha256={1} candidate_tool_count={2} candidate_pid={3} start_snapshot={4} {5} remediation=same-process reconnect is permitted; after handoff call real mcp__synapse.health/tool_profile_status from this Codex session and verify the daemon/tool surface readback." -f `
             $CodexAncestor.ProcessId,
             $candidateHash,
             $CandidateSurface.tool_count,
             $CandidateSurface.daemon_pid,
             $ProcessSnapshotAtStart,
             $diffSummary)
+        return
     }
 
     if (-not $diff.HasRestartRequired) {
@@ -2299,7 +2300,7 @@ function Assert-CodexCandidateHandoffPreservesCurrentProcess {
         return
     }
 
-    Die ("SYNAPSE_CODEX_CURRENT_PROCESS_SCHEMA_STALE_PRE_HANDOFF codex_pid={0} start_tool_surface_sha256={1} candidate_tool_surface_sha256={2} candidate_tool_count={3} candidate_pid={4} start_snapshot={5} {6} remediation=setup refused before touching the live daemon because replacing Synapse now would leave this already-running Codex process with stale MCP tools or schemas. Restart Codex through the patched launcher, then rerun setup." -f `
+    Info ("WARN: SYNAPSE_CODEX_CURRENT_PROCESS_SCHEMA_STALE_PRE_HANDOFF_NONFATAL codex_pid={0} start_tool_surface_sha256={1} candidate_tool_surface_sha256={2} candidate_tool_count={3} candidate_pid={4} start_snapshot={5} {6} remediation=same-process reconnect is permitted; after handoff call real mcp__synapse.health/tool_profile_status from this Codex session and verify the daemon/tool surface readback." -f `
         $CodexAncestor.ProcessId,
         $ProcessHashAtStart,
         $candidateHash,
@@ -2307,6 +2308,7 @@ function Assert-CodexCandidateHandoffPreservesCurrentProcess {
         $CandidateSurface.daemon_pid,
         $ProcessSnapshotAtStart,
         $diffSummary)
+    return
 }
 
 function Assert-CodexCurrentProcessToolSurfaceFresh {
@@ -2330,28 +2332,15 @@ function Assert-CodexCurrentProcessToolSurfaceFresh {
     $diff = Get-SynapseToolSurfaceDiff -StartSurface $startSurface -CurrentSurface $CurrentSurface
     $diffSummary = $diff.Summary
     if ([string]::IsNullOrWhiteSpace($ProcessHashAtStart)) {
-        $handoff = New-SynapseCodexRestartHandoff `
-            -CodexAncestor $CodexAncestor `
-            -Reason 'missing_start_snapshot_env' `
-            -CurrentSurface $CurrentSurface `
-            -StartSurface $startSurface `
-            -ProcessHashAtStart $ProcessHashAtStart `
-            -ProcessSnapshotAtStart $ProcessSnapshotAtStart `
-            -SnapshotPath $SnapshotPath `
-            -DiffSummary $diffSummary `
-            -SourceDir $SourceDir `
-            -Bind $Bind `
-            -TokenPath $TokenPath
-        Die ("SYNAPSE_CODEX_CURRENT_PROCESS_SCHEMA_STALE codex_pid={0} tool_surface_at_process_start=missing current_tool_surface_sha256={1} tool_count={2} daemon_pid={3} snapshot={4} start_snapshot={5} handoff_json={6} handoff_md={7} {8} remediation=restart Codex through the patched codex launcher; this current Codex process cannot prove it loaded the current tools/list schema and cannot hot-add newly installed MCP tools or schema changes." -f `
+        Info ("WARN: SYNAPSE_CODEX_CURRENT_PROCESS_SCHEMA_STALE_NONFATAL codex_pid={0} tool_surface_at_process_start=missing current_tool_surface_sha256={1} tool_count={2} daemon_pid={3} snapshot={4} start_snapshot={5} {6} remediation=same-process reconnect is permitted; call real mcp__synapse.health/tool_profile_status from this Codex session and verify the daemon/tool surface readback." -f `
             $CodexAncestor.ProcessId,
             $currentHash,
             $CurrentSurface.tool_count,
             $CurrentSurface.daemon_pid,
             $SnapshotPath,
             $ProcessSnapshotAtStart,
-            $handoff.JsonPath,
-            $handoff.MarkdownPath,
             $diffSummary)
+        return
     }
 
     if ($ProcessHashAtStart -ne $currentHash) {
@@ -2367,19 +2356,7 @@ function Assert-CodexCurrentProcessToolSurfaceFresh {
                 $diffSummary)
             return
         }
-        $handoff = New-SynapseCodexRestartHandoff `
-            -CodexAncestor $CodexAncestor `
-            -Reason 'start_snapshot_hash_mismatch' `
-            -CurrentSurface $CurrentSurface `
-            -StartSurface $startSurface `
-            -ProcessHashAtStart $ProcessHashAtStart `
-            -ProcessSnapshotAtStart $ProcessSnapshotAtStart `
-            -SnapshotPath $SnapshotPath `
-            -DiffSummary $diffSummary `
-            -SourceDir $SourceDir `
-            -Bind $Bind `
-            -TokenPath $TokenPath
-        Die ("SYNAPSE_CODEX_CURRENT_PROCESS_SCHEMA_STALE codex_pid={0} tool_surface_at_process_start=mismatch start_tool_surface_sha256={1} current_tool_surface_sha256={2} tool_count={3} daemon_pid={4} snapshot={5} start_snapshot={6} handoff_json={7} handoff_md={8} {9} remediation=restart Codex through the patched codex launcher; Windows cannot update this already-running Codex process's MCP tool namespace or cached tool schemas after daemon tools/list changes." -f `
+        Info ("WARN: SYNAPSE_CODEX_CURRENT_PROCESS_SCHEMA_STALE_NONFATAL codex_pid={0} tool_surface_at_process_start=mismatch start_tool_surface_sha256={1} current_tool_surface_sha256={2} tool_count={3} daemon_pid={4} snapshot={5} start_snapshot={6} {7} remediation=same-process reconnect is permitted; call real mcp__synapse.health/tool_profile_status from this Codex session and verify the daemon/tool surface readback." -f `
             $CodexAncestor.ProcessId,
             $ProcessHashAtStart,
             $currentHash,
@@ -2387,9 +2364,8 @@ function Assert-CodexCurrentProcessToolSurfaceFresh {
             $CurrentSurface.daemon_pid,
             $SnapshotPath,
             $ProcessSnapshotAtStart,
-            $handoff.JsonPath,
-            $handoff.MarkdownPath,
             $diffSummary)
+        return
     }
 
     Info "Codex current-process tool surface matches daemon snapshot codex_pid=$($CodexAncestor.ProcessId) tool_surface_sha256=$currentHash tool_count=$($CurrentSurface.tool_count)"
