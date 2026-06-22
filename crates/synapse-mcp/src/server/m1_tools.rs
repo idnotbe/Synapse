@@ -2602,7 +2602,7 @@ impl SynapseService {
     }
 
     #[tool(
-        description = "Return the full serialized HTML of the calling session's owned background browser tab (document.documentElement.outerHTML) via raw CDP, plus url/title/readyState read back from the same target. Requires an active session CDP target or an explicit cdp_target_id owned by this session; never the human foreground tab. Read-only, background-safe: never activates the tab or uses OS foreground input. The HTML is truncated in-page to max_bytes; html_len/truncated report the original size. Raw CDP only; the popup-safe extension bridge fails closed."
+        description = "Return the full serialized HTML of the calling session's owned background browser tab (document.documentElement.outerHTML), plus url/title/readyState read back from the same target. Uses raw CDP when available or the typed normal Chrome bridge pageContent helper for chrome-tab:* targets; never the human foreground tab. Read-only, background-safe: never activates the tab or uses OS foreground input. The HTML is truncated in-page to max_bytes; html_len/truncated report the original size."
     )]
     pub async fn browser_content(
         &self,
@@ -2660,7 +2660,7 @@ impl SynapseService {
     }
 
     #[tool(
-        description = "Replace the full document HTML of the calling session's owned background browser tab via raw CDP Page.setDocumentContent, then read back URL/title/readyState/history from the same target. This is Playwright setContent-style main-frame content replacement for session-owned targets only: never activates the tab, never uses OS foreground input, and never falls back to the human foreground tab. Raw CDP only; the popup-safe normal Chrome extension bridge fails closed."
+        description = "Replace the full document HTML of the calling session's owned background browser tab, then read back URL/title/readyState/history from the same target. Uses raw CDP Page.setDocumentContent when available or the typed normal Chrome bridge setContent helper for chrome-tab:* targets; the normal bridge seeds inaccessible blank/internal pages on the daemon-local origin before replacement. Never activates the tab, never uses OS foreground input, and never falls back to the human foreground tab."
     )]
     pub async fn browser_set_content(
         &self,
@@ -6142,6 +6142,50 @@ impl SynapseService {
         max_bytes: usize,
     ) -> Result<BrowserContentResponse, ErrorData> {
         let Some(endpoint) = synapse_a11y::endpoint_for_window(window_hwnd) else {
+            if cdp_target_id.starts_with("chrome-tab:") {
+                let content = crate::chrome_debugger_bridge::page_content(
+                    window_hwnd,
+                    cdp_target_id,
+                    max_bytes,
+                )
+                .await
+                .map_err(|error| {
+                    mcp_error(
+                        error.code(),
+                        format!(
+                            "browser_content normal bridge pageContent failed for target {cdp_target_id:?}: {}",
+                            error.detail()
+                        ),
+                    )
+                })?;
+                tracing::info!(
+                    code = "CHROME_BRIDGE_BACKGROUND_CONTENT",
+                    session_id = %session_id,
+                    hwnd = window_hwnd,
+                    cdp_target_id = %content.target_id,
+                    html_len = content.html_len,
+                    truncated = content.truncated,
+                    target_url = %content.url,
+                    "readback=chrome.scripting.executeScript(document.documentElement.outerHTML) outcome=content_read"
+                );
+                return Ok(BrowserContentResponse {
+                    session_id: session_id.to_owned(),
+                    window_hwnd,
+                    transport: "chrome_tabs_extension".to_owned(),
+                    endpoint: "chrome-extension://leoocgnkjnplbfdbklajepahofecgfbk/chrome.tabs"
+                        .to_owned(),
+                    cdp_target_id: content.target_id,
+                    url: content.url,
+                    title: content.title,
+                    ready_state: content.ready_state,
+                    html: content.html,
+                    html_len: content.html_len,
+                    truncated: content.truncated,
+                    max_bytes: content.max_bytes,
+                    readback_backend: content.readback_backend,
+                    required_foreground: false,
+                });
+            }
             return Err(browser_raw_cdp_required_error(
                 "browser_content",
                 window_hwnd,
@@ -6230,6 +6274,76 @@ impl SynapseService {
         wait_timeout_ms: u64,
     ) -> Result<BrowserSetContentResponse, ErrorData> {
         let Some(endpoint) = synapse_a11y::endpoint_for_window(window_hwnd) else {
+            if cdp_target_id.starts_with("chrome-tab:") {
+                let set =
+                    crate::chrome_debugger_bridge::set_content(
+                        window_hwnd,
+                        cdp_target_id,
+                        html,
+                        wait_timeout_ms,
+                        Some(session_id),
+                    )
+                    .await
+                    .map_err(|error| {
+                        mcp_error(
+                            error.code(),
+                            format!(
+                                "browser_set_content normal bridge setContent failed for target {cdp_target_id:?}: {}",
+                                error.detail()
+                            ),
+                        )
+                    })?;
+                tracing::info!(
+                    code = "CHROME_BRIDGE_BACKGROUND_SET_CONTENT",
+                    session_id = %session_id,
+                    hwnd = window_hwnd,
+                    cdp_target_id = %set.target_id,
+                    html_len = set.html_len,
+                    before_url = %set.before_url,
+                    after_url = %set.after_url,
+                    seeded_url = %set.seeded_url,
+                    ready_state = %set.ready_state,
+                    "readback=chrome.scripting.executeScript(document.open/write/close)+chrome.tabs.get outcome=content_set"
+                );
+                return Ok(BrowserSetContentResponse {
+                    session_id: session_id.to_owned(),
+                    window_hwnd,
+                    transport: "chrome_tabs_extension".to_owned(),
+                    endpoint: "chrome-extension://leoocgnkjnplbfdbklajepahofecgfbk/chrome.tabs"
+                        .to_owned(),
+                    cdp_target_id: set.target_id,
+                    frame_id: set
+                        .frame_id
+                        .map(|value| value.to_string())
+                        .unwrap_or_else(|| "0".to_owned()),
+                    html_len: set.html_len,
+                    before_url: set.before_url,
+                    before_title: set.before_title,
+                    after_url: set.after_url,
+                    after_title: set.after_title,
+                    ready_state: set.ready_state,
+                    history_current_index: set.history_current_index,
+                    history_entry_count: set.history_entry_count,
+                    seeded_url: if set.seeded_url.is_empty() {
+                        None
+                    } else {
+                        Some(set.seeded_url)
+                    },
+                    seeded_from_url: if set.seeded_from_url.is_empty() {
+                        None
+                    } else {
+                        Some(set.seeded_from_url)
+                    },
+                    seeded_reason: if set.seeded_reason.is_empty() {
+                        None
+                    } else {
+                        Some(set.seeded_reason)
+                    },
+                    readback_backend: set.readback_backend,
+                    backend_tier_used: "chrome_tabs_extension".to_owned(),
+                    required_foreground: false,
+                });
+            }
             return Err(browser_raw_cdp_required_error(
                 "browser_set_content",
                 window_hwnd,
@@ -6276,6 +6390,9 @@ impl SynapseService {
             ready_state: set.after.ready_state,
             history_current_index: set.after.history_current_index,
             history_entry_count: set.after.history_entry_count,
+            seeded_url: None,
+            seeded_from_url: None,
+            seeded_reason: None,
             readback_backend: "Page.setDocumentContent+Runtime.evaluate".to_owned(),
             backend_tier_used: "cdp".to_owned(),
             required_foreground: false,

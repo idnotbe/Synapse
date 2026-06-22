@@ -1412,9 +1412,9 @@ if ($staleSynapseActivePermissions.Count -gt 0) {
     daemon_bridge_transport = 'direct_localhost_websocket'
     daemon_bridge_origin = "chrome-extension://$ExtensionId"
     bridge_self_reload_command = 'cdp_bridge_reload'
-    bridge_build_id_expected = 'synapse-chrome-bridge-2026-06-21-click-options-v1'
-    bridge_build_sha256_expected = 'fbee19874f831616a1b46dc945a0ed5778dfea67a45c4f680e1abc83eea6cadf'
-    bridge_required_capabilities = @('alarmReconnect', 'activateTab', 'closeTab', 'coordinateClick', 'domAction', 'externalPopupRiskSuppression', 'listTabs', 'navigateTab', 'openTab', 'pageVitals', 'reloadSelf', 'targetInfo', 'targetInfoPageText', 'typeActiveElement', 'setFieldValue')
+    bridge_build_id_expected = 'synapse-chrome-bridge-2026-06-22-set-content-seed-v4'
+    bridge_build_sha256_expected = '3ef84d2de247f996a2b92677bae8922e976736058a95699b11446c887e12f906'
+    bridge_required_capabilities = @('alarmReconnect', 'activateTab', 'closeTab', 'coordinateClick', 'domAction', 'externalPopupRiskSuppression', 'listTabs', 'navigateTab', 'openTab', 'pageVitals', 'pageContent', 'setContent', 'reloadSelf', 'targetInfo', 'targetInfoPageText', 'typeActiveElement', 'setFieldValue')
     background_navigation_backend = 'chrome.tabs_plus_chrome.scripting_executeScript_for_typed_dom_actions_no_debugger_no_native_messaging_plus_chrome.management_external_popup_suppression'
     reconnect_driver = 'bounded_websocket_reconnect_with_chrome_alarms_mv3_wake'
     attach_popup_prevention = 'normal_bridge_debugger_free_no_chrome.debugger_permission_no_helper_windows_no_nativeMessaging_permission_plus_daemon_side_attach_disabled_for_debugger_commands'

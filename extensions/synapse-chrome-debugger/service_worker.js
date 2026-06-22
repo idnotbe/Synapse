@@ -1,6 +1,6 @@
 const PROTOCOL_VERSION = 1;
-const BRIDGE_BUILD_ID = "synapse-chrome-bridge-2026-06-21-click-options-v1";
-const BRIDGE_BUILD_SHA256 = "fbee19874f831616a1b46dc945a0ed5778dfea67a45c4f680e1abc83eea6cadf";
+const BRIDGE_BUILD_ID = "synapse-chrome-bridge-2026-06-22-set-content-seed-v4";
+const BRIDGE_BUILD_SHA256 = "3ef84d2de247f996a2b92677bae8922e976736058a95699b11446c887e12f906";
 const COMMAND_CAPABILITIES = Object.freeze([
   "alarmReconnect",
   "externalPopupRiskSuppression",
@@ -12,6 +12,8 @@ const COMMAND_CAPABILITIES = Object.freeze([
   "navigateTab",
   "activateTab",
   "pageVitals",
+  "pageContent",
+  "setContent",
   "domAction",
   "coordinateClick",
   "reloadSelf",
@@ -20,6 +22,7 @@ const COMMAND_CAPABILITIES = Object.freeze([
 ]);
 const EXPECTED_EXTENSION_ID = "leoocgnkjnplbfdbklajepahofecgfbk";
 const DAEMON_BASE_URL = "http://127.0.0.1:7700";
+const SET_CONTENT_SEED_PATH = "/__synapse_bridge_set_content_seed.html";
 const ERROR_ATTACH_FAILED = "A11Y_CDP_ATTACH_FAILED";
 const ERROR_AXTREE_FAILED = "A11Y_CDP_AXTREE_FAILED";
 const ERROR_DEBUGGER_WARNING_UNSUPPRESSED = "A11Y_CDP_DEBUGGER_WARNING_UNSUPPRESSED";
@@ -301,9 +304,12 @@ function commandRequiresExternalPopupSuppression(kind) {
     "typeActiveElement",
     "setFieldValue",
     "pageVitals",
+    "pageContent",
+    "setContent",
     "navigateTab",
     "activateTab",
-    "domAction"
+    "domAction",
+    "coordinateClick"
   ].includes(kind);
 }
 
@@ -696,6 +702,10 @@ async function handleCommand(command) {
       result = rejectAttachCommand(kind, params);
     } else if (kind === "targetInfo" || kind === "targetInfoPageText") {
       result = await handleTargetInfo(params);
+    } else if (kind === "pageContent") {
+      result = await handlePageContent(params);
+    } else if (kind === "setContent") {
+      result = await handleSetContent(params);
     } else if (kind === "typeActiveElement") {
       result = await handleTypeActiveElement(params);
     } else if (kind === "setFieldValue") {
@@ -935,6 +945,182 @@ async function handlePageVitals(params) {
     target_candidate_count: selected.targetCandidateCount,
     target_selection_reason: selected.selectionReason
   };
+}
+
+async function handlePageContent(params) {
+  const selected = await selectTabTarget(params, { requireTargetId: true });
+  const maxBytes = normalizeMaxContentBytes(params.maxBytes);
+  const state = await tabPageState(selected.tabId, selected.target);
+  const content = await tabPageContentState(selected.tabId, maxBytes);
+  if (!content.available) {
+    throw bridgeError(
+      ERROR_AXTREE_FAILED,
+      `pageContent read failed for tab ${selected.tabId}: code=${String(content.error_code || "UNKNOWN")} ` +
+        `detail=${String(content.error_detail || "")}`
+    );
+  }
+  return {
+    extension_id: chrome.runtime.id,
+    target_id: state.target_id || selected.target.id,
+    tab_id: selected.tabId,
+    chrome_window_id: state.chrome_window_id,
+    url: state.url || content.url || "",
+    title: state.title || content.title || "",
+    ready_state: content.ready_state || state.ready_state || "",
+    history_current_index: Number.isSafeInteger(content.history_current_index) ? content.history_current_index : -1,
+    history_entry_count: Number.isSafeInteger(content.history_entry_count) ? content.history_entry_count : 0,
+    html: content.html || "",
+    html_len: Number.isSafeInteger(content.html_len) ? content.html_len : 0,
+    truncated: Boolean(content.truncated),
+    max_bytes: maxBytes,
+    readback_backend: "chrome.scripting.executeScript(document.documentElement.outerHTML)",
+    frame_id: content.frame_id,
+    frame_document_id: content.frame_document_id,
+    target_candidate_count: selected.targetCandidateCount,
+    target_selection_reason: selected.selectionReason
+  };
+}
+
+async function handleSetContent(params) {
+  const selected = await selectTabTarget(params, { requireTargetId: true });
+  const html = String(params.html ?? "");
+  const waitTimeoutMs = normalizeWaitTimeout(params.waitTimeoutMs);
+  const agentSessionId = normalizeOptionalSessionId(params.agentSessionId);
+  if (html.length === 0) {
+    throw bridgeError(ERROR_AXTREE_FAILED, "setContent requires non-empty html");
+  }
+  if (!chrome.scripting || typeof chrome.scripting.executeScript !== "function") {
+    throw bridgeError(
+      ERROR_AXTREE_FAILED,
+      "chrome.scripting.executeScript unavailable; extension is missing scripting permission"
+    );
+  }
+  const before = await tabPageState(selected.tabId, selected.target);
+  const execution = await executeSetContentScript(selected, html, waitTimeoutMs, agentSessionId, before);
+  const { injected, seed } = execution;
+  const frameResults = frameExecutionResults(injected);
+  const first = frameResults.find((frame) => frame.result) || null;
+  const result = first?.result;
+  if (!result || typeof result !== "object") {
+    throw bridgeError(ERROR_AXTREE_FAILED, "chrome.scripting.executeScript setContent returned no structured result");
+  }
+  if (!result.ok) {
+    throw bridgeError(
+      String(result.error_code || ERROR_AXTREE_FAILED),
+      `setContent failed: ${String(result.error_detail || "")}`
+    );
+  }
+  const after = await waitForTabPageState(
+    selected.tabId,
+    selected.target,
+    waitTimeoutMs,
+    {
+      description: "document.readyState complete after setContent",
+      matches: (state) => state.ready_state === "complete"
+    }
+  );
+  return {
+    extension_id: chrome.runtime.id,
+    target_id: after.target_id || selected.target.id,
+    tab_id: selected.tabId,
+    chrome_window_id: after.chrome_window_id,
+    before_url: before.url || "",
+    before_title: before.title || "",
+    after_url: after.url || result.url || "",
+    after_title: after.title || result.title || "",
+    ready_state: result.ready_state || after.ready_state || "",
+    history_current_index: Number.isSafeInteger(result.history_current_index) ? result.history_current_index : -1,
+    history_entry_count: Number.isSafeInteger(result.history_entry_count) ? result.history_entry_count : 0,
+    html_len: Number.isSafeInteger(result.html_len) ? result.html_len : html.length,
+    seeded_url: seed?.url || "",
+    seeded_from_url: seed?.from_url || "",
+    seeded_reason: seed?.reason || "",
+    readback_backend: "chrome.scripting.executeScript(document.open/write/close)+chrome.tabs.get",
+    backend_tier_used: "chrome_tabs_extension",
+    frame_id: Number.isSafeInteger(first.frame_id) ? first.frame_id : null,
+    frame_document_id: first.document_id,
+    frame_result_count: frameResults.length,
+    frame_results: frameResults.map(summarizeFrameExecutionResult),
+    target_candidate_count: selected.targetCandidateCount,
+    target_selection_reason: selected.selectionReason
+  };
+}
+
+async function executeSetContentScript(selected, html, waitTimeoutMs, agentSessionId, before) {
+  try {
+    const injected = await runSetContentScript(selected.tabId, html, waitTimeoutMs);
+    return { injected, seed: null };
+  } catch (error) {
+    if (!isScriptingAccessDeniedError(error)) {
+      throw bridgeError(
+        ERROR_AXTREE_FAILED,
+        `chrome.scripting.executeScript setContent(${selected.tabId}) failed: ${errorMessage(error)}`
+      );
+    }
+    const seed = await seedTabForSetContent(selected, waitTimeoutMs, agentSessionId, before, error);
+    try {
+      const injected = await runSetContentScript(selected.tabId, html, waitTimeoutMs);
+      return { injected, seed };
+    } catch (retryError) {
+      throw bridgeError(
+        ERROR_AXTREE_FAILED,
+        `chrome.scripting.executeScript setContent(${selected.tabId}) failed after seed navigation ` +
+          `url=${JSON.stringify(seed.url)} original=${errorMessage(error)} retry=${errorMessage(retryError)}`
+      );
+    }
+  }
+}
+
+async function runSetContentScript(tabId, html, waitTimeoutMs) {
+  return chrome.scripting.executeScript({
+    target: { tabId },
+    world: "MAIN",
+    func: setContentInPage,
+    args: [{ html, waitTimeoutMs }]
+  });
+}
+
+async function seedTabForSetContent(selected, waitTimeoutMs, agentSessionId, before, cause) {
+  const seedUrl = setContentSeedUrl(selected.tabId);
+  markAgentNavigation(selected.tabId, {
+    action: "setContentSeed",
+    requestedUrl: seedUrl,
+    sessionId: agentSessionId
+  });
+  try {
+    await chrome.tabs.update(selected.tabId, { url: seedUrl });
+  } catch (error) {
+    throw bridgeError(
+      ERROR_AXTREE_FAILED,
+      `chrome.tabs.update(${selected.tabId}) seed for setContent failed: ${errorMessage(error)}; ` +
+        `original executeScript failure=${errorMessage(cause)}`
+    );
+  }
+  await waitForTabPageState(selected.tabId, selected.target, waitTimeoutMs, {
+    description: `setContent seed url ${JSON.stringify(seedUrl)}`,
+    matches: (state) => state.url === seedUrl || state.url.startsWith(`${seedUrl}#`)
+  });
+  return {
+    url: seedUrl,
+    from_url: before?.url || "",
+    reason: errorMessage(cause)
+  };
+}
+
+function setContentSeedUrl(tabId) {
+  const nonce = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  return `${DAEMON_BASE_URL}${SET_CONTENT_SEED_PATH}?tab=${encodeURIComponent(String(tabId))}&nonce=${encodeURIComponent(nonce)}`;
+}
+
+function isScriptingAccessDeniedError(error) {
+  const message = errorMessage(error);
+  return (
+    message.includes("Cannot access contents of url") ||
+    message.includes("Extension manifest must request permission") ||
+    message.includes("Cannot access a chrome:// URL") ||
+    message.includes("Cannot access chrome://") ||
+    message.includes("The extensions gallery cannot be scripted")
+  );
 }
 
 async function handleCapturePageScreenshot(params) {
@@ -1959,6 +2145,60 @@ async function tabPageTextState(tabId) {
   }
 }
 
+async function tabPageContentState(tabId, maxBytes) {
+  if (!chrome.scripting || typeof chrome.scripting.executeScript !== "function") {
+    return {
+      available: false,
+      readback_source: "chrome.scripting.executeScript",
+      html: null,
+      html_len: 0,
+      truncated: false,
+      max_bytes: maxBytes,
+      error_code: "CHROME_SCRIPTING_UNAVAILABLE",
+      error_detail: "Chrome scripting API is unavailable; extension is missing scripting permission"
+    };
+  }
+  try {
+    const results = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: readPageContentInPage,
+      args: [maxBytes]
+    });
+    const frames = frameExecutionResults(results);
+    const selected = frames.find((frame) => frame.result) || null;
+    if (!selected || typeof selected.result !== "object" || selected.result === null) {
+      return {
+        available: false,
+        readback_source: "chrome.scripting.executeScript",
+        html: null,
+        html_len: 0,
+        truncated: false,
+        max_bytes: maxBytes,
+        error_code: "CHROME_SCRIPTING_EMPTY_RESULT",
+        error_detail: "chrome.scripting.executeScript returned no page-content result"
+      };
+    }
+    return {
+      available: true,
+      readback_source: "chrome.scripting.executeScript",
+      frame_id: selected.frame_id,
+      frame_document_id: selected.document_id,
+      ...selected.result
+    };
+  } catch (error) {
+    return {
+      available: false,
+      readback_source: "chrome.scripting.executeScript",
+      html: null,
+      html_len: 0,
+      truncated: false,
+      max_bytes: maxBytes,
+      error_code: "CHROME_SCRIPTING_EXECUTE_FAILED",
+      error_detail: errorMessage(error)
+    };
+  }
+}
+
 function trimForReadback(value, maxChars) {
   const limit = Number.isSafeInteger(maxChars) && maxChars >= 0 ? maxChars : 240;
   return Array.from(String(value || "").replace(/\s+/g, " ").trim()).slice(0, limit).join("");
@@ -2156,6 +2396,78 @@ function readPageTextInPage(maxChars) {
     title: String(document.title || ""),
     ready_state: String(document.readyState || "")
   };
+}
+
+function readPageContentInPage(maxBytes) {
+  const max = Number.isSafeInteger(maxBytes) && maxBytes >= 0 ? Math.min(maxBytes, 2 * 1024 * 1024) : 2 * 1024 * 1024;
+  const html = String(document.documentElement?.outerHTML || "");
+  return {
+    ok: true,
+    html: Array.from(html).slice(0, max).join(""),
+    html_len: html.length,
+    truncated: html.length > max,
+    max_bytes: max,
+    url: String(location.href || ""),
+    title: String(document.title || ""),
+    ready_state: String(document.readyState || ""),
+    history_current_index: -1,
+    history_entry_count: Number.isSafeInteger(history.length) ? history.length : 0
+  };
+}
+
+async function setContentInPage(request) {
+  const html = String((request && request.html) ?? "");
+  const waitTimeoutMs = Number.isSafeInteger(request?.waitTimeoutMs)
+    ? Math.max(1, Math.min(request.waitTimeoutMs, 30000))
+    : 10000;
+  if (html.length === 0) {
+    return {
+      ok: false,
+      error_code: "CHROME_DOM_ACTION_UNSUPPORTED",
+      error_detail: "setContent requires non-empty html"
+    };
+  }
+  try {
+    const waitForLoad = new Promise((resolve) => {
+      let done = false;
+      const finish = () => {
+        if (done) {
+          return;
+        }
+        done = true;
+        setTimeout(resolve, 0);
+      };
+      window.addEventListener("load", finish, { once: true });
+      setTimeout(finish, waitTimeoutMs);
+    });
+    document.open();
+    document.write(html);
+    document.close();
+    if (document.readyState !== "complete") {
+      await waitForLoad;
+    } else {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+    const historyLength = Number.isSafeInteger(history.length) ? history.length : 0;
+    return {
+      ok: true,
+      html_len: html.length,
+      url: String(location.href || ""),
+      title: String(document.title || ""),
+      ready_state: String(document.readyState || ""),
+      history_current_index: -1,
+      history_entry_count: historyLength,
+      inline_script_marker: document.body?.getAttribute("data-inline-script") || null,
+      load_event_marker: document.body?.getAttribute("data-load-event") || null,
+      script_proof_present: Boolean(document.getElementById("issue1159-script-proof"))
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      error_code: "CHROME_SCRIPTING_EXECUTE_FAILED",
+      error_detail: error && error.message ? String(error.message) : String(error)
+    };
+  }
 }
 
 function readPageVitalsInPage() {
@@ -4868,6 +5180,17 @@ function normalizeWaitTimeout(value) {
   const number = Number(value);
   if (!Number.isInteger(number) || number < 1 || number > 30000) {
     throw bridgeError(ERROR_ATTACH_FAILED, "waitTimeoutMs must be an integer from 1 through 30000");
+  }
+  return number;
+}
+
+function normalizeMaxContentBytes(value) {
+  if (value === undefined || value === null) {
+    return 2 * 1024 * 1024;
+  }
+  const number = Number(value);
+  if (!Number.isInteger(number) || number < 0 || number > 2 * 1024 * 1024) {
+    throw bridgeError(ERROR_ATTACH_FAILED, "maxBytes must be an integer from 0 through 2097152");
   }
   return number;
 }

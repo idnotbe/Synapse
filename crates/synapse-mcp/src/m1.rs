@@ -2093,13 +2093,13 @@ pub struct BrowserWaitForSelectorResponse {
 }
 
 /// Parameters for `browser_content` (#1158): return the full serialized HTML of
-/// the calling session's owned CDP page target.
+/// the calling session's owned browser page target.
 #[derive(Clone, Debug, Default, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct BrowserContentParams {
-    /// CDP TargetID to read. Defaults to the active session CDP target. Must be
-    /// owned by this session; the human foreground tab is never an implicit
-    /// fallback.
+    /// CDP/Chrome bridge target id to read. Defaults to the active session
+    /// target. Must be owned by this session; the human foreground tab is never
+    /// an implicit fallback.
     #[serde(default)]
     pub cdp_target_id: Option<String>,
     /// Browser HWND that owns the target. Required only with an explicit
@@ -2135,13 +2135,15 @@ pub struct BrowserContentResponse {
 }
 
 /// Parameters for `browser_set_content` (#1159): replace the main-frame HTML of
-/// the calling session's owned CDP page target.
+/// the calling session's owned browser page target. The normal Chrome bridge
+/// may move an inaccessible blank/internal page to a daemon-local seed URL
+/// before replacing the document.
 #[derive(Clone, Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct BrowserSetContentParams {
-    /// CDP TargetID to mutate. Defaults to the active session CDP target. Must be
-    /// owned by this session; the human foreground tab is never an implicit
-    /// fallback.
+    /// CDP/Chrome bridge target id to mutate. Defaults to the active session
+    /// target. Must be owned by this session; the human foreground tab is never
+    /// an implicit fallback.
     #[serde(default)]
     pub cdp_target_id: Option<String>,
     /// Browser HWND that owns the target. Required only with an explicit
@@ -2174,6 +2176,12 @@ pub struct BrowserSetContentResponse {
     pub ready_state: String,
     pub history_current_index: i64,
     pub history_entry_count: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub seeded_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub seeded_from_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub seeded_reason: Option<String>,
     pub readback_backend: String,
     pub backend_tier_used: String,
     pub required_foreground: bool,

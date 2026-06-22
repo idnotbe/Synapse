@@ -97,11 +97,17 @@ registration for the expected Synapse extension so the worker can report its
 with `A11Y_CDP_DEBUGGER_WARNING_UNSUPPRESSED` before queueing any browser work.
 
 Background tab commands (`listTabs`, `openTab`, `closeTab`, `navigateTab`, `activateTab`,
-`targetInfoPageText`, `pageVitals`, `domAction`, `setFieldValue`, and
+`targetInfoPageText`, `pageVitals`, `pageContent`, `setContent`, `domAction`, `setFieldValue`, and
 `typeActiveElement`) use `chrome.windows.getAll`,
 `chrome.tabs.query`, `chrome.tabs.create`, `chrome.tabs.remove`, `chrome.tabs.update`,
 `chrome.tabs.reload`, `chrome.tabs.goBack`, `chrome.tabs.goForward`, and
-`chrome.scripting.executeScript`. When the daemon gives the normal bridge an OS
+`chrome.scripting.executeScript`. `setContent` writes through a typed
+precompiled `chrome.scripting.executeScript(document.open/write/close)` helper
+in MAIN world so script tags in replacement HTML use normal page execution
+semantics; if Chrome refuses script injection into an owned blank/internal page
+such as a top-level `about:blank`, the bridge first moves that background tab
+to a daemon-local seed URL on `http://127.0.0.1:7700` and then performs the
+same document replacement/readback. When the daemon gives the normal bridge an OS
 HWND hint, the extension cannot see HWNDs directly, so it maps the hint through
 the daemon's passive window bounds/title readback before using `windowId`. If
 that mapping does not identify exactly one Chrome window, `openTab` and
@@ -114,7 +120,7 @@ changes viewport/layout and breaks coordinate truth. `evaluateScript` is also
 not a normal-bridge capability: arbitrary string evaluation needs raw CDP
 Runtime.evaluate, while `chrome.scripting.executeScript` can safely provide only
 typed, precompiled DOM helpers under normal page/extension CSP. Use
-`targetInfoPageText`, `pageVitals`, `domAction`, `setFieldValue`, and
+`targetInfoPageText`, `pageVitals`, `pageContent`, `setContent`, `domAction`, `setFieldValue`, and
 `typeActiveElement` for popup-free normal-profile read/action work, and use raw
 CDP in a dedicated silent automation profile for arbitrary JavaScript eval.
 `pageVitals` and `targetInfoPageText` read the page Performance Timeline for LCP
