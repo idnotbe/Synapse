@@ -5,7 +5,10 @@ user's normal Chrome profile through a direct localhost WebSocket from the
 extension service worker to the Synapse daemon. The normal end-user bridge is
 tabs-first: background tab open/close/navigation use `chrome.tabs` APIs, and the
 extension requests `debugger` only for the narrow target-scoped `cdpInput`
-hover/tap lane. It does not require `nativeMessaging`. Page-scoped evaluation
+hover/tap/active-tab drag lane. Inactive normal-profile tabs use a strict
+selector-scoped synthetic MouseEvent drag path through `chrome.scripting` so
+drag FSV stays background-safe. It also dispatches HTML5 DragEvent/DataTransfer
+drops in page script. It does not require `nativeMessaging`. Page-scoped evaluation
 uses `chrome.scripting.executeScript`; screenshot or deep CDP work must use raw
 CDP from a dedicated Synapse-launched automation profile started with
 `--silent-debugger-extension-api`, or fail closed before touching the normal
@@ -55,9 +58,9 @@ current reversible HKCU Chrome `ExtensionSettings` popup shield for external
 extensions or native hosts that request `debugger`/`nativeMessaging`. It also
 preserves a nativeMessaging-only self-shield for the stable Synapse extension
 ID. The current bridge intentionally requests `debugger` for the narrow
-target-scoped `cdpInput` lane used by hover/tap in the already-open Chrome
-profile, and it still never requests `nativeMessaging` or creates helper Chrome
-windows. The shield is identified by Synapse's
+target-scoped `cdpInput` lane used by hover/tap/active-tab mouse-drag in the already-open
+Chrome profile, and it still never requests `nativeMessaging` or creates helper
+Chrome windows. The shield is identified by Synapse's
 `blocked_install_message` marker and can be removed with the maintenance command
 below. If the HKCU Chrome policy key is ACL-locked, the verifier reports
 `SYNAPSE_CHROME_POLICY_POPUP_SHIELD_WRITE_DENIED` with ACL readback. That policy
@@ -136,7 +139,10 @@ plus document visibility state. The tabs-first readback/action commands do not
 call `chrome.debugger.getTargets` or `chrome.debugger.attach`; target IDs
 returned by this path are synthetic `chrome-tab:<tabId>` IDs backed by
 `chrome.tabs` readback. The narrow `cdpInput` command attaches only long enough
-to dispatch hover/tap input, then detaches. The daemon refuses other
+to dispatch hover/tap/active-tab mouse-drag input, then detaches; inactive-tab
+mouse drag uses a strict in-page MouseEvent sequence. The HTML5 drag path uses
+typed `chrome.scripting.executeScript` to create `DragEvent` plus `DataTransfer`
+in page MAIN world. The daemon refuses other
 attach-capable debugger commands before queueing them. External
 `debugger`/`nativeMessaging` surfaces remain visible in health/diagnostics for
 operator attribution and policy shielding, and they must be suppressed by
@@ -151,8 +157,10 @@ and the full required capability set.
 Attach-capable DOM commands (`snapshot`, `clickNode`, `typeNode`, and
 `nodeValue`) are unavailable in the normal end-user install. The normal service
 worker rejects them immediately. The bridge's only `chrome.debugger` use is the
-target-scoped `cdpInput` hover/tap lane; DOM attach and debugger-backed
-screenshots require raw CDP on a dedicated Synapse-launched automation profile.
+target-scoped `cdpInput` hover/tap/active-tab mouse-drag lane plus inactive-tab
+synthetic MouseEvent drag fallback; DOM attach and
+debugger-backed screenshots require raw CDP on a dedicated Synapse-launched
+automation profile.
 
 The install verifier also reads whether the live Chrome profile contains an
 external extension or native-messaging wrapper process with `debugger` or
@@ -181,10 +189,10 @@ or remote debugging without `--silent-debugger-extension-api`. A remaining
 end-user debugger/native-host/banner popup is therefore attributed to a concrete
 extension or process instead of being reported as an ambiguous Synapse bridge
 failure. Background normal-profile tab, typed DOM commands, and the target-scoped
-`cdpInput` hover/tap lane require those warnings to be cleared or suppressed
-before they run. Use raw CDP on a dedicated Synapse-launched automation profile
-started with `--silent-debugger-extension-api` for full attach-capable CDP work
-outside the bridge's narrow input lane.
+`cdpInput` hover/tap/drag lane require those warnings to be cleared or
+suppressed before they run. Use raw CDP on a dedicated Synapse-launched
+automation profile started with `--silent-debugger-extension-api` for full
+attach-capable CDP work outside the bridge's narrow input lane.
 
 The full Windows setup script runs the same verifier and applies the same
 reversible HKCU popup shield by default:
@@ -216,5 +224,6 @@ entries that blocked `debugger`, then reports a per-hive result; admin- or user-
 Background automation is achieved on Synapse's own side with the bundled bridge
 over localhost WebSocket, no `nativeMessaging` permission, no helper Chrome
 windows, tabs/scripting for DOM work, and a narrow `chrome.debugger` `cdpInput`
-lane for hover/tap. Deeper DOM/action CDP still runs in a dedicated
+lane for hover/tap/active-tab mouse-drag plus inactive-tab synthetic mouse drag
+and HTML5 DataTransfer dispatch. Deeper DOM/action CDP still runs in a dedicated
 Synapse-launched automation profile started with `--silent-debugger-extension-api`.

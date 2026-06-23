@@ -1,6 +1,6 @@
 const PROTOCOL_VERSION = 1;
-const BRIDGE_BUILD_ID = "synapse-chrome-bridge-2026-06-23-cdp-input-v3";
-const BRIDGE_BUILD_SHA256 = "eec1cb0805ccaed5416576ac8ecd1566a788e8751ebcda70da27b89658a4a9d8";
+const BRIDGE_BUILD_ID = "synapse-chrome-bridge-2026-06-23-dnd-v3";
+const BRIDGE_BUILD_SHA256 = "5955f80310cee69c05fe938070220406b7ad33354070db198beb2f79514a827c";
 const DEBUGGER_COMMAND_TIMEOUT_MS = 5000;
 const COMMAND_CAPABILITIES = Object.freeze([
   "alarmReconnect",
@@ -2780,6 +2780,18 @@ async function handleCdpInput(params) {
   const autoWaitTimeoutMs = normalizeDomActionAutoWaitTimeout(params.autoWaitTimeoutMs, autoWait);
   const before = await tabPageState(selected.tabId, selected.target);
   const beforePageText = await tabPageTextState(selected.tabId);
+  if (action === "drag" || action === "html5_drag") {
+    return await handleCdpInputDrag(
+      selected,
+      action,
+      params,
+      before,
+      beforePageText,
+      waitTimeoutMs,
+      autoWait,
+      autoWaitTimeoutMs
+    );
+  }
   let point;
   let frameId = 0;
   let resolved = {
@@ -2933,13 +2945,193 @@ async function handleCdpInput(params) {
 
 function normalizeCdpInputAction(value) {
   const action = String(value || "").trim().toLowerCase();
-  if (action === "hover" || action === "tap") {
+  if (action === "hover" || action === "tap" || action === "drag" || action === "html5_drag") {
     return action;
   }
   throw bridgeError(
     ERROR_CHROME_DOM_ACTION_UNSUPPORTED,
-    `cdpInput action must be hover or tap; got ${JSON.stringify(value)}`
+    `cdpInput action must be hover, tap, drag, or html5_drag; got ${JSON.stringify(value)}`
   );
+}
+
+async function handleCdpInputDrag(selected, action, params, before, beforePageText, waitTimeoutMs, autoWait, autoWaitTimeoutMs) {
+  if (!chrome.scripting || typeof chrome.scripting.executeScript !== "function") {
+    throw bridgeError(
+      ERROR_CHROME_SCRIPTING_EXECUTE_FAILED,
+      "chrome.scripting.executeScript unavailable; extension is missing scripting permission"
+    );
+  }
+  const sourceSelector = stringOrNull(params.sourceSelector);
+  const targetSelector = stringOrNull(params.targetSelector);
+  if (!sourceSelector || !targetSelector) {
+    throw bridgeError(
+      ERROR_CHROME_DOM_ACTION_UNSUPPORTED,
+      `cdpInput ${action} requires non-empty sourceSelector and targetSelector`
+    );
+  }
+  const source = await resolveCdpInputSelector(
+    selected,
+    action,
+    "source",
+    sourceSelector,
+    autoWait,
+    autoWaitTimeoutMs
+  );
+  const target = await resolveCdpInputSelector(
+    selected,
+    action,
+    "target",
+    targetSelector,
+    autoWait,
+    autoWaitTimeoutMs
+  );
+  const steps = normalizeCdpInputDragSteps(params.dragSteps);
+  const durationMs = normalizeCdpInputDragDuration(params.dragDurationMs);
+  const dispatch = action === "drag"
+    ? await dispatchMouseDrag(selected.tabId, before, sourceSelector, targetSelector, source.point, target.point, steps, durationMs)
+    : await dispatchHtml5DragDrop(selected.tabId, sourceSelector, targetSelector, params);
+  const after = await waitForTabPageState(selected.tabId, selected.target, waitTimeoutMs);
+  const afterPageText = await tabPageTextState(selected.tabId);
+  return {
+    extension_id: chrome.runtime.id,
+    target_id: after.target_id || selected.target.id,
+    tab_id: selected.tabId,
+    chrome_window_id: after.chrome_window_id,
+    action,
+    before_page: before,
+    after_page: after,
+    before_page_text: beforePageText,
+    after_page_text: afterPageText,
+    readback_backend: dispatch.backend || (action === "drag" ? "chrome.debugger.Input" : "chrome.scripting.executeScript(DragEvent+DataTransfer)"),
+    required_foreground: false,
+    source_selector: sourceSelector,
+    target_selector: targetSelector,
+    source_frame_id: source.frame_id,
+    target_frame_id: target.frame_id,
+    frame_id: source.frame_id,
+    target_candidate_count: selected.targetCandidateCount,
+    target_selection_reason: selected.selectionReason,
+    method: dispatch.method,
+    dispatched_events: dispatch.dispatched_events,
+    drag_steps: steps,
+    drag_duration_ms: durationMs,
+    source_viewport_point: source.point,
+    target_viewport_point: target.point,
+    debugger_protocol_version: dispatch.protocol_version || null,
+    cdp_fallback_error: dispatch.cdp_fallback_error || null,
+    html5_readback: dispatch.html5_readback || null,
+    synthetic_mouse_readback: dispatch.synthetic_mouse_readback || null,
+    source: source.resolved,
+    target: target.resolved
+  };
+}
+
+async function resolveCdpInputSelector(selected, action, label, selector, autoWait, autoWaitTimeoutMs) {
+  const request = {
+    action,
+    selector,
+    elementId: null,
+    elementPath: null,
+    role: null,
+    name: null,
+    value: null,
+    autoWait,
+    autoWaitTimeoutMs,
+    resolveOnly: true,
+    resolveActionability: true,
+    maxPageTextChars: MAX_PAGE_TEXT_CHARS
+  };
+  let injected;
+  try {
+    injected = await chrome.scripting.executeScript({
+      target: { tabId: selected.tabId, allFrames: true },
+      func: performDomActionInPage,
+      args: [request]
+    });
+  } catch (error) {
+    throw bridgeError(
+      ERROR_CHROME_SCRIPTING_EXECUTE_FAILED,
+      `chrome.scripting.executeScript cdpInput(${selected.tabId}, ${action}, ${label}) resolve failed: ${errorMessage(error)}`
+    );
+  }
+
+  const frameResults = frameExecutionResults(injected);
+  const okFrames = frameResults.filter((frame) => frame.result && frame.result.ok);
+  const totalMatches = frameResults.reduce((sum, frame) => sum + frameResolvedMatchCount(frame), 0);
+  const ambiguousFrames = frameResults.filter((frame) =>
+    frame.result?.error_code === ERROR_CHROME_DOM_ELEMENT_AMBIGUOUS
+  );
+  if (okFrames.length > 1 || totalMatches > 1 || ambiguousFrames.length > 0) {
+    throw bridgeError(
+      ERROR_CHROME_DOM_ELEMENT_AMBIGUOUS,
+      `cdpInput ${action} ${label} selector matched ${totalMatches} actionable element(s) across ${frameResults.length} frame(s); ` +
+        `frame_results=${JSON.stringify(frameResults.map(summarizeFrameExecutionResult).slice(0, 8))}`
+    );
+  }
+  const first = okFrames[0] || null;
+  if (!first || !first.result || typeof first.result !== "object") {
+    const failed = frameResults.find((frame) => frame.result)?.result;
+    throw bridgeError(
+      String(failed?.error_code || ERROR_CHROME_DOM_ELEMENT_NOT_FOUND),
+      `cdpInput ${action} ${label} selector failed across ${frameResults.length} frame(s): ${String(failed?.error_detail || "no matching frame result")}; ` +
+        `frame_results=${JSON.stringify(frameResults.map(summarizeFrameExecutionResult).slice(0, 8))}`
+    );
+  }
+  if (first.frame_id !== 0) {
+    throw bridgeError(
+      ERROR_CHROME_DOM_ACTION_UNSUPPORTED,
+      `cdpInput ${action} currently supports top-frame drag targets only because Input coordinates and HTML5 dispatch are same-document scoped; ` +
+        `${label}_frame_id=${first.frame_id}. Re-resolve top-frame elements or use a raw-CDP frame-aware target.`
+    );
+  }
+  const actionPoint = first.result.action_point;
+  if (!actionPoint || !Number.isFinite(actionPoint.x) || !Number.isFinite(actionPoint.y)) {
+    throw bridgeError(
+      ERROR_CHROME_DOM_ELEMENT_NOT_ACTIONABLE,
+      `cdpInput ${action} ${label} selector resolved without a finite viewport action point`
+    );
+  }
+  return {
+    frame_id: first.frame_id,
+    point: { x: actionPoint.x, y: actionPoint.y },
+    resolved: {
+      label,
+      resolved_by: first.result.resolved_by,
+      matched_count: first.result.matched_count,
+      before_element: first.result.before_element,
+      after_element: first.result.after_element,
+      auto_wait: first.result.auto_wait,
+      auto_wait_readback: first.result.auto_wait_readback,
+      frame_result_count: frameResults.length,
+      frame_results: frameResults.map(summarizeFrameExecutionResult)
+    }
+  };
+}
+
+function normalizeCdpInputDragSteps(value) {
+  if (value === null || value === undefined) {
+    return 12;
+  }
+  if (!Number.isSafeInteger(value) || value < 1 || value > 100) {
+    throw bridgeError(
+      ERROR_CHROME_DOM_ACTION_UNSUPPORTED,
+      `cdpInput dragSteps must be an integer in 1..=100; got ${JSON.stringify(value)}`
+    );
+  }
+  return value;
+}
+
+function normalizeCdpInputDragDuration(value) {
+  if (value === null || value === undefined) {
+    return 350;
+  }
+  if (!Number.isSafeInteger(value) || value < 0 || value > 10000) {
+    throw bridgeError(
+      ERROR_CHROME_DOM_ACTION_UNSUPPORTED,
+      `cdpInput dragDurationMs must be an integer in 0..=10000; got ${JSON.stringify(value)}`
+    );
+  }
+  return value;
 }
 
 function normalizeCdpInputCoordinate(params, action) {
@@ -3041,6 +3233,282 @@ async function dispatchCdpInput(tabId, action, point) {
       }
     }
   }
+}
+
+async function dispatchCdpInputMouseDrag(tabId, sourcePoint, targetPoint, steps, durationMs) {
+  const debuggee = { tabId };
+  const protocolVersion = "1.3";
+  let attached = false;
+  const dispatched = [];
+  const delayMs = steps > 0 && durationMs > 0 ? Math.max(0, Math.floor(durationMs / steps)) : 0;
+  try {
+    await chrome.debugger.attach(debuggee, protocolVersion);
+    attached = true;
+    await sendDebuggerCommand(debuggee, "Input.dispatchMouseEvent", {
+      type: "mouseMoved",
+      x: sourcePoint.x,
+      y: sourcePoint.y,
+      button: "none",
+      pointerType: "mouse"
+    });
+    dispatched.push("mouseMoved(source)");
+    await sendDebuggerCommand(debuggee, "Input.dispatchMouseEvent", {
+      type: "mousePressed",
+      x: sourcePoint.x,
+      y: sourcePoint.y,
+      button: "left",
+      buttons: 1,
+      clickCount: 1,
+      pointerType: "mouse"
+    });
+    dispatched.push("mousePressed(left)");
+    for (let index = 1; index <= steps; index += 1) {
+      const ratio = index / steps;
+      const x = sourcePoint.x + (targetPoint.x - sourcePoint.x) * ratio;
+      const y = sourcePoint.y + (targetPoint.y - sourcePoint.y) * ratio;
+      await sendDebuggerCommand(debuggee, "Input.dispatchMouseEvent", {
+        type: "mouseMoved",
+        x,
+        y,
+        button: "left",
+        buttons: 1,
+        pointerType: "mouse"
+      });
+      dispatched.push(`dragMove(${index}/${steps})`);
+      if (delayMs > 0 && index < steps) {
+        await sleep(delayMs);
+      }
+    }
+    await sendDebuggerCommand(debuggee, "Input.dispatchMouseEvent", {
+      type: "mouseReleased",
+      x: targetPoint.x,
+      y: targetPoint.y,
+      button: "left",
+      buttons: 0,
+      clickCount: 1,
+      pointerType: "mouse"
+    });
+    dispatched.push("mouseReleased(left)");
+    return {
+      method: "Input.dispatchMouseEvent(mouseMoved,mousePressed,dragMove,mouseReleased)",
+      dispatched_events: dispatched,
+      protocol_version: protocolVersion
+    };
+  } catch (error) {
+    throw bridgeError(
+      ERROR_ATTACH_FAILED,
+      `chrome.debugger drag dispatch failed for tab ${tabId}: ${errorMessage(error)}`
+    );
+  } finally {
+    if (attached) {
+      try {
+        await chrome.debugger.detach(debuggee);
+      } catch (error) {
+        console.warn(`Synapse chrome.debugger detach failed for drag tab ${tabId}: ${errorMessage(error)}`);
+      }
+    }
+  }
+}
+
+async function dispatchMouseDrag(tabId, before, sourceSelector, targetSelector, sourcePoint, targetPoint, steps, durationMs) {
+  if (before?.active === true) {
+    try {
+      const dispatch = await dispatchCdpInputMouseDrag(tabId, sourcePoint, targetPoint, steps, durationMs);
+      return {
+        ...dispatch,
+        backend: "chrome.debugger.Input"
+      };
+    } catch (error) {
+      const fallback = await dispatchSyntheticMouseDrag(tabId, sourceSelector, targetSelector, sourcePoint, targetPoint, steps, durationMs);
+      return {
+        ...fallback,
+        cdp_fallback_error: errorMessage(error)
+      };
+    }
+  }
+  const dispatch = await dispatchSyntheticMouseDrag(tabId, sourceSelector, targetSelector, sourcePoint, targetPoint, steps, durationMs);
+  return {
+    ...dispatch,
+    cdp_fallback_error: "skipped chrome.debugger Input.dispatchMouseEvent because target tab is inactive"
+  };
+}
+
+async function dispatchSyntheticMouseDrag(tabId, sourceSelector, targetSelector, sourcePoint, targetPoint, steps, durationMs) {
+  const results = await chrome.scripting.executeScript({
+    target: { tabId, allFrames: false },
+    world: "MAIN",
+    func: performSyntheticMouseDragInPage,
+    args: [sourceSelector, targetSelector, sourcePoint, targetPoint, steps, durationMs]
+  });
+  const readback = results?.[0]?.result;
+  if (!readback?.ok) {
+    throw bridgeError(
+      readback?.code || ERROR_CHROME_DOM_ACTION_POSTCONDITION_FAILED,
+      `synthetic mouse drag failed: ${readback?.detail || JSON.stringify(readback)}`
+    );
+  }
+  return {
+    method: "chrome.scripting.MouseEvent(mousemove,mousedown,dragMove,mouseup)",
+    backend: "chrome.scripting.executeScript(MouseEvent)",
+    dispatched_events: readback.events_dispatched || [],
+    synthetic_mouse_readback: readback
+  };
+}
+
+async function performSyntheticMouseDragInPage(sourceSelector, targetSelector, sourcePoint, targetPoint, steps, durationMs) {
+  const sleepInPage = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  const summarizeElement = (element) => {
+    const rect = element.getBoundingClientRect();
+    return {
+      tag_name: element.tagName,
+      id: element.id || null,
+      class_name: element.className || null,
+      text: String(element.innerText || element.textContent || "").trim().slice(0, 200),
+      rect: {
+        x: rect.x,
+        y: rect.y,
+        width: rect.width,
+        height: rect.height
+      }
+    };
+  };
+  const findStrict = (selector, label) => {
+    let matches;
+    try {
+      matches = Array.from(document.querySelectorAll(selector));
+    } catch (error) {
+      return {
+        ok: false,
+        code: "CHROME_DOM_SELECTOR_INVALID",
+        detail: `${label} selector is invalid: ${error?.message || String(error)}`
+      };
+    }
+    if (matches.length === 0) {
+      return {
+        ok: false,
+        code: "CHROME_DOM_ELEMENT_NOT_FOUND",
+        detail: `${label} selector ${JSON.stringify(selector)} matched no elements`
+      };
+    }
+    if (matches.length > 1) {
+      return {
+        ok: false,
+        code: "CHROME_DOM_ELEMENT_AMBIGUOUS",
+        detail: `${label} selector ${JSON.stringify(selector)} matched ${matches.length} elements`
+      };
+    }
+    return { ok: true, element: matches[0] };
+  };
+  const source = findStrict(sourceSelector, "source");
+  if (!source.ok) {
+    return source;
+  }
+  const target = findStrict(targetSelector, "target");
+  if (!target.ok) {
+    return target;
+  }
+  const safeSteps = Number.isInteger(steps) && steps > 0 ? steps : 1;
+  const delayMs = safeSteps > 0 && durationMs > 0 ? Math.max(0, Math.floor(durationMs / safeSteps)) : 0;
+  const events = [];
+  const pointFor = (index) => {
+    const ratio = index / safeSteps;
+    return {
+      x: sourcePoint.x + (targetPoint.x - sourcePoint.x) * ratio,
+      y: sourcePoint.y + (targetPoint.y - sourcePoint.y) * ratio
+    };
+  };
+  const elementAt = (point, fallback) => {
+    const found = document.elementFromPoint(point.x, point.y);
+    return found || fallback || document;
+  };
+  const dispatchMouse = (type, dispatchTarget, point, buttons) => {
+    const event = new MouseEvent(type, {
+      bubbles: true,
+      cancelable: true,
+      composed: true,
+      view: window,
+      clientX: point.x,
+      clientY: point.y,
+      screenX: Math.round(window.screenX + point.x),
+      screenY: Math.round(window.screenY + point.y),
+      button: type === "mousemove" ? 0 : 0,
+      buttons
+    });
+    const defaultAllowed = dispatchTarget.dispatchEvent(event);
+    events.push({
+      type,
+      target_id: dispatchTarget.id || null,
+      target_tag_name: dispatchTarget.tagName || null,
+      client_x: point.x,
+      client_y: point.y,
+      buttons,
+      default_allowed: defaultAllowed
+    });
+  };
+
+  dispatchMouse("mousemove", source.element, sourcePoint, 0);
+  dispatchMouse("mousedown", source.element, sourcePoint, 1);
+  for (let index = 1; index <= safeSteps; index += 1) {
+    const point = pointFor(index);
+    dispatchMouse("mousemove", elementAt(point, target.element), point, 1);
+    if (delayMs > 0 && index < safeSteps) {
+      await sleepInPage(delayMs);
+    }
+  }
+  dispatchMouse("mouseup", elementAt(targetPoint, target.element), targetPoint, 0);
+
+  return {
+    ok: true,
+    source: summarizeElement(source.element),
+    target: summarizeElement(target.element),
+    events_dispatched: events,
+    event_count: events.length,
+    drag_steps: safeSteps,
+    drag_duration_ms: durationMs,
+    page_text: String(document.body?.innerText || document.documentElement?.innerText || "").slice(0, 4096)
+  };
+}
+
+async function dispatchHtml5DragDrop(tabId, sourceSelector, targetSelector, params) {
+  const data = {
+    mimeType: stringOrNull(params.dragDataMimeType) || "text/plain",
+    text: stringOrNull(params.dragDataText) || ""
+  };
+  let injected;
+  try {
+    injected = await chrome.scripting.executeScript({
+      target: { tabId, frameIds: [0] },
+      world: "MAIN",
+      func: performHtml5DragDropInPage,
+      args: [{ sourceSelector, targetSelector, data }]
+    });
+  } catch (error) {
+    throw bridgeError(
+      ERROR_CHROME_SCRIPTING_EXECUTE_FAILED,
+      `chrome.scripting.executeScript html5_drag(${tabId}) failed: ${errorMessage(error)}`
+    );
+  }
+  const frameResults = frameExecutionResults(injected);
+  const first = frameResults.find((frame) => frame.result) || null;
+  const result = first?.result;
+  if (!result || typeof result !== "object") {
+    throw bridgeError(
+      ERROR_CHROME_SCRIPTING_EXECUTE_FAILED,
+      `html5_drag returned no structured result; frame_results=${JSON.stringify(frameResults.map(summarizeFrameExecutionResult).slice(0, 8))}`
+    );
+  }
+  if (!result.ok) {
+    throw bridgeError(
+      String(result.error_code || ERROR_CHROME_DOM_ACTION_UNSUPPORTED),
+      `html5_drag failed: ${String(result.error_detail || "")}; frame_results=${JSON.stringify(frameResults.map(summarizeFrameExecutionResult).slice(0, 8))}`
+    );
+  }
+  return {
+    method: "DragEvent(dragstart,dragenter,dragover,drop,dragend)+DataTransfer",
+    dispatched_events: result.events_dispatched || [],
+    protocol_version: null,
+    html5_readback: result
+  };
 }
 
 async function activateTabForCdpTouch(tabId, beforeState) {
@@ -8964,7 +9432,7 @@ async function performDomActionInPage(request) {
     ? Math.min(Math.max(request.maxPageTextChars, 0), 65536)
     : 4096;
 
-  if (!["click", "dblclick", "press", "select", "submit", "dispatch_event", "clear", "focus", "blur", "select_text", "check", "uncheck", "hover", "tap"].includes(action)) {
+  if (!["click", "dblclick", "press", "select", "submit", "dispatch_event", "clear", "focus", "blur", "select_text", "check", "uncheck", "hover", "tap", "drag", "html5_drag"].includes(action)) {
     return fail(ERROR_ACTION_UNSUPPORTED, `unsupported DOM action ${JSON.stringify(action)}`);
   }
   if (action === "dispatch_event" && !eventType) {
@@ -9107,7 +9575,7 @@ async function performDomActionInPage(request) {
       actionReadback = performCheckState(element, true, eventsDispatched);
     } else if (action === "uncheck") {
       actionReadback = performCheckState(element, false, eventsDispatched);
-    } else if (action === "hover" || action === "tap") {
+    } else if (action === "hover" || action === "tap" || action === "drag" || action === "html5_drag") {
       throw actionError(ERROR_ACTION_UNSUPPORTED, `DOM action ${action} is resolver-only; dispatch through cdpInput`);
     }
   } catch (error) {
@@ -11251,6 +11719,121 @@ function matchingAgentNavigationClaim(tabId, url, status) {
     agentNavigationClaims.delete(tabId);
   }
   return claim;
+}
+
+async function performHtml5DragDropInPage(request) {
+  const ERROR_SELECTOR_INVALID = "CHROME_DOM_SELECTOR_INVALID";
+  const ERROR_ELEMENT_NOT_FOUND = "CHROME_DOM_ELEMENT_NOT_FOUND";
+  const ERROR_ELEMENT_AMBIGUOUS = "CHROME_DOM_ELEMENT_AMBIGUOUS";
+  const ERROR_ACTION_UNSUPPORTED = "CHROME_DOM_ACTION_UNSUPPORTED";
+
+  function fail(error_code, error_detail, extra = {}) {
+    return {
+      ok: false,
+      error_code,
+      error_detail,
+      ...extra
+    };
+  }
+
+  function strictSelector(selector, label) {
+    const value = String(selector || "").trim();
+    if (!value) {
+      throw { code: ERROR_SELECTOR_INVALID, message: `${label} selector must be non-empty` };
+    }
+    let matches;
+    try {
+      matches = Array.from(document.querySelectorAll(value));
+    } catch (error) {
+      throw { code: ERROR_SELECTOR_INVALID, message: `${label} selector ${JSON.stringify(value)} is invalid: ${error?.message || error}` };
+    }
+    if (matches.length === 0) {
+      throw { code: ERROR_ELEMENT_NOT_FOUND, message: `${label} selector ${JSON.stringify(value)} matched no elements` };
+    }
+    if (matches.length > 1) {
+      throw { code: ERROR_ELEMENT_AMBIGUOUS, message: `${label} selector ${JSON.stringify(value)} matched ${matches.length} elements` };
+    }
+    return matches[0];
+  }
+
+  function summary(element) {
+    if (!(element instanceof Element)) {
+      return null;
+    }
+    return {
+      tag_name: String(element.tagName || "").toLowerCase(),
+      id: String(element.id || ""),
+      text: String(element.textContent || "").trim().slice(0, 200),
+      class_name: String(element.className || "")
+    };
+  }
+
+  function pageText() {
+    return String(document.body?.innerText || document.documentElement?.innerText || "").slice(0, 4096);
+  }
+
+  function dispatchDragEvent(element, type, dataTransfer) {
+    const event = new DragEvent(type, {
+      bubbles: true,
+      cancelable: true,
+      composed: true,
+      dataTransfer
+    });
+    return element.dispatchEvent(event);
+  }
+
+  try {
+    const source = strictSelector(request?.sourceSelector, "source");
+    const target = strictSelector(request?.targetSelector, "target");
+    if (typeof DataTransfer !== "function" || typeof DragEvent !== "function") {
+      return fail(ERROR_ACTION_UNSUPPORTED, "DataTransfer and DragEvent constructors are required for html5_drag");
+    }
+    const dataTransfer = new DataTransfer();
+    const data = request?.data || {};
+    const mimeType = String(data.mimeType || "text/plain");
+    const hasRequestedText = typeof data.text === "string" && data.text.length > 0;
+    const text = hasRequestedText ? String(data.text) : String(source.textContent || "");
+    dataTransfer.setData(mimeType, text);
+
+    const events = [];
+    const dragstartDefaultAllowed = dispatchDragEvent(source, "dragstart", dataTransfer);
+    events.push("dragstart");
+    if (hasRequestedText) {
+      dataTransfer.setData(mimeType, text);
+    }
+    const dragenterDefaultAllowed = dispatchDragEvent(target, "dragenter", dataTransfer);
+    events.push("dragenter");
+    const dragoverDefaultAllowed = dispatchDragEvent(target, "dragover", dataTransfer);
+    events.push("dragover");
+    const dropDefaultAllowed = dispatchDragEvent(target, "drop", dataTransfer);
+    events.push("drop");
+    const dragendDefaultAllowed = dispatchDragEvent(source, "dragend", dataTransfer);
+    events.push("dragend");
+
+    return {
+      ok: true,
+      action: "html5_drag",
+      events_dispatched: events,
+      source_selector: String(request.sourceSelector || ""),
+      target_selector: String(request.targetSelector || ""),
+      source_before: summary(source),
+      target_before: summary(target),
+      source_after: summary(source),
+      target_after: summary(target),
+      data_transfer_types: Array.from(dataTransfer.types || []),
+      data_transfer_text: dataTransfer.getData(mimeType),
+      data_transfer_reapplied_after_dragstart: hasRequestedText,
+      dragstart_default_allowed: dragstartDefaultAllowed,
+      dragenter_default_allowed: dragenterDefaultAllowed,
+      dragover_default_allowed: dragoverDefaultAllowed,
+      dragover_default_prevented: !dragoverDefaultAllowed,
+      drop_default_allowed: dropDefaultAllowed,
+      dragend_default_allowed: dragendDefaultAllowed,
+      in_page_after_text: pageText()
+    };
+  } catch (error) {
+    return fail(error?.code || ERROR_ACTION_UNSUPPORTED, error?.message || String(error || "html5_drag failed"));
+  }
 }
 
 function ensurePageEventBuffer(tabId, state = {}) {

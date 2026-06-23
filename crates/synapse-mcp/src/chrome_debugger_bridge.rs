@@ -40,9 +40,9 @@ const NATIVE_HOST_NAME: &str = "com.synapse.chrome_debugger";
 const EXTENSION_ORIGIN: &str = "chrome-extension://leoocgnkjnplbfdbklajepahofecgfbk";
 const BRIDGE_TOKEN_HEADER: &str = "x-synapse-bridge-token";
 const BRIDGE_PROTOCOL_VERSION: u32 = 1;
-const EXPECTED_EXTENSION_BUILD_ID: &str = "synapse-chrome-bridge-2026-06-23-cdp-input-v3";
+const EXPECTED_EXTENSION_BUILD_ID: &str = "synapse-chrome-bridge-2026-06-23-dnd-v3";
 const EXPECTED_EXTENSION_BUILD_SHA256: &str =
-    "eec1cb0805ccaed5416576ac8ecd1566a788e8751ebcda70da27b89658a4a9d8";
+    "5955f80310cee69c05fe938070220406b7ad33354070db198beb2f79514a827c";
 const SYNAPSE_CHROME_BLOCKED_INSTALL_MESSAGE: &str = "Synapse blocked this extension on this host because debugger/nativeMessaging permissions can surface Chrome debugger or native-host popups during background automation.";
 const REQUIRED_DIRECT_HTTP_CAPABILITIES: &[&str] = &[
     "alarmReconnect",
@@ -92,7 +92,7 @@ const NATIVE_DAEMON_RECONNECT_DELAY: Duration = Duration::from_secs(1);
 const MAX_NATIVE_MESSAGE_FROM_CHROME: usize = 64 * 1024 * 1024;
 const MAX_NATIVE_MESSAGE_TO_CHROME: usize = 1024 * 1024;
 const UNKNOWN_NATIVE_HOST_ID_FRAGMENT: &str = "unknown chrome debugger native host_id";
-const INSTALL_GUIDANCE: &str = "install the bundled Synapse Chrome extension from extensions\\synapse-chrome-debugger with scripts\\install-synapse-chrome-debugger.ps1; the installer auto-loads the unpacked extension into the already-open active Chrome profile and refuses to launch a second Chrome profile; the normal end-user bridge uses chrome.tabs/chrome.scripting/chrome.webNavigation/chrome.webRequest over direct localhost WebSocket plus chrome.alarms MV3 reconnect wake, and exposes a narrow chrome.debugger CDP input lane for target-scoped hover/tap; it never uses nativeMessaging or helper Chrome windows; expected extension_id=leoocgnkjnplbfdbklajepahofecgfbk";
+const INSTALL_GUIDANCE: &str = "install the bundled Synapse Chrome extension from extensions\\synapse-chrome-debugger with scripts\\install-synapse-chrome-debugger.ps1; the installer auto-loads the unpacked extension into the already-open active Chrome profile and refuses to launch a second Chrome profile; the normal end-user bridge uses chrome.tabs/chrome.scripting/chrome.webNavigation/chrome.webRequest over direct localhost WebSocket plus chrome.alarms MV3 reconnect wake, and exposes a narrow chrome.debugger CDP input lane for target-scoped hover/tap/active-tab drag plus inactive-tab synthetic mouse drag and HTML5 DataTransfer drag dispatch; it never uses nativeMessaging or helper Chrome windows; expected_extension_id=leoocgnkjnplbfdbklajepahofecgfbk";
 const NO_ACTIVE_HOST_REPAIR_GUIDANCE: &str = "no_active_host_repair=use the already-open authenticated Chrome profile only; do not launch a second Chrome process/profile; wait for the installed bridge worker alarmReconnect registration and re-read health; if an active stale host appears call cdp_bridge_reload; if no host registers, run scripts\\install-synapse-chrome-debugger.ps1 from the interactive Windows desktop so it auto-loads the bundled unpacked extension into the existing active Chrome profile; if health reports installed=false, cdp_bridge_reload cannot repair because Chrome has no loaded extension host to receive reloadSelf";
 const TOKEN_ENV: &str = "SYNAPSE_BEARER_TOKEN";
 const APPDATA_ENV: &str = "APPDATA";
@@ -257,7 +257,7 @@ impl ChromeDebuggerBridgeError {
         Self {
             code: error_codes::A11Y_CDP_DEBUGGER_WARNING_UNSUPPRESSED,
             detail: format!(
-                "Synapse Chrome Bridge refused unsupported attach-capable command {command_kind:?} before queueing any Chrome command; hwnd={hwnd} reason=current normal-profile bridge exposes only the narrow cdpInput chrome.debugger lane for target-scoped hover/tap, while this command still requires a dedicated raw-CDP automation profile{external_surface_hint} remediation=run scripts\\install-synapse-chrome-debugger.ps1 and cdp_bridge_reload to ensure the current bridge is installed, or use raw CDP from a dedicated Synapse-launched automation profile for full DOM/action CDP or screenshots"
+                "Synapse Chrome Bridge refused unsupported attach-capable command {command_kind:?} before queueing any Chrome command; hwnd={hwnd} reason=current normal-profile bridge exposes only the narrow cdpInput chrome.debugger lane for target-scoped hover/tap/active-tab drag plus inactive-tab synthetic mouse drag, while this command still requires a dedicated raw-CDP automation profile{external_surface_hint} remediation=run scripts\\install-synapse-chrome-debugger.ps1 and cdp_bridge_reload to ensure the current bridge is installed, or use raw CDP from a dedicated Synapse-launched automation profile for full DOM/action CDP or screenshots"
             ),
         }
     }
@@ -5316,6 +5316,12 @@ pub(crate) struct ChromeDebuggerCdpInputRequest<'a> {
     pub x: Option<i32>,
     pub y: Option<i32>,
     pub coordinate_space: Option<&'a str>,
+    pub source_selector: Option<&'a str>,
+    pub target_selector: Option<&'a str>,
+    pub drag_steps: Option<u32>,
+    pub drag_duration_ms: Option<u64>,
+    pub drag_data_mime_type: Option<&'a str>,
+    pub drag_data_text: Option<&'a str>,
     pub wait_timeout_ms: u64,
     pub auto_wait: bool,
     pub auto_wait_timeout_ms: u32,
@@ -5340,6 +5346,12 @@ pub(crate) async fn cdp_input(
                 "x": request.x,
                 "y": request.y,
                 "coordinateSpace": request.coordinate_space,
+                "sourceSelector": request.source_selector,
+                "targetSelector": request.target_selector,
+                "dragSteps": request.drag_steps,
+                "dragDurationMs": request.drag_duration_ms,
+                "dragDataMimeType": request.drag_data_mime_type,
+                "dragDataText": request.drag_data_text,
                 "waitTimeoutMs": request.wait_timeout_ms,
                 "autoWait": request.auto_wait,
                 "autoWaitTimeoutMs": request.auto_wait_timeout_ms,
