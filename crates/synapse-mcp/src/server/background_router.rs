@@ -4065,10 +4065,13 @@ fn target_act_parse_observed_element_id(
 
 fn target_act_click_element_id_can_be_dom_id(value: &str) -> bool {
     let value = value.trim();
-    !value.is_empty()
-        && !value.starts_with("0x")
-        && !value.starts_with("-0x")
-        && !value.contains(':')
+    if value.is_empty() || value.starts_with("0x") || value.starts_with("-0x") {
+        return false;
+    }
+    if value.starts_with("chrome-tab:") {
+        return true;
+    }
+    !value.contains(':')
 }
 
 fn target_act_validate_dom_locator(
@@ -6723,6 +6726,18 @@ mod tests {
         assert!(
             routed.is_none(),
             "plain page element ids should route through the browser DOM bridge"
+        );
+    }
+
+    #[test]
+    fn target_act_click_bridge_element_id_routes_to_dom() {
+        let routed =
+            target_act_legacy_click_element_id("chrome-tab:589708698:frame:4970:path:0.1.1")
+                .expect("normal bridge element id should be accepted as a DOM id");
+
+        assert!(
+            routed.is_none(),
+            "normal bridge element ids must route through chrome_debugger_bridge.domAction"
         );
     }
 

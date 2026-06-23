@@ -1,6 +1,6 @@
 const PROTOCOL_VERSION = 1;
-const BRIDGE_BUILD_ID = "synapse-chrome-bridge-2026-06-23-frame-locators-v1";
-const BRIDGE_BUILD_SHA256 = "5328a0a7d021732a2dfcf58e1f332c2b2517f08d168cf5abdd4736f4c9cd1689";
+const BRIDGE_BUILD_ID = "synapse-chrome-bridge-2026-06-23-dom-action-element-path-v1";
+const BRIDGE_BUILD_SHA256 = "3c17e31387132cc53533b15f74e570d7e4fc72f13495435395ada80cfb117314";
 const COMMAND_CAPABILITIES = Object.freeze([
   "alarmReconnect",
   "externalPopupRiskSuppression",
@@ -2646,10 +2646,15 @@ async function handleDomAction(params) {
 
   const before = await tabPageState(selected.tabId, selected.target);
   const beforePageText = await tabPageTextState(selected.tabId);
+  const requestedElementId = stringOrNull(params.elementId);
+  const bridgeElement = requestedElementId && requestedElementId.startsWith("chrome-tab:")
+    ? parseChromeBridgeElementId(requestedElementId, selected.tabId, "domAction")
+    : { raw: requestedElementId, frameId: null, path: null };
   const request = {
     action,
     selector: stringOrNull(params.selector),
-    elementId: stringOrNull(params.elementId),
+    elementId: requestedElementId,
+    elementPath: bridgeElement.path,
     role: stringOrNull(params.role),
     name: stringOrNull(params.name),
     value: stringOrNull(params.value),
@@ -2667,10 +2672,16 @@ async function handleDomAction(params) {
     autoWaitTimeoutMs,
     maxPageTextChars: MAX_PAGE_TEXT_CHARS
   };
+  const resolveTarget = { tabId: selected.tabId };
+  if (Number.isSafeInteger(bridgeElement.frameId)) {
+    resolveTarget.frameIds = [bridgeElement.frameId];
+  } else {
+    resolveTarget.allFrames = true;
+  }
   let injected;
   try {
     injected = await chrome.scripting.executeScript({
-      target: { tabId: selected.tabId, allFrames: true },
+      target: resolveTarget,
       func: performDomActionInPage,
       args: [{ ...request, resolveOnly: true }]
     });
@@ -8588,6 +8599,7 @@ async function performDomActionInPage(request) {
   const locator = {
     selector: stringOrEmpty(request?.selector),
     elementId: stringOrEmpty(request?.elementId),
+    elementPath: stringOrEmpty(request?.elementPath),
     role: normalizeText(request?.role),
     name: normalizeText(request?.name),
     value: stringOrEmpty(request?.value),
@@ -9151,6 +9163,10 @@ async function performDomActionInPage(request) {
       } catch (error) {
         return fail(ERROR_SELECTOR_INVALID, `invalid selector ${JSON.stringify(loc.selector)}: ${errorMessageLocal(error)}`);
       }
+    } else if (loc.elementPath) {
+      resolvedBy = "element_path";
+      const byPath = elementByPathLocal(loc.elementPath);
+      candidates = byPath ? [byPath] : [];
     } else if (loc.elementId) {
       resolvedBy = "element_id";
       const id = loc.elementId.startsWith("#") ? loc.elementId.slice(1) : loc.elementId;
@@ -9195,6 +9211,24 @@ async function performDomActionInPage(request) {
       matchedCount: filtered.length,
       resolvedBy
     };
+  }
+
+  function elementByPathLocal(path) {
+    if (!path) {
+      return null;
+    }
+    const parts = String(path).split(".").map((part) => Number(part));
+    let current = document.documentElement;
+    if (parts[0] !== 0) {
+      return null;
+    }
+    for (const index of parts.slice(1)) {
+      if (!current || !Number.isSafeInteger(index) || index < 0) {
+        return null;
+      }
+      current = current.children[index] || null;
+    }
+    return current instanceof Element ? current : null;
   }
 
   function semanticCandidates(actionName) {
