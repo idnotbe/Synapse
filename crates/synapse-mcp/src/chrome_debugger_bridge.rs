@@ -40,10 +40,9 @@ const NATIVE_HOST_NAME: &str = "com.synapse.chrome_debugger";
 const EXTENSION_ORIGIN: &str = "chrome-extension://leoocgnkjnplbfdbklajepahofecgfbk";
 const BRIDGE_TOKEN_HEADER: &str = "x-synapse-bridge-token";
 const BRIDGE_PROTOCOL_VERSION: u32 = 1;
-const EXPECTED_EXTENSION_BUILD_ID: &str =
-    "synapse-chrome-bridge-2026-06-23-page-screenshot-focus-v4";
+const EXPECTED_EXTENSION_BUILD_ID: &str = "synapse-chrome-bridge-2026-06-23-page-pdf-v2";
 const EXPECTED_EXTENSION_BUILD_SHA256: &str =
-    "3fe36d3eab7f9e3b34bfc9b8caa741beff496e267bf94c669a21db3bc883a86a";
+    "5edb3b608b74420b0d3716f1d0fc087f038b4ab02126181c45569f0b88e6c4f3";
 const SYNAPSE_CHROME_BLOCKED_INSTALL_MESSAGE: &str = "Synapse blocked this extension on this host because debugger/nativeMessaging permissions can surface Chrome debugger or native-host popups during background automation.";
 const REQUIRED_DIRECT_HTTP_CAPABILITIES: &[&str] = &[
     "alarmReconnect",
@@ -61,6 +60,7 @@ const REQUIRED_DIRECT_HTTP_CAPABILITIES: &[&str] = &[
     "pageVitals",
     "pageContent",
     "pageScreenshot",
+    "pagePdf",
     "setContent",
     "storageState",
     "ariaSnapshot",
@@ -100,7 +100,7 @@ const NATIVE_DAEMON_RECONNECT_DELAY: Duration = Duration::from_secs(1);
 const MAX_NATIVE_MESSAGE_FROM_CHROME: usize = 64 * 1024 * 1024;
 const MAX_NATIVE_MESSAGE_TO_CHROME: usize = 1024 * 1024;
 const UNKNOWN_NATIVE_HOST_ID_FRAGMENT: &str = "unknown chrome debugger native host_id";
-const INSTALL_GUIDANCE: &str = "install the bundled Synapse Chrome extension from extensions\\synapse-chrome-debugger with scripts\\install-synapse-chrome-debugger.ps1; the installer auto-loads the unpacked extension into the already-open active Chrome profile and refuses to launch a second Chrome profile; the normal end-user bridge uses chrome.tabs/chrome.scripting/chrome.webNavigation/chrome.webRequest over direct localhost WebSocket plus chrome.alarms MV3 reconnect wake, exposes debugger-free pageScreenshot capture through chrome.tabs.captureVisibleTab stitching, and exposes narrow chrome.debugger lanes for target-scoped hover/tap/active-tab drag, viewport emulation, device emulation, geolocation emulation, locale/timezone emulation, media emulation, and network conditions plus inactive-tab synthetic mouse drag and HTML5 DataTransfer drag dispatch; it never uses nativeMessaging or helper Chrome windows; expected_extension_id=leoocgnkjnplbfdbklajepahofecgfbk";
+const INSTALL_GUIDANCE: &str = "install the bundled Synapse Chrome extension from extensions\\synapse-chrome-debugger with scripts\\install-synapse-chrome-debugger.ps1; the installer auto-loads the unpacked extension into the already-open active Chrome profile and refuses to launch a second Chrome profile; the normal end-user bridge uses chrome.tabs/chrome.scripting/chrome.webNavigation/chrome.webRequest over direct localhost WebSocket plus chrome.alarms MV3 reconnect wake, exposes debugger-free pageScreenshot capture through chrome.tabs.captureVisibleTab stitching, and exposes narrow chrome.debugger lanes for target-scoped hover/tap/active-tab drag, Page.printToPDF PDF rendering, viewport emulation, device emulation, geolocation emulation, locale/timezone emulation, media emulation, and network conditions plus inactive-tab synthetic mouse drag and HTML5 DataTransfer drag dispatch; it never uses nativeMessaging or helper Chrome windows; expected_extension_id=leoocgnkjnplbfdbklajepahofecgfbk";
 const NO_ACTIVE_HOST_REPAIR_GUIDANCE: &str = "no_active_host_repair=use the already-open authenticated Chrome profile only; do not launch a second Chrome process/profile; wait for the installed bridge worker alarmReconnect registration and re-read health; if an active stale host appears call cdp_bridge_reload; if no host registers, run scripts\\install-synapse-chrome-debugger.ps1 from the interactive Windows desktop so it auto-loads the bundled unpacked extension into the existing active Chrome profile; if health reports installed=false, cdp_bridge_reload cannot repair because Chrome has no loaded extension host to receive reloadSelf";
 const TOKEN_ENV: &str = "SYNAPSE_BEARER_TOKEN";
 const APPDATA_ENV: &str = "APPDATA";
@@ -3249,6 +3249,59 @@ pub(crate) struct ChromeDebuggerPageScreenshotResult {
     pub extension_id: Option<String>,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub(crate) struct ChromeDebuggerPagePdfResult {
+    pub target_id: String,
+    pub tab_id: u32,
+    #[serde(default)]
+    pub chrome_window_id: Option<i64>,
+    #[serde(default)]
+    pub url: String,
+    #[serde(default)]
+    pub title: String,
+    pub data_base64: String,
+    #[serde(default)]
+    pub data_base64_len: usize,
+    #[serde(default)]
+    pub pdf_byte_length: usize,
+    #[serde(default)]
+    pub landscape: bool,
+    #[serde(default)]
+    pub print_background: bool,
+    #[serde(default)]
+    pub display_header_footer: bool,
+    #[serde(default)]
+    pub scale: f64,
+    #[serde(default)]
+    pub paper_width: f64,
+    #[serde(default)]
+    pub paper_height: f64,
+    #[serde(default)]
+    pub margin_top: f64,
+    #[serde(default)]
+    pub margin_bottom: f64,
+    #[serde(default)]
+    pub margin_left: f64,
+    #[serde(default)]
+    pub margin_right: f64,
+    #[serde(default)]
+    pub page_ranges: String,
+    #[serde(default)]
+    pub prefer_css_page_size: bool,
+    #[serde(default)]
+    pub readback_backend: String,
+    #[serde(default)]
+    pub backend_tier_used: String,
+    #[serde(default)]
+    pub protocol_version: String,
+    #[serde(default)]
+    pub target_candidate_count: u32,
+    #[serde(default)]
+    pub target_selection_reason: String,
+    #[serde(default)]
+    pub extension_id: Option<String>,
+}
+
 #[derive(Copy, Clone, Debug, Default, Deserialize, Serialize)]
 pub(crate) struct ChromeDebuggerPageScreenshotRect {
     #[serde(default)]
@@ -5373,6 +5426,27 @@ pub(crate) async fn page_screenshot(
     })
 }
 
+pub(crate) async fn page_pdf(
+    hwnd: i64,
+    target_id: &str,
+    params: Value,
+) -> Result<ChromeDebuggerPagePdfResult, ChromeDebuggerBridgeError> {
+    ensure_normal_bridge_external_popup_suppressed(hwnd, "pagePdf")?;
+    let mut payload = if params.is_object() {
+        params
+    } else {
+        json!({})
+    };
+    payload["hwnd"] = json!(hwnd);
+    payload["targetIdHint"] = json!(target_id);
+    let result = bridge().send_command("pagePdf", payload).await?;
+    serde_json::from_value::<ChromeDebuggerPagePdfResult>(result).map_err(|error| {
+        ChromeDebuggerBridgeError::protocol(format!(
+            "decode Chrome debugger pagePdf response: {error}"
+        ))
+    })
+}
+
 pub(crate) async fn type_active_element(
     hwnd: i64,
     target_id: &str,
@@ -6861,6 +6935,23 @@ fn chrome_response_readback_summary(kind: &str, result: Option<&Value>) -> Optio
             "before_active": result.get("before_active"),
             "active_for_capture": result.get("active_for_capture"),
             "restored_previous_active": result.get("restored_previous_active"),
+            "readback_backend": result.get("readback_backend"),
+            "target_selection_reason": result.get("target_selection_reason"),
+            "extension_id": result.get("extension_id"),
+        }),
+        "pagePdf" => json!({
+            "target_id": result.get("target_id"),
+            "tab_id": result.get("tab_id"),
+            "chrome_window_id": result.get("chrome_window_id"),
+            "pdf_byte_length": result.get("pdf_byte_length"),
+            "landscape": result.get("landscape"),
+            "print_background": result.get("print_background"),
+            "paper_width": result.get("paper_width"),
+            "paper_height": result.get("paper_height"),
+            "margin_top": result.get("margin_top"),
+            "margin_bottom": result.get("margin_bottom"),
+            "margin_left": result.get("margin_left"),
+            "margin_right": result.get("margin_right"),
             "readback_backend": result.get("readback_backend"),
             "target_selection_reason": result.get("target_selection_reason"),
             "extension_id": result.get("extension_id"),

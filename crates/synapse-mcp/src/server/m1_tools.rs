@@ -6,18 +6,19 @@ use super::{
     BrowserExposeBindingOperation, BrowserExposeBindingParams, BrowserExposeBindingResponse,
     BrowserFrameLocator, BrowserInitScriptOperation, BrowserInspectParams, BrowserInspectResponse,
     BrowserLayoutRelation, BrowserLocateEngine, BrowserLocateParams, BrowserLocateResponse,
-    BrowserLocatedFrame, BrowserNetworkWaitEntry, BrowserScreenshotParams,
-    BrowserScreenshotResponse, BrowserScreenshotScope, BrowserScrollIntoViewParams,
-    BrowserScrollIntoViewResponse, BrowserSetContentParams, BrowserSetContentResponse,
-    BrowserTabEntry, BrowserTabsParams, BrowserTabsResponse, BrowserWaitForFunctionParams,
-    BrowserWaitForFunctionResponse, BrowserWaitForLoadStateParams, BrowserWaitForLoadStateResponse,
-    BrowserWaitForLoadStateState, BrowserWaitForNetworkResponseParams,
-    BrowserWaitForNetworkResponseResponse, BrowserWaitForParams, BrowserWaitForRequestParams,
-    BrowserWaitForRequestResponse, BrowserWaitForResponse, BrowserWaitForSelectorParams,
-    BrowserWaitForSelectorResponse, BrowserWaitForSelectorState, BrowserWaitForState,
-    BrowserWaitForUrlMatchKind, BrowserWaitForUrlParams, BrowserWaitForUrlResponse,
-    CaptureScreenshotFormat, CaptureScreenshotParams, CaptureScreenshotResponse,
-    CdpActivateTabParams, CdpActivateTabResponse, CdpActiveElementInfo, CdpBridgeHostReadback,
+    BrowserLocatedFrame, BrowserNetworkWaitEntry, BrowserPdfParams, BrowserPdfResponse,
+    BrowserScreenshotParams, BrowserScreenshotResponse, BrowserScreenshotScope,
+    BrowserScrollIntoViewParams, BrowserScrollIntoViewResponse, BrowserSetContentParams,
+    BrowserSetContentResponse, BrowserTabEntry, BrowserTabsParams, BrowserTabsResponse,
+    BrowserWaitForFunctionParams, BrowserWaitForFunctionResponse, BrowserWaitForLoadStateParams,
+    BrowserWaitForLoadStateResponse, BrowserWaitForLoadStateState,
+    BrowserWaitForNetworkResponseParams, BrowserWaitForNetworkResponseResponse,
+    BrowserWaitForParams, BrowserWaitForRequestParams, BrowserWaitForRequestResponse,
+    BrowserWaitForResponse, BrowserWaitForSelectorParams, BrowserWaitForSelectorResponse,
+    BrowserWaitForSelectorState, BrowserWaitForState, BrowserWaitForUrlMatchKind,
+    BrowserWaitForUrlParams, BrowserWaitForUrlResponse, CaptureScreenshotFormat,
+    CaptureScreenshotParams, CaptureScreenshotResponse, CdpActivateTabParams,
+    CdpActivateTabResponse, CdpActiveElementInfo, CdpBridgeHostReadback,
     CdpBridgeReloadAckReadback, CdpBridgeReloadParams, CdpBridgeReloadResponse, CdpCloseTabParams,
     CdpCloseTabResponse, CdpLargestContentfulPaintInfo, CdpNavigateAction, CdpNavigateTabParams,
     CdpNavigateTabResponse, CdpOpenTabParams, CdpOpenTabResponse, CdpPageTextInfo,
@@ -630,6 +631,65 @@ impl SynapseService {
         self.audit_action_started_with_details_for_session(TOOL, &request_details, &session_id)?;
         let result = self
             .browser_screenshot_impl(&params.0, &validation, window_hwnd, &cdp_target_id)
+            .await;
+        self.audit_action_result_for_session(TOOL, &result, &session_id)?;
+        result.map(Json)
+    }
+
+    #[tool(
+        description = "Render the calling session's owned normal Chrome tab to PDF through the already-open Chrome bridge using a narrow chrome.debugger Page.printToPDF lane. Supports paper size, margins, landscape, print background, CSS page size, header/footer templates, page ranges, and scale. Writes a PDF file, returns byte count/hash and target readback, and never launches another Chrome profile."
+    )]
+    pub async fn browser_pdf(
+        &self,
+        params: Parameters<BrowserPdfParams>,
+        request_context: RequestContext<RoleServer>,
+    ) -> Result<Json<BrowserPdfResponse>, ErrorData> {
+        const TOOL: &str = "browser_pdf";
+        tracing::info!(
+            code = "MCP_TOOL_INVOCATION",
+            kind = TOOL,
+            "tool.invocation kind=browser_pdf"
+        );
+        let session_id = require_target_session_id(&request_context)?;
+        let validation = validate_browser_pdf_params(&params.0)?;
+        let request_details = json!({
+            "session_id": &session_id,
+            "window_hwnd": params.0.window_hwnd,
+            "requested_cdp_target": cdp_target_id_audit_ref(params.0.cdp_target_id.as_deref()),
+            "path": &params.0.path,
+            "landscape": params.0.landscape,
+            "print_background": params.0.print_background,
+            "paper_width": params.0.paper_width,
+            "paper_height": params.0.paper_height,
+            "required_foreground": false,
+            "phase": "target_resolution",
+        });
+        let resolution = self.resolve_cdp_tab_mutation_target(
+            TOOL,
+            &session_id,
+            params.0.window_hwnd,
+            params.0.cdp_target_id.as_deref(),
+        );
+        let (window_hwnd, cdp_target_id) = self.audit_cdp_target_resolution_result(
+            TOOL,
+            &session_id,
+            &request_details,
+            resolution,
+        )?;
+        let request_details = json!({
+            "session_id": &session_id,
+            "window_hwnd": window_hwnd,
+            "cdp_target_id": &cdp_target_id,
+            "path": &params.0.path,
+            "landscape": params.0.landscape,
+            "print_background": params.0.print_background,
+            "paper_width": params.0.paper_width,
+            "paper_height": params.0.paper_height,
+            "required_foreground": false,
+        });
+        self.audit_action_started_with_details_for_session(TOOL, &request_details, &session_id)?;
+        let result = self
+            .browser_pdf_impl(&params.0, &validation, window_hwnd, &cdp_target_id)
             .await;
         self.audit_action_result_for_session(TOOL, &result, &session_id)?;
         result.map(Json)
@@ -1353,6 +1413,90 @@ impl SynapseService {
             backend_tier_used: captured.backend_tier_used,
             source_of_truth:
                 "normal Chrome bridge chrome.scripting page metrics/masks/scroll plus chrome.tabs.captureVisibleTab tiles stitched by synapse-mcp"
+                    .to_owned(),
+        })
+    }
+
+    async fn browser_pdf_impl(
+        &self,
+        params: &BrowserPdfParams,
+        validation: &BrowserPdfValidation,
+        window_hwnd: i64,
+        cdp_target_id: &str,
+    ) -> Result<BrowserPdfResponse, ErrorData> {
+        if !cdp_target_id.starts_with("chrome-tab:") {
+            return Err(mcp_error(
+                error_codes::ACTION_TARGET_INVALID,
+                format!(
+                    "browser_pdf requires a normal Chrome bridge target shaped like chrome-tab:<id>; got {cdp_target_id:?}"
+                ),
+            ));
+        }
+        ensure_screenshot_path_available(&validation.output_path, params.overwrite)?;
+        let bridge_payload = browser_pdf_bridge_payload(params);
+        let captured =
+            crate::chrome_debugger_bridge::page_pdf(window_hwnd, cdp_target_id, bridge_payload)
+                .await
+                .map_err(|error| {
+                    mcp_error(
+                        error.code(),
+                        format!(
+                            "browser_pdf Chrome bridge Page.printToPDF failed: {}",
+                            error.detail()
+                        ),
+                    )
+                })?;
+        if !cdp_target_ids_equal(&captured.target_id, cdp_target_id) {
+            return Err(mcp_error(
+                error_codes::ACTION_POSTCONDITION_FAILED,
+                format!(
+                    "browser_pdf Chrome bridge returned target {:?} for requested target {:?}",
+                    captured.target_id, cdp_target_id
+                ),
+            ));
+        }
+        let pdf_bytes = base64::engine::general_purpose::STANDARD
+            .decode(captured.data_base64.as_bytes())
+            .map_err(|error| {
+                mcp_error(
+                    error_codes::TOOL_INTERNAL_ERROR,
+                    format!("browser_pdf could not decode Page.printToPDF base64: {error}"),
+                )
+            })?;
+        if !pdf_bytes.starts_with(b"%PDF-") {
+            return Err(mcp_error(
+                error_codes::ACTION_POSTCONDITION_FAILED,
+                "browser_pdf Page.printToPDF decoded bytes did not start with %PDF-",
+            ));
+        }
+        let pdf_sha256 = sha256_hex(&pdf_bytes);
+        let bytes_written = write_pdf_bytes(&validation.output_path, &pdf_bytes, params.overwrite)?;
+        Ok(BrowserPdfResponse {
+            path: validation.output_path.to_string_lossy().into_owned(),
+            bytes_written,
+            pdf_sha256,
+            capture_backend: "chrome_debugger_page_print_to_pdf".to_owned(),
+            cdp_target_id: captured.target_id,
+            tab_id: captured.tab_id,
+            chrome_window_id: captured.chrome_window_id,
+            url: captured.url,
+            title: captured.title,
+            landscape: captured.landscape,
+            print_background: captured.print_background,
+            display_header_footer: captured.display_header_footer,
+            scale: captured.scale,
+            paper_width: captured.paper_width,
+            paper_height: captured.paper_height,
+            margin_top: captured.margin_top,
+            margin_bottom: captured.margin_bottom,
+            margin_left: captured.margin_left,
+            margin_right: captured.margin_right,
+            page_ranges: captured.page_ranges,
+            prefer_css_page_size: captured.prefer_css_page_size,
+            required_foreground: false,
+            backend_tier_used: captured.backend_tier_used,
+            source_of_truth:
+                "normal Chrome bridge narrow chrome.debugger Page.printToPDF lane returning base64 PDF bytes written by synapse-mcp"
                     .to_owned(),
         })
     }
@@ -11585,6 +11729,93 @@ fn validate_browser_screenshot_params(
     })
 }
 
+struct BrowserPdfValidation {
+    output_path: PathBuf,
+}
+
+fn validate_browser_pdf_params(
+    params: &BrowserPdfParams,
+) -> Result<BrowserPdfValidation, ErrorData> {
+    let output_path = browser_pdf_output_path(&params.path)?;
+    validate_browser_pdf_number(params.scale, "scale", 0.1, 2.0)?;
+    validate_browser_pdf_number(params.paper_width, "paper_width", 0.1, 200.0)?;
+    validate_browser_pdf_number(params.paper_height, "paper_height", 0.1, 200.0)?;
+    validate_browser_pdf_number(params.margin_top, "margin_top", 0.0, 20.0)?;
+    validate_browser_pdf_number(params.margin_bottom, "margin_bottom", 0.0, 20.0)?;
+    validate_browser_pdf_number(params.margin_left, "margin_left", 0.0, 20.0)?;
+    validate_browser_pdf_number(params.margin_right, "margin_right", 0.0, 20.0)?;
+    if let Some(page_ranges) = params.page_ranges.as_deref()
+        && page_ranges.len() > 1024
+    {
+        return Err(mcp_error(
+            error_codes::TOOL_PARAMS_INVALID,
+            "browser_pdf page_ranges exceeds 1024 bytes",
+        ));
+    }
+    if let Some(header_template) = params.header_template.as_deref()
+        && header_template.len() > 8192
+    {
+        return Err(mcp_error(
+            error_codes::TOOL_PARAMS_INVALID,
+            "browser_pdf header_template exceeds 8192 bytes",
+        ));
+    }
+    if let Some(footer_template) = params.footer_template.as_deref()
+        && footer_template.len() > 8192
+    {
+        return Err(mcp_error(
+            error_codes::TOOL_PARAMS_INVALID,
+            "browser_pdf footer_template exceeds 8192 bytes",
+        ));
+    }
+    if let Some(wait_timeout_ms) = params.wait_timeout_ms
+        && wait_timeout_ms > 60_000
+    {
+        return Err(mcp_error(
+            error_codes::TOOL_PARAMS_INVALID,
+            format!("browser_pdf wait_timeout_ms must be <= 60000; got {wait_timeout_ms}"),
+        ));
+    }
+    Ok(BrowserPdfValidation { output_path })
+}
+
+fn validate_browser_pdf_number(
+    value: Option<f64>,
+    name: &str,
+    min: f64,
+    max: f64,
+) -> Result<(), ErrorData> {
+    if let Some(value) = value
+        && (!value.is_finite() || value < min || value > max)
+    {
+        return Err(mcp_error(
+            error_codes::TOOL_PARAMS_INVALID,
+            format!("browser_pdf {name} must be finite and in {min}..={max}; got {value}"),
+        ));
+    }
+    Ok(())
+}
+
+fn browser_pdf_bridge_payload(params: &BrowserPdfParams) -> Value {
+    json!({
+        "landscape": params.landscape,
+        "printBackground": params.print_background,
+        "displayHeaderFooter": params.display_header_footer,
+        "headerTemplate": params.header_template.as_deref(),
+        "footerTemplate": params.footer_template.as_deref(),
+        "scale": params.scale,
+        "paperWidth": params.paper_width,
+        "paperHeight": params.paper_height,
+        "marginTop": params.margin_top,
+        "marginBottom": params.margin_bottom,
+        "marginLeft": params.margin_left,
+        "marginRight": params.margin_right,
+        "pageRanges": params.page_ranges.as_deref(),
+        "preferCSSPageSize": params.prefer_css_page_size,
+        "waitTimeoutMs": params.wait_timeout_ms,
+    })
+}
+
 fn validate_browser_screenshot_clip(clip: Rect) -> Result<(), ErrorData> {
     if clip.x < 0 || clip.y < 0 || clip.w <= 0 || clip.h <= 0 {
         return Err(mcp_error(
@@ -12186,6 +12417,27 @@ fn screenshot_output_path(raw_path: &str) -> Result<PathBuf, ErrorData> {
     Ok(path)
 }
 
+fn browser_pdf_output_path(raw_path: &str) -> Result<PathBuf, ErrorData> {
+    let path = screenshot_output_path(raw_path)?;
+    let Some(extension) = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(str::to_ascii_lowercase)
+    else {
+        return Err(mcp_error(
+            error_codes::TOOL_PARAMS_INVALID,
+            format!("browser_pdf path must end in .pdf: {}", path.display()),
+        ));
+    };
+    if extension != "pdf" {
+        return Err(mcp_error(
+            error_codes::TOOL_PARAMS_INVALID,
+            format!("browser_pdf unsupported file extension .{extension}; expected .pdf"),
+        ));
+    }
+    Ok(path)
+}
+
 fn screenshot_format_from_path(path: &Path) -> Result<CaptureScreenshotFormat, ErrorData> {
     let Some(extension) = path
         .extension()
@@ -12368,6 +12620,66 @@ fn install_screenshot_file(
             ),
         )
     })
+}
+
+fn write_pdf_bytes(
+    output_path: &Path,
+    pdf_bytes: &[u8],
+    overwrite: bool,
+) -> Result<u64, ErrorData> {
+    if pdf_bytes.is_empty() {
+        return Err(mcp_error(
+            error_codes::STORAGE_WRITE_FAILED,
+            format!(
+                "browser_pdf refused to write empty PDF: {}",
+                output_path.display()
+            ),
+        ));
+    }
+    let temp_path = screenshot_temp_path(output_path);
+    if temp_path.try_exists().map_err(|error| {
+        mcp_error(
+            error_codes::STORAGE_READ_FAILED,
+            format!(
+                "browser_pdf temp path existence check failed for {}: {error}",
+                temp_path.display()
+            ),
+        )
+    })? {
+        return Err(mcp_error(
+            error_codes::STORAGE_WRITE_FAILED,
+            format!(
+                "browser_pdf temp path already exists: {}",
+                temp_path.display()
+            ),
+        ));
+    }
+    std::fs::write(&temp_path, pdf_bytes).map_err(|error| {
+        mcp_error(
+            error_codes::STORAGE_WRITE_FAILED,
+            format!(
+                "browser_pdf failed to write {}: {error}",
+                temp_path.display()
+            ),
+        )
+    })?;
+    install_screenshot_file(&temp_path, output_path, overwrite)?;
+    let metadata = std::fs::metadata(output_path).map_err(|error| {
+        mcp_error(
+            error_codes::STORAGE_READ_FAILED,
+            format!(
+                "browser_pdf metadata readback failed for {}: {error}",
+                output_path.display()
+            ),
+        )
+    })?;
+    if metadata.len() == 0 {
+        return Err(mcp_error(
+            error_codes::STORAGE_WRITE_FAILED,
+            format!("browser_pdf wrote an empty file: {}", output_path.display()),
+        ));
+    }
+    Ok(metadata.len())
 }
 
 fn screenshot_temp_path(output_path: &Path) -> PathBuf {

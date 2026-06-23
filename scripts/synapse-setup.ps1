@@ -1038,6 +1038,33 @@ fi
     }
 }
 
+function Test-CodexSynapseHttpConfig {
+    param(
+        [Parameter(Mandatory=$true)][string]$ConfigPath,
+        [Parameter(Mandatory=$true)][string]$Bind
+    )
+
+    if (-not (Test-Path $ConfigPath)) {
+        return $false
+    }
+    try {
+        $content = Get-Content -Raw $ConfigPath
+    } catch {
+        return $false
+    }
+    $section = [regex]::Match(
+        $content,
+        '(?ms)^\[mcp_servers\.synapse\]\s*(?<body>.*?)(?=^\[|\z)'
+    )
+    if (-not $section.Success) {
+        return $false
+    }
+    $body = [string]$section.Groups['body'].Value
+    $bindUrlRegex = [regex]::Escape("http://$Bind/mcp")
+    return ($body -match "url\s*=\s*`"$bindUrlRegex`"" -and
+        $body -match 'bearer_token_env_var\s*=\s*"SYNAPSE_BEARER_TOKEN"')
+}
+
 function Get-SynapseMcpProcessSnapshot {
     @(Get-CimInstance Win32_Process -Filter "Name='synapse-mcp.exe'" -ErrorAction SilentlyContinue |
         Sort-Object ProcessId |
@@ -3272,15 +3299,28 @@ if (-not $SkipClientWiring) {
     $codex = Get-Command codex -ErrorAction SilentlyContinue
     $codexCfg = "$env:USERPROFILE\.codex\config.toml"
     if ($codex) {
-        & $codex.Source mcp remove synapse 2>$null | Out-Null
-        & $codex.Source mcp add synapse --url "http://$Bind/mcp" --bearer-token-env-var SYNAPSE_BEARER_TOKEN
-        if ($LASTEXITCODE -ne 0) { Die "codex mcp add failed (exit $LASTEXITCODE). Codex must be wired to HTTP, not the connect bridge." }
+        if (Test-CodexSynapseHttpConfig -ConfigPath $codexCfg -Bind $Bind) {
+            Info "Codex MCP entry already uses the required Streamable HTTP transport."
+        } else {
+            & $codex.Source mcp remove synapse 2>$null | Out-Null
+            & $codex.Source mcp add synapse --url "http://$Bind/mcp" --bearer-token-env-var SYNAPSE_BEARER_TOKEN
+            $codexAddExit = $LASTEXITCODE
+            if ($codexAddExit -ne 0 -and -not (Test-CodexSynapseHttpConfig -ConfigPath $codexCfg -Bind $Bind)) {
+                Die "codex mcp add failed (exit $codexAddExit). Codex must be wired to HTTP, not the connect bridge."
+            }
+            if (-not (Test-CodexSynapseHttpConfig -ConfigPath $codexCfg -Bind $Bind)) {
+                Die "codex mcp add completed but Codex config is not the required HTTP transport."
+            }
+            if ($codexAddExit -ne 0) {
+                Info "WARN: codex mcp add exited $codexAddExit but Codex config now contains the required HTTP entry; continuing."
+            }
+        }
         Install-CodexSynapseTokenLoader -CodexCommandPath $codex.Source -TokenPath $TokenPath
         Info "Codex (Windows) wired via Streamable HTTP transport."
     } elseif (Test-Path $codexCfg) {
         $c = Get-Content -Raw $codexCfg
-        $bindUrlRegex = [regex]::Escape("http://$Bind/mcp")
-        if ($c -match '(?m)^\[mcp_servers\.synapse\]' -and ($c -notmatch "url\s*=\s*`"$bindUrlRegex`"" -or $c -notmatch 'bearer_token_env_var\s*=\s*"SYNAPSE_BEARER_TOKEN"')) {
+        if ($c -match '(?m)^\[mcp_servers\.synapse\]' -and
+            -not (Test-CodexSynapseHttpConfig -ConfigPath $codexCfg -Bind $Bind)) {
             Die "Codex config exists at $codexCfg but codex CLI is not on PATH and the synapse entry is not the required HTTP transport. Install/repair Codex CLI, then re-run."
         }
         Info "Codex CLI not found; existing Codex config is already HTTP or has no synapse entry."

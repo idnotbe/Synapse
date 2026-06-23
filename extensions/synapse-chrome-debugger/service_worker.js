@@ -1,6 +1,6 @@
 const PROTOCOL_VERSION = 1;
-const BRIDGE_BUILD_ID = "synapse-chrome-bridge-2026-06-23-page-screenshot-focus-v4";
-const BRIDGE_BUILD_SHA256 = "3fe36d3eab7f9e3b34bfc9b8caa741beff496e267bf94c669a21db3bc883a86a";
+const BRIDGE_BUILD_ID = "synapse-chrome-bridge-2026-06-23-page-pdf-v2";
+const BRIDGE_BUILD_SHA256 = "5edb3b608b74420b0d3716f1d0fc087f038b4ab02126181c45569f0b88e6c4f3";
 const DEBUGGER_COMMAND_TIMEOUT_MS = 5000;
 const CAPTURE_VISIBLE_TAB_MIN_INTERVAL_MS = 600;
 let captureVisibleTabQueue = Promise.resolve();
@@ -22,6 +22,7 @@ const COMMAND_CAPABILITIES = Object.freeze([
   "pageVitals",
   "pageContent",
   "pageScreenshot",
+  "pagePdf",
   "setContent",
   "ariaSnapshot",
   "assertPoll",
@@ -815,6 +816,8 @@ async function handleCommand(command) {
       result = await handlePageContent(params);
     } else if (kind === "pageScreenshot") {
       result = await handlePageScreenshot(params);
+    } else if (kind === "pagePdf") {
+      result = await handlePagePdf(params);
     } else if (kind === "cookies") {
       result = await handleCookies(params);
     } else if (kind === "storageState") {
@@ -2060,6 +2063,7 @@ async function handleWaitForLoadState(params) {
   const initialState = await tabPageState(selected.tabId, selected.target);
   const { buffer } = ensurePageEventBuffer(selected.tabId, initialState);
   let pollCount = 0;
+  let last = null;
   while (true) {
     pollCount += 1;
     const pageState = await tabPageState(selected.tabId, selected.target);
@@ -3051,6 +3055,165 @@ function pageScreenshotCleanupInPage(request) {
     scroll_x: Number(window.scrollX || 0),
     scroll_y: Number(window.scrollY || 0)
   };
+}
+
+async function handlePagePdf(params) {
+  const selected = await selectTabTarget(params, { requireTargetId: true });
+  const request = normalizePagePdfRequest(params);
+  const before = await tabPageState(selected.tabId, selected.target);
+  const printed = await dispatchPagePdf(selected.tabId, request);
+  if (typeof printed.data !== "string" || printed.data.length === 0) {
+    throw bridgeError(
+      ERROR_ATTACH_FAILED,
+      `pagePdf Page.printToPDF returned no base64 data for tab ${selected.tabId}`
+    );
+  }
+  const after = await tabPageState(selected.tabId, selected.target);
+  return {
+    extension_id: chrome.runtime.id,
+    target_id: after.target_id || selected.target.id || "",
+    tab_id: selected.tabId,
+    chrome_window_id: after.chrome_window_id,
+    url: after.url || before.url || "",
+    title: after.title || before.title || "",
+    data_base64: printed.data,
+    data_base64_len: printed.data.length,
+    pdf_byte_length: base64ByteLength(printed.data),
+    landscape: request.landscape,
+    print_background: request.printBackground,
+    display_header_footer: request.displayHeaderFooter,
+    scale: request.scale,
+    paper_width: request.paperWidth,
+    paper_height: request.paperHeight,
+    margin_top: request.marginTop,
+    margin_bottom: request.marginBottom,
+    margin_left: request.marginLeft,
+    margin_right: request.marginRight,
+    page_ranges: request.pageRanges,
+    prefer_css_page_size: request.preferCSSPageSize,
+    readback_backend: "chrome.debugger.Page.printToPDF",
+    backend_tier_used: "chrome_debugger_print_to_pdf",
+    protocol_version: printed.protocol_version,
+    target_candidate_count: selected.targetCandidateCount,
+    target_selection_reason: selected.selectionReason
+  };
+}
+
+function normalizePagePdfRequest(params) {
+  return {
+    landscape: normalizePagePdfBoolean(params.landscape, false, "landscape"),
+    printBackground: normalizePagePdfBoolean(params.printBackground, false, "printBackground"),
+    displayHeaderFooter: normalizePagePdfBoolean(params.displayHeaderFooter, false, "displayHeaderFooter"),
+    headerTemplate: normalizePagePdfString(params.headerTemplate, "", "headerTemplate", 8192),
+    footerTemplate: normalizePagePdfString(params.footerTemplate, "", "footerTemplate", 8192),
+    scale: normalizePagePdfNumber(params.scale, "scale", 1, 0.1, 2),
+    paperWidth: normalizePagePdfNumber(params.paperWidth, "paperWidth", 8.5, 0.1, 200),
+    paperHeight: normalizePagePdfNumber(params.paperHeight, "paperHeight", 11, 0.1, 200),
+    marginTop: normalizePagePdfNumber(params.marginTop, "marginTop", 0.4, 0, 20),
+    marginBottom: normalizePagePdfNumber(params.marginBottom, "marginBottom", 0.4, 0, 20),
+    marginLeft: normalizePagePdfNumber(params.marginLeft, "marginLeft", 0.4, 0, 20),
+    marginRight: normalizePagePdfNumber(params.marginRight, "marginRight", 0.4, 0, 20),
+    pageRanges: normalizePagePdfString(params.pageRanges, "", "pageRanges", 1024),
+    preferCSSPageSize: normalizePagePdfBoolean(params.preferCSSPageSize, false, "preferCSSPageSize"),
+    waitTimeoutMs: normalizePagePdfTimeout(params.waitTimeoutMs)
+  };
+}
+
+function normalizePagePdfBoolean(value, defaultValue, fieldName) {
+  if (value === null || value === undefined) {
+    return defaultValue;
+  }
+  if (typeof value !== "boolean") {
+    throw bridgeError(ERROR_ATTACH_FAILED, `pagePdf ${fieldName} must be a boolean`);
+  }
+  return value;
+}
+
+function normalizePagePdfString(value, defaultValue, fieldName, maxLength) {
+  if (value === null || value === undefined) {
+    return defaultValue;
+  }
+  if (typeof value !== "string") {
+    throw bridgeError(ERROR_ATTACH_FAILED, `pagePdf ${fieldName} must be a string`);
+  }
+  if (value.length > maxLength) {
+    throw bridgeError(ERROR_ATTACH_FAILED, `pagePdf ${fieldName} exceeds ${maxLength} bytes`);
+  }
+  return value;
+}
+
+function normalizePagePdfNumber(value, fieldName, defaultValue, min, max) {
+  if (value === null || value === undefined) {
+    return defaultValue;
+  }
+  const number = Number(value);
+  if (!Number.isFinite(number) || number < min || number > max) {
+    throw bridgeError(ERROR_ATTACH_FAILED, `pagePdf ${fieldName} must be finite and in ${min}..=${max}`);
+  }
+  return number;
+}
+
+function normalizePagePdfTimeout(value) {
+  if (value === null || value === undefined) {
+    return DEBUGGER_COMMAND_TIMEOUT_MS;
+  }
+  const number = Number(value);
+  if (!Number.isInteger(number) || number < 1 || number > 60000) {
+    throw bridgeError(ERROR_ATTACH_FAILED, "pagePdf waitTimeoutMs must be an integer in 1..=60000");
+  }
+  return number;
+}
+
+async function dispatchPagePdf(tabId, request) {
+  const debuggee = { tabId };
+  const protocolVersion = "1.3";
+  let attached = false;
+  try {
+    await chrome.debugger.attach(debuggee, protocolVersion);
+    attached = true;
+    const result = await sendDebuggerCommand(debuggee, "Page.printToPDF", {
+      landscape: request.landscape,
+      displayHeaderFooter: request.displayHeaderFooter,
+      printBackground: request.printBackground,
+      scale: request.scale,
+      paperWidth: request.paperWidth,
+      paperHeight: request.paperHeight,
+      marginTop: request.marginTop,
+      marginBottom: request.marginBottom,
+      marginLeft: request.marginLeft,
+      marginRight: request.marginRight,
+      pageRanges: request.pageRanges,
+      headerTemplate: request.headerTemplate,
+      footerTemplate: request.footerTemplate,
+      preferCSSPageSize: request.preferCSSPageSize
+    }, request.waitTimeoutMs);
+    return {
+      data: result && result.data,
+      protocol_version: protocolVersion
+    };
+  } catch (error) {
+    throw bridgeError(
+      ERROR_ATTACH_FAILED,
+      `pagePdf chrome.debugger Page.printToPDF failed for tab ${tabId}: ${errorMessage(error)}`
+    );
+  } finally {
+    if (attached) {
+      try {
+        await chrome.debugger.detach(debuggee);
+      } catch (error) {
+        console.warn(`Synapse chrome.debugger detach failed for pagePdf tab ${tabId}: ${errorMessage(error)}`);
+      }
+    }
+  }
+}
+
+function base64ByteLength(value) {
+  const normalized = String(value || "").replace(/\s+/g, "");
+  if (!normalized) {
+    return 0;
+  }
+  const padding = normalized.endsWith("==") ? 2 : normalized.endsWith("=") ? 1 : 0;
+  return Math.max(0, Math.floor((normalized.length * 3) / 4) - padding);
 }
 
 async function handleTypeActiveElement(params) {

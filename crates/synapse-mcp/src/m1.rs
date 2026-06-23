@@ -440,6 +440,87 @@ pub struct BrowserScreenshotResponse {
 
 #[derive(Clone, Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+pub struct BrowserPdfParams {
+    /// Output PDF file path. Must be absolute and end in .pdf.
+    pub path: String,
+    /// CDP/normal-bridge target id. Defaults to this MCP session's active CDP
+    /// target. Normal Chrome bridge targets are shaped like `chrome-tab:<id>`.
+    #[serde(default)]
+    pub cdp_target_id: Option<String>,
+    /// Browser HWND that owns the target. Required only when passing an explicit
+    /// `cdp_target_id` without an active session target.
+    #[serde(default)]
+    pub window_hwnd: Option<i64>,
+    #[serde(default)]
+    pub landscape: bool,
+    #[serde(default)]
+    pub print_background: bool,
+    #[serde(default)]
+    pub display_header_footer: bool,
+    #[serde(default)]
+    pub header_template: Option<String>,
+    #[serde(default)]
+    pub footer_template: Option<String>,
+    /// Print scale in Chrome Page.printToPDF units, 0.1 through 2.0.
+    #[serde(default)]
+    pub scale: Option<f64>,
+    /// Paper width in inches. Chrome defaults to 8.5.
+    #[serde(default)]
+    pub paper_width: Option<f64>,
+    /// Paper height in inches. Chrome defaults to 11.
+    #[serde(default)]
+    pub paper_height: Option<f64>,
+    #[serde(default)]
+    pub margin_top: Option<f64>,
+    #[serde(default)]
+    pub margin_bottom: Option<f64>,
+    #[serde(default)]
+    pub margin_left: Option<f64>,
+    #[serde(default)]
+    pub margin_right: Option<f64>,
+    #[serde(default)]
+    pub page_ranges: Option<String>,
+    #[serde(default)]
+    pub prefer_css_page_size: bool,
+    #[serde(default)]
+    pub overwrite: bool,
+    /// Optional caller wait budget, capped by the bridge command timeout.
+    #[serde(default)]
+    pub wait_timeout_ms: Option<u64>,
+}
+
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct BrowserPdfResponse {
+    pub path: String,
+    pub bytes_written: u64,
+    pub pdf_sha256: String,
+    pub capture_backend: String,
+    pub cdp_target_id: String,
+    pub tab_id: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chrome_window_id: Option<i64>,
+    pub url: String,
+    pub title: String,
+    pub landscape: bool,
+    pub print_background: bool,
+    pub display_header_footer: bool,
+    pub scale: f64,
+    pub paper_width: f64,
+    pub paper_height: f64,
+    pub margin_top: f64,
+    pub margin_bottom: f64,
+    pub margin_left: f64,
+    pub margin_right: f64,
+    pub page_ranges: String,
+    pub prefer_css_page_size: bool,
+    pub required_foreground: bool,
+    pub backend_tier_used: String,
+    pub source_of_truth: String,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct HiddenDesktopPipFrameParams {
     /// MCP session id whose session-owned hidden desktop should be viewed. If
     /// omitted, the caller's current MCP session is viewed.

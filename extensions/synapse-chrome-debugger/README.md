@@ -13,6 +13,8 @@ drag FSV stays background-safe. It also dispatches HTML5 DragEvent/DataTransfer
 drops in page script. `pageScreenshot` uses typed page metrics/masks/scroll via
 `chrome.scripting` plus queued `chrome.tabs.captureVisibleTab` tile stitching for
 viewport, full-page, clip, and element screenshots without `Page.captureScreenshot`.
+`pagePdf` uses a narrow `chrome.debugger` `Page.printToPDF` lane for PDF output
+from the same already-open Chrome profile.
 It does not require `nativeMessaging`. Page-scoped evaluation uses
 `chrome.scripting.executeScript`; arbitrary eval or deep CDP work must use raw CDP
 from a dedicated Synapse-launched automation profile started with
@@ -146,6 +148,8 @@ Chrome can report one, and always restores scroll position and masks. It queues
 `captureVisibleTab` calls to stay under Chrome's per-second capture quota for
 tiled full-page screenshots and back-to-back screenshot requests. It never
 launches a helper profile.
+`pagePdf` attaches `chrome.debugger` only long enough to call `Page.printToPDF`,
+then detaches and returns base64 PDF bytes to the daemon for file writing.
 `clock` uses the same typed MAIN-world execution model for current-document
 Date/timer control in an owned tab; future-document init-script clock injection
 remains a raw-CDP-only capability.
