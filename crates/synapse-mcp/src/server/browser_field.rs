@@ -19,7 +19,7 @@ use crate::m2::postcondition::text_signature;
 use rmcp::schemars::JsonSchema;
 use rmcp::{RoleServer, model::ErrorCode, service::RequestContext};
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{Value, json};
 use synapse_core::error_codes;
 
 const TOOL: &str = "browser_set_value";
@@ -79,6 +79,123 @@ pub struct BrowserSetValueResponse {
     pub independent_readback_sha256: String,
     pub status: String,
     pub elapsed_ms: u32,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct BrowserFillFormParams {
+    /// Ordered field operations. Applied in order; by default Synapse stops on
+    /// the first failed field so later fields are not corrupted by a bad spec.
+    pub fields: Vec<BrowserFillFormField>,
+    /// Continue after per-field failures and report every outcome. When false,
+    /// Synapse stops on the first failed field.
+    #[serde(default)]
+    pub continue_on_error: bool,
+    /// Chrome bridge tab target id (`chrome-tab:<id>`). Defaults to this
+    /// session's active CDP target. Must be owned by this session.
+    #[serde(default)]
+    pub cdp_target_id: Option<String>,
+    /// Browser HWND owning the target. Defaults to the session target's window.
+    #[serde(default)]
+    pub window_hwnd: Option<i64>,
+    /// Per-action DOM wait budget in milliseconds. Defaults to 5000.
+    #[serde(default)]
+    pub wait_timeout_ms: Option<u64>,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct BrowserFillFormField {
+    /// Optional caller label echoed in the per-field outcome.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Strict CSS selector for the target field/control.
+    pub selector: String,
+    /// Field operation kind.
+    #[serde(rename = "type")]
+    pub field_type: BrowserFillFormFieldType,
+    /// Text replacement value for `text`; value/option alias for `select`.
+    #[serde(default)]
+    pub value: Option<String>,
+    /// Text replacement value for `text`. Takes precedence over `value`.
+    #[serde(default)]
+    pub text: Option<String>,
+    /// Desired checkbox/radio state. Checkbox supports true/false; radio
+    /// supports true only because native radio uncheck is not meaningful.
+    #[serde(default)]
+    pub checked: Option<bool>,
+    /// Select option value.
+    #[serde(default)]
+    pub option: Option<String>,
+    /// Select option label.
+    #[serde(default)]
+    pub option_label: Option<String>,
+    /// Select zero-based option index.
+    #[serde(default)]
+    pub option_index: Option<i32>,
+    /// Multi-select option specs.
+    #[serde(default)]
+    pub options: Vec<BrowserFillFormSelectOption>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BrowserFillFormFieldType {
+    Text,
+    Checkbox,
+    Radio,
+    Select,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct BrowserFillFormSelectOption {
+    #[serde(default)]
+    pub value: Option<String>,
+    #[serde(default)]
+    pub label: Option<String>,
+    #[serde(default)]
+    pub index: Option<i32>,
+}
+
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct BrowserFillFormResponse {
+    pub ok: bool,
+    pub required_foreground: bool,
+    pub transport: String,
+    pub window_hwnd: i64,
+    pub cdp_target_id: String,
+    pub source_of_truth: String,
+    pub continue_on_error: bool,
+    pub status: String,
+    pub total_fields: u32,
+    pub attempted_fields: u32,
+    pub succeeded_fields: u32,
+    pub failed_fields: u32,
+    pub skipped_fields: u32,
+    pub fields: Vec<BrowserFillFormFieldOutcome>,
+    pub elapsed_ms: u32,
+}
+
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct BrowserFillFormFieldOutcome {
+    pub index: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    pub selector: String,
+    #[serde(rename = "type")]
+    pub field_type: BrowserFillFormFieldType,
+    pub ok: bool,
+    pub status: String,
+    pub delegated_tool: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_message: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result: Option<Value>,
 }
 
 #[tool_router(router = browser_field_tool_router, vis = "pub(super)")]
@@ -145,6 +262,75 @@ impl SynapseService {
             )
             .await;
         self.audit_action_result_for_session(TOOL, &result, &session_id)?;
+        result.map(Json)
+    }
+
+    #[tool(
+        description = "Fill multiple fields in the calling session's owned normal Chrome bridge tab in one ordered call (#1148). Each item targets a strict CSS selector and type=text|checkbox|radio|select. Text fields reuse browser_set_value's dual Source-of-Truth replacement readback; checkbox/radio/select reuse target_act-equivalent DOM actions over the debugger-free Chrome bridge. By default stops on first failed field so later fields are not changed by a bad spec; set continue_on_error=true to report every per-field success/failure. Never activates Chrome, never uses OS foreground input, and never falls back to the human foreground tab."
+    )]
+    pub async fn browser_fill_form(
+        &self,
+        params: Parameters<BrowserFillFormParams>,
+        request_context: RequestContext<RoleServer>,
+    ) -> Result<Json<BrowserFillFormResponse>, ErrorData> {
+        let params = params.0;
+        tracing::info!(
+            code = "MCP_TOOL_INVOCATION",
+            kind = "browser_fill_form",
+            "tool.invocation kind=browser_fill_form"
+        );
+        let session_id = super::context::mcp_session_id_from_request_context(&request_context)?
+            .ok_or_else(|| {
+                mcp_error(
+                    error_codes::TOOL_PARAMS_INVALID,
+                    "browser_fill_form requires an MCP session id (run the daemon in HTTP mode)",
+                )
+            })?;
+        validate_fill_form_params(&params)?;
+        let (window_hwnd, cdp_target_id) = self.resolve_bridge_target(
+            &session_id,
+            &BrowserSetValueParams {
+                text: String::new(),
+                selector: Some("#__synapse_unused__".to_owned()),
+                active_element: false,
+                cdp_target_id: params.cdp_target_id.clone(),
+                window_hwnd: params.window_hwnd,
+            },
+        )?;
+        if synapse_a11y::endpoint_for_window(window_hwnd).is_some() {
+            return Err(mcp_error(
+                error_codes::ACTION_TARGET_INVALID,
+                format!(
+                    "browser_fill_form targets the normal Chrome extension bridge, but window {window_hwnd} exposes a raw CDP debug endpoint; use raw-CDP primitives for a Synapse automation profile"
+                ),
+            ));
+        }
+        if !cdp_target_id.starts_with(CHROME_TAB_PREFIX) {
+            return Err(mcp_error(
+                error_codes::ACTION_TARGET_INVALID,
+                format!(
+                    "browser_fill_form requires a normal Chrome bridge tab target ({CHROME_TAB_PREFIX}<id>); got {cdp_target_id:?}"
+                ),
+            ));
+        }
+
+        let request_details = json!({
+            "session_id": &session_id,
+            "window_hwnd": window_hwnd,
+            "cdp_target_id": &cdp_target_id,
+            "field_count": params.fields.len(),
+            "continue_on_error": params.continue_on_error,
+            "required_foreground": false,
+        });
+        self.audit_action_started_with_details_for_session(
+            "browser_fill_form",
+            &request_details,
+            &session_id,
+        )?;
+        let result = self
+            .browser_fill_form_run(&session_id, window_hwnd, &cdp_target_id, &params)
+            .await;
+        self.audit_action_result_for_session("browser_fill_form", &result, &session_id)?;
         result.map(Json)
     }
 
@@ -279,6 +465,253 @@ impl SynapseService {
         })
     }
 
+    async fn browser_fill_form_run(
+        &self,
+        session_id: &str,
+        window_hwnd: i64,
+        cdp_target_id: &str,
+        params: &BrowserFillFormParams,
+    ) -> Result<BrowserFillFormResponse, ErrorData> {
+        let started = std::time::Instant::now();
+        let mut outcomes = Vec::with_capacity(params.fields.len());
+        for (index, field) in params.fields.iter().enumerate() {
+            let outcome = self
+                .browser_fill_form_apply_field(
+                    session_id,
+                    window_hwnd,
+                    cdp_target_id,
+                    index,
+                    field,
+                    params.wait_timeout_ms.unwrap_or(5000),
+                )
+                .await;
+            let ok = outcome.ok;
+            outcomes.push(outcome);
+            if !ok && !params.continue_on_error {
+                break;
+            }
+        }
+
+        let total_fields = u32::try_from(params.fields.len()).unwrap_or(u32::MAX);
+        let attempted_fields = u32::try_from(outcomes.len()).unwrap_or(u32::MAX);
+        let succeeded_fields =
+            u32::try_from(outcomes.iter().filter(|outcome| outcome.ok).count()).unwrap_or(u32::MAX);
+        let failed_fields = attempted_fields.saturating_sub(succeeded_fields);
+        let skipped_fields = total_fields.saturating_sub(attempted_fields);
+        let ok = failed_fields == 0 && skipped_fields == 0;
+        let status = if ok {
+            "verified_state"
+        } else if params.continue_on_error {
+            "completed_with_field_errors"
+        } else {
+            "stopped_on_field_error"
+        };
+
+        tracing::info!(
+            code = "BROWSER_FILL_FORM_READBACK",
+            session_id = %session_id,
+            hwnd = window_hwnd,
+            cdp_target_id = %cdp_target_id,
+            total_fields,
+            attempted_fields,
+            succeeded_fields,
+            failed_fields,
+            skipped_fields,
+            status,
+            "readback=browser_fill_form ordered per-field Source-of-Truth"
+        );
+
+        Ok(BrowserFillFormResponse {
+            ok,
+            required_foreground: false,
+            transport: "chrome_tabs_extension".to_owned(),
+            window_hwnd,
+            cdp_target_id: cdp_target_id.to_owned(),
+            source_of_truth:
+                "per-field browser_set_value/domAction readback plus caller page readback"
+                    .to_owned(),
+            continue_on_error: params.continue_on_error,
+            status: status.to_owned(),
+            total_fields,
+            attempted_fields,
+            succeeded_fields,
+            failed_fields,
+            skipped_fields,
+            fields: outcomes,
+            elapsed_ms: u32::try_from(started.elapsed().as_millis()).unwrap_or(u32::MAX),
+        })
+    }
+
+    async fn browser_fill_form_apply_field(
+        &self,
+        session_id: &str,
+        window_hwnd: i64,
+        cdp_target_id: &str,
+        index: usize,
+        field: &BrowserFillFormField,
+        wait_timeout_ms: u64,
+    ) -> BrowserFillFormFieldOutcome {
+        let index_u32 = u32::try_from(index).unwrap_or(u32::MAX);
+        let selector = field.selector.trim();
+        if selector.is_empty() {
+            return invalid_fill_form_field(index_u32, field, "selector must be non-empty");
+        }
+
+        match field.field_type {
+            BrowserFillFormFieldType::Text => {
+                let Some(text) = field.text.as_deref().or(field.value.as_deref()) else {
+                    return invalid_fill_form_field(
+                        index_u32,
+                        field,
+                        "text fields require text or value",
+                    );
+                };
+                match self
+                    .browser_set_value_run(
+                        session_id,
+                        window_hwnd,
+                        cdp_target_id,
+                        &Locator::Selector(selector.to_owned()),
+                        text,
+                    )
+                    .await
+                {
+                    Ok(result) => {
+                        fill_form_success(index_u32, field, "browser_set_value", json!(result))
+                    }
+                    Err(error) => {
+                        fill_form_error_data(index_u32, field, "browser_set_value", error)
+                    }
+                }
+            }
+            BrowserFillFormFieldType::Checkbox => {
+                let Some(checked) = field.checked else {
+                    return invalid_fill_form_field(
+                        index_u32,
+                        field,
+                        "checkbox fields require checked=true|false",
+                    );
+                };
+                let action = if checked { "check" } else { "uncheck" };
+                self.browser_fill_form_dom_action(
+                    index_u32,
+                    field,
+                    window_hwnd,
+                    cdp_target_id,
+                    action,
+                    None,
+                    wait_timeout_ms,
+                )
+                .await
+            }
+            BrowserFillFormFieldType::Radio => {
+                if matches!(field.checked, Some(false)) {
+                    return invalid_fill_form_field(
+                        index_u32,
+                        field,
+                        "radio fields support checked=true only; select another radio to change the group",
+                    );
+                }
+                self.browser_fill_form_dom_action(
+                    index_u32,
+                    field,
+                    window_hwnd,
+                    cdp_target_id,
+                    "check",
+                    None,
+                    wait_timeout_ms,
+                )
+                .await
+            }
+            BrowserFillFormFieldType::Select => {
+                let options_value = if field.options.is_empty() {
+                    None
+                } else {
+                    match serde_json::to_value(&field.options) {
+                        Ok(value) => Some(value),
+                        Err(error) => {
+                            return invalid_fill_form_field(
+                                index_u32,
+                                field,
+                                &format!("select options encode failed: {error}"),
+                            );
+                        }
+                    }
+                };
+                if field.option.is_none()
+                    && field.option_label.is_none()
+                    && field.option_index.is_none()
+                    && field.options.is_empty()
+                    && field.value.is_none()
+                {
+                    return invalid_fill_form_field(
+                        index_u32,
+                        field,
+                        "select fields require option, value, option_label, option_index, or options[]",
+                    );
+                }
+                self.browser_fill_form_dom_action(
+                    index_u32,
+                    field,
+                    window_hwnd,
+                    cdp_target_id,
+                    "select",
+                    options_value.as_ref(),
+                    wait_timeout_ms,
+                )
+                .await
+            }
+        }
+    }
+
+    async fn browser_fill_form_dom_action(
+        &self,
+        index: u32,
+        field: &BrowserFillFormField,
+        window_hwnd: i64,
+        cdp_target_id: &str,
+        action: &str,
+        options: Option<&Value>,
+        wait_timeout_ms: u64,
+    ) -> BrowserFillFormFieldOutcome {
+        let option = field.option.as_deref().or(field.value.as_deref());
+        match crate::chrome_debugger_bridge::dom_action(
+            crate::chrome_debugger_bridge::ChromeDebuggerDomActionRequest {
+                hwnd: window_hwnd,
+                target_id: cdp_target_id,
+                action,
+                selector: Some(field.selector.trim()),
+                element_id: None,
+                role: None,
+                name: None,
+                value: None,
+                option,
+                option_label: field.option_label.as_deref(),
+                option_index: field.option_index,
+                options,
+                event_type: None,
+                event_init: None,
+                clicks: None,
+                button: None,
+                modifiers: None,
+                position_x: None,
+                position_y: None,
+                wait_timeout_ms,
+                auto_wait: false,
+                auto_wait_timeout_ms: 0,
+            },
+        )
+        .await
+        {
+            Ok(result) => {
+                fill_form_success(index, field, "chrome_debugger_bridge.domAction", result)
+            }
+            Err(error) => {
+                fill_form_bridge_error(index, field, "chrome_debugger_bridge.domAction", error)
+            }
+        }
+    }
+
     fn resolve_bridge_target(
         &self,
         session_id: &str,
@@ -328,6 +761,119 @@ impl SynapseService {
             }
         }
         Ok((window_hwnd, cdp_target_id))
+    }
+}
+
+fn validate_fill_form_params(params: &BrowserFillFormParams) -> Result<(), ErrorData> {
+    if params.fields.is_empty() {
+        return Err(mcp_error(
+            error_codes::TOOL_PARAMS_INVALID,
+            "browser_fill_form requires at least one field",
+        ));
+    }
+    if params.fields.len() > 200 {
+        return Err(mcp_error(
+            error_codes::TOOL_PARAMS_INVALID,
+            format!(
+                "browser_fill_form supports at most 200 fields per call, got {}",
+                params.fields.len()
+            ),
+        ));
+    }
+    if let Some(timeout) = params.wait_timeout_ms
+        && !(50..=30_000).contains(&timeout)
+    {
+        return Err(mcp_error(
+            error_codes::TOOL_PARAMS_INVALID,
+            format!("browser_fill_form wait_timeout_ms must be in 50..=30000, got {timeout}"),
+        ));
+    }
+    Ok(())
+}
+
+fn fill_form_success(
+    index: u32,
+    field: &BrowserFillFormField,
+    delegated_tool: &str,
+    result: Value,
+) -> BrowserFillFormFieldOutcome {
+    BrowserFillFormFieldOutcome {
+        index,
+        name: field.name.clone(),
+        selector: field.selector.clone(),
+        field_type: field.field_type,
+        ok: true,
+        status: "ok".to_owned(),
+        delegated_tool: delegated_tool.to_owned(),
+        error_code: None,
+        error_message: None,
+        result: Some(result),
+    }
+}
+
+fn invalid_fill_form_field(
+    index: u32,
+    field: &BrowserFillFormField,
+    message: &str,
+) -> BrowserFillFormFieldOutcome {
+    BrowserFillFormFieldOutcome {
+        index,
+        name: field.name.clone(),
+        selector: field.selector.clone(),
+        field_type: field.field_type,
+        ok: false,
+        status: "invalid_params".to_owned(),
+        delegated_tool: "browser_fill_form".to_owned(),
+        error_code: Some(error_codes::TOOL_PARAMS_INVALID.to_owned()),
+        error_message: Some(message.to_owned()),
+        result: None,
+    }
+}
+
+fn fill_form_error_data(
+    index: u32,
+    field: &BrowserFillFormField,
+    delegated_tool: &str,
+    error: ErrorData,
+) -> BrowserFillFormFieldOutcome {
+    let error_code = error
+        .data
+        .as_ref()
+        .and_then(|data| data.get("code"))
+        .and_then(Value::as_str)
+        .unwrap_or("TOOL_ERROR")
+        .to_owned();
+    BrowserFillFormFieldOutcome {
+        index,
+        name: field.name.clone(),
+        selector: field.selector.clone(),
+        field_type: field.field_type,
+        ok: false,
+        status: "error".to_owned(),
+        delegated_tool: delegated_tool.to_owned(),
+        error_code: Some(error_code),
+        error_message: Some(error.message.to_string()),
+        result: None,
+    }
+}
+
+fn fill_form_bridge_error(
+    index: u32,
+    field: &BrowserFillFormField,
+    delegated_tool: &str,
+    error: crate::chrome_debugger_bridge::ChromeDebuggerBridgeError,
+) -> BrowserFillFormFieldOutcome {
+    BrowserFillFormFieldOutcome {
+        index,
+        name: field.name.clone(),
+        selector: field.selector.clone(),
+        field_type: field.field_type,
+        ok: false,
+        status: "error".to_owned(),
+        delegated_tool: delegated_tool.to_owned(),
+        error_code: Some(error.code().to_owned()),
+        error_message: Some(error.detail().to_owned()),
+        result: None,
     }
 }
 
@@ -464,5 +1010,58 @@ mod tests {
         assert!(value_matches("composer\n", "composer"));
         assert!(value_matches("", ""));
         assert!(!value_matches("leftover", ""));
+    }
+
+    fn fill_params(fields: Vec<BrowserFillFormField>) -> BrowserFillFormParams {
+        BrowserFillFormParams {
+            fields,
+            continue_on_error: false,
+            cdp_target_id: None,
+            window_hwnd: None,
+            wait_timeout_ms: None,
+        }
+    }
+
+    fn text_field(selector: &str, text: &str) -> BrowserFillFormField {
+        BrowserFillFormField {
+            name: None,
+            selector: selector.to_owned(),
+            field_type: BrowserFillFormFieldType::Text,
+            value: None,
+            text: Some(text.to_owned()),
+            checked: None,
+            option: None,
+            option_label: None,
+            option_index: None,
+            options: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn fill_form_validates_field_count_and_timeout() {
+        let err = validate_fill_form_params(&fill_params(Vec::new()))
+            .expect_err("empty form fill must fail");
+        assert!(err.message.contains("at least one field"));
+
+        let mut params = fill_params(vec![text_field("#name", "Ada")]);
+        params.wait_timeout_ms = Some(49);
+        let err = validate_fill_form_params(&params).expect_err("low timeout must fail");
+        assert!(err.message.contains("wait_timeout_ms"));
+
+        params.wait_timeout_ms = Some(50);
+        validate_fill_form_params(&params).expect("boundary timeout should pass");
+    }
+
+    #[test]
+    fn fill_form_invalid_field_outcome_is_per_field() {
+        let field = text_field("   ", "Ada");
+        let outcome = invalid_fill_form_field(2, &field, "selector must be non-empty");
+        assert!(!outcome.ok);
+        assert_eq!(outcome.index, 2);
+        assert_eq!(
+            outcome.error_code.as_deref(),
+            Some(error_codes::TOOL_PARAMS_INVALID)
+        );
+        assert!(outcome.error_message.unwrap().contains("selector"));
     }
 }
