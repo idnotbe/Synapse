@@ -2269,7 +2269,7 @@ impl SynapseService {
     }
 
     #[tool(
-        description = "Evaluate JavaScript in the calling session's owned browser tab, returning the JSON value plus Runtime.RemoteObject-like type metadata read back from the same target. Raw CDP uses Runtime.evaluate / Runtime.callFunctionOn. The normal authenticated Chrome bridge is debugger-free and intentionally refuses arbitrary page eval before queueing any Chrome command, because Chrome's debugger infobar changes viewport/layout and chrome.scripting cannot safely provide arbitrary string evaluation under page/extension CSP; use cdp_target_info/browser_set_value/target_act for popup-free normal-profile read/action surfaces or raw CDP in a dedicated silent automation profile for arbitrary evaluation. Page scope (default): `expression` is evaluated directly; pass `args` to invoke it as a function with those args. Element scope requires raw CDP: pass `element_id` and a function `expression`, called Playwright-style as fn(element, ...args) via Runtime.callFunctionOn. Requires an active session CDP target or an explicit cdp_target_id/element owned by this session; never uses an unrelated human foreground tab as a fallback. JS exceptions are surfaced loudly. Target-scoped: never changes tab activation or uses OS foreground input."
+        description = "Evaluate JavaScript in the calling session's owned browser tab, returning the JSON value plus Runtime.RemoteObject-like type metadata read back from the same target. Raw CDP uses Runtime.evaluate / Runtime.callFunctionOn. The normal authenticated Chrome bridge supports page-scope evaluation through a narrow target-scoped chrome.debugger Runtime.evaluate lane in the already-open Chrome profile; element-scope evaluation still requires raw CDP because normal bridge element ids are DOM-path based. Page scope (default): `expression` is evaluated directly; pass `args` to invoke it as a function with those args. Element scope: pass `element_id` and a function `expression`, called Playwright-style as fn(element, ...args) via Runtime.callFunctionOn. Requires an active session target or an explicit cdp_target_id/element owned by this session; never uses an unrelated human foreground tab as a fallback. JS exceptions are surfaced loudly. Target-scoped: never changes tab activation or uses OS foreground input."
     )]
     pub async fn browser_evaluate(
         &self,
@@ -2421,7 +2421,7 @@ impl SynapseService {
     }
 
     #[tool(
-        description = "Add or remove a Playwright-style init script for the calling session's owned browser tab via raw CDP Page.addScriptToEvaluateOnNewDocument / Page.removeScriptToEvaluateOnNewDocument. operation defaults to add: provide source, and the script runs before page scripts on every subsequent new document/navigation for that target. operation=remove requires the returned identifier. Target-scoped and background-safe: never activates the tab, never uses OS foreground input, and never falls back to the human foreground tab. Raw CDP only; the popup-safe normal Chrome extension bridge fails closed."
+        description = "Add or remove a Playwright-style init script for the calling session's owned browser tab via raw CDP or the normal Chrome bridge's narrow target-scoped chrome.debugger Page.addScriptToEvaluateOnNewDocument / Page.removeScriptToEvaluateOnNewDocument lane. operation defaults to add: provide source, and the script runs before page scripts on every subsequent new document/navigation for that target. operation=remove requires the returned identifier. Target-scoped and background-safe: never activates the tab, never uses OS foreground input, and never falls back to the human foreground tab."
     )]
     pub async fn browser_add_init_script(
         &self,
@@ -2482,7 +2482,7 @@ impl SynapseService {
     }
 
     #[tool(
-        description = "Inject a Playwright-style <script> tag into the calling session's owned current document from exactly one source: url, content, or local UTF-8 path. URL sources wait for onload/onerror and surface load failures as structured MCP errors; inline/path sources append synchronously. Target-scoped and background-safe: never activates the tab, never uses OS foreground input, and never falls back to the human foreground tab. Raw CDP only; the popup-safe normal Chrome extension bridge fails closed."
+        description = "Inject a Playwright-style <script> tag into the calling session's owned current document from exactly one source: url, content, or local UTF-8 path. Raw CDP targets use Runtime.evaluate; normal Chrome bridge chrome-tab targets use the narrow target-scoped chrome.debugger Runtime.evaluate lane. URL sources wait for onload/onerror and surface load failures as structured MCP errors; inline/path sources append synchronously. Target-scoped and background-safe: never activates the tab, never uses OS foreground input, and never falls back to the human foreground tab."
     )]
     pub async fn browser_add_script_tag(
         &self,
@@ -2555,7 +2555,7 @@ impl SynapseService {
     }
 
     #[tool(
-        description = "Inject a Playwright-style stylesheet into the calling session's owned current document from exactly one source: url, content, or local UTF-8 path. URL sources create <link rel=stylesheet> and wait for onload/onerror; inline/path sources create <style>. Target-scoped and background-safe: never activates the tab, never uses OS foreground input, and never falls back to the human foreground tab. Raw CDP only; the popup-safe normal Chrome extension bridge fails closed."
+        description = "Inject a Playwright-style stylesheet into the calling session's owned current document from exactly one source: url, content, or local UTF-8 path. Raw CDP targets use Runtime.evaluate; normal Chrome bridge chrome-tab targets use the narrow target-scoped chrome.debugger Runtime.evaluate lane. URL sources create <link rel=stylesheet> and wait for onload/onerror; inline/path sources create <style>. Target-scoped and background-safe: never activates the tab, never uses OS foreground input, and never falls back to the human foreground tab."
     )]
     pub async fn browser_add_style_tag(
         &self,
@@ -5448,7 +5448,7 @@ impl SynapseService {
                 return Err(mcp_error(
                     error_codes::A11Y_CDP_EXTENSION_UNAVAILABLE,
                     format!(
-                        "browser_evaluate element scope requires raw CDP for window {window_hwnd:#x}; the normal Chrome bridge is debugger-free and does not expose arbitrary page evaluation"
+                        "browser_evaluate element scope requires raw CDP for window {window_hwnd:#x}; the normal Chrome bridge exposes only page-scope Runtime.evaluate for chrome-tab targets"
                     ),
                 ));
             }
@@ -5465,7 +5465,7 @@ impl SynapseService {
                 mcp_error(
                     error.code(),
                     format!(
-                        "browser_evaluate normal Chrome bridge refused arbitrary page evaluation: {}",
+                        "browser_evaluate normal Chrome bridge Runtime.evaluate failed: {}",
                         error.detail()
                     ),
                 )
@@ -5824,10 +5824,70 @@ impl SynapseService {
         params: &BrowserAddInitScriptParams,
     ) -> Result<BrowserAddInitScriptResponse, ErrorData> {
         let Some(endpoint) = synapse_a11y::endpoint_for_window(window_hwnd) else {
-            return Err(browser_raw_cdp_required_error(
-                "browser_add_init_script",
-                window_hwnd,
-            ));
+            if cdp_target_id.starts_with("chrome-tab:") {
+                let operation = browser_init_script_operation_name(params.operation);
+                let result = crate::chrome_debugger_bridge::init_script(
+                    window_hwnd,
+                    cdp_target_id,
+                    operation,
+                    params.source.as_deref(),
+                    params.identifier.as_deref(),
+                    params.world_name.as_deref(),
+                    params.include_command_line_api.unwrap_or(false),
+                    params.run_immediately.unwrap_or(false),
+                )
+                .await
+                .map_err(|error| {
+                    mcp_error(
+                        error.code(),
+                        format!(
+                            "browser_add_init_script normal Chrome bridge initScript failed for target {cdp_target_id:?}: {}",
+                            error.detail()
+                        ),
+                    )
+                })?;
+                tracing::info!(
+                    code = "CHROME_BRIDGE_BACKGROUND_INIT_SCRIPT",
+                    session_id = %session_id,
+                    hwnd = window_hwnd,
+                    cdp_target_id = %result.target_id,
+                    operation = ?params.operation,
+                    identifier = %result.identifier,
+                    source_len = params.source.as_deref().map(str::len),
+                    target_url = %result.url,
+                    "readback=chrome.debugger.Page.addScriptToEvaluateOnNewDocument/Page.removeScriptToEvaluateOnNewDocument outcome=init_script_mutated"
+                );
+                return Ok(BrowserAddInitScriptResponse {
+                    session_id: session_id.to_owned(),
+                    window_hwnd,
+                    transport: "chrome_tabs_extension".to_owned(),
+                    endpoint: result
+                        .extension_id
+                        .as_deref()
+                        .map(chrome_debugger_endpoint)
+                        .unwrap_or_else(chrome_debugger_default_endpoint),
+                    cdp_target_id: result.target_id,
+                    operation: params.operation,
+                    identifier: result.identifier,
+                    source_len: (params.operation == BrowserInitScriptOperation::Add)
+                        .then(|| params.source.as_deref().map(str::len))
+                        .flatten(),
+                    world_name: params.world_name.clone(),
+                    include_command_line_api: params.include_command_line_api,
+                    run_immediately: params.run_immediately,
+                    url: result.url,
+                    title: result.title,
+                    ready_state: result.ready_state,
+                    readback_backend: if result.readback_backend.trim().is_empty() {
+                        "chrome.debugger.Page.addScriptToEvaluateOnNewDocument/Page.removeScriptToEvaluateOnNewDocument".to_owned()
+                    } else {
+                        result.readback_backend
+                    },
+                    backend_tier_used: "chrome_tabs_extension".to_owned(),
+                    required_foreground: false,
+                });
+            }
+            return Err(browser_raw_cdp_required_error("browser_add_init_script", window_hwnd));
         };
         let result = match params.operation {
             BrowserInitScriptOperation::Add => {
@@ -5941,6 +6001,74 @@ impl SynapseService {
         script_type: Option<&str>,
     ) -> Result<BrowserAddTagResponse, ErrorData> {
         let Some(endpoint) = synapse_a11y::endpoint_for_window(window_hwnd) else {
+            if cdp_target_id.starts_with("chrome-tab:") {
+                let marker = browser_tag_marker(tool, cdp_target_id);
+                let expression =
+                    build_browser_add_tag_expression(tool, tag_kind, source, script_type, &marker)?;
+                let evaluated = crate::chrome_debugger_bridge::evaluate_script(
+                    window_hwnd,
+                    cdp_target_id,
+                    &expression,
+                    &[],
+                    true,
+                    true,
+                )
+                .await
+                .map_err(|error| {
+                    mcp_error(
+                        error.code(),
+                        format!(
+                            "{tool} normal Chrome bridge Runtime.evaluate failed for target {cdp_target_id:?}: {}",
+                            error.detail()
+                        ),
+                    )
+                })?;
+                let payload: BrowserAddTagPayload =
+                    serde_json::from_value(evaluated.value.clone()).map_err(|error| {
+                        mcp_error(
+                            error_codes::OBSERVE_INTERNAL,
+                            format!("{tool} bridge payload decode failed: {error}"),
+                        )
+                    })?;
+                tracing::info!(
+                    code = "CHROME_BRIDGE_BACKGROUND_TAG_INJECT",
+                    session_id = %session_id,
+                    hwnd = window_hwnd,
+                    cdp_target_id = %evaluated.target_id,
+                    tag_name = %payload.tag_name,
+                    source_kind = %payload.source_kind,
+                    content_len = payload.content_len,
+                    element_marker = %payload.element_marker,
+                    target_url = %evaluated.url,
+                    "readback=chrome.debugger.Runtime.evaluate+tag.onload/onerror outcome=tag_injected"
+                );
+                return Ok(BrowserAddTagResponse {
+                    session_id: session_id.to_owned(),
+                    window_hwnd,
+                    transport: "chrome_tabs_extension".to_owned(),
+                    endpoint: evaluated
+                        .extension_id
+                        .as_deref()
+                        .map(chrome_debugger_endpoint)
+                        .unwrap_or_else(chrome_debugger_default_endpoint),
+                    cdp_target_id: evaluated.target_id,
+                    tag_name: payload.tag_name,
+                    source_kind: payload.source_kind,
+                    requested_url: payload.requested_url,
+                    resolved_url: payload.resolved_url,
+                    path: source.path.clone(),
+                    script_type: script_type.map(ToOwned::to_owned),
+                    content_len: payload.content_len,
+                    element_marker: payload.element_marker,
+                    url: evaluated.url,
+                    title: evaluated.title,
+                    ready_state: evaluated.ready_state,
+                    readback_backend: "chrome.debugger.Runtime.evaluate+tag.onload/onerror"
+                        .to_owned(),
+                    backend_tier_used: "chrome_tabs_extension".to_owned(),
+                    required_foreground: false,
+                });
+            }
             return Err(browser_raw_cdp_required_error(tool, window_hwnd));
         };
         let marker = browser_tag_marker(tool, cdp_target_id);
@@ -9377,6 +9505,13 @@ enum BrowserTagSourceKind {
     Url,
     Content,
     Path,
+}
+
+fn browser_init_script_operation_name(operation: BrowserInitScriptOperation) -> &'static str {
+    match operation {
+        BrowserInitScriptOperation::Add => "add",
+        BrowserInitScriptOperation::Remove => "remove",
+    }
 }
 
 impl BrowserTagSourceKind {

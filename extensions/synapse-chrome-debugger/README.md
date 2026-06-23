@@ -14,16 +14,19 @@ drops in page script. `pageScreenshot` uses typed page metrics/masks/scroll via
 `chrome.scripting` plus queued `chrome.tabs.captureVisibleTab` tile stitching for
 viewport, full-page, clip, and element screenshots without `Page.captureScreenshot`.
 `pagePdf` uses a narrow `chrome.debugger` `Page.printToPDF` lane for PDF output
-from the same already-open Chrome profile.
+from the same already-open Chrome profile. Page-scope `browser_evaluate`,
+`browser_add_init_script`, `browser_add_script_tag`, and
+`browser_add_style_tag` use narrow target-scoped `chrome.debugger`
+`Runtime.evaluate` / `Page.addScriptToEvaluateOnNewDocument` lanes against the
+same already-open Chrome profile.
 `downloads` uses `chrome.downloads` to capture real download created/changed/
 erased events, list profile downloads, wait for completion/interruption, and let
 the daemon save or move completed files to caller-chosen paths with byte/hash
 readback.
-It does not require `nativeMessaging`. Page-scoped evaluation uses
-`chrome.scripting.executeScript`; arbitrary eval or deep CDP work must use raw CDP
-from a dedicated Synapse-launched automation profile started with
-`--silent-debugger-extension-api`, or fail closed before touching the normal
-browser. It requires `chrome.alarms` so Chrome can wake the MV3 service worker
+It does not require `nativeMessaging`. Element-scoped evaluation, binding event
+capture, and deeper CDP work still require raw CDP from a dedicated
+Synapse-launched automation profile started with `--silent-debugger-extension-api`,
+or fail closed before touching the normal browser. It requires `chrome.alarms` so Chrome can wake the MV3 service worker
 after the daemon restarts or the worker is suspended, and
 `chrome.management` so the bridge can disable external debugger/nativeMessaging
 extensions that would otherwise create Chrome warning surfaces. If the daemon
@@ -69,7 +72,8 @@ current reversible HKCU Chrome `ExtensionSettings` popup shield for external
 extensions or native hosts that request `debugger`/`nativeMessaging`. It also
 preserves a nativeMessaging-only self-shield for the stable Synapse extension
 ID. The current bridge intentionally requests `debugger` for narrow
-target-scoped `cdpInput`, `viewportEmulation`, `deviceEmulation`, and
+target-scoped `Runtime.evaluate`, `Page.addScriptToEvaluateOnNewDocument`,
+`cdpInput`, `viewportEmulation`, `deviceEmulation`, and
 `geolocationEmulation` / `localeEmulation` / `mediaEmulation` /
 `networkConditions` lanes in the already-open
 Chrome profile, and it still never requests `nativeMessaging` or creates helper
@@ -119,7 +123,7 @@ with `A11Y_CDP_DEBUGGER_WARNING_UNSUPPRESSED` before queueing any browser work.
 
 Background tab commands (`listTabs`, `openTab`, `closeTab`, `navigateTab`, `activateTab`,
 `targetInfoPageText`, `pageVitals`, `pageContent`, `pageScreenshot`, `setContent`, `clock`, `pageEvents`, `domAction`, `setFieldValue`, and
-`typeActiveElement`) use `chrome.windows.getAll`,
+`typeActiveElement`, `evaluateScript`, and `initScript`) use `chrome.windows.getAll`,
 `chrome.tabs.query`, `chrome.tabs.create`, `chrome.tabs.remove`, `chrome.tabs.update`,
 `chrome.tabs.reload`, `chrome.tabs.goBack`, `chrome.tabs.goForward`,
 `chrome.tabs.captureVisibleTab`, and
@@ -140,12 +144,10 @@ not a normal-bridge capability; the daemon refuses that debugger-backed command
 before queueing any Chrome command because Chrome's debugger infobar changes
 viewport/layout and breaks coordinate truth. Use `browser_screenshot`, which
 routes to `pageScreenshot`, for normal-profile page screenshots. `evaluateScript` is also
-not a normal-bridge capability: arbitrary string evaluation needs raw CDP
-Runtime.evaluate, while `chrome.scripting.executeScript` can safely provide only
-typed, precompiled DOM helpers under normal page/extension CSP. Use
-`targetInfoPageText`, `pageVitals`, `pageContent`, `setContent`, `clock`, `pageEvents`, `domAction`, `setFieldValue`, and
-`typeActiveElement` for popup-free normal-profile read/action work, and use raw
-CDP in a dedicated silent automation profile for arbitrary JavaScript eval.
+a normal-bridge capability through the narrow target-scoped `chrome.debugger`
+`Runtime.evaluate` lane for session-owned `chrome-tab:*` targets. Use raw CDP in
+a dedicated silent automation profile for element-scoped evaluation, binding
+event capture, and broader DevTools-domain work.
 `pageScreenshot` temporarily activates only the requested tab inside its existing
 Chrome window so `chrome.tabs.captureVisibleTab` captures the right page. On
 Windows builds where Chrome refuses image readback for an unfocused Chrome
@@ -158,8 +160,8 @@ launches a helper profile.
 `pagePdf` attaches `chrome.debugger` only long enough to call `Page.printToPDF`,
 then detaches and returns base64 PDF bytes to the daemon for file writing.
 `clock` uses the same typed MAIN-world execution model for current-document
-Date/timer control in an owned tab; future-document init-script clock injection
-remains a raw-CDP-only capability.
+Date/timer control in an owned tab; future-document init scripts are available
+through the normal bridge's narrow `Page.addScriptToEvaluateOnNewDocument` lane.
 `pageEvents` keeps a per-tab normal-bridge ring buffer from `chrome.webNavigation`
 and a typed MAIN-world worker shim for current-document worker creation/termination
 readback; raw CDP still provides broader Target-domain worker/session detail.
@@ -221,7 +223,8 @@ Attach-capable DOM commands (`snapshot`, `clickNode`, `typeNode`, and
 worker rejects them immediately. The bridge's only `chrome.debugger` use is the
 target-scoped `cdpInput` hover/tap/active-tab mouse-drag lane and the
 `viewportEmulation` / `deviceEmulation` / `geolocationEmulation` /
-`localeEmulation` / `mediaEmulation` / `networkConditions` metrics lanes plus inactive-tab synthetic MouseEvent drag fallback; DOM attach and
+`localeEmulation` / `mediaEmulation` / `networkConditions` metrics lanes,
+page-scope `Runtime.evaluate`, init-script mutation, and inactive-tab synthetic MouseEvent drag fallback; DOM attach, binding event capture, and
 debugger-backed `Page.captureScreenshot` require raw CDP on a dedicated Synapse-launched
 automation profile.
 
@@ -291,6 +294,7 @@ entries that blocked `debugger`, then reports a per-hive result; admin- or user-
 Background automation is achieved on Synapse's own side with the bundled bridge
 over localhost WebSocket, no `nativeMessaging` permission, no helper Chrome
 windows, tabs/scripting for DOM work, and narrow `chrome.debugger` lanes for
+page-scope `Runtime.evaluate`, init-script mutation,
 `cdpInput` hover/tap/active-tab mouse-drag, `viewportEmulation`,
 `deviceEmulation`, `geolocationEmulation`, `localeEmulation`, and
 `mediaEmulation` / `networkConditions` plus

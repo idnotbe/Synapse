@@ -1,6 +1,6 @@
 const PROTOCOL_VERSION = 1;
-const BRIDGE_BUILD_ID = "synapse-chrome-bridge-2026-06-23-downloads-v1";
-const BRIDGE_BUILD_SHA256 = "93d0223ce4035eaaa95ac51f21b22420de4ca29e3da48e93ee83523e8662fab4";
+const BRIDGE_BUILD_ID = "synapse-chrome-bridge-2026-06-23-js-eval-v3";
+const BRIDGE_BUILD_SHA256 = "edc1471d8796ae0515d016efb942dc3dc21047bb54603cd7110c362d9158854e";
 const DEBUGGER_COMMAND_TIMEOUT_MS = 5000;
 const CAPTURE_VISIBLE_TAB_MIN_INTERVAL_MS = 600;
 let captureVisibleTabQueue = Promise.resolve();
@@ -39,6 +39,8 @@ const COMMAND_CAPABILITIES = Object.freeze([
   "waitForSelector",
   "clock",
   "pageEvents",
+  "evaluateScript",
+  "initScript",
   "cdpInput",
   "viewportEmulation",
   "deviceEmulation",
@@ -94,6 +96,7 @@ const DEVICE_BASELINE_BY_TAB = new Map();
 const LOCALE_BASELINE_BY_TAB = new Map();
 const MEDIA_BASELINE_BY_TAB = new Map();
 const NETWORK_BASELINE_BY_TAB = new Map();
+const INIT_SCRIPT_DEBUGGER_SESSIONS = new Map();
 
 let hostId = null;
 let bridgeToken = null;
@@ -351,6 +354,8 @@ function commandRequiresExternalPopupSuppression(kind) {
     "waitForSelector",
     "clock",
     "pageEvents",
+    "evaluateScript",
+    "initScript",
     "cdpInput",
     "viewportEmulation",
     "deviceEmulation",
@@ -719,7 +724,16 @@ chrome.tabs.onCreated.addListener((tab) => {
 });
 chrome.tabs.onRemoved.addListener((tabId) => {
   recordTabRemovedForPageEvents(tabId);
+  INIT_SCRIPT_DEBUGGER_SESSIONS.delete(tabId);
 });
+if (chrome.debugger?.onDetach?.addListener) {
+  chrome.debugger.onDetach.addListener((source, reason) => {
+    if (Number.isInteger(source?.tabId)) {
+      INIT_SCRIPT_DEBUGGER_SESSIONS.delete(source.tabId);
+      console.warn(`Synapse initScript debugger session detached for tab ${source.tabId}: ${String(reason || "unknown")}`);
+    }
+  });
+}
 chrome.tabs.onActivated.addListener((activeInfo) => {
   chrome.tabs.get(activeInfo.tabId)
     .then((tab) => postTabNavigationEvent("tabs.onActivated", tab))
@@ -895,7 +909,9 @@ async function handleCommand(command) {
     } else if (kind === "setFieldValue") {
       result = await handleSetFieldValue(params);
     } else if (kind === "evaluateScript") {
-      result = rejectAttachCommand(kind, params);
+      result = await handleEvaluateScript(params);
+    } else if (kind === "initScript") {
+      result = await handleInitScript(params);
     } else if (kind === "pageVitals") {
       result = await handlePageVitals(params);
     } else if (kind === "navigateTab") {
@@ -964,7 +980,7 @@ function rejectAttachCommand(kind, params) {
     ERROR_DEBUGGER_WARNING_UNSUPPRESSED,
     `Synapse Chrome Bridge refused unsupported legacy attach command ${String(kind)}; ` +
       `target-scoped CDP input is exposed through cdpInput, while full DOM snapshots and ` +
-      `general browser_evaluate still require the dedicated raw-CDP automation profile. ` +
+      `element-scoped DOM CDP work still requires the dedicated raw-CDP automation profile. ` +
       `hwnd=${String(params?.hwnd ?? "unknown")}`
   );
 }
@@ -1105,6 +1121,170 @@ async function handleTargetInfo(params) {
     active_element: activeElement,
     page_text: pageText,
     page_vitals: pageVitals,
+    target_candidate_count: selected.targetCandidateCount,
+    target_selection_reason: selected.selectionReason
+  };
+}
+
+async function handleEvaluateScript(params) {
+  const selected = await selectTabTarget(params, { requireTargetId: true });
+  const expression = normalizeEvaluateExpression(params.expression);
+  const args = normalizeEvaluateArgs(params.args);
+  const awaitPromise = normalizeEvaluateBoolean(params.awaitPromise, true, "awaitPromise");
+  const returnByValue = normalizeEvaluateBoolean(params.returnByValue, true, "returnByValue");
+  const expressionToRun = args.length > 0 ? buildEvaluateFunctionInvocation(expression, args) : expression;
+  const protocolVersion = "1.3";
+  let attachment = null;
+  let evaluation;
+  try {
+    attachment = await attachDebuggerForCommand(selected.tabId, protocolVersion);
+    evaluation = await sendDebuggerCommand(attachment.debuggee, "Runtime.evaluate", {
+      expression: expressionToRun,
+      awaitPromise,
+      returnByValue,
+      userGesture: true
+    });
+  } catch (error) {
+    throw bridgeError(
+      ERROR_ATTACH_FAILED,
+      `chrome.debugger Runtime.evaluate failed for tab ${selected.tabId}: ${errorMessage(error)}`
+    );
+  } finally {
+    if (attachment?.shouldDetach) {
+      try {
+        await chrome.debugger.detach(attachment.debuggee);
+      } catch (error) {
+        console.warn(`Synapse chrome.debugger detach failed for evaluateScript tab ${selected.tabId}: ${errorMessage(error)}`);
+      }
+    }
+  }
+  if (evaluation?.exceptionDetails) {
+    throw bridgeError(
+      ERROR_ATTACH_FAILED,
+      `Runtime.evaluate exception: ${formatDebuggerExceptionDetails(evaluation.exceptionDetails)}`
+    );
+  }
+  const remote = evaluation?.result || {};
+  const state = await tabPageState(selected.tabId, selected.target);
+  return {
+    extension_id: chrome.runtime.id,
+    target_id: state.target_id || selected.target.id,
+    tab_id: selected.tabId,
+    chrome_window_id: state.chrome_window_id,
+    url: state.url || "",
+    title: state.title || "",
+    ready_state: state.ready_state || "",
+    scope: "page",
+    result_type: String(remote.type || ""),
+    result_subtype: remote.subtype === undefined ? null : String(remote.subtype),
+    returned_by_value: Boolean(returnByValue),
+    value: Object.prototype.hasOwnProperty.call(remote, "value") ? remote.value : null,
+    description: remote.description === undefined ? null : String(remote.description),
+    unserializable_value: remote.unserializableValue === undefined ? null : String(remote.unserializableValue),
+    readback_backend: "chrome.debugger.Runtime.evaluate",
+    target_candidate_count: selected.targetCandidateCount,
+    target_selection_reason: selected.selectionReason
+  };
+}
+
+async function handleInitScript(params) {
+  const selected = await selectTabTarget(params, { requireTargetId: true });
+  const operation = normalizeInitScriptOperation(params.operation);
+  const protocolVersion = "1.3";
+  let identifier = "";
+  let addAttachment = null;
+  let temporaryRemoveAttachment = null;
+  let persistentSession = false;
+  let detachedAfterRemove = false;
+  try {
+    if (operation === "add") {
+      const source = normalizeInitScriptSource(params.source);
+      addAttachment = await ensureInitScriptDebuggerSession(selected.tabId, protocolVersion);
+      await ensureInitScriptPageDomainEnabled(addAttachment.debuggee, addAttachment.session);
+      persistentSession = true;
+      const commandParams = {
+        source,
+        includeCommandLineAPI: normalizeEvaluateBoolean(
+          params.includeCommandLineAPI,
+          false,
+          "includeCommandLineAPI"
+        ),
+        runImmediately: normalizeEvaluateBoolean(params.runImmediately, false, "runImmediately")
+      };
+      const worldName = normalizeOptionalNonEmptyString(params.worldName, "worldName");
+      if (worldName) {
+        commandParams.worldName = worldName;
+      }
+      const result = await sendDebuggerCommand(
+        addAttachment.debuggee,
+        "Page.addScriptToEvaluateOnNewDocument",
+        commandParams
+      );
+      identifier = String(result?.identifier || "");
+      if (!identifier) {
+        throw new Error("Page.addScriptToEvaluateOnNewDocument returned no identifier");
+      }
+      addAttachment.session.identifiers.add(identifier);
+    } else {
+      identifier = normalizeOptionalNonEmptyString(params.identifier, "identifier");
+      if (!identifier) {
+        throw bridgeError(ERROR_CHROME_DOM_ACTION_UNSUPPORTED, "initScript operation=remove requires identifier");
+      }
+      let debuggee = { tabId: selected.tabId };
+      if (INIT_SCRIPT_DEBUGGER_SESSIONS.has(selected.tabId)) {
+        persistentSession = true;
+        await ensureInitScriptPageDomainEnabled(debuggee, INIT_SCRIPT_DEBUGGER_SESSIONS.get(selected.tabId));
+      } else {
+        temporaryRemoveAttachment = await attachDebuggerForCommand(selected.tabId, protocolVersion);
+        debuggee = temporaryRemoveAttachment.debuggee;
+        await sendDebuggerCommand(debuggee, "Page.enable", {});
+      }
+      await sendDebuggerCommand(debuggee, "Page.removeScriptToEvaluateOnNewDocument", {
+        identifier
+      });
+      if (persistentSession) {
+        detachedAfterRemove = await maybeDetachInitScriptDebuggerSession(selected.tabId, debuggee, identifier);
+      }
+    }
+  } catch (error) {
+    if (operation === "add" && addAttachment?.newlyAttached && !identifier) {
+      INIT_SCRIPT_DEBUGGER_SESSIONS.delete(selected.tabId);
+      try {
+        await chrome.debugger.detach(addAttachment.debuggee);
+      } catch (detachError) {
+        console.warn(`Synapse chrome.debugger detach failed after initScript add error for tab ${selected.tabId}: ${errorMessage(detachError)}`);
+      }
+    }
+    if (error?.code) {
+      throw error;
+    }
+    throw bridgeError(
+      ERROR_ATTACH_FAILED,
+      `chrome.debugger initScript ${operation} failed for tab ${selected.tabId}: ${errorMessage(error)}`
+    );
+  } finally {
+    if (temporaryRemoveAttachment?.shouldDetach) {
+      try {
+        await chrome.debugger.detach(temporaryRemoveAttachment.debuggee);
+      } catch (error) {
+        console.warn(`Synapse chrome.debugger detach failed for initScript tab ${selected.tabId}: ${errorMessage(error)}`);
+      }
+    }
+  }
+  const state = await tabPageState(selected.tabId, selected.target);
+  return {
+    extension_id: chrome.runtime.id,
+    target_id: state.target_id || selected.target.id,
+    tab_id: selected.tabId,
+    chrome_window_id: state.chrome_window_id,
+    operation,
+    identifier,
+    url: state.url || "",
+    title: state.title || "",
+    ready_state: state.ready_state || "",
+    readback_backend: "chrome.debugger.Page.addScriptToEvaluateOnNewDocument/Page.removeScriptToEvaluateOnNewDocument",
+    debugger_session_persistent: persistentSession,
+    debugger_session_detached: detachedAfterRemove,
     target_candidate_count: selected.targetCandidateCount,
     target_selection_reason: selected.selectionReason
   };
@@ -8454,6 +8634,61 @@ async function sendDebuggerCommand(debuggee, method, params, timeoutMs = DEBUGGE
     );
   } catch (error) {
     throw new Error(`${method}: ${errorMessage(error)}`);
+  }
+}
+
+async function attachDebuggerForCommand(tabId, protocolVersion = "1.3") {
+  const debuggee = { tabId };
+  if (INIT_SCRIPT_DEBUGGER_SESSIONS.has(tabId)) {
+    return { debuggee, shouldDetach: false, persistent: true, protocolVersion };
+  }
+  await chrome.debugger.attach(debuggee, protocolVersion);
+  return { debuggee, shouldDetach: true, persistent: false, protocolVersion };
+}
+
+async function ensureInitScriptDebuggerSession(tabId, protocolVersion = "1.3") {
+  const debuggee = { tabId };
+  let session = INIT_SCRIPT_DEBUGGER_SESSIONS.get(tabId);
+  if (session) {
+    return { debuggee, session, newlyAttached: false, protocolVersion };
+  }
+  await chrome.debugger.attach(debuggee, protocolVersion);
+  session = {
+    protocolVersion,
+    pageEnabled: false,
+    identifiers: new Set(),
+    attachedAtUnixMs: Date.now()
+  };
+  INIT_SCRIPT_DEBUGGER_SESSIONS.set(tabId, session);
+  return { debuggee, session, newlyAttached: true, protocolVersion };
+}
+
+async function ensureInitScriptPageDomainEnabled(debuggee, session) {
+  if (!session || session.pageEnabled) {
+    return;
+  }
+  await sendDebuggerCommand(debuggee, "Page.enable", {});
+  session.pageEnabled = true;
+}
+
+async function maybeDetachInitScriptDebuggerSession(tabId, debuggee, identifier) {
+  const session = INIT_SCRIPT_DEBUGGER_SESSIONS.get(tabId);
+  if (!session) {
+    return false;
+  }
+  if (identifier) {
+    session.identifiers.delete(identifier);
+  }
+  if (session.identifiers.size > 0) {
+    return false;
+  }
+  INIT_SCRIPT_DEBUGGER_SESSIONS.delete(tabId);
+  try {
+    await chrome.debugger.detach(debuggee);
+    return true;
+  } catch (error) {
+    console.warn(`Synapse chrome.debugger detach failed for initScript cleanup tab ${tabId}: ${errorMessage(error)}`);
+    return false;
   }
 }
 
@@ -18100,6 +18335,82 @@ function normalizeReloadDelay(value) {
     throw bridgeError(ERROR_ATTACH_FAILED, "reloadDelayMs must be an integer from 0 through 5000");
   }
   return number;
+}
+
+function normalizeEvaluateExpression(value) {
+  if (typeof value !== "string" || value.length === 0) {
+    throw bridgeError(ERROR_CHROME_DOM_ACTION_UNSUPPORTED, "evaluateScript expression must be a non-empty string");
+  }
+  return value;
+}
+
+function normalizeEvaluateArgs(value) {
+  if (value === undefined || value === null) {
+    return [];
+  }
+  if (!Array.isArray(value)) {
+    throw bridgeError(ERROR_CHROME_DOM_ACTION_UNSUPPORTED, "evaluateScript args must be an array when supplied");
+  }
+  if (value.length > 64) {
+    throw bridgeError(ERROR_CHROME_DOM_ACTION_UNSUPPORTED, `evaluateScript accepts at most 64 args; got ${value.length}`);
+  }
+  return value;
+}
+
+function normalizeEvaluateBoolean(value, defaultValue, fieldName) {
+  if (value === undefined || value === null) {
+    return defaultValue;
+  }
+  if (typeof value !== "boolean") {
+    throw bridgeError(
+      ERROR_CHROME_DOM_ACTION_UNSUPPORTED,
+      `${fieldName} must be a boolean; got ${JSON.stringify(value)}`
+    );
+  }
+  return value;
+}
+
+function buildEvaluateFunctionInvocation(expression, args) {
+  return `(${expression})(${args.map((arg) => JSON.stringify(arg)).join(", ")})`;
+}
+
+function normalizeInitScriptOperation(value) {
+  const operation = String(value || "add").trim().toLowerCase();
+  if (operation === "add" || operation === "remove") {
+    return operation;
+  }
+  throw bridgeError(
+    ERROR_CHROME_DOM_ACTION_UNSUPPORTED,
+    `initScript operation must be add or remove; got ${JSON.stringify(value)}`
+  );
+}
+
+function normalizeInitScriptSource(value) {
+  if (typeof value !== "string" || value.length === 0) {
+    throw bridgeError(ERROR_CHROME_DOM_ACTION_UNSUPPORTED, "initScript operation=add requires non-empty source");
+  }
+  return value;
+}
+
+function normalizeOptionalNonEmptyString(value, fieldName) {
+  if (value === undefined || value === null) {
+    return "";
+  }
+  if (typeof value !== "string" || value.length === 0) {
+    throw bridgeError(ERROR_CHROME_DOM_ACTION_UNSUPPORTED, `${fieldName} must be a non-empty string when supplied`);
+  }
+  if (value.includes("\u0000")) {
+    throw bridgeError(ERROR_CHROME_DOM_ACTION_UNSUPPORTED, `${fieldName} must not contain NUL`);
+  }
+  return value;
+}
+
+function formatDebuggerExceptionDetails(details) {
+  const exceptionText = details?.exception?.description || details?.exception?.value || details?.text || "unknown exception";
+  const url = details?.url ? ` url=${details.url}` : "";
+  const line = Number.isInteger(details?.lineNumber) ? ` line=${details.lineNumber + 1}` : "";
+  const column = Number.isInteger(details?.columnNumber) ? ` column=${details.columnNumber + 1}` : "";
+  return `${String(exceptionText)}${url}${line}${column}`;
 }
 
 function sleep(ms) {

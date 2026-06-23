@@ -40,9 +40,9 @@ const NATIVE_HOST_NAME: &str = "com.synapse.chrome_debugger";
 const EXTENSION_ORIGIN: &str = "chrome-extension://leoocgnkjnplbfdbklajepahofecgfbk";
 const BRIDGE_TOKEN_HEADER: &str = "x-synapse-bridge-token";
 const BRIDGE_PROTOCOL_VERSION: u32 = 1;
-const EXPECTED_EXTENSION_BUILD_ID: &str = "synapse-chrome-bridge-2026-06-23-downloads-v1";
+const EXPECTED_EXTENSION_BUILD_ID: &str = "synapse-chrome-bridge-2026-06-23-js-eval-v3";
 const EXPECTED_EXTENSION_BUILD_SHA256: &str =
-    "93d0223ce4035eaaa95ac51f21b22420de4ca29e3da48e93ee83523e8662fab4";
+    "edc1471d8796ae0515d016efb942dc3dc21047bb54603cd7110c362d9158854e";
 const SYNAPSE_CHROME_BLOCKED_INSTALL_MESSAGE: &str = "Synapse blocked this extension on this host because debugger/nativeMessaging permissions can surface Chrome debugger or native-host popups during background automation.";
 const REQUIRED_DIRECT_HTTP_CAPABILITIES: &[&str] = &[
     "alarmReconnect",
@@ -78,6 +78,8 @@ const REQUIRED_DIRECT_HTTP_CAPABILITIES: &[&str] = &[
     "waitForSelector",
     "clock",
     "pageEvents",
+    "evaluateScript",
+    "initScript",
     "cdpInput",
     "viewportEmulation",
     "deviceEmulation",
@@ -101,7 +103,7 @@ const NATIVE_DAEMON_RECONNECT_DELAY: Duration = Duration::from_secs(1);
 const MAX_NATIVE_MESSAGE_FROM_CHROME: usize = 64 * 1024 * 1024;
 const MAX_NATIVE_MESSAGE_TO_CHROME: usize = 1024 * 1024;
 const UNKNOWN_NATIVE_HOST_ID_FRAGMENT: &str = "unknown chrome debugger native host_id";
-const INSTALL_GUIDANCE: &str = "install the bundled Synapse Chrome extension from extensions\\synapse-chrome-debugger with scripts\\install-synapse-chrome-debugger.ps1; the installer auto-loads the unpacked extension into the already-open active Chrome profile and refuses to launch a second Chrome profile; the normal end-user bridge uses chrome.tabs/chrome.scripting/chrome.downloads/chrome.webNavigation/chrome.webRequest over direct localhost WebSocket plus chrome.alarms MV3 reconnect wake, exposes debugger-free pageScreenshot capture through chrome.tabs.captureVisibleTab stitching, exposes chrome.downloads list/wait/event capture for browser_downloads save/move, and exposes narrow chrome.debugger lanes for target-scoped hover/tap/active-tab drag, Page.printToPDF PDF rendering, viewport emulation, device emulation, geolocation emulation, locale/timezone emulation, media emulation, and network conditions plus inactive-tab synthetic mouse drag and HTML5 DataTransfer drag dispatch; it never uses nativeMessaging or helper Chrome windows; expected_extension_id=leoocgnkjnplbfdbklajepahofecgfbk";
+const INSTALL_GUIDANCE: &str = "install the bundled Synapse Chrome extension from extensions\\synapse-chrome-debugger with scripts\\install-synapse-chrome-debugger.ps1; the installer auto-loads the unpacked extension into the already-open active Chrome profile and refuses to launch a second Chrome profile; the normal end-user bridge uses chrome.tabs/chrome.scripting/chrome.downloads/chrome.webNavigation/chrome.webRequest over direct localhost WebSocket plus chrome.alarms MV3 reconnect wake, exposes debugger-free pageScreenshot capture through chrome.tabs.captureVisibleTab stitching, exposes chrome.downloads list/wait/event capture for browser_downloads save/move, and exposes narrow chrome.debugger lanes for target-scoped hover/tap/active-tab drag, Page.printToPDF PDF rendering, Runtime.evaluate page evaluation, Page.addScriptToEvaluateOnNewDocument init scripts, viewport emulation, device emulation, geolocation emulation, locale/timezone emulation, media emulation, and network conditions plus inactive-tab synthetic mouse drag and HTML5 DataTransfer drag dispatch; it never uses nativeMessaging or helper Chrome windows; expected_extension_id=leoocgnkjnplbfdbklajepahofecgfbk";
 const NO_ACTIVE_HOST_REPAIR_GUIDANCE: &str = "no_active_host_repair=use the already-open authenticated Chrome profile only; do not launch a second Chrome process/profile; wait for the installed bridge worker alarmReconnect registration and re-read health; if an active stale host appears call cdp_bridge_reload; if no host registers, run scripts\\install-synapse-chrome-debugger.ps1 from the interactive Windows desktop so it auto-loads the bundled unpacked extension into the existing active Chrome profile; if health reports installed=false, cdp_bridge_reload cannot repair because Chrome has no loaded extension host to receive reloadSelf";
 const TOKEN_ENV: &str = "SYNAPSE_BEARER_TOKEN";
 const APPDATA_ENV: &str = "APPDATA";
@@ -266,7 +268,7 @@ impl ChromeDebuggerBridgeError {
         Self {
             code: error_codes::A11Y_CDP_DEBUGGER_WARNING_UNSUPPRESSED,
             detail: format!(
-                "Synapse Chrome Bridge refused unsupported attach-capable command {command_kind:?} before queueing any Chrome command; hwnd={hwnd} reason=current normal-profile bridge exposes only narrow chrome.debugger lanes for cdpInput target-scoped hover/tap/active-tab drag, viewportEmulation, deviceEmulation, geolocationEmulation, localeEmulation, mediaEmulation, and networkConditions plus inactive-tab synthetic mouse drag, while this command still requires a dedicated raw-CDP automation profile{external_surface_hint} remediation=run scripts\\install-synapse-chrome-debugger.ps1 and cdp_bridge_reload to ensure the current bridge is installed, or use raw CDP from a dedicated Synapse-launched automation profile for full DOM/action CDP or screenshots"
+                "Synapse Chrome Bridge refused unsupported attach-capable command {command_kind:?} before queueing any Chrome command; hwnd={hwnd} reason=current normal-profile bridge exposes only narrow chrome.debugger lanes for Runtime.evaluate page eval, Page.addScriptToEvaluateOnNewDocument init scripts, cdpInput target-scoped hover/tap/active-tab drag, viewportEmulation, deviceEmulation, geolocationEmulation, localeEmulation, mediaEmulation, and networkConditions plus inactive-tab synthetic mouse drag, while this command still requires a dedicated raw-CDP automation profile{external_surface_hint} remediation=run scripts\\install-synapse-chrome-debugger.ps1 and cdp_bridge_reload to ensure the current bridge is installed, or use raw CDP from a dedicated Synapse-launched automation profile for full DOM/action CDP or screenshots"
             ),
         }
     }
@@ -3696,6 +3698,26 @@ pub(crate) struct ChromeDebuggerEvaluateScriptResult {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+pub(crate) struct ChromeDebuggerInitScriptResult {
+    pub target_id: String,
+    pub tab_id: u32,
+    #[serde(default)]
+    pub chrome_window_id: Option<i64>,
+    pub operation: String,
+    pub identifier: String,
+    pub url: String,
+    pub title: String,
+    #[serde(default)]
+    pub ready_state: String,
+    #[serde(default)]
+    pub readback_backend: String,
+    pub target_candidate_count: u32,
+    pub target_selection_reason: String,
+    #[serde(default)]
+    pub extension_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub(crate) struct ChromeBridgeReloadCommandAck {
     pub ok: bool,
     #[serde(rename = "extensionId")]
@@ -6185,16 +6207,68 @@ pub(crate) async fn activate_tab(
 
 pub(crate) async fn evaluate_script(
     hwnd: i64,
-    _target_id: &str,
-    _expression: &str,
-    _args: &[Value],
-    _await_promise: bool,
-    _return_by_value: bool,
+    target_id: &str,
+    expression: &str,
+    args: &[Value],
+    await_promise: bool,
+    return_by_value: bool,
 ) -> Result<ChromeDebuggerEvaluateScriptResult, ChromeDebuggerBridgeError> {
-    Err(ChromeDebuggerBridgeError::normal_bridge_attach_disabled(
-        hwnd,
-        "evaluateScript",
-    ))
+    ensure_normal_bridge_external_popup_suppressed(hwnd, "evaluateScript")?;
+    let result = bridge()
+        .send_command(
+            "evaluateScript",
+            json!({
+                "hwnd": hwnd,
+                "targetIdHint": target_id,
+                "expression": expression,
+                "args": args,
+                "awaitPromise": await_promise,
+                "returnByValue": return_by_value,
+            }),
+        )
+        .await?;
+    serde_json::from_value::<ChromeDebuggerEvaluateScriptResult>(result).map_err(|error| {
+        ChromeDebuggerBridgeError::protocol(format!(
+            "decode Chrome debugger evaluateScript response: {error}"
+        ))
+    })
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "mirrors the MCP init-script parameters sent to the bridge"
+)]
+pub(crate) async fn init_script(
+    hwnd: i64,
+    target_id: &str,
+    operation: &str,
+    source: Option<&str>,
+    identifier: Option<&str>,
+    world_name: Option<&str>,
+    include_command_line_api: bool,
+    run_immediately: bool,
+) -> Result<ChromeDebuggerInitScriptResult, ChromeDebuggerBridgeError> {
+    ensure_normal_bridge_external_popup_suppressed(hwnd, "initScript")?;
+    let result = bridge()
+        .send_command(
+            "initScript",
+            json!({
+                "hwnd": hwnd,
+                "targetIdHint": target_id,
+                "operation": operation,
+                "source": source,
+                "identifier": identifier,
+                "worldName": world_name,
+                "includeCommandLineAPI": include_command_line_api,
+                "runImmediately": run_immediately,
+            }),
+        )
+        .await?;
+    serde_json::from_value::<ChromeDebuggerInitScriptResult>(result).map_err(|error| {
+        ChromeDebuggerBridgeError::protocol(format!(
+            "decode Chrome debugger initScript response: {error}"
+        ))
+    })
 }
 
 pub(crate) struct ChromeDebuggerDomActionRequest<'a> {
@@ -7116,6 +7190,16 @@ fn chrome_response_readback_summary(kind: &str, result: Option<&Value>) -> Optio
             "result_type": result.get("result_type"),
             "result_subtype": result.get("result_subtype"),
             "returned_by_value": result.get("returned_by_value"),
+            "readback_backend": result.get("readback_backend"),
+            "target_selection_reason": result.get("target_selection_reason"),
+            "extension_id": result.get("extension_id"),
+        }),
+        "initScript" => json!({
+            "target_id": result.get("target_id"),
+            "tab_id": result.get("tab_id"),
+            "chrome_window_id": result.get("chrome_window_id"),
+            "operation": result.get("operation"),
+            "identifier": result.get("identifier"),
             "readback_backend": result.get("readback_backend"),
             "target_selection_reason": result.get("target_selection_reason"),
             "extension_id": result.get("extension_id"),
