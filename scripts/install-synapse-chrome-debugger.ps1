@@ -823,12 +823,154 @@ function Test-SynapseChromeBridgeProfileRow {
     }
 }
 
+function ConvertTo-SynapseComparablePath {
+    param(
+        [AllowNull()]
+        [string]$Path
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Path)) {
+        return $null
+    }
+    $expanded = [System.Environment]::ExpandEnvironmentVariables($Path.Trim())
+    try {
+        $full = [System.IO.Path]::GetFullPath($expanded)
+    } catch {
+        $full = $expanded
+    }
+    $trimChars = [char[]]@([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar)
+    return $full.TrimEnd($trimChars)
+}
+
+function Get-SynapseCommandLineSwitchValue {
+    param(
+        [AllowNull()]
+        [string]$CommandLine,
+        [Parameter(Mandatory = $true)]
+        [string]$SwitchName
+    )
+
+    if ([string]::IsNullOrWhiteSpace($CommandLine)) {
+        return $null
+    }
+    $pattern = '(?i)(?:^|\s)' + [regex]::Escape($SwitchName) + '(?:=|\s+)(?:"([^"]+)"|''([^'']+)''|([^\s"]+))'
+    $match = [regex]::Match($CommandLine, $pattern)
+    if (-not $match.Success) {
+        return $null
+    }
+    foreach ($index in 1..3) {
+        if ($match.Groups[$index].Success -and -not [string]::IsNullOrWhiteSpace($match.Groups[$index].Value)) {
+            return $match.Groups[$index].Value
+        }
+    }
+    return $null
+}
+
+function Get-SynapseChromeProcessProfileMatch {
+    param(
+        [AllowNull()]
+        [string]$CommandLine,
+        [AllowNull()]
+        [string]$ChromeUserDataRoot
+    )
+
+    $commandLineReadable = -not [string]::IsNullOrWhiteSpace($CommandLine)
+    $userDataDir = Get-SynapseCommandLineSwitchValue -CommandLine $CommandLine -SwitchName '--user-data-dir'
+    $normalizedUserDataDir = ConvertTo-SynapseComparablePath -Path $userDataDir
+    $expectedRoot = ConvertTo-SynapseComparablePath -Path $ChromeUserDataRoot
+    $hasMsPlaywrightMcpDir = $commandLineReadable -and $CommandLine -match 'ms-playwright-mcp'
+    $hasRemoteDebuggingPipe = $commandLineReadable -and $CommandLine -match '(^|\s)--remote-debugging-pipe(\s|=|$)'
+    $hasRemoteDebuggingPort = $commandLineReadable -and $CommandLine -match '(^|\s)--remote-debugging-port(\s|=|$)'
+    $hasAutomationControlledFlag = $commandLineReadable -and $CommandLine -match '(^|\s)--disable-blink-features=([^\s]*,)?AutomationControlled(,|\s|$)'
+
+    $matches = $true
+    $reason = 'not_checked'
+    if (-not [string]::IsNullOrWhiteSpace($expectedRoot)) {
+        if (-not $commandLineReadable) {
+            $matches = $false
+            $reason = 'command_line_unreadable'
+        } elseif ($hasMsPlaywrightMcpDir) {
+            $matches = $false
+            $reason = 'dedicated_ms_playwright_mcp_user_data_dir'
+        } elseif ([string]::IsNullOrWhiteSpace($normalizedUserDataDir)) {
+            $matches = $true
+            $reason = 'default_chrome_user_data_root'
+        } elseif ([string]::Equals($normalizedUserDataDir, $expectedRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+            $matches = $true
+            $reason = 'user_data_root_matches_active_profile_root'
+        } else {
+            $matches = $false
+            $reason = 'user_data_root_mismatch'
+        }
+    }
+
+    [pscustomobject]@{
+        command_line_readable = $commandLineReadable
+        user_data_dir = $userDataDir
+        user_data_dir_normalized = $normalizedUserDataDir
+        expected_user_data_root = $expectedRoot
+        matches_active_profile_root = $matches
+        match_reason = $reason
+        has_ms_playwright_mcp_dir = $hasMsPlaywrightMcpDir
+        has_remote_debugging_pipe = $hasRemoteDebuggingPipe
+        has_remote_debugging_port = $hasRemoteDebuggingPort
+        has_automation_controlled_flag = $hasAutomationControlledFlag
+    }
+}
+
+function Format-SynapseChromeWindowRejectSummary {
+    param(
+        [object[]]$Windows
+    )
+
+    $rows = @($Windows | Select-Object -First 8 | ForEach-Object {
+        'hwnd={0},pid={1},title="{2}",eligible={3},reason={4},user_data_dir="{5}",remote_pipe={6},remote_port={7},ms_playwright_mcp={8}' -f `
+            $_.hwnd,
+            $_.pid,
+            (([string]$_.title) -replace '"', '\"'),
+            $_.chrome_profile_eligible,
+            $_.chrome_profile_match_reason,
+            (([string]$_.chrome_user_data_dir) -replace '"', '\"'),
+            $_.has_remote_debugging_pipe,
+            $_.has_remote_debugging_port,
+            $_.has_ms_playwright_mcp_dir
+    })
+    $extra = [Math]::Max(0, @($Windows).Count - $rows.Count)
+    $suffix = if ($extra -gt 0) { " | +$extra more" } else { '' }
+    return (($rows -join ' | ') + $suffix)
+}
+
 function Get-SynapseChromeTopLevelWindows {
+    param(
+        [AllowNull()]
+        [string]$ChromeUserDataRoot
+    )
+
     Initialize-SynapseChromeBridgeAutoInstallInterop
-    $chromeProcesses = @(Get-CimInstance Win32_Process -Filter "Name='chrome.exe'" -ErrorAction SilentlyContinue |
-        ForEach-Object { [int]$_.ProcessId })
-    if ($chromeProcesses.Count -eq 0) {
+    $chromeProcessRows = @(Get-CimInstance Win32_Process -Filter "Name='chrome.exe'" -ErrorAction SilentlyContinue |
+        ForEach-Object {
+            $commandLine = [string]$_.CommandLine
+            $profileMatch = Get-SynapseChromeProcessProfileMatch -CommandLine $commandLine -ChromeUserDataRoot $ChromeUserDataRoot
+            [pscustomobject]@{
+                pid = [int]$_.ProcessId
+                command_line_readable = $profileMatch.command_line_readable
+                chrome_user_data_dir = $profileMatch.user_data_dir
+                chrome_user_data_dir_normalized = $profileMatch.user_data_dir_normalized
+                chrome_profile_eligible = $profileMatch.matches_active_profile_root
+                chrome_profile_match_reason = $profileMatch.match_reason
+                has_ms_playwright_mcp_dir = $profileMatch.has_ms_playwright_mcp_dir
+                has_remote_debugging_pipe = $profileMatch.has_remote_debugging_pipe
+                has_remote_debugging_port = $profileMatch.has_remote_debugging_port
+                has_automation_controlled_flag = $profileMatch.has_automation_controlled_flag
+            }
+        })
+    if ($chromeProcessRows.Count -eq 0) {
         return @()
+    }
+    $chromeProcesses = @($chromeProcessRows | ForEach-Object { [int]$_.pid })
+    $chromeProcessByPid = @{}
+    foreach ($row in $chromeProcessRows) {
+        $chromeProcessByPid[[int]$row.pid] = $row
     }
     $foreground = [SynapseChromeBridgeAutoInstall.Win32]::GetForegroundWindow().ToInt64()
     $root = [System.Windows.Automation.AutomationElement]::RootElement
@@ -848,12 +990,22 @@ function Get-SynapseChromeTopLevelWindows {
         if ($hwnd -eq 0 -or [string]::IsNullOrWhiteSpace($title)) {
             continue
         }
+        $processInfo = $chromeProcessByPid[$processId]
         $windows += [pscustomobject]@{
             hwnd = $hwnd
             pid = $processId
             title = $title
             class_name = [string]$current.ClassName
             is_foreground = ($hwnd -eq $foreground)
+            command_line_readable = $processInfo.command_line_readable
+            chrome_user_data_dir = $processInfo.chrome_user_data_dir
+            chrome_user_data_dir_normalized = $processInfo.chrome_user_data_dir_normalized
+            chrome_profile_eligible = $processInfo.chrome_profile_eligible
+            chrome_profile_match_reason = $processInfo.chrome_profile_match_reason
+            has_ms_playwright_mcp_dir = $processInfo.has_ms_playwright_mcp_dir
+            has_remote_debugging_pipe = $processInfo.has_remote_debugging_pipe
+            has_remote_debugging_port = $processInfo.has_remote_debugging_port
+            has_automation_controlled_flag = $processInfo.has_automation_controlled_flag
             element = $child
         }
     }
@@ -1024,12 +1176,14 @@ function Wait-SynapseUntil {
 function Find-SynapseChromeFolderDialog {
     param(
         [Parameter(Mandatory = $true)]
-        [int64]$ChromeWindowHwnd
+        [int64]$ChromeWindowHwnd,
+        [Parameter(Mandatory = $true)]
+        [int]$ChromeWindowPid
     )
 
     $chromeWindows = @(Get-SynapseChromeTopLevelWindows)
     foreach ($window in $chromeWindows) {
-        if ($window.title -match '^Select the extension directory\.?$') {
+        if ($window.title -match '^Select the extension directory\.?$' -and $window.pid -eq $ChromeWindowPid) {
             return $window
         }
         if ($window.hwnd -ne $ChromeWindowHwnd) {
@@ -1151,11 +1305,13 @@ function Invoke-SynapseChromeBridgeAutoInstall {
 
     Initialize-SynapseChromeBridgeAutoInstallInterop
     $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
-    $windows = @(Get-SynapseChromeTopLevelWindows | Where-Object {
+    $candidateWindows = @(Get-SynapseChromeTopLevelWindows -ChromeUserDataRoot $ChromeUserDataRoot | Where-Object {
         $_.title -notmatch '^Select the extension directory\.?$'
     })
+    $windows = @($candidateWindows | Where-Object { $_.chrome_profile_eligible -eq $true })
     if ($windows.Count -eq 0) {
-        throw "SYNAPSE_CHROME_BRIDGE_AUTOINSTALL_NO_OPEN_CHROME_WINDOW active_profile=$activeProfile remediation=open the already-authenticated Chrome profile first; setup refuses to launch a second Chrome profile as the repair path"
+        $rejected = Format-SynapseChromeWindowRejectSummary -Windows $candidateWindows
+        throw "SYNAPSE_CHROME_BRIDGE_AUTOINSTALL_NO_ELIGIBLE_CHROME_WINDOW active_profile=$activeProfile user_data_root=$ChromeUserDataRoot rejected_windows=$rejected remediation=open the already-authenticated Chrome profile for this user-data root; setup refuses to drive ms-playwright-mcp, remote-debugging, unreadable, or other dedicated Chrome user-data-dir windows"
     }
     $chromeWindow = @($windows | Sort-Object @{ Expression = 'is_foreground'; Descending = $true }, @{ Expression = 'title'; Descending = $false } | Select-Object -First 1)[0]
     [SynapseChromeBridgeAutoInstall.Win32]::ShowWindowAsync([IntPtr]$chromeWindow.hwnd, 5) | Out-Null
@@ -1181,10 +1337,13 @@ function Invoke-SynapseChromeBridgeAutoInstall {
         Send-SynapseNativeKeyTap -VirtualKey 0x0D
 
         $loadUnpacked = Wait-SynapseUntil -Deadline $deadline -Probe {
-            $currentWindow = @(Get-SynapseChromeTopLevelWindows | Where-Object {
-                $_.hwnd -eq $chromeWindow.hwnd -or $_.title -match '^Extensions( - Google Chrome)?$'
+            $currentWindow = @(Get-SynapseChromeTopLevelWindows -ChromeUserDataRoot $ChromeUserDataRoot | Where-Object {
+                $_.hwnd -eq $chromeWindow.hwnd
             } | Select-Object -First 1)
             if ($currentWindow.Count -eq 0) {
+                return $null
+            }
+            if ($currentWindow[0].title -notmatch '^Extensions( - Google Chrome)?$') {
                 return $null
             }
             $button = Find-SynapseAutomationElementByName `
@@ -1206,12 +1365,14 @@ function Invoke-SynapseChromeBridgeAutoInstall {
             return $null
         }
         if (-not $loadUnpacked) {
-            throw "SYNAPSE_CHROME_BRIDGE_AUTOINSTALL_LOAD_UNPACKED_NOT_FOUND active_profile=$activeProfile timeout_s=$TimeoutSeconds remediation=Chrome did not expose the Load unpacked button on chrome://extensions in the already-open profile"
+            $latestWindow = Get-SynapseChromeWindowByHwnd -Hwnd $chromeWindow.hwnd
+            $latestTitle = if ($latestWindow) { [string]$latestWindow.title } else { '<missing>' }
+            throw "SYNAPSE_CHROME_BRIDGE_AUTOINSTALL_LOAD_UNPACKED_NOT_FOUND active_profile=$activeProfile timeout_s=$TimeoutSeconds chrome_window_hwnd=$($chromeWindow.hwnd) chrome_window_pid=$($chromeWindow.pid) latest_title=$latestTitle user_data_dir=$($chromeWindow.chrome_user_data_dir) match_reason=$($chromeWindow.chrome_profile_match_reason) remediation=Chrome did not confirm chrome://extensions and expose the Load unpacked button in the selected active-profile window; setup refuses to hunt controls in any other Chrome window"
         }
         Invoke-SynapseAutomationElement -Element $loadUnpacked.button -Description 'Load unpacked'
 
         $dialog = Wait-SynapseUntil -Deadline $deadline -Probe {
-            Find-SynapseChromeFolderDialog -ChromeWindowHwnd $chromeWindow.hwnd
+            Find-SynapseChromeFolderDialog -ChromeWindowHwnd $chromeWindow.hwnd -ChromeWindowPid $chromeWindow.pid
         }
         if (-not $dialog) {
             throw "SYNAPSE_CHROME_BRIDGE_AUTOINSTALL_FOLDER_DIALOG_NOT_FOUND active_profile=$activeProfile timeout_s=$TimeoutSeconds remediation=Chrome did not open the folder picker after Load unpacked"
@@ -1261,6 +1422,9 @@ function Invoke-SynapseChromeBridgeAutoInstall {
             reason = 'installed_unpacked_extension_in_active_profile'
             active_profile = $activeProfile
             chrome_window_hwnd = $chromeWindow.hwnd
+            chrome_window_pid = $chromeWindow.pid
+            chrome_window_user_data_dir = $chromeWindow.chrome_user_data_dir
+            chrome_window_profile_match_reason = $chromeWindow.chrome_profile_match_reason
             folder_dialog_hwnd = $dialog.hwnd
             before = $before
             after = $after
@@ -1659,6 +1823,13 @@ if (-not $PreserveExternalDebuggerExtensions) {
     $policyShieldExtensions += @($allExternalDebuggerOrNativeExtensions)
 }
 $chromePolicyPopupShield = Set-SynapseChromeExternalDebuggerPolicy -Extensions $policyShieldExtensions
+$blockingPolicyShieldRows = @($chromePolicyPopupShield | Where-Object {
+    $_.blocking -eq $true -or [string]$_.warning_code -eq 'SYNAPSE_CHROME_POLICY_POPUP_SHIELD_WRITE_DENIED'
+})
+if ($blockingPolicyShieldRows.Count -gt 0) {
+    $detail = ConvertTo-CompressedJson -Value $blockingPolicyShieldRows -Depth 10
+    throw "SYNAPSE_CHROME_POLICY_POPUP_SHIELD_WRITE_DENIED_BLOCKING detail=$detail remediation=repair HKCU\Software\Policies\Google\Chrome ACL or run from an elevated maintenance PowerShell so Synapse can write the reversible ExtensionSettings self-shield; setup refuses to continue with only a soft warning because the bridge must not depend on an unverified popup-shield fallback"
+}
 
 if ($staleSynapseActivePermissions.Count -gt 0) {
     $detail = [ordered]@{
