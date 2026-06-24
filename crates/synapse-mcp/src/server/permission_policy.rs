@@ -379,6 +379,8 @@ const SAFE_MCP_TOOLS: &[&str] = &[
     "target_claim_status",
     "storage_inspect",
     "capture_screenshot",
+    "subscribe",
+    "subscribe_cancel",
     "intent_current",
     "routine_label_export",
     "routine_list",
@@ -496,8 +498,24 @@ mod tests {
             GateDecision::AutoAllow
         );
         assert_eq!(
+            classify("mcp__synapse__subscribe", &json!({})),
+            GateDecision::AutoAllow
+        );
+        assert_eq!(
+            classify("mcp__synapse__subscribe_cancel", &json!({})),
+            GateDecision::AutoAllow
+        );
+        assert_eq!(
             classify("mcp__synapse__routine_label_export", &json!({})),
             GateDecision::AutoAllow
+        );
+        assert_eq!(
+            classify("mcp__synapse__intent_detect_tick", &json!({})),
+            GateDecision::GATE
+        );
+        assert_eq!(
+            classify("mcp__synapse__routine_feedback", &json!({})),
+            GateDecision::GATE
         );
         assert_eq!(
             classify("mcp__synapse__agent_spawn_task_started", &json!({})),

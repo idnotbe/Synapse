@@ -124,6 +124,8 @@ const NORMAL_ALLOWED_EXACT: &[&str] = &[
     "hygiene_report",
     "hygiene_scan_storage",
     "hygiene_scan_text",
+    "intent_current",
+    "intent_detect_tick",
     "local_model_list",
     "local_model_probe",
     "local_model_register",
@@ -140,6 +142,7 @@ const NORMAL_ALLOWED_EXACT: &[&str] = &[
     "reality_baseline",
     "routine_inspect",
     "routine_label_export",
+    "routine_feedback",
     "routine_list",
     "routine_mine",
     "routine_update",
@@ -152,6 +155,8 @@ const NORMAL_ALLOWED_EXACT: &[&str] = &[
     "storage_gc_once",
     "storage_inspect",
     "storage_put_probe_rows",
+    "subscribe",
+    "subscribe_cancel",
     "suggestion_accept",
     "suggestion_list",
     "suggestion_tick",
@@ -1622,10 +1627,13 @@ mod tests {
         assert!(tools.contains(&"profile_authoring_list".to_owned()));
         assert!(tools.contains(&"hygiene_report".to_owned()));
         assert!(tools.contains(&"episode_segment".to_owned()));
+        assert!(tools.contains(&"intent_current".to_owned()));
+        assert!(tools.contains(&"intent_detect_tick".to_owned()));
         assert!(tools.contains(&"routine_mine".to_owned()));
         assert!(tools.contains(&"routine_list".to_owned()));
         assert!(tools.contains(&"routine_inspect".to_owned()));
         assert!(tools.contains(&"routine_label_export".to_owned()));
+        assert!(tools.contains(&"routine_feedback".to_owned()));
         assert!(tools.contains(&"routine_update".to_owned()));
         assert!(tools.contains(&"timeline_pause".to_owned()));
         assert!(tools.contains(&"timeline_resume".to_owned()));
@@ -1634,6 +1642,8 @@ mod tests {
         assert!(tools.contains(&"timeline_redact".to_owned()));
         assert!(tools.contains(&"storage_put_probe_rows".to_owned()));
         assert!(tools.contains(&"storage_gc_once".to_owned()));
+        assert!(tools.contains(&"subscribe".to_owned()));
+        assert!(tools.contains(&"subscribe_cancel".to_owned()));
         assert!(!tools.contains(&"act_click".to_owned()));
         assert!(!tools.contains(&"act_type".to_owned()));
         assert!(!tools.contains(&"release_all".to_owned()));
