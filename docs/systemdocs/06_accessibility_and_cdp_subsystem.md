@@ -22,6 +22,7 @@ The `synapse-a11y` crate provides Synapse's two perception/action backends for l
 - `crates/synapse-a11y/src/cdp_dialog.rs`
 - `crates/synapse-a11y/src/cdp_dom.rs`
 - `crates/synapse-a11y/src/cdp_emulation.rs`
+- `crates/synapse-a11y/src/cdp_files.rs`
 - `crates/synapse-a11y/src/cdp_lifecycle.rs`
 - `crates/synapse-a11y/src/cdp_network.rs`
 - `crates/synapse-a11y/src/platform/mod.rs`
@@ -312,7 +313,21 @@ Types: `ConsoleEntry`, `ConsoleReadResult`, `ConsoleCaptureStatus`, `ConsoleRead
 
 Enums: `CdpDialogDefaultPolicy`, `CdpDialogAutoAction`, `CdpDialogHandleAction`. Structs: `CdpDialogEntry`, `CdpDialogCaptureStatus`, `CdpDialogReadFilter`, `CdpDialogReadResult`, `CdpDialogHandleResult`.
 
-### 5.8 `cdp_emulation.rs` — Browser Emulation (#1173–#1178)
+### 5.8 `cdp_files.rs` — File Input / Chooser Helpers (#1101-#1103)
+
+Wraps the CDP file-upload primitives used by both raw-CDP automation and the normal Chrome bridge contract:
+
+| Function | Signature |
+|---|---|
+| `cdp_set_file_input_files_params_for_backend_node` | `(backend_node_id, files) -> A11yResult<SetFileInputFilesParams>` |
+| `cdp_set_file_input_files_by_backend_node` | `async (page, backend_node_id, files) -> A11yResult<()>` |
+| `cdp_intercept_file_chooser_params` | `(enabled, cancel) -> A11yResult<SetInterceptFileChooserDialogParams>` |
+| `cdp_set_intercept_file_chooser` | `async (page, enabled, cancel) -> A11yResult<()>` |
+| `cdp_file_chooser_entry_from_event` | `(EventFileChooserOpened, seq, opened_at_unix_ms) -> CdpFileChooserEntry` |
+
+`DOM.setFileInputFiles` assigns local file paths to a file input node by `backendNodeId`. `Page.setInterceptFileChooserDialog` prevents the native OS picker and emits `Page.fileChooserOpened` with mode and backing node metadata. The normal-profile MCP `browser_file_upload` tool uses the extension bridge's narrow `chrome.debugger` lane for the same primitives on session-owned `chrome-tab:*` targets.
+
+### 5.9 `cdp_emulation.rs` — Browser Emulation (#1173–#1178)
 
 Target-scoped raw-CDP overrides. Each capability has an apply + reset pair returning a readback:
 
@@ -327,7 +342,7 @@ Target-scoped raw-CDP overrides. Each capability has an apply + reset pair retur
 
 Override/readback/result struct triples per capability: `CdpViewportOverride/Readback/Result`, `CdpDeviceDescriptor/...`, `CdpGeolocationOverride/...` (+ coordinate/error readbacks), `CdpLocaleTimezoneOverride/...`, `CdpMediaOverride/...`, `CdpNetworkConditionsOverride/...`.
 
-### 5.9 `cdp_lifecycle.rs` — Page Lifecycle + Worker Targets (#1199/#1200)
+### 5.10 `cdp_lifecycle.rs` — Page Lifecycle + Worker Targets (#1199/#1200)
 
 Persistent capture of `Page.lifecycleEvent` and worker target events over raw CDP.
 
@@ -338,7 +353,7 @@ Persistent capture of `Page.lifecycleEvent` and worker target events over raw CD
 
 Types: `CdpPageEventEntry`, `CdpPageEventsCaptureStatus`, `CdpPageEventsReadFilter<'a>`, `CdpPageEventsReadResult`, `CdpPageTargetSnapshot`, `CdpWorkerSnapshot`.
 
-### 5.10 `cdp_network.rs` — Network Capture + Interception (#1080)
+### 5.11 `cdp_network.rs` — Network Capture + Interception (#1080)
 
 Mirrors `cdp_console`'s persistent-listener model (CDP does not replay Network events after `Network.enable`): one long-lived connection per armed target, a live event pump, and a bounded ring buffer read by cursor without consuming. Also implements request override and Playwright-style `Fetch`-based routing.
 

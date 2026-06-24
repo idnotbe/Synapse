@@ -24,6 +24,10 @@ Chrome profile. `browser_handle_dialog` uses the same target-scoped bridge to
 listen for `Page.javascriptDialogOpening`/`Page.javascriptDialogClosed` and call
 `Page.handleJavaScriptDialog` for alert, confirm, prompt, and beforeunload
 dialogs.
+`browser_file_upload` uses `DOM.setFileInputFiles` for direct input assignment
+and `Page.setInterceptFileChooserDialog`/`Page.fileChooserOpened` to capture
+file chooser openings without showing the OS file picker, then assigns the
+pending chooser's backing node.
 `downloads` uses `chrome.downloads` to capture real download created/changed/
 erased events, list profile downloads, wait for completion/interruption, and let
 the daemon save or move completed files to caller-chosen paths with byte/hash
@@ -79,7 +83,7 @@ preserves a nativeMessaging-only self-shield for the stable Synapse extension
 ID. The current bridge intentionally requests `debugger` for narrow
 target-scoped `Runtime.evaluate`, `Page.addScriptToEvaluateOnNewDocument`,
 `Runtime.addBinding`/`Runtime.bindingCalled`, `Page.handleJavaScriptDialog`,
-`cdpInput`,
+`DOM.setFileInputFiles`, `Page.fileChooserOpened`, `cdpInput`,
 `viewportEmulation`, `deviceEmulation`, and
 `geolocationEmulation` / `localeEmulation` / `mediaEmulation` /
 `networkConditions` lanes in the already-open
@@ -129,7 +133,7 @@ registration for the expected Synapse extension so the worker can report its
 with `A11Y_CDP_DEBUGGER_WARNING_UNSUPPRESSED` before queueing any browser work.
 
 Background tab commands (`listTabs`, `openTab`, `closeTab`, `navigateTab`, `activateTab`,
-`targetInfoPageText`, `pageVitals`, `pageContent`, `pageScreenshot`, `setContent`, `clock`, `pageEvents`, `domAction`, `setFieldValue`, and
+`targetInfoPageText`, `pageVitals`, `pageContent`, `pageScreenshot`, `setContent`, `clock`, `pageEvents`, `domAction`, `setFieldValue`, `fileUpload`, and
 `typeActiveElement`, `evaluateScript`, `initScript`, `exposeBinding`, and
 `handleDialog`) use `chrome.windows.getAll`,
 `chrome.tabs.query`, `chrome.tabs.create`, `chrome.tabs.remove`, `chrome.tabs.update`,
@@ -152,10 +156,11 @@ not a normal-bridge capability; the daemon refuses that debugger-backed command
 before queueing any Chrome command because Chrome's debugger infobar changes
 viewport/layout and breaks coordinate truth. Use `browser_screenshot`, which
 routes to `pageScreenshot`, for normal-profile page screenshots. `evaluateScript`
-`exposeBinding`, and `handleDialog` are also normal-bridge capabilities through
+`exposeBinding`, `handleDialog`, and `fileUpload` are also normal-bridge capabilities through
 narrow target-scoped `chrome.debugger` `Runtime.evaluate`,
 `Runtime.addBinding`/`Runtime.bindingCalled`, and
-`Page.javascriptDialogOpening`/`Page.handleJavaScriptDialog` lanes for
+`Page.javascriptDialogOpening`/`Page.handleJavaScriptDialog` plus
+`DOM.setFileInputFiles`/`Page.fileChooserOpened` lanes for
 session-owned `chrome-tab:*` targets. Use raw CDP in a dedicated silent
 automation profile for element-scoped evaluation and broader DevTools-domain
 work.

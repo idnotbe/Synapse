@@ -1,6 +1,6 @@
 const PROTOCOL_VERSION = 1;
-const BRIDGE_BUILD_ID = "synapse-chrome-bridge-2026-06-23-dialog-v1";
-const BRIDGE_BUILD_SHA256 = "8141eae98afbbc1d3bcfd5b807fb7f8d069addf08708ac99a62f18b3546722fc";
+const BRIDGE_BUILD_ID = "synapse-chrome-bridge-2026-06-23-file-upload-v2";
+const BRIDGE_BUILD_SHA256 = "6a557863fa6472214e3c2f521a52079209c9a7d23f209f49b7c1647cc48e0b95";
 const DEBUGGER_COMMAND_TIMEOUT_MS = 5000;
 const CAPTURE_VISIBLE_TAB_MIN_INTERVAL_MS = 600;
 let captureVisibleTabQueue = Promise.resolve();
@@ -43,6 +43,7 @@ const COMMAND_CAPABILITIES = Object.freeze([
   "initScript",
   "exposeBinding",
   "handleDialog",
+  "fileUpload",
   "cdpInput",
   "viewportEmulation",
   "deviceEmulation",
@@ -95,6 +96,9 @@ const MAX_BINDING_EVENT_BUFFER = 1000;
 const MAX_BINDING_PAYLOAD_CHARS = 65536;
 const MAX_DIALOG_EVENT_BUFFER = 1000;
 const MAX_DIALOG_PROMPT_TEXT_CHARS = 8192;
+const MAX_FILE_CHOOSER_EVENT_BUFFER = 1000;
+const MAX_FILE_UPLOAD_PATHS = 256;
+const MAX_FILE_UPLOAD_PATH_CHARS = 32768;
 const OPEN_WINDOW_BOUNDS_TOLERANCE_PX = 96;
 const EXTERNAL_POPUP_RISK_PERMISSIONS = Object.freeze(["debugger", "nativeMessaging"]);
 const POPUP_RISK_SUPPRESSION_RECHECK_MS = 60000;
@@ -106,6 +110,7 @@ const NETWORK_BASELINE_BY_TAB = new Map();
 const INIT_SCRIPT_DEBUGGER_SESSIONS = new Map();
 const BINDING_DEBUGGER_SESSIONS = new Map();
 const DIALOG_DEBUGGER_SESSIONS = new Map();
+const FILE_CHOOSER_DEBUGGER_SESSIONS = new Map();
 
 let hostId = null;
 let bridgeToken = null;
@@ -738,6 +743,7 @@ chrome.tabs.onRemoved.addListener((tabId) => {
   INIT_SCRIPT_DEBUGGER_SESSIONS.delete(tabId);
   BINDING_DEBUGGER_SESSIONS.delete(tabId);
   DIALOG_DEBUGGER_SESSIONS.delete(tabId);
+  FILE_CHOOSER_DEBUGGER_SESSIONS.delete(tabId);
 });
 if (chrome.debugger?.onDetach?.addListener) {
   chrome.debugger.onDetach.addListener((source, reason) => {
@@ -745,6 +751,7 @@ if (chrome.debugger?.onDetach?.addListener) {
       INIT_SCRIPT_DEBUGGER_SESSIONS.delete(source.tabId);
       markBindingDebuggerDetached(source.tabId);
       markDialogDebuggerDetached(source.tabId);
+      markFileChooserDebuggerDetached(source.tabId);
       console.warn(`Synapse persistent debugger session detached for tab ${source.tabId}: ${String(reason || "unknown")}`);
     }
   });
@@ -757,6 +764,8 @@ if (chrome.debugger?.onEvent?.addListener) {
       recordDialogOpeningEvent(source.tabId, params || {});
     } else if (method === "Page.javascriptDialogClosed" && Number.isInteger(source?.tabId)) {
       recordDialogClosedEvent(source.tabId, params || {});
+    } else if (method === "Page.fileChooserOpened" && Number.isInteger(source?.tabId)) {
+      recordFileChooserOpenedEvent(source.tabId, params || {});
     }
   });
 }
@@ -942,6 +951,8 @@ async function handleCommand(command) {
       result = await handleExposeBinding(params);
     } else if (kind === "handleDialog") {
       result = await handleDialog(params);
+    } else if (kind === "fileUpload") {
+      result = await handleFileUpload(params);
     } else if (kind === "pageVitals") {
       result = await handlePageVitals(params);
     } else if (kind === "navigateTab") {
@@ -8919,13 +8930,14 @@ async function maybeDetachInitScriptDebuggerSession(tabId, debuggee, identifier)
     return false;
   }
   INIT_SCRIPT_DEBUGGER_SESSIONS.delete(tabId);
-  if (bindingSessionHasActiveNames(tabId) || dialogSessionIsActive(tabId)) {
+  if (bindingSessionHasActiveNames(tabId) || dialogSessionIsActive(tabId) || fileChooserSessionIsActive(tabId)) {
     return false;
   }
   try {
     await chrome.debugger.detach(debuggee);
     markBindingDebuggerDetached(tabId, false);
     markDialogDebuggerDetached(tabId, false);
+    markFileChooserDebuggerDetached(tabId, false);
     return true;
   } catch (error) {
     console.warn(`Synapse chrome.debugger detach failed for initScript cleanup tab ${tabId}: ${errorMessage(error)}`);
@@ -8943,10 +8955,16 @@ function dialogSessionIsAttached(tabId) {
   return Boolean(session?.attached);
 }
 
+function fileChooserSessionIsAttached(tabId) {
+  const session = FILE_CHOOSER_DEBUGGER_SESSIONS.get(tabId);
+  return Boolean(session?.attached);
+}
+
 function persistentDebuggerSessionIsAttached(tabId) {
   return INIT_SCRIPT_DEBUGGER_SESSIONS.has(tabId) ||
     bindingSessionIsAttached(tabId) ||
-    dialogSessionIsAttached(tabId);
+    dialogSessionIsAttached(tabId) ||
+    fileChooserSessionIsAttached(tabId);
 }
 
 function bindingSessionHasActiveNames(tabId) {
@@ -8961,6 +8979,10 @@ function hasActiveInitScriptDebuggerSession(tabId) {
 
 function dialogSessionIsActive(tabId) {
   return dialogSessionIsAttached(tabId);
+}
+
+function fileChooserSessionIsActive(tabId) {
+  return fileChooserSessionIsAttached(tabId);
 }
 
 async function ensureBindingDebuggerSession(tabId, protocolVersion = "1.3") {
@@ -9011,13 +9033,14 @@ async function addBindingToSession(debuggee, session, name, executionContextName
 }
 
 async function detachBindingDebuggerSession(tabId, debuggee, session) {
-  if (hasActiveInitScriptDebuggerSession(tabId) || dialogSessionIsActive(tabId)) {
+  if (hasActiveInitScriptDebuggerSession(tabId) || dialogSessionIsActive(tabId) || fileChooserSessionIsActive(tabId)) {
     return false;
   }
   try {
     await chrome.debugger.detach(debuggee);
     markBindingDebuggerDetached(tabId, false);
     markDialogDebuggerDetached(tabId, false);
+    markFileChooserDebuggerDetached(tabId, false);
     return true;
   } catch (error) {
     console.warn(`Synapse chrome.debugger detach failed for binding cleanup tab ${tabId}: ${errorMessage(error)}`);
@@ -9351,6 +9374,606 @@ function emptyDialogRead() {
     returned: 0,
     total_buffered: 0,
     dropped: 0
+  };
+}
+
+async function handleFileUpload(params) {
+  const selected = await selectTabTarget(params, { requireTargetId: true });
+  const operation = normalizeFileUploadOperation(params.operation);
+  const limit = normalizeFileChooserLimit(params.limit);
+  const sinceSeq = normalizeOptionalNonNegativeInteger(params.sinceSeq, "sinceSeq");
+  const files = normalizeFileUploadPaths(params.files, operation);
+  let session = FILE_CHOOSER_DEBUGGER_SESSIONS.get(selected.tabId) || null;
+  let captureNewlyArmed = false;
+  let inputReadback = null;
+  let handledChooser = null;
+  let canceledChooser = null;
+
+  if (operation === "arm_chooser" || operation === "read_chooser") {
+    if (operation === "arm_chooser") {
+      const ensured = await ensureFileChooserDebuggerSession(selected.tabId, true);
+      session = ensured.session;
+      captureNewlyArmed = ensured.newlyArmed;
+    }
+  } else if (operation === "set_chooser") {
+    const ensured = await ensureFileChooserDebuggerSession(selected.tabId, true);
+    session = ensured.session;
+    const pending = fileChooserPendingEntry(session);
+    if (!pending) {
+      throw bridgeError(
+        ERROR_ACTION_TARGET_INVALID,
+        `browser_file_upload set_chooser requested for tab ${selected.tabId}, but no file chooser is pending`
+      );
+    }
+    if (!Number.isSafeInteger(pending.backend_node_id) || pending.backend_node_id <= 0) {
+      throw bridgeError(
+        ERROR_ACTION_TARGET_INVALID,
+        `browser_file_upload pending chooser seq=${pending.seq} has no backendNodeId`
+      );
+    }
+    inputReadback = await setFilesForBackendNode(
+      ensured.debuggee,
+      pending.backend_node_id,
+      files,
+      "pending_chooser"
+    );
+    handledChooser = markFileChooserHandled(session, pending.seq, files, inputReadback);
+  } else if (operation === "cancel_chooser") {
+    if (!session?.attached) {
+      throw bridgeError(
+        ERROR_ACTION_TARGET_INVALID,
+        `browser_file_upload cancel_chooser requested for tab ${selected.tabId}, but chooser capture is not armed`
+      );
+    }
+    const pending = fileChooserPendingEntry(session);
+    if (!pending) {
+      throw bridgeError(
+        ERROR_ACTION_TARGET_INVALID,
+        `browser_file_upload cancel_chooser requested for tab ${selected.tabId}, but no file chooser is pending`
+      );
+    }
+    canceledChooser = markFileChooserCanceled(session, pending.seq);
+  } else {
+    inputReadback = await setFilesForLocator(selected, params, files, operation);
+  }
+
+  session = FILE_CHOOSER_DEBUGGER_SESSIONS.get(selected.tabId) || session;
+  const read = session
+    ? readFileChooserEntries(session, sinceSeq, limit)
+    : emptyFileChooserRead();
+  const state = await tabPageState(selected.tabId, selected.target);
+  return {
+    extension_id: chrome.runtime.id,
+    target_id: state.target_id || selected.target.id,
+    tab_id: selected.tabId,
+    chrome_window_id: state.chrome_window_id,
+    operation,
+    capture_newly_armed: captureNewlyArmed,
+    selector: stringOrNull(params.selector),
+    element_id: stringOrNull(params.elementId),
+    active_element: Boolean(params.activeElement),
+    requested_file_count: files.length,
+    input: inputReadback,
+    handled_chooser: handledChooser,
+    canceled_chooser: canceledChooser,
+    pending_chooser: read.pending_chooser,
+    entries: read.entries,
+    next_cursor: read.next_cursor,
+    returned: read.returned,
+    total_buffered: read.total_buffered,
+    dropped: read.dropped,
+    opened_count: session ? Number(session.openedCount || 0) : 0,
+    handled_count: session ? Number(session.handledCount || 0) : 0,
+    canceled_count: session ? Number(session.canceledCount || 0) : 0,
+    error_count: session ? Number(session.errorCount || 0) : 0,
+    url: state.url || "",
+    title: state.title || "",
+    ready_state: state.ready_state || "",
+    readback_backend: "chrome.debugger.DOM.setFileInputFiles+Runtime.callFunctionOn",
+    chooser_readback_backend: "chrome.debugger.Page.setInterceptFileChooserDialog+Page.fileChooserOpened",
+    backend_tier_used: "chrome_tabs_extension",
+    required_foreground: false,
+    target_candidate_count: selected.targetCandidateCount,
+    target_selection_reason: selected.selectionReason
+  };
+}
+
+async function setFilesForLocator(selected, params, files, operation) {
+  const attach = await attachDebuggerForCommand(selected.tabId);
+  const debuggee = attach.debuggee;
+  try {
+    const resolved = await resolveFileInputObject(debuggee, selected, params);
+    if (operation === "clear") {
+      await clearFileInputObject(debuggee, resolved.object_id);
+    } else {
+      await sendDebuggerCommand(debuggee, "DOM.setFileInputFiles", {
+        objectId: resolved.object_id,
+        files
+      });
+    }
+    return await readFileInputObject(debuggee, resolved.object_id, {
+      resolved_by: resolved.resolved_by,
+      match_count: resolved.match_count,
+      frame_id: resolved.frame_id,
+      element_path: resolved.element_path
+    });
+  } finally {
+    try {
+      await sendDebuggerCommand(debuggee, "Runtime.releaseObjectGroup", {
+        objectGroup: "synapseFileUpload"
+      });
+    } catch (_) {
+      // Object-group cleanup is best-effort.
+    }
+    if (attach.shouldDetach) {
+      try {
+        await chrome.debugger.detach(debuggee);
+      } catch (error) {
+        console.warn(`Synapse chrome.debugger detach failed for fileUpload tab ${selected.tabId}: ${errorMessage(error)}`);
+      }
+    }
+  }
+}
+
+async function clearFileInputObject(debuggee, objectId) {
+  const cleared = await sendDebuggerCommand(debuggee, "Runtime.callFunctionOn", {
+    objectId,
+    functionDeclaration: fileUploadClearInputInPage.toString(),
+    returnByValue: true,
+    awaitPromise: false,
+    userGesture: true
+  });
+  if (cleared?.exceptionDetails) {
+    throw bridgeError(
+      ERROR_ACTION_TARGET_INVALID,
+      `browser_file_upload clear threw: ${runtimeExceptionText(cleared.exceptionDetails)}`
+    );
+  }
+  if (cleared?.result?.value?.ok !== true) {
+    throw bridgeError(ERROR_ACTION_TARGET_INVALID, "browser_file_upload clear returned no success readback");
+  }
+}
+
+async function resolveFileInputObject(debuggee, selected, params) {
+  const selector = stringOrNull(params.selector);
+  const elementId = stringOrNull(params.elementId);
+  const activeElement = Boolean(params.activeElement);
+  const locatorCount = (selector ? 1 : 0) + (elementId ? 1 : 0) + (activeElement ? 1 : 0);
+  if (locatorCount !== 1) {
+    throw bridgeError(
+      ERROR_CHROME_DOM_ACTION_UNSUPPORTED,
+      "browser_file_upload requires exactly one of selector, elementId, or activeElement=true for set_files/clear"
+    );
+  }
+  const parsed = elementId
+    ? parseChromeBridgeElementId(elementId, selected.tabId, "browser_file_upload")
+    : { raw: null, frameId: 0, path: null };
+  if (parsed.frameId !== null && parsed.frameId !== 0) {
+    throw bridgeError(
+      ERROR_CHROME_DOM_ACTION_UNSUPPORTED,
+      `browser_file_upload direct elementId currently supports top-frame bridge element ids only; got frame ${parsed.frameId}; use arm_chooser + click + set_chooser for framed inputs`
+    );
+  }
+  const expression = `(${fileUploadResolveInputInPage.toString()})(${JSON.stringify({
+    selector,
+    elementPath: parsed.path,
+    activeElement
+  })})`;
+  const evaluated = await sendDebuggerCommand(debuggee, "Runtime.evaluate", {
+    expression,
+    objectGroup: "synapseFileUpload",
+    returnByValue: false,
+    awaitPromise: false,
+    userGesture: true
+  });
+  if (evaluated?.exceptionDetails) {
+    throw bridgeError(
+      ERROR_ACTION_TARGET_INVALID,
+      `browser_file_upload input resolution threw: ${runtimeExceptionText(evaluated.exceptionDetails)}`
+    );
+  }
+  const objectId = evaluated?.result?.objectId;
+  if (!objectId) {
+    throw bridgeError(
+      ERROR_ACTION_TARGET_INVALID,
+      "browser_file_upload input resolution returned no objectId"
+    );
+  }
+  return {
+    object_id: objectId,
+    resolved_by: elementId ? "element_id" : (activeElement ? "active_element" : "selector"),
+    match_count: 1,
+    frame_id: 0,
+    element_path: parsed.path
+  };
+}
+
+async function setFilesForBackendNode(debuggee, backendNodeId, files, resolvedBy) {
+  await sendDebuggerCommand(debuggee, "DOM.setFileInputFiles", {
+    backendNodeId,
+    files
+  });
+  const resolved = await sendDebuggerCommand(debuggee, "DOM.resolveNode", {
+    backendNodeId,
+    objectGroup: "synapseFileUpload"
+  });
+  const objectId = resolved?.object?.objectId;
+  if (!objectId) {
+    throw bridgeError(
+      ERROR_ACTION_TARGET_INVALID,
+      `browser_file_upload DOM.resolveNode returned no objectId for backendNodeId ${backendNodeId}`
+    );
+  }
+  try {
+    return await readFileInputObject(debuggee, objectId, {
+      resolved_by: resolvedBy,
+      match_count: 1,
+      frame_id: null,
+      backend_node_id: backendNodeId
+    });
+  } finally {
+    try {
+      await sendDebuggerCommand(debuggee, "Runtime.releaseObjectGroup", {
+        objectGroup: "synapseFileUpload"
+      });
+    } catch (_) {
+      // Best-effort cleanup.
+    }
+  }
+}
+
+async function readFileInputObject(debuggee, objectId, context) {
+  const read = await sendDebuggerCommand(debuggee, "Runtime.callFunctionOn", {
+    objectId,
+    functionDeclaration: fileUploadReadInputInPage.toString(),
+    returnByValue: true,
+    awaitPromise: false,
+    userGesture: true
+  });
+  if (read?.exceptionDetails) {
+    throw bridgeError(
+      ERROR_ACTION_TARGET_INVALID,
+      `browser_file_upload readback threw: ${runtimeExceptionText(read.exceptionDetails)}`
+    );
+  }
+  const value = read?.result?.value;
+  if (!value || typeof value !== "object") {
+    throw bridgeError(ERROR_ACTION_TARGET_INVALID, "browser_file_upload readback returned no object value");
+  }
+  return {
+    ...context,
+    ...value
+  };
+}
+
+async function ensureFileChooserDebuggerSession(tabId, intercept, protocolVersion = "1.3") {
+  const debuggee = { tabId };
+  let session = FILE_CHOOSER_DEBUGGER_SESSIONS.get(tabId);
+  if (!session) {
+    session = {
+      protocolVersion,
+      pageEnabled: false,
+      interceptEnabled: false,
+      attached: false,
+      entries: [],
+      nextSeq: 0,
+      dropped: 0,
+      capacity: MAX_FILE_CHOOSER_EVENT_BUFFER,
+      armedAtUnixMs: 0,
+      pendingSeq: null,
+      openedCount: 0,
+      handledCount: 0,
+      canceledCount: 0,
+      errorCount: 0
+    };
+    FILE_CHOOSER_DEBUGGER_SESSIONS.set(tabId, session);
+  }
+  let newlyArmed = false;
+  if (!session.attached) {
+    if (!persistentDebuggerSessionIsAttached(tabId)) {
+      await chrome.debugger.attach(debuggee, protocolVersion);
+    }
+    session.attached = true;
+    session.protocolVersion = protocolVersion;
+    session.armedAtUnixMs = Date.now();
+    newlyArmed = true;
+  }
+  if (!session.pageEnabled) {
+    await sendDebuggerCommand(debuggee, "Page.enable", {});
+    session.pageEnabled = true;
+  }
+  if (intercept && !session.interceptEnabled) {
+    await sendDebuggerCommand(debuggee, "Page.setInterceptFileChooserDialog", { enabled: true });
+    session.interceptEnabled = true;
+  }
+  return { debuggee, session, newlyArmed, protocolVersion };
+}
+
+function markFileChooserDebuggerDetached(tabId, clearPending = true) {
+  const session = FILE_CHOOSER_DEBUGGER_SESSIONS.get(tabId);
+  if (!session) {
+    return;
+  }
+  session.attached = false;
+  session.pageEnabled = false;
+  session.interceptEnabled = false;
+  if (clearPending) {
+    session.pendingSeq = null;
+  }
+}
+
+function recordFileChooserOpenedEvent(tabId, params) {
+  const session = FILE_CHOOSER_DEBUGGER_SESSIONS.get(tabId);
+  if (!session?.attached) {
+    return;
+  }
+  const entry = {
+    seq: Number(session.nextSeq || 0),
+    frame_id: String(params?.frameId || ""),
+    mode: String(params?.mode || ""),
+    backend_node_id: Number.isSafeInteger(params?.backendNodeId) ? params.backendNodeId : null,
+    opened_at_unix_ms: Date.now(),
+    pending: true,
+    handled_at_unix_ms: null,
+    canceled_at_unix_ms: null,
+    requested_file_count: null,
+    file_names: [],
+    input: null,
+    error: null
+  };
+  session.nextSeq += 1;
+  while (session.entries.length >= session.capacity) {
+    session.entries.shift();
+    session.dropped += 1;
+  }
+  session.pendingSeq = entry.seq;
+  session.openedCount += 1;
+  session.entries.push(entry);
+}
+
+function fileChooserPendingEntry(session) {
+  if (!session || session.pendingSeq === null || session.pendingSeq === undefined) {
+    return null;
+  }
+  return session.entries.find((entry) => entry.seq === session.pendingSeq) || null;
+}
+
+function markFileChooserHandled(session, seq, files, inputReadback) {
+  const entry = session.entries.find((candidate) => candidate.seq === seq);
+  if (!entry) {
+    return null;
+  }
+  entry.pending = false;
+  entry.handled_at_unix_ms = Date.now();
+  entry.requested_file_count = files.length;
+  entry.file_names = files.map(fileBaseName);
+  entry.input = inputReadback;
+  entry.error = null;
+  session.pendingSeq = null;
+  session.handledCount += 1;
+  return { ...entry };
+}
+
+function markFileChooserCanceled(session, seq) {
+  const entry = session.entries.find((candidate) => candidate.seq === seq);
+  if (!entry) {
+    return null;
+  }
+  entry.pending = false;
+  entry.canceled_at_unix_ms = Date.now();
+  session.pendingSeq = null;
+  session.canceledCount += 1;
+  return { ...entry };
+}
+
+function readFileChooserEntries(session, sinceSeq, limit) {
+  const cursor = sinceSeq === null ? 0 : sinceSeq;
+  const entries = session.entries
+    .filter((entry) => entry.seq >= cursor)
+    .slice(0, limit)
+    .map((entry) => ({ ...entry }));
+  const pending = fileChooserPendingEntry(session);
+  return {
+    entries,
+    pending_chooser: pending ? { ...pending } : null,
+    next_cursor: Number(session.nextSeq || 0),
+    returned: entries.length,
+    total_buffered: session.entries.length,
+    dropped: Number(session.dropped || 0)
+  };
+}
+
+function emptyFileChooserRead() {
+  return {
+    entries: [],
+    pending_chooser: null,
+    next_cursor: 0,
+    returned: 0,
+    total_buffered: 0,
+    dropped: 0
+  };
+}
+
+function normalizeFileUploadOperation(value) {
+  const normalized = String(value || "set_files").trim().toLowerCase().replace(/-/g, "_");
+  if (["set_files", "clear", "arm_chooser", "read_chooser", "set_chooser", "cancel_chooser"].includes(normalized)) {
+    return normalized;
+  }
+  throw bridgeError(
+    ERROR_CHROME_DOM_ACTION_UNSUPPORTED,
+    `browser_file_upload operation must be set_files, clear, arm_chooser, read_chooser, set_chooser, or cancel_chooser; got ${JSON.stringify(value)}`
+  );
+}
+
+function normalizeFileUploadPaths(value, operation) {
+  if (operation === "clear" || operation === "arm_chooser" || operation === "read_chooser" || operation === "cancel_chooser") {
+    return [];
+  }
+  if (!Array.isArray(value) || value.length === 0) {
+    throw bridgeError(ERROR_ACTION_TARGET_INVALID, `browser_file_upload ${operation} requires one or more files`);
+  }
+  if (value.length > MAX_FILE_UPLOAD_PATHS) {
+    throw bridgeError(
+      ERROR_ACTION_TARGET_INVALID,
+      `browser_file_upload supports at most ${MAX_FILE_UPLOAD_PATHS} files per call, got ${value.length}`
+    );
+  }
+  return value.map((item, index) => {
+    const text = String(item || "");
+    if (!text) {
+      throw bridgeError(ERROR_ACTION_TARGET_INVALID, `browser_file_upload files[${index}] must not be empty`);
+    }
+    if (text.length > MAX_FILE_UPLOAD_PATH_CHARS) {
+      throw bridgeError(
+        ERROR_ACTION_TARGET_INVALID,
+        `browser_file_upload files[${index}] is longer than ${MAX_FILE_UPLOAD_PATH_CHARS} characters`
+      );
+    }
+    if (text.includes("\u0000")) {
+      throw bridgeError(ERROR_ACTION_TARGET_INVALID, `browser_file_upload files[${index}] must not contain NUL`);
+    }
+    return text;
+  });
+}
+
+function normalizeFileChooserLimit(value) {
+  if (value === undefined || value === null) {
+    return 20;
+  }
+  const number = Number(value);
+  if (!Number.isSafeInteger(number) || number < 1 || number > 100) {
+    throw bridgeError(ERROR_ATTACH_FAILED, `browser_file_upload limit must be an integer from 1 through 100, got ${JSON.stringify(value)}`);
+  }
+  return number;
+}
+
+function fileBaseName(path) {
+  const text = String(path || "");
+  const normalized = text.replace(/\\/g, "/");
+  const parts = normalized.split("/");
+  return parts[parts.length - 1] || text;
+}
+
+function runtimeExceptionText(exceptionDetails) {
+  return String(
+    exceptionDetails?.exception?.description ||
+    exceptionDetails?.text ||
+    exceptionDetails?.exception?.value ||
+    "unknown Runtime exception"
+  );
+}
+
+function fileUploadResolveInputInPage(request) {
+  const selector = request && request.selector ? String(request.selector) : "";
+  const elementPath = request && request.elementPath ? String(request.elementPath) : "";
+  const activeElement = Boolean(request && request.activeElement);
+
+  function elementByPath(path) {
+    if (!path) {
+      return null;
+    }
+    const parts = String(path).split(".").map((part) => Number(part));
+    let current = document.documentElement;
+    if (parts[0] !== 0) {
+      return null;
+    }
+    for (const index of parts.slice(1)) {
+      if (!current || !Number.isSafeInteger(index) || index < 0) {
+        return null;
+      }
+      current = current.children[index] || null;
+    }
+    return current instanceof Element ? current : null;
+  }
+
+  function isVisible(element) {
+    if (!element || typeof element.getClientRects !== "function") {
+      return false;
+    }
+    if (element.getClientRects().length > 0) {
+      return true;
+    }
+    return Boolean(element.offsetWidth || element.offsetHeight);
+  }
+
+  function isFileInput(element) {
+    return element instanceof HTMLInputElement &&
+      String(element.getAttribute("type") || "").toLowerCase() === "file" &&
+      !element.disabled &&
+      isVisible(element);
+  }
+
+  let element = null;
+  if (selector) {
+    let nodes;
+    try {
+      nodes = Array.from(document.querySelectorAll(selector));
+    } catch (error) {
+      throw new Error(`selector ${JSON.stringify(selector)} is invalid: ${error && error.message || error}`);
+    }
+    const inputs = nodes.filter(isFileInput);
+    if (inputs.length === 0) {
+      throw new Error(`selector ${JSON.stringify(selector)} matched ${nodes.length} node(s), 0 enabled visible file inputs`);
+    }
+    if (inputs.length > 1) {
+      throw new Error(`selector ${JSON.stringify(selector)} matched ${inputs.length} enabled visible file inputs; refine the selector`);
+    }
+    element = inputs[0];
+  } else if (elementPath) {
+    element = elementByPath(elementPath);
+    if (!isFileInput(element)) {
+      throw new Error(`element path ${JSON.stringify(elementPath)} did not resolve to an enabled visible input[type=file]`);
+    }
+  } else if (activeElement) {
+    element = document.activeElement;
+    if (!isFileInput(element)) {
+      throw new Error("activeElement is not an enabled visible input[type=file]");
+    }
+  }
+  if (!element) {
+    throw new Error("no file input resolved");
+  }
+  return element;
+}
+
+function fileUploadReadInputInPage() {
+  const element = this;
+  if (!(element instanceof HTMLInputElement) || String(element.type || "").toLowerCase() !== "file") {
+    throw new Error("resolved object is not an input[type=file]");
+  }
+  const files = Array.from(element.files || []).map((file) => ({
+    name: String(file.name || ""),
+    size: Number(file.size || 0),
+    type: String(file.type || ""),
+    last_modified: Number(file.lastModified || 0)
+  }));
+  return {
+    tag_name: "input",
+    type_attr: String(element.type || ""),
+    id: String(element.id || ""),
+    name_attr: String(element.getAttribute("name") || ""),
+    accept: String(element.getAttribute("accept") || ""),
+    multiple: Boolean(element.multiple),
+    webkitdirectory: Boolean(element.webkitdirectory),
+    disabled: Boolean(element.disabled),
+    file_count: files.length,
+    files,
+    value: String(element.value || "")
+  };
+}
+
+function fileUploadClearInputInPage() {
+  const element = this;
+  if (!(element instanceof HTMLInputElement) || String(element.type || "").toLowerCase() !== "file") {
+    throw new Error("resolved object is not an input[type=file]");
+  }
+  element.value = "";
+  element.dispatchEvent(new Event("input", { bubbles: true, composed: true }));
+  element.dispatchEvent(new Event("change", { bubbles: true, composed: true }));
+  return {
+    ok: true,
+    file_count: element.files ? element.files.length : 0,
+    value: String(element.value || "")
   };
 }
 

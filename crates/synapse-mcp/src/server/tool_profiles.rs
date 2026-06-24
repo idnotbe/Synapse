@@ -65,6 +65,7 @@ const NORMAL_ALLOWED_EXACT: &[&str] = &[
     "browser_emulate",
     "browser_evaluate",
     "browser_expose_binding",
+    "browser_file_upload",
     "browser_fill_form",
     "browser_frames",
     "browser_geolocation",
@@ -177,6 +178,7 @@ const BROWSER_CONTROL_ALLOWED_EXACT: &[&str] = &[
     "browser_emulate",
     "browser_evaluate",
     "browser_expose_binding",
+    "browser_file_upload",
     "browser_fill_form",
     "browser_frames",
     "browser_geolocation",
@@ -1322,6 +1324,7 @@ mod tests {
                 "browser_emulate",
                 "browser_evaluate",
                 "browser_expose_binding",
+                "browser_file_upload",
                 "browser_geolocation",
                 "browser_handle_dialog",
                 "browser_locale",
@@ -1370,6 +1373,7 @@ mod tests {
         assert!(visible.contains(&"browser_drop".to_owned()));
         assert!(visible.contains(&"browser_emulate".to_owned()));
         assert!(visible.contains(&"browser_expose_binding".to_owned()));
+        assert!(visible.contains(&"browser_file_upload".to_owned()));
         assert!(visible.contains(&"browser_geolocation".to_owned()));
         assert!(visible.contains(&"browser_handle_dialog".to_owned()));
         assert!(visible.contains(&"browser_locale".to_owned()));
@@ -1456,6 +1460,7 @@ mod tests {
         assert!(visible.contains(&"browser_drop".to_owned()));
         assert!(visible.contains(&"browser_emulate".to_owned()));
         assert!(visible.contains(&"browser_expose_binding".to_owned()));
+        assert!(visible.contains(&"browser_file_upload".to_owned()));
         assert!(visible.contains(&"browser_geolocation".to_owned()));
         assert!(visible.contains(&"browser_handle_dialog".to_owned()));
         assert!(visible.contains(&"browser_locale".to_owned()));

@@ -10,7 +10,7 @@
 - `crates/synapse-mcp/src/server/background_router.rs` (`target_act`)
 - `crates/synapse-mcp/src/server/agent_control.rs`, `agent_cost.rs`, `agent_stats.rs`, `agent_query.rs`, `agent_mailbox.rs`, `agent_templates.rs`, `agent_tasks.rs`
 - `crates/synapse-mcp/src/server/session_tools.rs`, `lease_tools.rs`, `target_claims.rs`
-- `crates/synapse-mcp/src/server/browser_assert.rs`, `browser_clock_events.rs`, `browser_dialog.rs`, `browser_dnd.rs`, `browser_emulate.rs`, `browser_emulation.rs`, `browser_field.rs`, `browser_frames.rs`, `browser_network.rs`, `browser_storage.rs`
+- `crates/synapse-mcp/src/server/browser_assert.rs`, `browser_clock_events.rs`, `browser_dialog.rs`, `browser_dnd.rs`, `browser_emulate.rs`, `browser_emulation.rs`, `browser_field.rs`, `browser_files.rs`, `browser_frames.rs`, `browser_network.rs`, `browser_storage.rs`
 - `crates/synapse-mcp/src/server/intent_tools.rs`, `plan_tools.rs`, `reality.rs`, `suggestions.rs`, `routine_feedback.rs`, `routine_labeling.rs`
 - `crates/synapse-mcp/src/server/timeline_query.rs`, `timeline_digest.rs`, `data_cleaning.rs`
 - `crates/synapse-mcp/src/server/workspace_blackboard.rs`, `tool_profiles.rs`, `notify_tools.rs`, `hygiene_report.rs`, `permission_gate.rs`, `escalation/mod.rs`
@@ -26,9 +26,9 @@ Tools are registered through the **`rmcp`** crate's attribute macros. Each tool 
 
 The full surface is assembled in `SynapseService::tool_router()` (`server.rs:603`) by summing every module router with `+`. Tool **names** are the function names verbatim (e.g. `fn observe` -> tool `observe`). Over MCP they appear to clients as `mcp__synapse__<name>`.
 
-**Total tools documented: 206.**
+**Total tools documented: 207.**
 
-- **Core surface (always registered): ~181 tools.**
+- **Core surface (always registered): ~182 tools.**
 - **EverQuest domain pack: 25 tools**, registered only when `SYNAPSE_ENABLE_EVERQUEST` is set (`server.rs:649`). rmcp builds the tool list once per service, so this is a startup opt-in.
 - **Debug-only:** `storage_put_probe_rows` and `storage_pressure_sample` are removed from the default surface and remain callable only when `SYNAPSE_DEBUG_TOOLS` is set (`server.rs:671`).
 
@@ -72,6 +72,7 @@ Source-of-truth observation, OCR, screenshots, window enumeration, and the CDP/C
 | `cdp_activate_tab` | Activate (foreground) a tab | `window_hwnd?`, `cdp_target_id?`, `wait_timeout_ms?` | activates tab |
 | `browser_evaluate` | Eval JS in owned tab | `expression` (req), `cdp_target_id?`, `window_hwnd?`, `element_id?`, `args?`, `await_promise=true`, `return_by_value=true` | runs JS |
 | `browser_expose_binding` | Add/read/remove a `window` binding fn | `operation` (Add), `name` (req), `cdp_target_id?`, `window_hwnd?`, `execution_context_name?`, `since_seq?`, `max_calls=200` | injects/reads binding |
+| `browser_file_upload` | Set/clear file inputs or intercept a pending file chooser in normal Chrome | `operation` (SetFiles), `files?`, one of `selector?`/`element_id?`/`active_element`, `since_seq?`, `limit=20`, target params | validates local files; uses `DOM.setFileInputFiles` and `Page.fileChooserOpened`; never opens an OS file picker |
 | `browser_add_init_script` | Add/remove a Playwright-style init script | `operation` (Add), `source?`, `identifier?`, `world_name?`, `include_command_line_api=false`, `run_immediately=false`, `cdp_target_id?`, `window_hwnd?` | mutates page init |
 | `browser_add_script_tag` | Inject `<script>` (url/content/path) | one of `url?`/`content?`/`path?`, `script_type?`, `cdp_target_id?`, `window_hwnd?` | DOM mutation |
 | `browser_add_style_tag` | Inject `<style>`/`<link>` (url/content/path) | one of `url?`/`content?`/`path?`, `cdp_target_id?`, `window_hwnd?` | DOM mutation |

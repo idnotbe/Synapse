@@ -40,9 +40,9 @@ const NATIVE_HOST_NAME: &str = "com.synapse.chrome_debugger";
 const EXTENSION_ORIGIN: &str = "chrome-extension://leoocgnkjnplbfdbklajepahofecgfbk";
 const BRIDGE_TOKEN_HEADER: &str = "x-synapse-bridge-token";
 const BRIDGE_PROTOCOL_VERSION: u32 = 1;
-const EXPECTED_EXTENSION_BUILD_ID: &str = "synapse-chrome-bridge-2026-06-23-dialog-v1";
+const EXPECTED_EXTENSION_BUILD_ID: &str = "synapse-chrome-bridge-2026-06-23-file-upload-v2";
 const EXPECTED_EXTENSION_BUILD_SHA256: &str =
-    "8141eae98afbbc1d3bcfd5b807fb7f8d069addf08708ac99a62f18b3546722fc";
+    "6a557863fa6472214e3c2f521a52079209c9a7d23f209f49b7c1647cc48e0b95";
 const SYNAPSE_CHROME_BLOCKED_INSTALL_MESSAGE: &str = "Synapse blocked this extension on this host because debugger/nativeMessaging permissions can surface Chrome debugger or native-host popups during background automation.";
 const REQUIRED_DIRECT_HTTP_CAPABILITIES: &[&str] = &[
     "alarmReconnect",
@@ -82,6 +82,7 @@ const REQUIRED_DIRECT_HTTP_CAPABILITIES: &[&str] = &[
     "initScript",
     "exposeBinding",
     "handleDialog",
+    "fileUpload",
     "cdpInput",
     "viewportEmulation",
     "deviceEmulation",
@@ -105,7 +106,7 @@ const NATIVE_DAEMON_RECONNECT_DELAY: Duration = Duration::from_secs(1);
 const MAX_NATIVE_MESSAGE_FROM_CHROME: usize = 64 * 1024 * 1024;
 const MAX_NATIVE_MESSAGE_TO_CHROME: usize = 1024 * 1024;
 const UNKNOWN_NATIVE_HOST_ID_FRAGMENT: &str = "unknown chrome debugger native host_id";
-const INSTALL_GUIDANCE: &str = "install the bundled Synapse Chrome extension from extensions\\synapse-chrome-debugger with scripts\\install-synapse-chrome-debugger.ps1; the installer auto-loads the unpacked extension into the already-open active Chrome profile and refuses to launch a second Chrome profile; the normal end-user bridge uses chrome.tabs/chrome.scripting/chrome.downloads/chrome.webNavigation/chrome.webRequest over direct localhost WebSocket plus chrome.alarms MV3 reconnect wake, exposes debugger-free pageScreenshot capture through chrome.tabs.captureVisibleTab stitching, exposes chrome.downloads list/wait/event capture for browser_downloads save/move, and exposes narrow chrome.debugger lanes for target-scoped hover/tap/active-tab drag, Page.printToPDF PDF rendering, Runtime.evaluate page evaluation, Page.addScriptToEvaluateOnNewDocument init scripts, Runtime.addBinding/Runtime.bindingCalled binding capture, Page.handleJavaScriptDialog dialog handling, viewport emulation, device emulation, geolocation emulation, locale/timezone emulation, media emulation, and network conditions plus inactive-tab synthetic mouse drag and HTML5 DataTransfer drag dispatch; it never uses nativeMessaging or helper Chrome windows; expected_extension_id=leoocgnkjnplbfdbklajepahofecgfbk";
+const INSTALL_GUIDANCE: &str = "install the bundled Synapse Chrome extension from extensions\\synapse-chrome-debugger with scripts\\install-synapse-chrome-debugger.ps1; the installer auto-loads the unpacked extension into the already-open active Chrome profile and refuses to launch a second Chrome profile; the normal end-user bridge uses chrome.tabs/chrome.scripting/chrome.downloads/chrome.webNavigation/chrome.webRequest over direct localhost WebSocket plus chrome.alarms MV3 reconnect wake, exposes debugger-free pageScreenshot capture through chrome.tabs.captureVisibleTab stitching, exposes chrome.downloads list/wait/event capture for browser_downloads save/move, and exposes narrow chrome.debugger lanes for target-scoped hover/tap/active-tab drag, Page.printToPDF PDF rendering, Runtime.evaluate page evaluation, Page.addScriptToEvaluateOnNewDocument init scripts, Runtime.addBinding/Runtime.bindingCalled binding capture, Page.handleJavaScriptDialog dialog handling, DOM.setFileInputFiles/Page.fileChooserOpened file upload handling, viewport emulation, device emulation, geolocation emulation, locale/timezone emulation, media emulation, and network conditions plus inactive-tab synthetic mouse drag and HTML5 DataTransfer drag dispatch; it never uses nativeMessaging or helper Chrome windows; expected_extension_id=leoocgnkjnplbfdbklajepahofecgfbk";
 const NO_ACTIVE_HOST_REPAIR_GUIDANCE: &str = "no_active_host_repair=use the already-open authenticated Chrome profile only; do not launch a second Chrome process/profile; wait for the installed bridge worker alarmReconnect registration and re-read health; if an active stale host appears call cdp_bridge_reload; if no host registers, run scripts\\install-synapse-chrome-debugger.ps1 from the interactive Windows desktop so it auto-loads the bundled unpacked extension into the existing active Chrome profile; if health reports installed=false, cdp_bridge_reload cannot repair because Chrome has no loaded extension host to receive reloadSelf";
 const TOKEN_ENV: &str = "SYNAPSE_BEARER_TOKEN";
 const APPDATA_ENV: &str = "APPDATA";
@@ -3874,6 +3875,140 @@ pub(crate) struct ChromeDebuggerHandleDialogResult {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+pub(crate) struct ChromeDebuggerFileUploadFile {
+    pub name: String,
+    #[serde(default)]
+    pub size: u64,
+    #[serde(default)]
+    pub r#type: String,
+    #[serde(default)]
+    pub last_modified: f64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub(crate) struct ChromeDebuggerFileUploadInput {
+    #[serde(default)]
+    pub resolved_by: String,
+    #[serde(default)]
+    pub match_count: u32,
+    #[serde(default)]
+    pub frame_id: Option<i64>,
+    #[serde(default)]
+    pub element_path: Option<String>,
+    #[serde(default)]
+    pub backend_node_id: Option<i64>,
+    #[serde(default)]
+    pub tag_name: String,
+    #[serde(default)]
+    pub type_attr: String,
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub name_attr: String,
+    #[serde(default)]
+    pub accept: String,
+    #[serde(default)]
+    pub multiple: bool,
+    #[serde(default)]
+    pub webkitdirectory: bool,
+    #[serde(default)]
+    pub disabled: bool,
+    #[serde(default)]
+    pub file_count: usize,
+    #[serde(default)]
+    pub files: Vec<ChromeDebuggerFileUploadFile>,
+    #[serde(default)]
+    pub value: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub(crate) struct ChromeDebuggerFileChooserEntry {
+    pub seq: u64,
+    #[serde(default)]
+    pub frame_id: String,
+    #[serde(default)]
+    pub mode: String,
+    #[serde(default)]
+    pub backend_node_id: Option<i64>,
+    pub opened_at_unix_ms: u64,
+    #[serde(default)]
+    pub pending: bool,
+    #[serde(default)]
+    pub handled_at_unix_ms: Option<u64>,
+    #[serde(default)]
+    pub canceled_at_unix_ms: Option<u64>,
+    #[serde(default)]
+    pub requested_file_count: Option<usize>,
+    #[serde(default)]
+    pub file_names: Vec<String>,
+    #[serde(default)]
+    pub input: Option<ChromeDebuggerFileUploadInput>,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub(crate) struct ChromeDebuggerFileUploadResult {
+    pub target_id: String,
+    pub tab_id: u32,
+    #[serde(default)]
+    pub chrome_window_id: Option<i64>,
+    pub operation: String,
+    #[serde(default)]
+    pub capture_newly_armed: bool,
+    #[serde(default)]
+    pub selector: Option<String>,
+    #[serde(default)]
+    pub element_id: Option<String>,
+    #[serde(default)]
+    pub active_element: bool,
+    #[serde(default)]
+    pub requested_file_count: usize,
+    #[serde(default)]
+    pub input: Option<ChromeDebuggerFileUploadInput>,
+    #[serde(default)]
+    pub handled_chooser: Option<ChromeDebuggerFileChooserEntry>,
+    #[serde(default)]
+    pub canceled_chooser: Option<ChromeDebuggerFileChooserEntry>,
+    #[serde(default)]
+    pub pending_chooser: Option<ChromeDebuggerFileChooserEntry>,
+    #[serde(default)]
+    pub entries: Vec<ChromeDebuggerFileChooserEntry>,
+    #[serde(default)]
+    pub next_cursor: u64,
+    #[serde(default)]
+    pub returned: usize,
+    #[serde(default)]
+    pub total_buffered: usize,
+    #[serde(default)]
+    pub dropped: u64,
+    #[serde(default)]
+    pub opened_count: u64,
+    #[serde(default)]
+    pub handled_count: u64,
+    #[serde(default)]
+    pub canceled_count: u64,
+    #[serde(default)]
+    pub error_count: u64,
+    pub url: String,
+    pub title: String,
+    #[serde(default)]
+    pub ready_state: String,
+    #[serde(default)]
+    pub readback_backend: String,
+    #[serde(default)]
+    pub chooser_readback_backend: String,
+    #[serde(default)]
+    pub backend_tier_used: String,
+    #[serde(default)]
+    pub required_foreground: bool,
+    pub target_candidate_count: u32,
+    pub target_selection_reason: String,
+    #[serde(default)]
+    pub extension_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub(crate) struct ChromeBridgeReloadCommandAck {
     pub ok: bool,
     #[serde(rename = "extensionId")]
@@ -6497,6 +6632,45 @@ pub(crate) async fn handle_dialog(
     })
 }
 
+pub(crate) struct ChromeDebuggerFileUploadRequest<'a> {
+    pub hwnd: i64,
+    pub target_id: &'a str,
+    pub operation: &'a str,
+    pub files: &'a [String],
+    pub selector: Option<&'a str>,
+    pub element_id: Option<&'a str>,
+    pub active_element: bool,
+    pub since_seq: Option<u64>,
+    pub limit: usize,
+}
+
+pub(crate) async fn file_upload(
+    request: ChromeDebuggerFileUploadRequest<'_>,
+) -> Result<ChromeDebuggerFileUploadResult, ChromeDebuggerBridgeError> {
+    ensure_normal_bridge_external_popup_suppressed(request.hwnd, "fileUpload")?;
+    let result = bridge()
+        .send_command(
+            "fileUpload",
+            json!({
+                "hwnd": request.hwnd,
+                "targetIdHint": request.target_id,
+                "operation": request.operation,
+                "files": request.files,
+                "selector": request.selector,
+                "elementId": request.element_id,
+                "activeElement": request.active_element,
+                "sinceSeq": request.since_seq,
+                "limit": request.limit,
+            }),
+        )
+        .await?;
+    serde_json::from_value::<ChromeDebuggerFileUploadResult>(result).map_err(|error| {
+        ChromeDebuggerBridgeError::protocol(format!(
+            "decode Chrome debugger fileUpload response: {error}"
+        ))
+    })
+}
+
 pub(crate) struct ChromeDebuggerDomActionRequest<'a> {
     pub hwnd: i64,
     pub target_id: &'a str,
@@ -7472,6 +7646,40 @@ fn chrome_response_readback_summary(kind: &str, result: Option<&Value>) -> Optio
             "auto_handled_count": result.get("auto_handled_count"),
             "error_count": result.get("error_count"),
             "readback_backend": result.get("readback_backend"),
+            "target_selection_reason": result.get("target_selection_reason"),
+            "extension_id": result.get("extension_id"),
+        }),
+        "fileUpload" => json!({
+            "target_id": result.get("target_id"),
+            "tab_id": result.get("tab_id"),
+            "chrome_window_id": result.get("chrome_window_id"),
+            "operation": result.get("operation"),
+            "requested_file_count": result.get("requested_file_count"),
+            "input_file_count": result
+                .get("input")
+                .and_then(|value| value.get("file_count")),
+            "input_names": result
+                .get("input")
+                .and_then(|value| value.get("files")),
+            "capture_newly_armed": result.get("capture_newly_armed"),
+            "pending_mode": result
+                .get("pending_chooser")
+                .and_then(|value| value.get("mode")),
+            "pending_backend_node_id": result
+                .get("pending_chooser")
+                .and_then(|value| value.get("backend_node_id")),
+            "handled_seq": result
+                .get("handled_chooser")
+                .and_then(|value| value.get("seq")),
+            "returned": result.get("returned"),
+            "total_buffered": result.get("total_buffered"),
+            "next_cursor": result.get("next_cursor"),
+            "opened_count": result.get("opened_count"),
+            "handled_count": result.get("handled_count"),
+            "canceled_count": result.get("canceled_count"),
+            "error_count": result.get("error_count"),
+            "readback_backend": result.get("readback_backend"),
+            "chooser_readback_backend": result.get("chooser_readback_backend"),
             "target_selection_reason": result.get("target_selection_reason"),
             "extension_id": result.get("extension_id"),
         }),
