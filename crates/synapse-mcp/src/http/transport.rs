@@ -3506,7 +3506,7 @@ fn dashboard_agent_event_rows(
     db: &Db,
     request: DashboardAgentEventsQueryRequest,
 ) -> Result<DashboardAgentEventsQueryResponse, Response> {
-    let limit = request.limit.unwrap_or(100).clamp(1, 500);
+    let limit = request.limit.unwrap_or(100).clamp(1, 2_000);
     let scan_limit = request.scan_limit.unwrap_or(10_000).clamp(limit, 50_000);
     if let (Some(start), Some(end)) = (request.start_ts_ns, request.end_ts_ns)
         && start >= end
@@ -6127,12 +6127,12 @@ fn dashboard_unix_time_ms() -> u64 {
         .unwrap_or(u64::MAX)
 }
 
-const DASHBOARD_CSS_FILE: &str = "dashboard-MWT7M6XZ.css";
-const DASHBOARD_JS_FILE: &str = "dashboard-CffunRjo.js";
+const DASHBOARD_CSS_FILE: &str = "dashboard-DL_3qsw4.css";
+const DASHBOARD_JS_FILE: &str = "dashboard-2jMz_uzs.js";
 const DASHBOARD_HTML: &str = include_str!("../../../../dashboard/dist/index.html");
 const DASHBOARD_CSS: &str =
-    include_str!("../../../../dashboard/dist/assets/dashboard-MWT7M6XZ.css");
-const DASHBOARD_JS: &str = include_str!("../../../../dashboard/dist/assets/dashboard-CffunRjo.js");
+    include_str!("../../../../dashboard/dist/assets/dashboard-DL_3qsw4.css");
+const DASHBOARD_JS: &str = include_str!("../../../../dashboard/dist/assets/dashboard-2jMz_uzs.js");
 #[cfg(test)]
 const DASHBOARD_APP_SOURCE: &str = include_str!("../../../../dashboard/src/app.tsx");
 #[cfg(test)]

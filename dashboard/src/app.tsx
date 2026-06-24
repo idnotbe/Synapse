@@ -6310,54 +6310,111 @@ function FleetTable({
 }
 
 type TraceZoom = "compact" | "full";
+type TraceSource = "agent_events" | "command_audit";
 
 interface TraceSpanRow {
   id: string;
   keyHex: string;
+  endKeyHex?: string;
+  source: TraceSource;
   lane: string;
   label: string;
+  operation: string;
   status: FleetStatus;
   startNs: number;
   endNs: number;
   count: number;
+  depth: number;
+  open: boolean;
+  truncated: boolean;
+  physicalKeys: string[];
+  transcriptAnchor?: string;
+  toolCallId?: string;
+  toolName?: string;
+  tokenTotal?: number;
+  errorType?: string;
   raw: Record<string, unknown>;
 }
 
 function TraceWaterfall({ state, onAuditKeySelect }: { state?: DashboardState; onAuditKeySelect: (keyHex: string) => void }) {
   const [zoom, setZoom] = useState<TraceZoom>("compact");
+  const [source, setSource] = useState<TraceSource>("agent_events");
+  const [selectedId, setSelectedId] = useState("");
+  const [hoveredId, setHoveredId] = useState("");
+  const eventWindow = traceAgentEventWindow(state);
+  const agentEventsQuery = useQuery<AgentEventsQueryResponse>({
+    queryKey: ["dashboard-trace-agent-events", eventWindow.startNs, eventWindow.endNs],
+    enabled: source === "agent_events" && eventWindow.startNs !== undefined,
+    queryFn: () =>
+      fetchAgentEvents({
+        start_ts_ns: eventWindow.startNs,
+        end_ts_ns: eventWindow.endNs,
+        limit: 2000,
+        scan_limit: 50_000
+      })
+  });
+  const eventRows = agentEventsQuery.data?.rows ?? [];
+  const eventTraceRows = useMemo(() => buildAgentEventTraceSpans(eventRows), [eventRows]);
   const auditRows = asArray<Record<string, unknown>>(asRecord(panelData(state?.command_audit)).rows)
     .map((row, index) => auditRowToTraceSpan(row, index))
     .filter((row): row is TraceSpanRow => Boolean(row))
     .sort((a, b) => a.startNs - b.startNs);
-  const spans = zoom === "compact" ? compactTraceSpans(auditRows) : auditRows;
-  const [selectedId, setSelectedId] = useState("");
+  const baseSpans = source === "agent_events" ? eventTraceRows : auditRows;
+  const compactSpans = useMemo(() => compactTraceSpans(baseSpans), [baseSpans]);
+  const spans = zoom === "compact" ? compactSpans : baseSpans;
   const selected = spans.find((span) => span.id === selectedId) ?? spans[0];
+  const hovered = spans.find((span) => span.id === hoveredId);
+  const transcriptRows = asArray<Record<string, unknown>>(asRecord(panelData(state?.agent_transcripts)).rows);
+  const transcriptMatch = traceTranscriptMatch(hovered ?? selected, transcriptRows);
   const minNs = spans.reduce((min, span) => Math.min(min, span.startNs), Number.POSITIVE_INFINITY);
   const maxNs = spans.reduce((max, span) => Math.max(max, span.endNs), 0);
   const rangeNs = Number.isFinite(minNs) && maxNs > minNs ? maxNs - minNs : 1;
+  const fullRefTotal = baseSpans.reduce((sum, span) => sum + span.count, 0);
+  const compactRefTotal = compactSpans.reduce((sum, span) => sum + span.count, 0);
 
   return (
     <Section
       title="Trace Waterfall"
       tier="triage"
-      questions={["Which command spans are slow or failing?", "Does compact mode reconcile with full rows?", "Which audit row proves the selected span?"]}
+      questions={["Which event spans are slow or failing?", "Does compact mode reconcile with full rows?", "Which physical journal key proves the selected span?"]}
       actions={
-        <div className="inline-flex rounded-md border border-border bg-surface-1 p-1">
-          <Button type="button" variant={zoom === "compact" ? "secondary" : "ghost"} size="sm" onClick={() => setZoom("compact")}>
-            <Rows3 aria-hidden="true" className="h-4 w-4" />
-            Compact
-          </Button>
-          <Button type="button" variant={zoom === "full" ? "secondary" : "ghost"} size="sm" onClick={() => setZoom("full")}>
-            <Search aria-hidden="true" className="h-4 w-4" />
-            Full
-          </Button>
+        <div className="flex flex-wrap gap-2">
+          <div className="inline-flex rounded-md border border-border bg-surface-1 p-1">
+            <Button type="button" variant={source === "agent_events" ? "secondary" : "ghost"} size="sm" onClick={() => setSource("agent_events")}>
+              <Network aria-hidden="true" className="h-4 w-4" />
+              Agent Events
+            </Button>
+            <Button type="button" variant={source === "command_audit" ? "secondary" : "ghost"} size="sm" onClick={() => setSource("command_audit")}>
+              <FileSearch aria-hidden="true" className="h-4 w-4" />
+              Audit
+            </Button>
+          </div>
+          <div className="inline-flex rounded-md border border-border bg-surface-1 p-1">
+            <Button type="button" variant={zoom === "compact" ? "secondary" : "ghost"} size="sm" onClick={() => setZoom("compact")}>
+              <Rows3 aria-hidden="true" className="h-4 w-4" />
+              Compact
+            </Button>
+            <Button type="button" variant={zoom === "full" ? "secondary" : "ghost"} size="sm" onClick={() => setZoom("full")}>
+              <Search aria-hidden="true" className="h-4 w-4" />
+              Full
+            </Button>
+          </div>
         </div>
       }
     >
+      <div className="mb-4 grid gap-3 md:grid-cols-4">
+        <MetricRow label="Source" value={source === "agent_events" ? agentEventsQuery.data?.source_of_truth || "CF_AGENT_EVENTS" : state?.command_audit.source || "CF_ACTION_LOG"} />
+        <MetricRow label="Window" value={formatTraceWindow(eventWindow.startNs, eventWindow.endNs)} />
+        <MetricRow label="Rows" value={source === "agent_events" ? `${eventRows.length}/${agentEventsQuery.data?.matched_rows ?? 0}` : rawText(auditRows.length)} />
+        <MetricRow label="Reconcile" value={`${compactRefTotal}/${fullRefTotal} refs`} />
+      </div>
+      {source === "agent_events" && agentEventsQuery.isError ? (
+        <div className="mb-3 rounded-md border border-danger-border bg-danger-bg p-3 text-sm text-danger-fg">{rawText(agentEventsQuery.error)}</div>
+      ) : null}
       {spans.length ? (
         <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(20rem,0.38fr)]">
           <div className="rounded-lg border border-border bg-surface-1 p-3">
-            <div className="mb-3 grid grid-cols-[minmax(7rem,0.22fr)_minmax(0,1fr)_4rem] gap-3 text-label uppercase text-muted">
+            <div className="mb-3 grid grid-cols-[minmax(8rem,0.24fr)_minmax(0,1fr)_4rem] gap-3 text-label uppercase text-muted">
               <span>Lane</span>
               <span>Span</span>
               <span className="text-right">Rows</span>
@@ -6371,12 +6428,16 @@ function TraceWaterfall({ state, onAuditKeySelect }: { state?: DashboardState; o
                     key={span.id}
                     type="button"
                     onClick={() => setSelectedId(span.id)}
+                    onMouseEnter={() => setHoveredId(span.id)}
+                    onMouseLeave={() => setHoveredId("")}
                     className={cn(
-                      "grid w-full grid-cols-[minmax(7rem,0.22fr)_minmax(0,1fr)_4rem] items-center gap-3 rounded-md px-2 py-1.5 text-left hover:bg-surface-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus-ring",
+                      "grid w-full grid-cols-[minmax(8rem,0.24fr)_minmax(0,1fr)_4rem] items-center gap-3 rounded-md px-2 py-1.5 text-left hover:bg-surface-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus-ring",
                       selected?.id === span.id && "bg-surface-2"
                     )}
                   >
-                    <span className="truncate font-mono text-xs text-secondary">{shortKey(span.lane)}</span>
+                    <span className="truncate font-mono text-xs text-secondary" style={{ paddingLeft: `${Math.min(span.depth, 4) * 0.65}rem` }}>
+                      {shortKey(span.lane)}
+                    </span>
                     <span className="relative h-8 min-w-0 overflow-hidden rounded-md border border-border-subtle bg-surface-2">
                       <span
                         className="absolute top-1/2 h-4 -translate-y-1/2 rounded-sm"
@@ -6387,7 +6448,7 @@ function TraceWaterfall({ state, onAuditKeySelect }: { state?: DashboardState; o
                         }}
                       />
                       <span className="absolute inset-0 flex items-center px-2 text-xs text-primary">
-                        <span className="truncate">{span.label}</span>
+                        <span className="truncate">{span.truncated ? `${span.label} / open/truncated` : span.label}</span>
                       </span>
                     </span>
                     <span className="text-right font-mono text-xs text-secondary">{span.count}</span>
@@ -6402,16 +6463,31 @@ function TraceWaterfall({ state, onAuditKeySelect }: { state?: DashboardState; o
               <>
                 <MetricRow label="Span" value={selected.label} />
                 <MetricRow label="Lane" value={selected.lane || "unknown"} />
+                <MetricRow label="Operation" value={selected.operation || "unknown"} />
                 <MetricRow label="Status" value={selected.status} />
                 <MetricRow label="Rows" value={selected.count} />
+                <MetricRow label="Start Key" value={<span className="font-mono">{shortKey(selected.keyHex)}</span>} />
+                {selected.endKeyHex ? <MetricRow label="End Key" value={<span className="font-mono">{shortKey(selected.endKeyHex)}</span>} /> : null}
                 <MetricRow label="Start" value={nsToTime(selected.startNs) || rawText(selected.startNs)} />
-                <MetricRow label="End" value={selected.endNs === selected.startNs ? "open/truncated" : nsToTime(selected.endNs) || rawText(selected.endNs)} />
-                {selected.keyHex ? (
+                <MetricRow label="End" value={selected.open || selected.truncated ? "open/truncated" : nsToTime(selected.endNs) || rawText(selected.endNs)} />
+                {selected.errorType ? <MetricRow label="Error Type" value={selected.errorType} /> : null}
+                {selected.tokenTotal !== undefined ? <MetricRow label="Tokens" value={formatTokenCount(selected.tokenTotal)} /> : null}
+                {selected.source === "command_audit" && selected.keyHex ? (
                   <Button type="button" variant="secondary" size="sm" className="mt-3" onClick={() => onAuditKeySelect(selected.keyHex)}>
                     <FileSearch aria-hidden="true" className="h-4 w-4" />
                     Audit Row
                   </Button>
                 ) : null}
+                {transcriptMatch ? (
+                  <div className={cn("mt-3 border-t border-border-subtle pt-3", hovered ? "rounded-md ring-2 ring-focus-ring ring-offset-0" : "")}>
+                    <h4 className="mb-2 text-sm font-medium text-primary">Transcript Cross-highlight</h4>
+                    <MetricRow label="Line" value={transcriptMatch.lineLabel} />
+                    <p className="mt-2 max-h-28 overflow-auto whitespace-pre-wrap break-words text-sm text-secondary">{transcriptMatch.summary}</p>
+                    <RawValue value={transcriptMatch.row} label="Matched transcript row" />
+                  </div>
+                ) : (
+                  <MetricRow label="Transcript" value="no matching row in current transcript sample" />
+                )}
                 <div className="mt-3">
                   <RawValue value={selected.raw} label="Selected span raw row" />
                 </div>
@@ -6422,7 +6498,7 @@ function TraceWaterfall({ state, onAuditKeySelect }: { state?: DashboardState; o
           </div>
         </div>
       ) : (
-        <EmptyStateArt title="No command audit rows for trace" />
+        <EmptyStateArt title={source === "agent_events" && agentEventsQuery.isFetching ? "Loading trace event rows" : "No trace rows"} />
       )}
     </Section>
   );
@@ -6450,12 +6526,19 @@ function auditRowToTraceSpan(row: Record<string, unknown>, index: number): Trace
   return {
     id: keyHex || `${actor}-${tool}-${index}`,
     keyHex,
+    source: "command_audit",
     lane: actor,
     label: error ? `${tool} / ${error}` : tool,
+    operation: "command_audit",
     status,
     startNs,
     endNs,
     count: 1,
+    depth: 0,
+    open: durationNs <= 0,
+    truncated: durationNs <= 0,
+    physicalKeys: keyHex ? [keyHex] : [],
+    errorType: error,
     raw: row
   };
 }
@@ -6463,18 +6546,419 @@ function auditRowToTraceSpan(row: Record<string, unknown>, index: number): Trace
 function compactTraceSpans(rows: TraceSpanRow[]): TraceSpanRow[] {
   const groups = new Map<string, TraceSpanRow>();
   for (const row of rows) {
-    const key = `${row.lane}\u0000${row.label}\u0000${row.status}`;
+    const key = `${row.source}\u0000${row.lane}\u0000${row.label}\u0000${row.status}\u0000${row.depth}`;
     const group = groups.get(key);
     if (!group) {
-      groups.set(key, { ...row });
+      groups.set(key, { ...row, physicalKeys: [...row.physicalKeys] });
       continue;
     }
     group.startNs = Math.min(group.startNs, row.startNs);
     group.endNs = Math.max(group.endNs, row.endNs);
     group.count += row.count;
-    group.raw = { compact_group: true, rows: group.count, first: group.raw, latest: row.raw };
+    group.open = group.open || row.open;
+    group.truncated = group.truncated || row.truncated;
+    group.physicalKeys = [...new Set([...group.physicalKeys, ...row.physicalKeys])];
+    if (!group.endKeyHex && row.endKeyHex) group.endKeyHex = row.endKeyHex;
+    group.tokenTotal = (group.tokenTotal ?? 0) + (row.tokenTotal ?? 0);
+    if (!group.errorType && row.errorType) group.errorType = row.errorType;
+    group.raw = { compact_group: true, rows: group.count, physical_keys: group.physicalKeys, first: group.raw, latest: row.raw };
   }
   return [...groups.values()].sort((a, b) => a.startNs - b.startNs);
+}
+
+function traceAgentEventWindow(state?: DashboardState): { startNs?: number; endNs?: number } {
+  const fleet = asRecord(asRecord(panelData(state?.agent_stats)).fleet);
+  const first = numberOrUndefined(fleet.first_event_ns);
+  const last = numberOrUndefined(fleet.last_event_ns);
+  if (last === undefined) return {};
+  const recentTraceNs = 48 * 60 * 60 * 1_000_000_000;
+  const startNs = first === undefined ? Math.max(0, last - recentTraceNs) : Math.max(first, last - recentTraceNs);
+  return { startNs: Math.floor(startNs), endNs: Math.floor(last + 1_000_000_000) };
+}
+
+function formatTraceWindow(startNs?: number, endNs?: number): string {
+  if (startNs === undefined || endNs === undefined) return "pending";
+  return formatNsWindow(startNs, endNs);
+}
+
+interface TraceEventActor {
+  anchor: string;
+  parentAnchor?: string;
+  rows: AgentEventQueryRow[];
+  first?: AgentEventQueryRow;
+  terminal?: AgentEventQueryRow;
+  agentName?: string;
+}
+
+interface TraceOpenEvent {
+  row: AgentEventQueryRow;
+  index: number;
+}
+
+function buildAgentEventTraceSpans(rows: AgentEventQueryRow[]): TraceSpanRow[] {
+  const sorted = [...rows].sort((a, b) => a.ts_ns - b.ts_ns || a.seq - b.seq);
+  const sessionToSpawn = new Map<string, string>();
+  const spawnParents = new Map<string, string>();
+  for (const row of sorted) {
+    const spawnId = rawText(row.spawn_id || asRecord(row.record).spawn_id);
+    const sessionId = rawText(row.session_id || asRecord(row.record).session_id);
+    if (spawnId && sessionId) sessionToSpawn.set(sessionId, spawnId);
+    const parent = rawText(asRecord(asRecord(row.record).payload).started_by_session_id);
+    if (spawnId && parent) spawnParents.set(spawnId, sessionToSpawn.get(parent) || parent);
+  }
+
+  const actors = new Map<string, TraceEventActor>();
+  for (const row of sorted) {
+    const anchor = traceEventAnchor(row, sessionToSpawn);
+    const record = asRecord(row.record);
+    const attrs = asRecord(record.attributes);
+    const actor = actors.get(anchor) ?? { anchor, rows: [] };
+    actor.rows.push(row);
+    if (!actor.first || row.ts_ns < actor.first.ts_ns) actor.first = row;
+    if (traceIsTerminalEvent(row)) actor.terminal = row;
+    actor.agentName ||= rawText(attrs["gen_ai.agent.name"]);
+    actor.parentAnchor ||= spawnParents.get(anchor);
+    actors.set(anchor, actor);
+  }
+
+  const actorDepth = (anchor: string, seen = new Set<string>()): number => {
+    if (seen.has(anchor)) return 0;
+    seen.add(anchor);
+    const parent = actors.get(anchor)?.parentAnchor;
+    if (!parent || !actors.has(parent)) return 0;
+    return Math.min(4, actorDepth(parent, seen) + 1);
+  };
+
+  const spans: TraceSpanRow[] = [];
+  const openTurns = new Map<string, TraceOpenEvent[]>();
+  const openToolsByCallId = new Map<string, TraceOpenEvent>();
+  const openToolsByActorTool = new Map<string, TraceOpenEvent[]>();
+  const turnCounters = new Map<string, number>();
+
+  for (const row of sorted) {
+    const anchor = traceEventAnchor(row, sessionToSpawn);
+    const depth = actorDepth(anchor);
+    const kind = row.kind;
+    const attrs = asRecord(asRecord(row.record).attributes);
+    const toolName = rawText(attrs["gen_ai.tool.name"]) || "tool";
+    const toolCallId = rawText(attrs["gen_ai.tool.call.id"]);
+    if (kind === "turn_started") {
+      const list = openTurns.get(anchor) ?? [];
+      list.push({ row, index: (turnCounters.get(anchor) ?? 0) + 1 });
+      turnCounters.set(anchor, (turnCounters.get(anchor) ?? 0) + 1);
+      openTurns.set(anchor, list);
+      continue;
+    }
+    if (kind === "turn_finished") {
+      const list = openTurns.get(anchor) ?? [];
+      const start = list.shift();
+      openTurns.set(anchor, list);
+      spans.push(
+        traceEventSpan({
+          source: "agent_events",
+          operation: "chat",
+          label: `chat turn ${start?.index ?? turnCounters.get(anchor) ?? 1}`,
+          lane: anchor,
+          depth: depth + 1,
+          startRow: start?.row ?? row,
+          endRow: start ? row : undefined,
+          fallbackEndNs: row.ts_ns,
+          open: !start,
+          truncated: !start
+        })
+      );
+      continue;
+    }
+    if (kind === "tool_call_started") {
+      const open = { row, index: spans.length };
+      if (toolCallId) openToolsByCallId.set(toolCallId, open);
+      const key = `${anchor}\u0000${toolName}`;
+      const list = openToolsByActorTool.get(key) ?? [];
+      list.push(open);
+      openToolsByActorTool.set(key, list);
+      continue;
+    }
+    if (kind === "tool_call_finished") {
+      const key = `${anchor}\u0000${toolName}`;
+      const byTool = openToolsByActorTool.get(key) ?? [];
+      const start = toolCallId ? openToolsByCallId.get(toolCallId) : byTool[0];
+      if (start) {
+        if (toolCallId) openToolsByCallId.delete(toolCallId);
+        const remaining = byTool.filter((entry) => entry !== start);
+        openToolsByActorTool.set(key, remaining);
+      }
+      spans.push(
+        traceEventSpan({
+          source: "agent_events",
+          operation: "execute_tool",
+          label: `execute_tool ${toolName}`,
+          lane: anchor,
+          depth: depth + 2,
+          startRow: start?.row ?? row,
+          endRow: start ? row : undefined,
+          fallbackEndNs: row.ts_ns,
+          open: !start,
+          truncated: !start
+        })
+      );
+      continue;
+    }
+    if (traceShouldRenderPointEvent(kind)) {
+      spans.push(
+        traceEventSpan({
+          source: "agent_events",
+          operation: traceEventOperation(row),
+          label: traceEventPointLabel(row),
+          lane: anchor,
+          depth,
+          startRow: row,
+          fallbackEndNs: row.ts_ns,
+          open: false,
+          truncated: false
+        })
+      );
+    }
+  }
+
+  for (const actor of actors.values()) {
+    const first = actor.first;
+    if (!first) continue;
+    const terminal = actor.terminal;
+    spans.push(
+      traceEventSpan({
+        source: "agent_events",
+        operation: "invoke_agent",
+        label: `invoke_agent ${actor.agentName || shortKey(actor.anchor)}`,
+        lane: actor.anchor,
+        depth: actorDepth(actor.anchor),
+        startRow: first,
+        endRow: terminal,
+        fallbackEndNs: actor.rows.at(-1)?.ts_ns ?? first.ts_ns,
+        open: !terminal,
+        truncated: !terminal
+      })
+    );
+  }
+
+  for (const [anchor, turns] of openTurns) {
+    const actor = actors.get(anchor);
+    for (const turn of turns) {
+      spans.push(
+        traceEventSpan({
+          source: "agent_events",
+          operation: "chat",
+          label: `chat turn ${turn.index}`,
+          lane: anchor,
+          depth: actorDepth(anchor) + 1,
+          startRow: turn.row,
+          fallbackEndNs: actor?.rows.at(-1)?.ts_ns ?? turn.row.ts_ns,
+          open: true,
+          truncated: true
+        })
+      );
+    }
+  }
+
+  for (const [key, tools] of openToolsByActorTool) {
+    const [anchor, toolName] = key.split("\u0000");
+    const actor = actors.get(anchor);
+    for (const tool of tools) {
+      const callId = rawText(asRecord(asRecord(tool.row.record).attributes)["gen_ai.tool.call.id"]);
+      if (callId && !openToolsByCallId.has(callId)) continue;
+      spans.push(
+        traceEventSpan({
+          source: "agent_events",
+          operation: "execute_tool",
+          label: `execute_tool ${toolName || "tool"}`,
+          lane: anchor,
+          depth: actorDepth(anchor) + 2,
+          startRow: tool.row,
+          fallbackEndNs: actor?.rows.at(-1)?.ts_ns ?? tool.row.ts_ns,
+          open: true,
+          truncated: true
+        })
+      );
+    }
+  }
+
+  return spans.sort((a, b) => a.startNs - b.startNs || a.depth - b.depth || a.label.localeCompare(b.label));
+}
+
+function traceEventAnchor(row: AgentEventQueryRow, sessionToSpawn: Map<string, string>): string {
+  const record = asRecord(row.record);
+  const attrs = asRecord(record.attributes);
+  const spawnId = rawText(row.spawn_id || record.spawn_id);
+  if (spawnId) return spawnId;
+  const sessionId = rawText(row.session_id || record.session_id);
+  if (sessionId && sessionToSpawn.has(sessionId)) return sessionToSpawn.get(sessionId) ?? sessionId;
+  return sessionId || rawText(attrs["gen_ai.conversation.id"]) || "unknown-agent";
+}
+
+function traceEventSpan(input: {
+  source: TraceSource;
+  operation: string;
+  label: string;
+  lane: string;
+  depth: number;
+  startRow: AgentEventQueryRow;
+  endRow?: AgentEventQueryRow;
+  fallbackEndNs: number;
+  open: boolean;
+  truncated: boolean;
+}): TraceSpanRow {
+  const startRecord = asRecord(input.startRow.record);
+  const endRecord = asRecord(input.endRow?.record);
+  const attrs = { ...asRecord(startRecord.attributes), ...asRecord(endRecord.attributes) };
+  const payload = { ...asRecord(startRecord.payload), ...asRecord(endRecord.payload) };
+  const endNs = input.endRow ? Math.max(input.startRow.ts_ns, input.endRow.ts_ns) : Math.max(input.startRow.ts_ns, input.fallbackEndNs);
+  const keys = [input.startRow.key_hex, input.endRow?.key_hex].filter((key): key is string => Boolean(key));
+  const errorType = traceEventErrorType(input.startRow, input.endRow);
+  const tokenTotal = traceEventTokenTotal(startRecord, endRecord);
+  return {
+    id: `${input.source}:${input.operation}:${input.lane}:${input.startRow.key_hex}:${input.endRow?.key_hex ?? "open"}`,
+    keyHex: input.startRow.key_hex,
+    endKeyHex: input.endRow?.key_hex,
+    source: input.source,
+    lane: input.lane,
+    label: errorType ? `${input.label} / ${errorType}` : input.label,
+    operation: input.operation,
+    status: traceEventStatus(input.startRow, input.endRow),
+    startNs: input.startRow.ts_ns,
+    endNs,
+    count: keys.length || 1,
+    depth: input.depth,
+    open: input.open,
+    truncated: input.truncated,
+    physicalKeys: keys,
+    transcriptAnchor: rawText(input.startRow.spawn_id || input.startRow.session_id || attrs["gen_ai.conversation.id"] || input.lane),
+    toolCallId: rawText(attrs["gen_ai.tool.call.id"]),
+    toolName: rawText(attrs["gen_ai.tool.name"]),
+    tokenTotal: tokenTotal > 0 ? tokenTotal : undefined,
+    errorType,
+    raw: {
+      source_of_truth: "CF_AGENT_EVENTS bounded physical row scan",
+      operation: input.operation,
+      physical_keys: keys,
+      start: input.startRow,
+      end: input.endRow ?? null,
+      observed_end_ns: input.endRow ? undefined : input.fallbackEndNs,
+      attributes: attrs,
+      payload
+    }
+  };
+}
+
+function traceEventOperation(row: AgentEventQueryRow): string {
+  const attrs = asRecord(asRecord(row.record).attributes);
+  return rawText(attrs["gen_ai.operation.name"]) || row.kind;
+}
+
+function traceEventPointLabel(row: AgentEventQueryRow): string {
+  const record = asRecord(row.record);
+  const attrs = asRecord(record.attributes);
+  const reason = rawText(record.reason_code);
+  const stateTo = rawText(record.state_to);
+  const toolName = rawText(attrs["gen_ai.tool.name"]);
+  return [row.kind, toolName || stateTo || reason].filter(Boolean).join(" ");
+}
+
+function traceShouldRenderPointEvent(kind: string): boolean {
+  return !["turn_started", "turn_finished", "tool_call_started", "tool_call_finished"].includes(kind);
+}
+
+function traceIsTerminalEvent(row: AgentEventQueryRow): boolean {
+  return ["exited", "killed", "interrupted"].includes(row.kind);
+}
+
+function traceEventStatus(startRow: AgentEventQueryRow, endRow?: AgentEventQueryRow): FleetStatus {
+  const terminal = endRow ?? startRow;
+  const record = asRecord(terminal.record);
+  const endState = rawText(record.end_state);
+  const error = traceEventErrorType(startRow, endRow);
+  if (error || endState === "error" || terminal.kind === "killed") return "failed";
+  if (terminal.kind === "interrupted") return "needs_input";
+  if (endRow || traceIsTerminalEvent(terminal)) return "done";
+  return "working";
+}
+
+function traceEventErrorType(startRow: AgentEventQueryRow, endRow?: AgentEventQueryRow): string {
+  const records = [asRecord(startRow.record), asRecord(endRow?.record)];
+  for (const record of records) {
+    const attrs = asRecord(record.attributes);
+    const payload = asRecord(record.payload);
+    const errorType = rawText(attrs["error.type"] || payload.error_type || payload.error_code);
+    if (errorType) return errorType;
+    if (rawText(record.end_state) === "error") return rawText(record.reason_code) || "agent_error";
+  }
+  return "";
+}
+
+function traceEventTokenTotal(...records: Record<string, unknown>[]): number {
+  return records.reduce((sum, record) => {
+    const attrs = asRecord(record.attributes);
+    return (
+      sum +
+      numberOrZero(attrs["gen_ai.usage.input_tokens"]) +
+      numberOrZero(attrs["gen_ai.usage.output_tokens"]) +
+      numberOrZero(attrs["gen_ai.usage.cache_read.input_tokens"]) +
+      numberOrZero(attrs["gen_ai.usage.cache_creation.input_tokens"])
+    );
+  }, 0);
+}
+
+function traceTranscriptMatch(span: TraceSpanRow | undefined, rows: Record<string, unknown>[]) {
+  if (!span) return null;
+  const candidates = rows.filter((row) => traceTranscriptRowMatchesSpan(row, span));
+  if (!candidates.length) return null;
+  const withDistance = candidates
+    .map((row, index) => {
+      const record = asRecord(row.record);
+      const ts = Number(row.ts_ns ?? record.ts_ns ?? 0);
+      return {
+        row,
+        distance: Number.isFinite(ts) && ts > 0 ? Math.abs(ts - span.startNs) : Number.MAX_SAFE_INTEGER,
+        index
+      };
+    })
+    .sort((a, b) => a.distance - b.distance || a.index - b.index);
+  const row = withDistance[0].row;
+  const record = asRecord(row.record);
+  const line = rawText(row.line_no || record.line_no || row.seq || record.seq);
+  return {
+    row,
+    lineLabel: line || "unknown",
+    summary: traceTranscriptSummary(row)
+  };
+}
+
+function traceTranscriptRowMatchesSpan(row: Record<string, unknown>, span: TraceSpanRow): boolean {
+  const record = asRecord(row.record);
+  const ids = new Set([span.transcriptAnchor, span.lane].filter((value): value is string => Boolean(value)));
+  if (![row.spawn_id, row.session_id, record.spawn_id, record.session_id].some((value) => ids.has(rawText(value)))) return false;
+  if (span.toolCallId || span.toolName) {
+    const calls = asArray<Record<string, unknown>>(record.tool_calls).map(asRecord);
+    if (
+      calls.some(
+        (call) =>
+          (span.toolCallId && rawText(call.tool_call_id) === span.toolCallId) ||
+          (span.toolName && rawText(call.tool_name) === span.toolName)
+      )
+    ) {
+      return true;
+    }
+  }
+  return span.operation === "chat" || span.operation === "invoke_agent";
+}
+
+function traceTranscriptSummary(row: Record<string, unknown>): string {
+  const record = asRecord(row.record);
+  const text = rawText(record.content_summary).trim();
+  if (text) return text;
+  const sourceError = rawText(record.source_error || record.parse_error).trim();
+  if (sourceError) return sourceError;
+  const calls = asArray<Record<string, unknown>>(record.tool_calls).map(asRecord);
+  const names = calls.map((call) => rawText(call.tool_name)).filter(Boolean);
+  return names.length ? `tool: ${names.slice(0, 4).join(", ")}` : "Transcript metadata row";
 }
 
 function ToolActivity({
