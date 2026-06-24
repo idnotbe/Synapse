@@ -583,7 +583,7 @@ export function App() {
 
 function invalidateDashboardScope(queryClient: QueryClient, scope: DashboardPanelScope) {
   for (const queryKey of dashboardQueryKeysForScope(scope)) {
-    void queryClient.invalidateQueries({ queryKey });
+    void queryClient.invalidateQueries({ queryKey }, { cancelRefetch: false });
   }
 }
 

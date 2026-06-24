@@ -3250,7 +3250,7 @@ async fn dashboard_state(State(state): State<HttpState>, headers: HeaderMap) -> 
             agent_transcript_panel(&state)
         });
     let context = dashboard_timed_state_segment(&mut timing_segments, "context", || {
-        context_panel(&state, &tool_names)
+        context_panel(&state, &tool_names, &sessions)
     });
     let hygiene = dashboard_timed_state_segment(&mut timing_segments, "hygiene", || {
         hygiene_panel(&state, &tool_names)
@@ -5521,7 +5521,11 @@ fn dashboard_shell_jobs_panel() -> DashboardPanel {
     }
 }
 
-fn context_panel(state: &HttpState, tool_names: &BTreeSet<&str>) -> DashboardPanel {
+fn context_panel(
+    state: &HttpState,
+    tool_names: &BTreeSet<&str>,
+    sessions_panel: &DashboardPanel,
+) -> DashboardPanel {
     let workspace = if tool_names.contains("workspace_list") {
         match state
             .health_service
@@ -5551,34 +5555,29 @@ fn context_panel(state: &HttpState, tool_names: &BTreeSet<&str>) -> DashboardPan
 
     let mut inboxes = Vec::new();
     if tool_names.contains("agent_inbox") {
-        match state.health_service.session_list_impl(false) {
-            Ok(sessions) => {
-                for row in sessions.sessions.iter().take(50) {
-                    let spawn_id = row
-                        .registry
-                        .spawned_agent
-                        .as_ref()
-                        .map(|spawn| spawn.spawn_id.clone());
+        match dashboard_context_inbox_seeds(sessions_panel) {
+            Ok(seeds) => {
+                for seed in seeds.iter().take(50) {
                     match state.health_service.dashboard_agent_inbox_snapshot(
-                        &row.registry.session_id,
+                        &seed.session_id,
                         25,
                         Vec::new(),
                     ) {
                         Ok(inbox) => inboxes.push(DashboardContextInboxSurface {
-                            session_id: row.registry.session_id.clone(),
-                            spawn_id,
-                            agent_kind: row.registry.agent_kind.clone(),
-                            lifecycle: row.registry.lifecycle.clone(),
-                            source_of_truth: "CF_KV agent-mailbox/v1 peek via agent_inbox drain=false",
+                            session_id: seed.session_id.clone(),
+                            spawn_id: seed.spawn_id.clone(),
+                            agent_kind: seed.agent_kind.clone(),
+                            lifecycle: seed.lifecycle.clone(),
+                            source_of_truth: "CF_KV agent-mailbox/v1 peek via agent_inbox drain=false; sessions reused from dashboard state",
                             inbox: Some(inbox),
                             error: None,
                         }),
                         Err(error) => inboxes.push(DashboardContextInboxSurface {
-                            session_id: row.registry.session_id.clone(),
-                            spawn_id,
-                            agent_kind: row.registry.agent_kind.clone(),
-                            lifecycle: row.registry.lifecycle.clone(),
-                            source_of_truth: "CF_KV agent-mailbox/v1 peek via agent_inbox drain=false",
+                            session_id: seed.session_id.clone(),
+                            spawn_id: seed.spawn_id.clone(),
+                            agent_kind: seed.agent_kind.clone(),
+                            lifecycle: seed.lifecycle.clone(),
+                            source_of_truth: "CF_KV agent-mailbox/v1 peek via agent_inbox drain=false; sessions reused from dashboard state",
                             inbox: None,
                             error: Some(format!("{error:?}")),
                         }),
@@ -5587,13 +5586,13 @@ fn context_panel(state: &HttpState, tool_names: &BTreeSet<&str>) -> DashboardPan
             }
             Err(error) => {
                 inboxes.push(DashboardContextInboxSurface {
-                    session_id: "session_list".to_owned(),
+                    session_id: "dashboard_sessions".to_owned(),
                     spawn_id: None,
                     agent_kind: "dashboard".to_owned(),
                     lifecycle: "error".to_owned(),
-                    source_of_truth: "session_list + CF_KV agent-mailbox/v1",
+                    source_of_truth: "dashboard sessions panel + CF_KV agent-mailbox/v1",
                     inbox: None,
-                    error: Some(format!("{error:?}")),
+                    error: Some(error),
                 });
             }
         }
@@ -5607,6 +5606,84 @@ fn context_panel(state: &HttpState, tool_names: &BTreeSet<&str>) -> DashboardPan
             inboxes,
         },
     )
+}
+
+#[derive(Clone, Debug)]
+struct DashboardContextInboxSeed {
+    session_id: String,
+    spawn_id: Option<String>,
+    agent_kind: String,
+    lifecycle: String,
+}
+
+fn dashboard_context_inbox_seeds(
+    sessions_panel: &DashboardPanel,
+) -> Result<Vec<DashboardContextInboxSeed>, String> {
+    if sessions_panel.status != "ok" {
+        return Err(format!(
+            "sessions panel is {}, not ok: {}",
+            sessions_panel.status,
+            sessions_panel.error.as_deref().unwrap_or("no error detail")
+        ));
+    }
+    let full_rows = sessions_panel
+        .data
+        .get("sessions")
+        .and_then(serde_json::Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    if !full_rows.is_empty() {
+        return Ok(full_rows
+            .into_iter()
+            .filter_map(|row| dashboard_context_inbox_seed_from_full_row(&row))
+            .collect());
+    }
+    let compact_rows = sessions_panel
+        .data
+        .get("compact_sessions")
+        .and_then(serde_json::Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    Ok(compact_rows
+        .into_iter()
+        .filter_map(|row| dashboard_context_inbox_seed_from_compact_row(&row))
+        .collect())
+}
+
+fn dashboard_context_inbox_seed_from_full_row(
+    row: &serde_json::Value,
+) -> Option<DashboardContextInboxSeed> {
+    let session_id = dashboard_json_string(row, "session_id")?;
+    let agent_state = row.get("agent_state");
+    let spawned_agent = row.get("spawned_agent");
+    Some(DashboardContextInboxSeed {
+        session_id,
+        spawn_id: dashboard_json_string(row, "spawn_id")
+            .or_else(|| agent_state.and_then(|value| dashboard_json_string(value, "spawn_id")))
+            .or_else(|| spawned_agent.and_then(|value| dashboard_json_string(value, "spawn_id"))),
+        agent_kind: dashboard_json_string(row, "agent_kind")
+            .or_else(|| dashboard_json_string(row, "client_name"))
+            .unwrap_or_else(|| "agent".to_owned()),
+        lifecycle: dashboard_json_string(row, "lifecycle").unwrap_or_else(|| "unknown".to_owned()),
+    })
+}
+
+fn dashboard_context_inbox_seed_from_compact_row(
+    row: &serde_json::Value,
+) -> Option<DashboardContextInboxSeed> {
+    Some(DashboardContextInboxSeed {
+        session_id: dashboard_json_string(row, "session_id")?,
+        spawn_id: dashboard_json_string(row, "spawned_agent_id"),
+        agent_kind: dashboard_json_string(row, "agent_kind").unwrap_or_else(|| "agent".to_owned()),
+        lifecycle: dashboard_json_string(row, "lifecycle").unwrap_or_else(|| "unknown".to_owned()),
+    })
+}
+
+fn dashboard_json_string(row: &serde_json::Value, key: &str) -> Option<String> {
+    row.get(key)
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
 }
 
 fn approval_panel(
@@ -5785,11 +5862,11 @@ fn dashboard_unix_time_ms() -> u64 {
 }
 
 const DASHBOARD_CSS_FILE: &str = "dashboard-MWT7M6XZ.css";
-const DASHBOARD_JS_FILE: &str = "dashboard-BM0HUkPE.js";
+const DASHBOARD_JS_FILE: &str = "dashboard-CM35ZLIZ.js";
 const DASHBOARD_HTML: &str = include_str!("../../../../dashboard/dist/index.html");
 const DASHBOARD_CSS: &str =
     include_str!("../../../../dashboard/dist/assets/dashboard-MWT7M6XZ.css");
-const DASHBOARD_JS: &str = include_str!("../../../../dashboard/dist/assets/dashboard-BM0HUkPE.js");
+const DASHBOARD_JS: &str = include_str!("../../../../dashboard/dist/assets/dashboard-CM35ZLIZ.js");
 #[cfg(test)]
 const DASHBOARD_APP_SOURCE: &str = include_str!("../../../../dashboard/src/app.tsx");
 #[cfg(test)]
