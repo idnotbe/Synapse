@@ -955,6 +955,7 @@ function FleetView({
             questions={["Why is this agent in its current state?", "Which detail surface proves it?", "Is raw verification available without flooding the page?"]}
           >
             <AgentPeek agent={selectedAgent} />
+            <AgentAttentionPeek state={state} agent={selectedAgent} onDecided={onSpawned} />
           </Section>
           <Section
             title="System Shape"
@@ -2346,12 +2347,106 @@ function ApprovalsView({ state, onDecided }: { state?: DashboardState; onDecided
   );
 }
 
+function AgentAttentionPeek({
+  state,
+  agent,
+  onDecided
+}: {
+  state?: DashboardState;
+  agent?: AgentSummary;
+  onDecided?: () => void;
+}) {
+  const rows = useMemo(() => {
+    const ids = agentIdentifierSet(agent);
+    return parseApprovalRows(state?.approvals).filter((row) => approvalRowMatchesAgent(row, ids));
+  }, [agent, state]);
+  const [busy, setBusy] = useState<Record<string, boolean>>({});
+  const [errors, setErrors] = useState<Record<string, string>>({});
+  const [notes, setNotes] = useState<Record<string, string>>({});
+
+  async function decide(
+    approvalId: string,
+    decision: "approve" | "deny",
+    opts?: { editedArgs?: string; response?: string }
+  ) {
+    setBusy((prev) => ({ ...prev, [approvalId]: true }));
+    setErrors((prev) => {
+      const next = { ...prev };
+      delete next[approvalId];
+      return next;
+    });
+    try {
+      const note = notes[approvalId]?.trim();
+      await decideApproval({
+        approval_id: approvalId,
+        decision,
+        note: note || undefined,
+        edited_args: opts?.editedArgs,
+        response: opts?.response
+      });
+      onDecided?.();
+    } catch (err) {
+      setErrors((prev) => ({
+        ...prev,
+        [approvalId]: err instanceof Error ? err.message : String(err)
+      }));
+    } finally {
+      setBusy((prev) => ({ ...prev, [approvalId]: false }));
+    }
+  }
+
+  if (!agent) {
+    return null;
+  }
+
+  return (
+    <div className="mt-3 border-t border-border-subtle pt-3">
+      <div className="mb-2 flex items-center justify-between gap-3">
+        <h3 className="text-sm font-semibold tracking-normal text-primary">Selected Agent Attention</h3>
+        <span className="text-label uppercase text-muted">{rows.length} pending</span>
+      </div>
+      {rows.length ? (
+        <div className="space-y-3">
+          {rows.map((row) => (
+            <ApprovalCard
+              key={row.approvalId}
+              row={row}
+              busy={!!busy[row.approvalId]}
+              error={errors[row.approvalId]}
+              note={notes[row.approvalId] ?? ""}
+              selected={false}
+              showSelection={false}
+              onToggleSelected={() => {}}
+              onNote={(value) => setNotes((prev) => ({ ...prev, [row.approvalId]: value }))}
+              onApprove={(opts) => void decide(row.approvalId, "approve", opts)}
+              onDeny={() => void decide(row.approvalId, "deny")}
+            />
+          ))}
+        </div>
+      ) : (
+        <p className="text-sm text-muted">No pending approval or question for this agent.</p>
+      )}
+    </div>
+  );
+}
+
+function approvalRowMatchesAgent(row: ApprovalRow, ids: Set<string>): boolean {
+  if (ids.size === 0) return false;
+  if (row.spawnId && ids.has(row.spawnId)) return true;
+  const raw = asRecord(row.raw);
+  const requestedBy = rawText(raw.requested_by_session);
+  if (ids.has(requestedBy)) return true;
+  const requestedSuffix = requestedBy.split(":").pop() ?? "";
+  return ids.has(requestedSuffix) || rowMatchesAgent(raw, ids);
+}
+
 function ApprovalCard({
   row,
   busy,
   error,
   note,
   selected,
+  showSelection = true,
   onToggleSelected,
   onNote,
   onApprove,
@@ -2362,6 +2457,7 @@ function ApprovalCard({
   error?: string;
   note: string;
   selected: boolean;
+  showSelection?: boolean;
   onToggleSelected: () => void;
   onNote: (value: string) => void;
   onApprove: (opts: { editedArgs?: string; response?: string }) => void;
@@ -2426,14 +2522,16 @@ function ApprovalCard({
   return (
     <div className="rounded-lg border border-border bg-surface p-[var(--density-card-padding)]">
       <div className="flex items-start gap-3">
-        <input
-          type="checkbox"
-          aria-label="Select approval"
-          checked={batchSelectable && selected}
-          onChange={onToggleSelected}
-          disabled={!batchSelectable}
-          className="mt-1 size-4 accent-[var(--accent)]"
-        />
+        {showSelection ? (
+          <input
+            type="checkbox"
+            aria-label="Select approval"
+            checked={batchSelectable && selected}
+            onChange={onToggleSelected}
+            disabled={!batchSelectable}
+            className="mt-1 size-4 accent-[var(--accent)]"
+          />
+        ) : null}
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-2">
             <span className="rounded bg-canvas px-2 py-0.5 font-mono text-[11px] uppercase tracking-wide text-secondary">

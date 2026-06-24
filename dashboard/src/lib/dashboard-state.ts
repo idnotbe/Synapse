@@ -1290,8 +1290,8 @@ export function buildAgents(state?: DashboardState): AgentSummary[] {
     }
   }
 
-  if (attachedRegistry) {
-    return attachedRows
+  const attachedAgents = attachedRegistry
+    ? attachedRows
       .map((row) => {
         const process = asRecord(row.process);
         const killHandle = asRecord(row.kill_handle);
@@ -1332,8 +1332,8 @@ export function buildAgents(state?: DashboardState): AgentSummary[] {
           raw: row
         } satisfies AgentSummary;
       })
-      .filter((agent) => agent.id);
-  }
+      .filter((agent) => agent.id)
+    : [];
 
   const live = sessionRows.map((row) => {
     const agentState = asRecord(row.agent_state);
@@ -1342,20 +1342,23 @@ export function buildAgents(state?: DashboardState): AgentSummary[] {
     const stateName = rawText(agentState.state || row.lifecycle);
     const lastSeenMs = Number(row.last_seen_ms_ago);
     const lastAction = rawText(row.last_action);
+    const lifecycle = rawText(row.lifecycle);
+    const reason = rawText(agentState.reason_code);
+    const status = statusFromLiveSession(stateName, lastSeenMs, lastAction, reason);
     const stats = findTranscriptStats(transcriptStats, spawnId, sessionId);
     return {
       id: sessionId,
       spawnId: spawnId || undefined,
       killId: spawnId || sessionId,
-      killable: true,
+      killable: Boolean(spawnId) && lifecycle === "live" && status !== "done" && status !== "failed",
       kind: rawText(row.agent_kind || row.client_name || "agent"),
-      lifecycle: rawText(row.lifecycle),
-      status: statusFromLiveSession(stateName, lastSeenMs, lastAction, rawText(agentState.reason_code)),
+      lifecycle,
+      status,
       summary: stats?.latestSummary || lastAction || stateName || "session live",
       lastSeenMs: Number.isFinite(lastSeenMs) ? lastSeenMs : undefined,
       lastAction,
       target: row.active_target ? rawText(row.active_target) : "",
-      reason: rawText(agentState.reason_code),
+      reason,
       diffStats: {
         events: 1,
         transcripts: stats?.count ?? 0,
@@ -1424,7 +1427,18 @@ export function buildAgents(state?: DashboardState): AgentSummary[] {
     } satisfies AgentSummary;
   });
 
-  return [...live, ...historical].filter((agent) => agent.id);
+  return dedupeAgentSummaries([...attachedAgents, ...live, ...historical]);
+}
+
+function dedupeAgentSummaries(agents: AgentSummary[]): AgentSummary[] {
+  const seen = new Set<string>();
+  return agents.filter((agent) => {
+    if (!agent.id) return false;
+    const ids = [agent.id, agent.spawnId, agent.killId].filter((value): value is string => Boolean(value));
+    if (ids.some((id) => seen.has(id))) return false;
+    ids.forEach((id) => seen.add(id));
+    return true;
+  });
 }
 
 export async function createAgentTask(request: AgentTaskCreateRequest): Promise<AgentTaskMutationResponse> {
