@@ -140,7 +140,9 @@ const NORMAL_ALLOWED_EXACT: &[&str] = &[
     "set_capture_target",
     "set_perception_mode",
     "set_target",
+    "storage_gc_once",
     "storage_inspect",
+    "storage_put_probe_rows",
     "suggestion_accept",
     "suggestion_list",
     "suggestion_tick",
@@ -150,7 +152,11 @@ const NORMAL_ALLOWED_EXACT: &[&str] = &[
     "target_claim_status",
     "target_release",
     "timeline_digest",
+    "timeline_exclusions",
     "timeline_get",
+    "timeline_pause",
+    "timeline_purge",
+    "timeline_resume",
     "timeline_search",
     "timeline_stats",
     "tool_profile_set",
@@ -1604,6 +1610,12 @@ mod tests {
         assert!(tools.contains(&"profile_authoring_generate".to_owned()));
         assert!(tools.contains(&"profile_authoring_inspect".to_owned()));
         assert!(tools.contains(&"profile_authoring_list".to_owned()));
+        assert!(tools.contains(&"timeline_pause".to_owned()));
+        assert!(tools.contains(&"timeline_resume".to_owned()));
+        assert!(tools.contains(&"timeline_exclusions".to_owned()));
+        assert!(tools.contains(&"timeline_purge".to_owned()));
+        assert!(tools.contains(&"storage_put_probe_rows".to_owned()));
+        assert!(tools.contains(&"storage_gc_once".to_owned()));
         assert!(!tools.contains(&"act_click".to_owned()));
         assert!(!tools.contains(&"act_type".to_owned()));
         assert!(!tools.contains(&"release_all".to_owned()));

@@ -670,10 +670,11 @@ impl SynapseService {
                 + Self::everquest_world_model_tool_router()
                 + Self::everquest_world_summary_tool_router();
         }
-        // Gate test-only storage probes off the default agent surface; they
-        // remain available (and callable) only when SYNAPSE_DEBUG_TOOLS is set.
+        // Gate synthetic disk-pressure simulation off the default agent
+        // surface; it remains available only when SYNAPSE_DEBUG_TOOLS is set.
+        // `storage_put_probe_rows` is a real diagnostic write tool used by
+        // storage GC FSV to seed bounded probe rows before eviction.
         if !debug_tools_enabled() {
-            router.remove_route("storage_put_probe_rows");
             router.remove_route("storage_pressure_sample");
         }
         router
