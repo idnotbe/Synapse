@@ -158,6 +158,7 @@ struct Runner {
     successful_workspace_puts: Vec<JsonObject>,
     task_tool_contract: Option<TaskToolContract>,
     completed_task_tools: BTreeSet<String>,
+    completed_task_tool_counts: BTreeMap<String, usize>,
     completed_task_tool_sources: BTreeMap<String, String>,
     approval_wait_elapsed: Duration,
     http: reqwest::Client,
@@ -189,6 +190,7 @@ struct TaskToolContract {
     allowed_tools: BTreeSet<String>,
     ordered_tools: Vec<String>,
     argument_templates: BTreeMap<String, JsonObject>,
+    step_argument_templates: Vec<Option<JsonObject>>,
     source: &'static str,
 }
 
@@ -234,12 +236,27 @@ impl TaskToolContract {
         Value::Object(templates)
     }
 
+    fn step_argument_templates_json(&self) -> Value {
+        Value::Array(
+            self.step_argument_templates
+                .iter()
+                .map(|template| {
+                    template
+                        .as_ref()
+                        .map(|args| Value::Object(args.clone()))
+                        .unwrap_or(Value::Null)
+                })
+                .collect(),
+        )
+    }
+
     fn to_json(&self) -> Value {
         json!({
             "source": self.source,
             "allowed_tools": self.allowed_tools_json(),
             "ordered_tools": self.ordered_tools_json(),
             "argument_templates": self.argument_templates_json(),
+            "step_argument_templates": self.step_argument_templates_json(),
         })
     }
 
@@ -248,6 +265,7 @@ impl TaskToolContract {
             "allowed_tools": self.allowed_tools_json(),
             "ordered_tools": self.ordered_tools_json(),
             "argument_templates": self.argument_templates_json(),
+            "step_argument_templates": self.step_argument_templates_json(),
         })
     }
 }
@@ -493,6 +511,7 @@ impl Runner {
             successful_workspace_puts: Vec::new(),
             task_tool_contract,
             completed_task_tools: BTreeSet::new(),
+            completed_task_tool_counts: BTreeMap::new(),
             completed_task_tool_sources: BTreeMap::new(),
             approval_wait_elapsed: Duration::ZERO,
             http,
@@ -617,7 +636,7 @@ impl Runner {
                 }
                 let missing_tools = missing_task_contract_tools(
                     &self.task_tool_contract,
-                    &self.completed_task_tools,
+                    &self.completed_task_tool_counts,
                 );
                 if !missing_tools.is_empty() {
                     bail!(
@@ -824,7 +843,7 @@ impl Runner {
 
         if let Some(reason) = task_contract_out_of_order_rejection(
             self.task_tool_contract.as_ref(),
-            &self.completed_task_tools,
+            &self.completed_task_tool_counts,
             &tool_name,
         ) {
             let terminal = self
@@ -836,11 +855,16 @@ impl Runner {
             return Ok(());
         }
 
+        let args = self
+            .normalize_trusted_exact_contract_args(&call, &tool_name, args, routed)
+            .await?;
+
         if let Some(reason) = model_tool_call_pre_gate_rejection(
             &tool_name,
             &args,
             self.synapse_tool_exists(&tool_name),
             self.task_tool_contract.as_ref(),
+            &self.completed_task_tool_counts,
         ) {
             let terminal = self
                 .record_model_tool_call_invalid(&call, &tool_name, routed, &reason)
@@ -882,7 +906,7 @@ impl Runner {
                 let transport_terminal = tool_call_error_is_terminal(&error);
                 let exact_required_tool_failed = task_contract_required_tool_failure_is_terminal(
                     self.task_tool_contract.as_ref(),
-                    &self.completed_task_tools,
+                    &self.completed_task_tool_counts,
                     &tool_name,
                     &args,
                 );
@@ -969,7 +993,7 @@ impl Runner {
         let result_text = bounded_result_text(&model_tool_result_value(
             &result_value,
             &self.task_tool_contract,
-            &self.completed_task_tools,
+            &self.completed_task_tool_counts,
             &self.successful_workspace_puts,
         ));
         self.messages.push(json!({
@@ -1021,7 +1045,7 @@ impl Runner {
     fn should_defer_repeated_workspace_put_for_contract(&self, tool_name: &str) -> bool {
         workspace_put_contract_repetition_should_defer(
             &self.task_tool_contract,
-            &self.completed_task_tools,
+            &self.completed_task_tool_counts,
             tool_name,
         )
     }
@@ -1029,7 +1053,7 @@ impl Runner {
     fn should_defer_repeated_completed_task_tool_for_contract(&self, tool_name: &str) -> bool {
         task_contract_completed_tool_repetition_should_defer(
             &self.task_tool_contract,
-            &self.completed_task_tools,
+            &self.completed_task_tool_counts,
             tool_name,
         )
     }
@@ -1048,7 +1072,7 @@ impl Runner {
         args: &JsonObject,
     ) -> anyhow::Result<()> {
         let missing_tools =
-            missing_task_contract_tools(&self.task_tool_contract, &self.completed_task_tools);
+            missing_task_contract_tools(&self.task_tool_contract, &self.completed_task_tool_counts);
         let completion_deferred = !missing_tools.is_empty();
         let result_value = json!({
             "ok": true,
@@ -1143,7 +1167,7 @@ impl Runner {
             "arguments": args,
             "task_contract_progress": task_contract_progress_value(
                 &self.task_tool_contract,
-                &self.completed_task_tools,
+                &self.completed_task_tool_counts,
                 &self.successful_workspace_puts,
             ),
             "completion_deferred": true,
@@ -1157,7 +1181,7 @@ impl Runner {
                 "message": "workspace_put already succeeded and was read back in this run",
             }),
             &self.task_tool_contract,
-            &self.completed_task_tools,
+            &self.completed_task_tool_counts,
             &self.successful_workspace_puts,
         ));
         self.messages.push(json!({
@@ -1214,7 +1238,7 @@ impl Runner {
             "arguments": args,
             "task_contract_progress": task_contract_progress_value(
                 &self.task_tool_contract,
-                &self.completed_task_tools,
+                &self.completed_task_tool_counts,
                 &self.successful_workspace_puts,
             ),
             "completion_deferred": true,
@@ -1229,7 +1253,7 @@ impl Runner {
                 "message": "that function already completed; do not call it again",
             }),
             &self.task_tool_contract,
-            &self.completed_task_tools,
+            &self.completed_task_tool_counts,
             &self.successful_workspace_puts,
         ));
         self.messages.push(json!({
@@ -1291,6 +1315,7 @@ impl Runner {
                 tool_name,
                 &args,
                 self.task_tool_contract.as_ref(),
+                &self.completed_task_tool_counts,
             );
         let reason_code = if exact_contract_authorized {
             "trusted_unattended_exact_contract"
@@ -1323,6 +1348,56 @@ impl Runner {
         Ok(ToolGate::Allow(args))
     }
 
+    async fn normalize_trusted_exact_contract_args(
+        &mut self,
+        call: &OpenAiToolCall,
+        tool_name: &str,
+        args: JsonObject,
+        routed: bool,
+    ) -> anyhow::Result<JsonObject> {
+        let Some(contract_args) = trusted_exact_contract_normalized_args(
+            self.cli.trusted_unattended_exact_contract,
+            tool_name,
+            &args,
+            self.task_tool_contract.as_ref(),
+            &self.completed_task_tool_counts,
+        ) else {
+            return Ok(args);
+        };
+        let model_args = args;
+        self.write_line(json!({
+            "type": "local.tool_call.arguments_normalized",
+            "conversation_id": self.conversation_id,
+            "model": self.registry.model_id,
+            "turn_index": self.turn_count,
+            "tool_name": tool_name,
+            "tool_call_id": call.id,
+            "routed_tool_name": if routed { Some(tool_name) } else { None },
+            "reason_code": "trusted_unattended_exact_contract_arguments_normalized",
+            "model_arguments": Value::Object(model_args),
+            "contract_arguments": Value::Object(contract_args.clone()),
+            "task_contract_progress": task_contract_progress_value(
+                &self.task_tool_contract,
+                &self.completed_task_tool_counts,
+                &self.successful_workspace_puts,
+            ),
+            "tool_exposure": self.tool_exposure.as_str(),
+        }))?;
+        self.post_event(json!({
+            "event": "state_changed",
+            "session_id": self.mcp_session_id,
+            "conversation_id": self.conversation_id,
+            "model": self.registry.model_id,
+            "registry_name": self.registry.name,
+            "state_to": "live",
+            "reason_code": "trusted_unattended_exact_contract_arguments_normalized",
+            "tool_name": tool_name,
+            "tool_call_id": call.id,
+        }))
+        .await?;
+        Ok(contract_args)
+    }
+
     async fn record_model_tool_call_invalid(
         &mut self,
         call: &OpenAiToolCall,
@@ -1350,7 +1425,7 @@ impl Runner {
         };
         let task_contract_progress = task_contract_progress_value(
             &self.task_tool_contract,
-            &self.completed_task_tools,
+            &self.completed_task_tool_counts,
             &self.successful_workspace_puts,
         );
         let mut model_feedback = json!({
@@ -1368,7 +1443,7 @@ impl Runner {
         });
         if let Some(progress) = task_contract_model_status_value(
             &self.task_tool_contract,
-            &self.completed_task_tools,
+            &self.completed_task_tool_counts,
             &self.successful_workspace_puts,
         ) {
             attach_model_contract_status_feedback(&mut model_feedback, progress);
@@ -1484,7 +1559,7 @@ impl Runner {
         let detail = format!("TOOL_CALL_ARGUMENTS_NOT_JSON: {error}");
         let task_contract_progress = task_contract_progress_value(
             &self.task_tool_contract,
-            &self.completed_task_tools,
+            &self.completed_task_tool_counts,
             &self.successful_workspace_puts,
         );
         let mut result_value = json!({ "error": detail });
@@ -1503,7 +1578,7 @@ impl Runner {
         });
         if let Some(progress) = task_contract_model_status_value(
             &self.task_tool_contract,
-            &self.completed_task_tools,
+            &self.completed_task_tool_counts,
             &self.successful_workspace_puts,
         ) {
             attach_model_contract_status_feedback(&mut model_feedback, progress);
@@ -1751,11 +1826,15 @@ impl Runner {
 
     fn messages_for_current_turn(&self) -> Vec<Value> {
         let mut messages = self.messages.clone();
-        if self.tool_exposure == ToolExposure::Internalized {
+        if matches!(
+            self.tool_exposure,
+            ToolExposure::Internalized | ToolExposure::Routed
+        ) {
             if let Some(contract) = &self.task_tool_contract {
-                if let Some(message) =
-                    task_contract_next_instruction_message(contract, &self.completed_task_tools)
-                {
+                if let Some(message) = task_contract_next_instruction_message(
+                    contract,
+                    &self.completed_task_tool_counts,
+                ) {
                     messages.push(message);
                 }
             }
@@ -1764,12 +1843,15 @@ impl Runner {
     }
 
     fn openai_tools_for_current_turn(&self) -> anyhow::Result<TurnToolSelection> {
-        if self.tool_exposure == ToolExposure::Internalized {
+        if matches!(
+            self.tool_exposure,
+            ToolExposure::Internalized | ToolExposure::Routed
+        ) {
             if let Some(contract) = &self.task_tool_contract {
-                return exact_contract_turn_tools_for_internalized(
+                return exact_contract_turn_tools(
                     &self.tools,
                     contract,
-                    &self.completed_task_tools,
+                    &self.completed_task_tool_counts,
                 );
             }
         }
@@ -1878,6 +1960,7 @@ impl Runner {
                     .cloned()
                     .map(Value::String)
                     .collect::<Vec<_>>(),
+                "completed_task_tool_counts": self.completed_task_tool_counts.clone(),
                 "completed_task_tool_sources": self.completed_task_tool_sources.clone(),
                 "usage": self.total_usage,
                 "completed_at_unix_ms": unix_time_ms_now(),
@@ -1945,9 +2028,15 @@ impl Runner {
             return;
         };
         if contract.allowed_tools.contains(tool_name) {
+            let count = self
+                .completed_task_tool_counts
+                .entry(tool_name.to_owned())
+                .or_insert(0);
+            *count = count.saturating_add(1);
+            let occurrence_key = format!("{tool_name}#{}", *count);
             self.completed_task_tools.insert(tool_name.to_owned());
             self.completed_task_tool_sources
-                .entry(tool_name.to_owned())
+                .entry(occurrence_key)
                 .or_insert_with(|| source.to_owned());
         }
     }
@@ -1965,7 +2054,7 @@ impl Runner {
     fn attach_task_contract_progress(&self, result_value: &mut Value) {
         let Some(progress) = task_contract_progress_value(
             &self.task_tool_contract,
-            &self.completed_task_tools,
+            &self.completed_task_tool_counts,
             &self.successful_workspace_puts,
         ) else {
             return;
@@ -1984,12 +2073,14 @@ impl Runner {
     }
 
     fn should_complete_verified_task_contract(&self) -> bool {
-        verified_workspace_contract_complete(&self.task_tool_contract, &self.completed_task_tools)
-            || verified_workspace_checkpoint_contract_complete(
-                &self.task_tool_contract,
-                &self.completed_task_tools,
-                &self.successful_workspace_puts,
-            )
+        verified_workspace_contract_complete(
+            &self.task_tool_contract,
+            &self.completed_task_tool_counts,
+        ) || verified_workspace_checkpoint_contract_complete(
+            &self.task_tool_contract,
+            &self.completed_task_tool_counts,
+            &self.successful_workspace_puts,
+        )
     }
 
     async fn record_verified_workspace_contract_completion(&mut self) -> anyhow::Result<()> {
@@ -2012,6 +2103,7 @@ impl Runner {
                 .cloned()
                 .map(Value::String)
                 .collect::<Vec<_>>(),
+            "completed_task_tool_counts": self.completed_task_tool_counts.clone(),
             "completed_task_tool_sources": self.completed_task_tool_sources.clone(),
         }))?;
         self.post_event(json!({
@@ -2031,6 +2123,7 @@ impl Runner {
                 .cloned()
                 .map(Value::String)
                 .collect::<Vec<_>>(),
+            "completed_task_tool_counts": self.completed_task_tool_counts.clone(),
             "completed_task_tool_sources": self.completed_task_tool_sources.clone(),
         }))
         .await?;
@@ -2119,6 +2212,7 @@ fn model_tool_call_pre_gate_rejection(
     args: &JsonObject,
     tool_present: bool,
     task_tool_contract: Option<&TaskToolContract>,
+    completed_task_tool_counts: &BTreeMap<String, usize>,
 ) -> Option<ModelToolCallRejection> {
     if !tool_present {
         return Some(ModelToolCallRejection::recoverable(
@@ -2138,7 +2232,9 @@ fn model_tool_call_pre_gate_rejection(
                 "Retry using only an allowed task tool with the exact user-provided arguments.",
             ));
         }
-        if let Some(rejection) = task_contract_argument_rejection(contract, tool_name, args) {
+        if let Some(rejection) =
+            task_contract_argument_rejection(contract, completed_task_tool_counts, tool_name, args)
+        {
             return Some(rejection);
         }
     }
@@ -2166,11 +2262,20 @@ fn local_agent_exact_contract_gate_bypass_allowed(
     tool_name: &str,
     args: &JsonObject,
     task_tool_contract: Option<&TaskToolContract>,
+    completed_task_tool_counts: &BTreeMap<String, usize>,
 ) -> bool {
     let Some(contract) = task_tool_contract else {
         return false;
     };
     if !contract.allowed_tools.contains(tool_name) {
+        return false;
+    }
+    let Some((step_index, next_tool)) =
+        next_missing_task_contract_step(contract, completed_task_tool_counts)
+    else {
+        return false;
+    };
+    if next_tool != tool_name {
         return false;
     }
     if crate::server::permission_policy::classify(
@@ -2184,10 +2289,54 @@ fn local_agent_exact_contract_gate_bypass_allowed(
     if local_agent_exact_contract_gate_bypass_denied_tool(tool_name) {
         return false;
     }
-    match contract.argument_templates.get(tool_name) {
+    match contract
+        .step_argument_templates
+        .get(step_index)
+        .and_then(Option::as_ref)
+    {
         Some(expected) => expected == args,
         None => false,
     }
+}
+
+fn trusted_exact_contract_normalized_args(
+    trusted: bool,
+    tool_name: &str,
+    args: &JsonObject,
+    task_tool_contract: Option<&TaskToolContract>,
+    completed_task_tool_counts: &BTreeMap<String, usize>,
+) -> Option<JsonObject> {
+    if !trusted {
+        return None;
+    }
+    let contract = task_tool_contract?;
+    if !contract.allowed_tools.contains(tool_name) {
+        return None;
+    }
+    let (step_index, next_tool) =
+        next_missing_task_contract_step(contract, completed_task_tool_counts)?;
+    if next_tool != tool_name {
+        return None;
+    }
+    if local_agent_exact_contract_gate_bypass_denied_tool(tool_name) {
+        return None;
+    }
+    let expected = contract
+        .step_argument_templates
+        .get(step_index)
+        .and_then(Option::as_ref)?;
+    if expected == args {
+        return None;
+    }
+    if crate::server::permission_policy::classify(
+        &gate_tool_label(tool_name),
+        &Value::Object(expected.clone()),
+    )
+    .destructive()
+    {
+        return None;
+    }
+    Some(expected.clone())
 }
 
 fn local_agent_exact_contract_gate_bypass_denied_tool(tool_name: &str) -> bool {
@@ -2275,10 +2424,19 @@ fn local_agent_runner_operator_control_tool(tool_name: &str) -> bool {
 
 fn task_contract_argument_rejection(
     contract: &TaskToolContract,
+    completed_task_tool_counts: &BTreeMap<String, usize>,
     tool_name: &str,
     args: &JsonObject,
 ) -> Option<ModelToolCallRejection> {
-    let expected = contract.argument_templates.get(tool_name)?;
+    let (step_index, next_tool) =
+        next_missing_task_contract_step(contract, completed_task_tool_counts)?;
+    if next_tool != tool_name {
+        return None;
+    }
+    let expected = contract
+        .step_argument_templates
+        .get(step_index)
+        .and_then(Option::as_ref)?;
     if expected == args {
         return None;
     }
@@ -2339,9 +2497,24 @@ fn infer_task_tool_contract(task: &str, tools: &[Tool]) -> Option<TaskToolContra
     }
     let mut mentioned_tools = tools
         .iter()
-        .filter_map(|tool| {
+        .flat_map(|tool| {
             let name = tool.name.as_ref();
-            task_tool_name_position(task, name).map(|position| (position, name.to_owned()))
+            let positions = task_tool_name_positions(task, name)
+                .into_iter()
+                .filter(|position| !task_tool_mention_is_denied(task, *position))
+                .collect::<Vec<_>>();
+            let Some(first_position) = positions.first().copied() else {
+                return Vec::new();
+            };
+            if task_tool_argument_template(task, first_position).is_some() {
+                positions
+                    .into_iter()
+                    .filter(|position| task_tool_argument_template(task, *position).is_some())
+                    .map(|position| (position, name.to_owned()))
+                    .collect::<Vec<_>>()
+            } else {
+                vec![(first_position, name.to_owned())]
+            }
         })
         .collect::<Vec<_>>();
     mentioned_tools.sort_by(|(left_position, left_name), (right_position, right_name)| {
@@ -2354,6 +2527,32 @@ fn infer_task_tool_contract(task: &str, tools: &[Tool]) -> Option<TaskToolContra
         .map(|(_, name)| name.clone())
         .collect::<Vec<_>>();
     let allowed_tools = ordered_tools.iter().cloned().collect::<BTreeSet<_>>();
+    let argument_templates_by_name = mentioned_tools
+        .iter()
+        .map(|(_, name)| {
+            (
+                name.clone(),
+                task_tool_argument_templates_for_name(task, name),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let mut argument_template_indexes = BTreeMap::<String, usize>::new();
+    let step_argument_templates = mentioned_tools
+        .iter()
+        .map(|(position, name)| {
+            task_tool_argument_template(task, *position).or_else(|| {
+                let index = argument_template_indexes.entry(name.clone()).or_insert(0);
+                let template = argument_templates_by_name
+                    .get(name)
+                    .and_then(|templates| templates.get(*index))
+                    .cloned();
+                if template.is_some() {
+                    *index += 1;
+                }
+                template
+            })
+        })
+        .collect::<Vec<_>>();
     let argument_templates = mentioned_tools
         .iter()
         .filter_map(|(_, name)| {
@@ -2367,14 +2566,9 @@ fn infer_task_tool_contract(task: &str, tools: &[Tool]) -> Option<TaskToolContra
         allowed_tools,
         ordered_tools,
         argument_templates,
+        step_argument_templates,
         source: "task_exact_tool_phrase",
     })
-}
-
-fn task_tool_name_position(task: &str, tool_name: &str) -> Option<usize> {
-    task_tool_name_positions(task, tool_name)
-        .into_iter()
-        .find(|position| !task_tool_mention_is_denied(task, *position))
 }
 
 fn task_tool_name_positions(task: &str, tool_name: &str) -> Vec<usize> {
@@ -2453,6 +2647,14 @@ fn task_tool_argument_template_for_name(task: &str, tool_name: &str) -> Option<J
         .find_map(|position| task_tool_argument_template(task, position))
 }
 
+fn task_tool_argument_templates_for_name(task: &str, tool_name: &str) -> Vec<JsonObject> {
+    task_tool_name_positions(task, tool_name)
+        .into_iter()
+        .filter(|position| !task_tool_mention_is_denied(task, *position))
+        .filter_map(|position| task_tool_argument_template(task, position))
+        .collect()
+}
+
 fn parse_json_object_at(input: &str, object_start: usize) -> anyhow::Result<JsonObject> {
     let mut depth = 0usize;
     let mut in_string = false;
@@ -2490,19 +2692,80 @@ fn parse_json_object_at(input: &str, object_start: usize) -> anyhow::Result<Json
 
 fn missing_task_contract_tools(
     task_tool_contract: &Option<TaskToolContract>,
-    completed_task_tools: &BTreeSet<String>,
+    completed_task_tool_counts: &BTreeMap<String, usize>,
 ) -> Vec<String> {
+    task_tool_contract
+        .as_ref()
+        .map(|contract| {
+            missing_task_contract_tools_for_contract(contract, completed_task_tool_counts)
+        })
+        .unwrap_or_default()
+}
+
+fn missing_task_contract_tools_for_contract(
+    contract: &TaskToolContract,
+    completed_task_tool_counts: &BTreeMap<String, usize>,
+) -> Vec<String> {
+    let mut remaining_counts = completed_task_tool_counts.clone();
+    contract
+        .ordered_tools
+        .iter()
+        .filter_map(|tool| {
+            let count = remaining_counts.entry(tool.clone()).or_insert(0);
+            if *count > 0 {
+                *count -= 1;
+                None
+            } else {
+                Some(tool.clone())
+            }
+        })
+        .collect()
+}
+
+fn required_task_contract_tool_count(
+    task_tool_contract: &Option<TaskToolContract>,
+    tool_name: &str,
+) -> usize {
     task_tool_contract
         .as_ref()
         .map(|contract| {
             contract
                 .ordered_tools
                 .iter()
-                .filter(|tool| !completed_task_tools.contains(*tool))
-                .cloned()
-                .collect::<Vec<_>>()
+                .filter(|tool| tool.as_str() == tool_name)
+                .count()
         })
         .unwrap_or_default()
+}
+
+fn completed_task_contract_tool_count(
+    completed_task_tool_counts: &BTreeMap<String, usize>,
+    tool_name: &str,
+) -> usize {
+    completed_task_tool_counts
+        .get(tool_name)
+        .copied()
+        .unwrap_or_default()
+}
+
+fn completed_task_contract_tools(
+    contract: &TaskToolContract,
+    completed_task_tool_counts: &BTreeMap<String, usize>,
+) -> Vec<String> {
+    let mut remaining_counts = completed_task_tool_counts.clone();
+    contract
+        .ordered_tools
+        .iter()
+        .filter_map(|tool| {
+            let count = remaining_counts.entry(tool.clone()).or_insert(0);
+            if *count > 0 {
+                *count -= 1;
+                Some(tool.clone())
+            } else {
+                None
+            }
+        })
+        .collect()
 }
 
 fn final_answer_after_failed_only_tools_should_fail(
@@ -2519,23 +2782,41 @@ fn final_answer_after_failed_only_tools_should_fail(
 
 fn next_missing_task_contract_tool<'a>(
     contract: &'a TaskToolContract,
-    completed_task_tools: &BTreeSet<String>,
+    completed_task_tool_counts: &BTreeMap<String, usize>,
 ) -> Option<&'a str> {
+    next_missing_task_contract_step(contract, completed_task_tool_counts).map(|(_, tool)| tool)
+}
+
+fn next_missing_task_contract_step<'a>(
+    contract: &'a TaskToolContract,
+    completed_task_tool_counts: &BTreeMap<String, usize>,
+) -> Option<(usize, &'a str)> {
+    let mut remaining_counts = completed_task_tool_counts.clone();
     contract
         .ordered_tools
         .iter()
-        .find(|tool| !completed_task_tools.contains(*tool))
-        .map(String::as_str)
+        .enumerate()
+        .find_map(|(index, tool)| {
+            let count = remaining_counts.entry(tool.clone()).or_insert(0);
+            if *count > 0 {
+                *count -= 1;
+                None
+            } else {
+                Some((index, tool.as_str()))
+            }
+        })
 }
 
 fn task_contract_next_instruction_message(
     contract: &TaskToolContract,
-    completed_task_tools: &BTreeSet<String>,
+    completed_task_tool_counts: &BTreeMap<String, usize>,
 ) -> Option<Value> {
-    let next_tool = next_missing_task_contract_tool(contract, completed_task_tools)?;
+    let (step_index, next_tool) =
+        next_missing_task_contract_step(contract, completed_task_tool_counts)?;
     let arguments = contract
-        .argument_templates
-        .get(next_tool)
+        .step_argument_templates
+        .get(step_index)
+        .and_then(Option::as_ref)
         .cloned()
         .unwrap_or_default();
     let arguments_text =
@@ -2550,60 +2831,66 @@ fn task_contract_next_instruction_message(
 
 fn workspace_put_contract_repetition_should_defer(
     task_tool_contract: &Option<TaskToolContract>,
-    completed_task_tools: &BTreeSet<String>,
+    completed_task_tool_counts: &BTreeMap<String, usize>,
     tool_name: &str,
 ) -> bool {
     tool_name == "workspace_put"
-        && completed_task_tools.contains("workspace_put")
-        && !missing_task_contract_tools(task_tool_contract, completed_task_tools).is_empty()
+        && completed_task_contract_tool_count(completed_task_tool_counts, "workspace_put")
+            >= required_task_contract_tool_count(task_tool_contract, "workspace_put")
+        && !missing_task_contract_tools(task_tool_contract, completed_task_tool_counts).is_empty()
 }
 
 fn task_contract_completed_tool_repetition_should_defer(
     task_tool_contract: &Option<TaskToolContract>,
-    completed_task_tools: &BTreeSet<String>,
+    completed_task_tool_counts: &BTreeMap<String, usize>,
     tool_name: &str,
 ) -> bool {
     let Some(contract) = task_tool_contract else {
         return false;
     };
     contract.allowed_tools.contains(tool_name)
-        && completed_task_tools.contains(tool_name)
-        && !missing_task_contract_tools(task_tool_contract, completed_task_tools).is_empty()
+        && completed_task_contract_tool_count(completed_task_tool_counts, tool_name)
+            >= required_task_contract_tool_count(task_tool_contract, tool_name)
+        && !missing_task_contract_tools(task_tool_contract, completed_task_tool_counts).is_empty()
 }
 
 fn task_contract_required_tool_failure_is_terminal(
     contract: Option<&TaskToolContract>,
-    completed_task_tools: &BTreeSet<String>,
+    completed_task_tool_counts: &BTreeMap<String, usize>,
     tool_name: &str,
     args: &JsonObject,
 ) -> bool {
     let Some(contract) = contract else {
         return false;
     };
-    if next_missing_task_contract_tool(contract, completed_task_tools) != Some(tool_name) {
+    let Some((step_index, next_tool)) =
+        next_missing_task_contract_step(contract, completed_task_tool_counts)
+    else {
+        return false;
+    };
+    if next_tool != tool_name {
         return false;
     }
     contract
-        .argument_templates
-        .get(tool_name)
+        .step_argument_templates
+        .get(step_index)
+        .and_then(Option::as_ref)
         .is_some_and(|expected| expected == args)
 }
 
 fn task_contract_out_of_order_rejection(
     contract: Option<&TaskToolContract>,
-    completed_task_tools: &BTreeSet<String>,
+    completed_task_tool_counts: &BTreeMap<String, usize>,
     tool_name: &str,
 ) -> Option<ModelToolCallRejection> {
     let contract = contract?;
-    if !contract.allowed_tools.contains(tool_name) || completed_task_tools.contains(tool_name) {
+    if !contract.allowed_tools.contains(tool_name)
+        || completed_task_contract_tool_count(completed_task_tool_counts, tool_name)
+            >= required_task_contract_tool_count(&Some(contract.clone()), tool_name)
+    {
         return None;
     }
-    let remaining = contract
-        .ordered_tools
-        .iter()
-        .filter(|tool| !completed_task_tools.contains(*tool))
-        .cloned()
-        .collect::<Vec<_>>();
+    let remaining = missing_task_contract_tools_for_contract(contract, completed_task_tool_counts);
     let expected = remaining.first()?;
     if expected == tool_name {
         return None;
@@ -2619,7 +2906,7 @@ fn task_contract_out_of_order_rejection(
 
 fn verified_workspace_contract_complete(
     task_tool_contract: &Option<TaskToolContract>,
-    completed_task_tools: &BTreeSet<String>,
+    completed_task_tool_counts: &BTreeMap<String, usize>,
 ) -> bool {
     let Some(contract) = task_tool_contract else {
         return false;
@@ -2627,12 +2914,12 @@ fn verified_workspace_contract_complete(
     contract.allowed_tools.len() == 2
         && contract.allowed_tools.contains("workspace_put")
         && contract.allowed_tools.contains("workspace_get")
-        && missing_task_contract_tools(task_tool_contract, completed_task_tools).is_empty()
+        && missing_task_contract_tools(task_tool_contract, completed_task_tool_counts).is_empty()
 }
 
 fn verified_workspace_checkpoint_contract_complete(
     task_tool_contract: &Option<TaskToolContract>,
-    completed_task_tools: &BTreeSet<String>,
+    completed_task_tool_counts: &BTreeMap<String, usize>,
     successful_workspace_puts: &[JsonObject],
 ) -> bool {
     let Some(contract) = task_tool_contract else {
@@ -2640,7 +2927,7 @@ fn verified_workspace_checkpoint_contract_complete(
     };
     contract.allowed_tools.contains("workspace_put")
         && !successful_workspace_puts.is_empty()
-        && missing_task_contract_tools(task_tool_contract, completed_task_tools).is_empty()
+        && missing_task_contract_tools(task_tool_contract, completed_task_tool_counts).is_empty()
 }
 
 fn final_message_from_successful_workspace_puts(
@@ -2661,23 +2948,25 @@ fn final_message_from_successful_workspace_puts(
 
 fn task_contract_progress_value(
     task_tool_contract: &Option<TaskToolContract>,
-    completed_task_tools: &BTreeSet<String>,
+    completed_task_tool_counts: &BTreeMap<String, usize>,
     successful_workspace_puts: &[JsonObject],
 ) -> Option<Value> {
     let contract = task_tool_contract.as_ref()?;
-    let missing_tools = missing_task_contract_tools(task_tool_contract, completed_task_tools);
-    let completed_tools = completed_task_tools
-        .iter()
-        .cloned()
+    let missing_tools = missing_task_contract_tools(task_tool_contract, completed_task_tool_counts);
+    let all_required_tools_complete = missing_tools.is_empty();
+    let completed_tools = completed_task_contract_tools(contract, completed_task_tool_counts)
+        .into_iter()
         .map(Value::String)
         .collect::<Vec<_>>();
+    let next_step_index = completed_tools.len();
     let mut progress = json!({
         "source": contract.source,
         "allowed_tools": contract.allowed_tools_json(),
         "ordered_tools": contract.ordered_tools_json(),
         "completed_tools": completed_tools,
+        "completed_tool_counts": completed_task_tool_counts,
         "missing_tools": missing_tools,
-        "all_required_tools_complete": missing_tools.is_empty(),
+        "all_required_tools_complete": all_required_tools_complete,
     });
     if let Value::Object(map) = &mut progress {
         if let Some(next_tool) = map
@@ -2692,8 +2981,9 @@ fn task_contract_progress_value(
                 Value::String(next_tool.clone()),
             );
             if let Some(arguments) = contract
-                .argument_templates
-                .get(&next_tool)
+                .step_argument_templates
+                .get(next_step_index)
+                .and_then(Option::as_ref)
                 .map(|args| Value::Object(args.clone()))
             {
                 map.insert("suggested_next_arguments".to_owned(), arguments);
@@ -2743,21 +3033,22 @@ fn task_contract_progress_value(
 
 fn task_contract_model_status_value(
     task_tool_contract: &Option<TaskToolContract>,
-    completed_task_tools: &BTreeSet<String>,
+    completed_task_tool_counts: &BTreeMap<String, usize>,
     successful_workspace_puts: &[JsonObject],
 ) -> Option<Value> {
     let contract = task_tool_contract.as_ref()?;
-    let remaining = missing_task_contract_tools(task_tool_contract, completed_task_tools);
-    let completed = completed_task_tools
-        .iter()
-        .cloned()
+    let remaining = missing_task_contract_tools(task_tool_contract, completed_task_tool_counts);
+    let completed = completed_task_contract_tools(contract, completed_task_tool_counts)
+        .into_iter()
         .map(Value::String)
         .collect::<Vec<_>>();
+    let next_step_index = completed.len();
     let all_required_functions_complete = remaining.is_empty();
     let mut status = json!({
         "allowed_function_names": contract.allowed_tools_json(),
         "ordered_function_names": contract.ordered_tools_json(),
         "completed_function_names": completed,
+        "completed_function_counts": completed_task_tool_counts,
         "remaining_function_names": remaining.clone(),
         "all_required_functions_complete": all_required_functions_complete,
     });
@@ -2767,8 +3058,9 @@ fn task_contract_model_status_value(
     let next_tool = remaining.first().cloned();
     if let Some(next_tool) = next_tool {
         let next_arguments = if let Some(arguments) = contract
-            .argument_templates
-            .get(&next_tool)
+            .step_argument_templates
+            .get(next_step_index)
+            .and_then(Option::as_ref)
             .map(|args| Value::Object(args.clone()))
         {
             arguments
@@ -2839,12 +3131,12 @@ fn strip_model_hidden_contract_fields(value: &Value) -> Value {
 fn model_tool_result_value(
     result_value: &Value,
     task_tool_contract: &Option<TaskToolContract>,
-    completed_task_tools: &BTreeSet<String>,
+    completed_task_tool_counts: &BTreeMap<String, usize>,
     successful_workspace_puts: &[JsonObject],
 ) -> Value {
     let Some(status) = task_contract_model_status_value(
         task_tool_contract,
-        completed_task_tools,
+        completed_task_tool_counts,
         successful_workspace_puts,
     ) else {
         return strip_model_hidden_contract_fields(result_value);
@@ -3135,12 +3427,13 @@ fn openai_tool_by_name(tools: &[Tool], name: &str) -> Option<Value> {
         .map(openai_tool_from_mcp)
 }
 
-fn exact_contract_turn_tools_for_internalized(
+fn exact_contract_turn_tools(
     tools: &[Tool],
     contract: &TaskToolContract,
-    completed_task_tools: &BTreeSet<String>,
+    completed_task_tool_counts: &BTreeMap<String, usize>,
 ) -> anyhow::Result<TurnToolSelection> {
-    let Some(next_tool) = next_missing_task_contract_tool(contract, completed_task_tools) else {
+    let Some(next_tool) = next_missing_task_contract_tool(contract, completed_task_tool_counts)
+    else {
         return Ok(TurnToolSelection {
             tools: Vec::new(),
             tool_choice: None,
@@ -3920,6 +4213,14 @@ mod tests {
 
     use super::*;
 
+    fn completed_counts<const N: usize>(tools: [&str; N]) -> BTreeMap<String, usize> {
+        let mut counts = BTreeMap::new();
+        for tool in tools {
+            *counts.entry(tool.to_owned()).or_insert(0) += 1;
+        }
+        counts
+    }
+
     #[test]
     fn agent_wait_tool_result_kill_is_runner_control() {
         let result = json!({
@@ -4182,8 +4483,14 @@ mod tests {
             "run_id": "issue1055",
             "key": "missing-value",
         }))?;
-        let reason = model_tool_call_pre_gate_rejection("workspace_put", &args, true, None)
-            .expect("workspace_put without value/artifact must fail before approval");
+        let reason = model_tool_call_pre_gate_rejection(
+            "workspace_put",
+            &args,
+            true,
+            None,
+            &BTreeMap::new(),
+        )
+        .expect("workspace_put without value/artifact must fail before approval");
         assert!(
             reason
                 .reason
@@ -4197,7 +4504,14 @@ mod tests {
             "value": null,
         }))?;
         assert!(
-            model_tool_call_pre_gate_rejection("workspace_put", &with_value, true, None).is_none()
+            model_tool_call_pre_gate_rejection(
+                "workspace_put",
+                &with_value,
+                true,
+                None,
+                &BTreeMap::new()
+            )
+            .is_none()
         );
         Ok(())
     }
@@ -4207,8 +4521,9 @@ mod tests {
         let args: JsonObject = serde_json::from_value(json!({
             "malformed_output": true,
         }))?;
-        let reason = model_tool_call_pre_gate_rejection("agent_retry", &args, false, None)
-            .expect("invented tool names must fail before approval");
+        let reason =
+            model_tool_call_pre_gate_rejection("agent_retry", &args, false, None, &BTreeMap::new())
+                .expect("invented tool names must fail before approval");
         assert!(reason.reason.contains("not present in Synapse tools/list"));
         assert!(reason.reason.contains("real Synapse tool name"));
         assert!(!reason.terminal);
@@ -4221,13 +4536,40 @@ mod tests {
             "approval_id": "apr1-test",
             "decision": "decline",
         }))?;
-        let reason = model_tool_call_pre_gate_rejection("approval_decide", &args, true, None)
-            .expect("local models must not self-decide approval rows");
+        let reason = model_tool_call_pre_gate_rejection(
+            "approval_decide",
+            &args,
+            true,
+            None,
+            &BTreeMap::new(),
+        )
+        .expect("local models must not self-decide approval rows");
         assert!(reason.reason.contains("runner/operator-control"));
         assert!(reason.terminal);
-        assert!(model_tool_call_pre_gate_rejection("approval_gate", &args, true, None).is_some());
-        assert!(model_tool_call_pre_gate_rejection("agent_send", &args, true, None).is_some());
-        assert!(model_tool_call_pre_gate_rejection("workspace_get", &args, true, None).is_none());
+        assert!(
+            model_tool_call_pre_gate_rejection(
+                "approval_gate",
+                &args,
+                true,
+                None,
+                &BTreeMap::new()
+            )
+            .is_some()
+        );
+        assert!(
+            model_tool_call_pre_gate_rejection("agent_send", &args, true, None, &BTreeMap::new())
+                .is_some()
+        );
+        assert!(
+            model_tool_call_pre_gate_rejection(
+                "workspace_get",
+                &args,
+                true,
+                None,
+                &BTreeMap::new()
+            )
+            .is_none()
+        );
         Ok(())
     }
 
@@ -4237,8 +4579,14 @@ mod tests {
             "task_id": "synapse",
             "concurrency_cap": 1,
         }))?;
-        let reason = model_tool_call_pre_gate_rejection("task_dispatch_once", &args, true, None)
-            .expect("dispatcher tools must fail before MCP dispatch");
+        let reason = model_tool_call_pre_gate_rejection(
+            "task_dispatch_once",
+            &args,
+            true,
+            None,
+            &BTreeMap::new(),
+        )
+        .expect("dispatcher tools must fail before MCP dispatch");
         assert!(reason.reason.contains("runner/operator-control"));
         assert!(reason.terminal);
 
@@ -4247,9 +4595,14 @@ mod tests {
             "model_ref": "qwen8v2-tool-live",
             "prompt": "nested"
         }))?;
-        let spawn_reason =
-            model_tool_call_pre_gate_rejection("act_spawn_agent", &nested_spawn, true, None)
-                .expect("nested spawn is runner control for local-model workers");
+        let spawn_reason = model_tool_call_pre_gate_rejection(
+            "act_spawn_agent",
+            &nested_spawn,
+            true,
+            None,
+            &BTreeMap::new(),
+        )
+        .expect("nested spawn is runner control for local-model workers");
         assert!(spawn_reason.reason.contains("runner/operator-control"));
         assert!(spawn_reason.terminal);
         Ok(())
@@ -4303,6 +4656,7 @@ mod tests {
             &dispatcher_args,
             true,
             Some(&contract),
+            &BTreeMap::new(),
         )
         .expect("dispatcher drift must not dispatch under an exact contract");
         assert!(
@@ -4373,9 +4727,14 @@ mod tests {
         assert!(!contract.allowed_tools.contains("local_model_probe"));
 
         let args = JsonObject::new();
-        let rejection =
-            model_tool_call_pre_gate_rejection("local_model_probe", &args, true, Some(&contract))
-                .expect("off-task tool must be rejected before approval");
+        let rejection = model_tool_call_pre_gate_rejection(
+            "local_model_probe",
+            &args,
+            true,
+            Some(&contract),
+            &BTreeMap::new(),
+        )
+        .expect("off-task tool must be rejected before approval");
         assert!(!rejection.terminal);
         assert!(
             rejection
@@ -4393,8 +4752,7 @@ mod tests {
 1. Call workspace_put with key \"issue1222/key\" and value {\"ok\":true}.\n\
 2. Call workspace_get with key \"issue1222/key\".";
         let contract = infer_task_tool_contract(task, &tools).expect("exact tool contract");
-        let mut completed = BTreeSet::new();
-        completed.insert("workspace_put".to_owned());
+        let completed = completed_counts(["workspace_put"]);
 
         let missing = missing_task_contract_tools(&Some(contract), &completed);
 
@@ -4408,8 +4766,7 @@ mod tests {
 1. Call workspace_put with run_id \"issue1222\", key \"issue1222/key\", and value \"ok\".\n\
 2. Call workspace_get with run_id \"issue1222\" and key \"issue1222/key\".";
         let contract = infer_task_tool_contract(task, &tools).expect("exact tool contract");
-        let mut completed = BTreeSet::new();
-        completed.insert("workspace_put".to_owned());
+        let mut completed = completed_counts(["workspace_put"]);
 
         assert!(workspace_put_contract_repetition_should_defer(
             &Some(contract.clone()),
@@ -4417,7 +4774,7 @@ mod tests {
             "workspace_put"
         ));
 
-        completed.insert("workspace_get".to_owned());
+        completed = completed_counts(["workspace_put", "workspace_get"]);
         assert!(!workspace_put_contract_repetition_should_defer(
             &Some(contract),
             &completed,
@@ -4437,8 +4794,7 @@ mod tests {
         let task = "Use exactly these real Synapse tools in this exact order:\n\
 cdp_open_tab, target_claim, target_act, browser_evaluate, workspace_put.";
         let contract = infer_task_tool_contract(task, &tools).expect("exact tool contract");
-        let mut completed = BTreeSet::new();
-        completed.insert("cdp_open_tab".to_owned());
+        let mut completed = completed_counts(["cdp_open_tab"]);
 
         assert!(task_contract_completed_tool_repetition_should_defer(
             &Some(contract.clone()),
@@ -4462,7 +4818,7 @@ cdp_open_tab, target_claim, target_act, browser_evaluate, workspace_put.";
             "browser_evaluate",
             "workspace_put",
         ] {
-            completed.insert(tool.to_owned());
+            *completed.entry(tool.to_owned()).or_insert(0) += 1;
         }
         assert!(!task_contract_completed_tool_repetition_should_defer(
             &Some(contract),
@@ -4487,7 +4843,7 @@ cdp_open_tab, target_claim, target_act, browser_evaluate, workspace_put.";
 4. target_act {\"selector\":\"#mark\",\"verb\":\"click\",\"wait_timeout_ms\":10000}\n\
 5. workspace_put {\"run_id\":\"issue1280\",\"key\":\"ramp-004\",\"value\":{\"ok\":true}}";
         let contract = infer_task_tool_contract(task, &tools).expect("exact tool contract");
-        let completed = BTreeSet::from(["cdp_open_tab".to_owned(), "target_claim".to_owned()]);
+        let completed = completed_counts(["cdp_open_tab", "target_claim"]);
         let exact_args: JsonObject =
             serde_json::from_value(json!({"selector":"#agent-input","text":"ramp-004"}))?;
         assert!(
@@ -4574,11 +4930,7 @@ cdp_open_tab, target_claim, target_act, browser_evaluate, workspace_put.";
 5. cdp_target_info {}\n\
 6. workspace_put {\"run_id\":\"issue1246\",\"key\":\"browser-target\",\"value\":{\"ok\":true}}";
         let contract = infer_task_tool_contract(task, &tools).expect("exact tool contract");
-        let completed = BTreeSet::from([
-            "cdp_open_tab".to_owned(),
-            "target_claim".to_owned(),
-            "browser_set_value".to_owned(),
-        ]);
+        let completed = completed_counts(["cdp_open_tab", "target_claim", "browser_set_value"]);
 
         let rejection =
             task_contract_out_of_order_rejection(Some(&contract), &completed, "workspace_put")
@@ -4625,7 +4977,13 @@ cdp_open_tab, target_claim, target_act, browser_evaluate, workspace_put.";
                 "cdp_target_info",
                 &exact_empty,
                 true,
-                Some(&contract)
+                Some(&contract),
+                &completed_counts([
+                    "cdp_open_tab",
+                    "target_claim",
+                    "browser_set_value",
+                    "target_act"
+                ])
             )
             .is_none()
         );
@@ -4636,6 +4994,12 @@ cdp_open_tab, target_claim, target_act, browser_evaluate, workspace_put.";
             &extra_args,
             true,
             Some(&contract),
+            &completed_counts([
+                "cdp_open_tab",
+                "target_claim",
+                "browser_set_value",
+                "target_act",
+            ]),
         )
         .expect("extra argument must fail before approval");
         assert!(
@@ -4653,6 +5017,13 @@ cdp_open_tab, target_claim, target_act, browser_evaluate, workspace_put.";
             &missing_args,
             true,
             Some(&contract),
+            &completed_counts([
+                "cdp_open_tab",
+                "target_claim",
+                "browser_set_value",
+                "target_act",
+                "cdp_target_info",
+            ]),
         )
         .expect("missing exact value must fail before approval");
         assert!(rejection.reason.contains("missing_keys=[value]"));
@@ -4667,9 +5038,69 @@ cdp_open_tab, target_claim, target_act, browser_evaluate, workspace_put.";
             &changed_args,
             true,
             Some(&contract),
+            &completed_counts([
+                "cdp_open_tab",
+                "target_claim",
+                "browser_set_value",
+                "target_act",
+                "cdp_target_info",
+            ]),
         )
         .expect("changed exact value must fail before approval");
         assert!(rejection.reason.contains("changed_keys=[value]"));
+        Ok(())
+    }
+
+    #[test]
+    fn exact_tool_contract_tracks_duplicate_tool_steps_by_occurrence() -> anyhow::Result<()> {
+        let tools = tools_named(["target_act", "workspace_put"]);
+        let task = "Use exactly these real Synapse tools in this exact order:\n\
+1. target_act {\"verb\":\"set_field\",\"role\":\"document\",\"name\":\"Text editor\",\"text\":\"hello im gemma\",\"wait_timeout_ms\":10000}\n\
+2. target_act {\"verb\":\"save\",\"path\":\"C:\\\\Temp\\\\issue1034.txt\",\"text\":\"hello im gemma\",\"wait_timeout_ms\":5000}\n\
+3. workspace_put {\"run_id\":\"issue1034\",\"key\":\"gemma\",\"value\":{\"ok\":true}}";
+        let contract = infer_task_tool_contract(task, &tools).expect("exact contract");
+
+        assert_eq!(
+            contract.ordered_tools,
+            vec!["target_act", "target_act", "workspace_put"]
+        );
+        assert_eq!(
+            contract.step_argument_templates[0]
+                .as_ref()
+                .and_then(|args| args.get("verb"))
+                .and_then(Value::as_str),
+            Some("set_field")
+        );
+        assert_eq!(
+            contract.step_argument_templates[1]
+                .as_ref()
+                .and_then(|args| args.get("verb"))
+                .and_then(Value::as_str),
+            Some("save")
+        );
+
+        let completed = completed_counts(["target_act"]);
+        assert_eq!(
+            missing_task_contract_tools(&Some(contract.clone()), &completed),
+            vec!["target_act".to_owned(), "workspace_put".to_owned()]
+        );
+        let save_args: JsonObject = serde_json::from_value(json!({
+            "verb": "save",
+            "path": "C:\\Temp\\issue1034.txt",
+            "text": "hello im gemma",
+            "wait_timeout_ms": 5000
+        }))?;
+        assert!(
+            model_tool_call_pre_gate_rejection(
+                "target_act",
+                &save_args,
+                true,
+                Some(&contract),
+                &completed,
+            )
+            .is_none(),
+            "second target_act occurrence must validate against the save template"
+        );
         Ok(())
     }
 
@@ -4698,12 +5129,14 @@ cdp_open_tab, target_claim, target_act, browser_evaluate, workspace_put.";
         assert!(local_agent_exact_contract_gate_bypass_allowed(
             "browser_set_value",
             &exact_set,
-            Some(&contract)
+            Some(&contract),
+            &completed_counts(["cdp_open_tab", "target_claim"])
         ));
         assert!(!local_agent_exact_contract_gate_bypass_allowed(
             "browser_set_value",
             &exact_set,
-            None
+            None,
+            &BTreeMap::new()
         ));
 
         let changed_set: JsonObject = serde_json::from_value(json!({
@@ -4713,21 +5146,158 @@ cdp_open_tab, target_claim, target_act, browser_evaluate, workspace_put.";
         assert!(!local_agent_exact_contract_gate_bypass_allowed(
             "browser_set_value",
             &changed_set,
-            Some(&contract)
+            Some(&contract),
+            &completed_counts(["cdp_open_tab", "target_claim"])
         ));
 
         let exact_info = Map::new();
         assert!(local_agent_exact_contract_gate_bypass_allowed(
             "cdp_target_info",
             &exact_info,
-            Some(&contract)
+            Some(&contract),
+            &completed_counts([
+                "cdp_open_tab",
+                "target_claim",
+                "browser_set_value",
+                "target_act"
+            ])
         ));
         let extra_info: JsonObject = serde_json::from_value(json!({"include": []}))?;
         assert!(!local_agent_exact_contract_gate_bypass_allowed(
             "cdp_target_info",
             &extra_info,
-            Some(&contract)
+            Some(&contract),
+            &completed_counts([
+                "cdp_open_tab",
+                "target_claim",
+                "browser_set_value",
+                "target_act"
+            ])
         ));
+        Ok(())
+    }
+
+    #[test]
+    fn trusted_exact_contract_normalizes_next_tool_args_to_template() -> anyhow::Result<()> {
+        let tools = tools_named([
+            "cdp_open_tab",
+            "target_claim",
+            "browser_set_value",
+            "target_act",
+            "cdp_target_info",
+            "workspace_put",
+        ]);
+        let task = "Use only the exact tool calls below, in order:\n\
+1. cdp_open_tab {\"url\":\"http://127.0.0.1:8896/issue1220-lane.html?agent=ramp10-003\",\"window_hwnd\":1704314}\n\
+2. target_claim {\"ttl_ms\":600000}\n\
+3. browser_set_value {\"selector\":\"#agent-input\",\"text\":\"ramp10-003\"}\n\
+4. target_act {\"selector\":\"#mark\",\"verb\":\"click\",\"wait_timeout_ms\":10000}\n\
+5. cdp_target_info {}\n\
+6. workspace_put {\"run_id\":\"issue1220-ramp10-20260620-1043\",\"key\":\"ramp10-003\",\"value\":{\"ok\":true,\"agent\":\"ramp10-003\",\"expected_status\":\"ramp10-003:ramp10-003\"}}";
+        let contract = infer_task_tool_contract(task, &tools).expect("exact contract");
+        let completed = completed_counts([
+            "cdp_open_tab",
+            "target_claim",
+            "browser_set_value",
+            "target_act",
+        ]);
+        let drifted_info: JsonObject = serde_json::from_value(json!({
+            "cdp_target_id": "chrome-tab:600753094",
+            "window_hwnd": 1704314
+        }))?;
+        let normalized = trusted_exact_contract_normalized_args(
+            true,
+            "cdp_target_info",
+            &drifted_info,
+            Some(&contract),
+            &completed,
+        )
+        .expect("next safe tool drift should normalize to contract template");
+
+        assert!(normalized.is_empty());
+        assert!(
+            model_tool_call_pre_gate_rejection(
+                "cdp_target_info",
+                &normalized,
+                true,
+                Some(&contract),
+                &completed
+            )
+            .is_none()
+        );
+        assert!(local_agent_exact_contract_gate_bypass_allowed(
+            "cdp_target_info",
+            &normalized,
+            Some(&contract),
+            &completed
+        ));
+        assert!(!local_agent_exact_contract_gate_bypass_allowed(
+            "cdp_target_info",
+            &drifted_info,
+            Some(&contract),
+            &completed
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn trusted_exact_contract_normalization_refuses_operator_control_tools() -> anyhow::Result<()> {
+        let tools = tools_named(["act_run_shell", "workspace_put"]);
+        let task = "Use only the exact tool calls below, in order:\n\
+1. act_run_shell {\"command\":\"powershell.exe\",\"args\":[\"-NoLogo\",\"-NoProfile\",\"-Command\",\"Write-Output ok\"],\"execution_mode\":\"inline\",\"timeout_ms\":1000}\n\
+2. workspace_put {\"run_id\":\"issue1220\",\"key\":\"shell-edge\",\"value\":{\"ok\":true}}";
+        let contract = infer_task_tool_contract(task, &tools).expect("exact contract");
+        let drifted_shell: JsonObject = serde_json::from_value(json!({
+            "command": "powershell.exe",
+            "args": ["-NoLogo", "-NoProfile", "-Command", "Write-Output ok"],
+            "execution_mode": "inline",
+            "timeout_ms": 1000,
+            "unexpected": true
+        }))?;
+
+        assert!(
+            trusted_exact_contract_normalized_args(
+                true,
+                "act_run_shell",
+                &drifted_shell,
+                Some(&contract),
+                &BTreeMap::new(),
+            )
+            .is_none()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn trusted_exact_contract_normalization_requires_trust_and_next_tool() -> anyhow::Result<()> {
+        let tools = tools_named(["cdp_target_info", "workspace_put"]);
+        let task = "Use only the exact tool calls below, in order:\n\
+1. cdp_target_info {}\n\
+2. workspace_put {\"run_id\":\"issue1220\",\"key\":\"status\",\"value\":{\"ok\":true}}";
+        let contract = infer_task_tool_contract(task, &tools).expect("exact contract");
+        let drifted_info: JsonObject = serde_json::from_value(json!({"include": []}))?;
+        let completed = completed_counts(["cdp_target_info"]);
+
+        assert!(
+            trusted_exact_contract_normalized_args(
+                false,
+                "cdp_target_info",
+                &drifted_info,
+                Some(&contract),
+                &BTreeMap::new(),
+            )
+            .is_none()
+        );
+        assert!(
+            trusted_exact_contract_normalized_args(
+                true,
+                "cdp_target_info",
+                &drifted_info,
+                Some(&contract),
+                &completed,
+            )
+            .is_none()
+        );
         Ok(())
     }
 
@@ -4743,12 +5313,20 @@ cdp_open_tab, target_claim, target_act, browser_evaluate, workspace_put.";
         }))?;
 
         assert!(
-            model_tool_call_pre_gate_rejection("act_type", &args, true, Some(&contract)).is_none()
+            model_tool_call_pre_gate_rejection(
+                "act_type",
+                &args,
+                true,
+                Some(&contract),
+                &BTreeMap::new()
+            )
+            .is_none()
         );
         assert!(!local_agent_exact_contract_gate_bypass_allowed(
             "act_type",
             &args,
-            Some(&contract)
+            Some(&contract),
+            &BTreeMap::new()
         ));
         Ok(())
     }
@@ -4798,7 +5376,8 @@ cdp_open_tab, target_claim, target_act, browser_evaluate, workspace_put.";
                 !local_agent_exact_contract_gate_bypass_allowed(
                     tool_name,
                     &object,
-                    Some(&contract)
+                    Some(&contract),
+                    &BTreeMap::new()
                 ),
                 "{tool_name} must not be labeled exact-contract-authorized"
             );
@@ -4825,7 +5404,8 @@ cdp_open_tab, target_claim, target_act, browser_evaluate, workspace_put.";
         assert!(local_agent_exact_contract_gate_bypass_allowed(
             "target_act",
             &args,
-            Some(&contract)
+            Some(&contract),
+            &BTreeMap::new()
         ));
         Ok(())
     }
@@ -4848,7 +5428,8 @@ cdp_open_tab, target_claim, target_act, browser_evaluate, workspace_put.";
         assert!(!local_agent_exact_contract_gate_bypass_allowed(
             "target_act",
             &args,
-            Some(&contract)
+            Some(&contract),
+            &BTreeMap::new()
         ));
         Ok(())
     }
@@ -4880,8 +5461,7 @@ cdp_open_tab, target_claim, target_act, browser_evaluate, workspace_put.";
 1. Call workspace_put with run_id \"issue1222\", key \"issue1222/key\", and value \"ok\".\n\
 2. Call workspace_get with run_id \"issue1222\" and key \"issue1222/key\".";
         let contract = infer_task_tool_contract(task, &tools).expect("exact tool contract");
-        let mut completed = BTreeSet::new();
-        completed.insert("workspace_put".to_owned());
+        let completed = completed_counts(["workspace_put"]);
         let successful_put: JsonObject = serde_json::from_value(json!({
             "run_id": "issue1222",
             "key": "issue1222/key",
@@ -4938,7 +5518,7 @@ cdp_open_tab, target_claim, target_act, browser_evaluate, workspace_put.";
             ]
         );
         assert_eq!(
-            missing_task_contract_tools(&Some(contract.clone()), &BTreeSet::new()),
+            missing_task_contract_tools(&Some(contract.clone()), &BTreeMap::new()),
             vec![
                 "cdp_open_tab",
                 "target_claim",
@@ -4947,8 +5527,7 @@ cdp_open_tab, target_claim, target_act, browser_evaluate, workspace_put.";
                 "workspace_put",
             ]
         );
-        let mut completed = BTreeSet::new();
-        completed.insert("cdp_open_tab".to_owned());
+        let completed = completed_counts(["cdp_open_tab"]);
         let progress = task_contract_progress_value(&Some(contract), &completed, &[])
             .expect("progress after first browser tool");
         assert_eq!(progress["suggested_next_tool"], json!("target_claim"));
@@ -5000,7 +5579,7 @@ Do not call task_retry, browser_evaluate, act_type, act_press, or raw foreground
         assert!(!contract.allowed_tools.contains("browser_evaluate"));
         assert!(!contract.allowed_tools.contains("act_type"));
         assert!(!contract.allowed_tools.contains("act_press"));
-        let progress = task_contract_progress_value(&Some(contract), &BTreeSet::new(), &[])
+        let progress = task_contract_progress_value(&Some(contract), &BTreeMap::new(), &[])
             .expect("initial progress");
         assert_eq!(progress["suggested_next_tool"], json!("cdp_open_tab"));
     }
@@ -5013,7 +5592,7 @@ cdp_open_tab, target_claim.\n\n\
 1. cdp_open_tab {\"url\":\"http://127.0.0.1:8896/issue1246-browser-target.html\",\"window_hwnd\":2427400}\n\
 2. target_claim {\"ttl_ms\":120000}";
         let contract = infer_task_tool_contract(task, &tools).expect("exact tool contract");
-        let progress = task_contract_progress_value(&Some(contract.clone()), &BTreeSet::new(), &[])
+        let progress = task_contract_progress_value(&Some(contract.clone()), &BTreeMap::new(), &[])
             .expect("initial progress");
 
         assert_eq!(progress["suggested_next_tool"], json!("cdp_open_tab"));
@@ -5038,8 +5617,7 @@ cdp_open_tab, target_claim.\n\n\
 1. cdp_open_tab {\"url\":\"http://127.0.0.1:8896/issue1246.html\",\"window_hwnd\":2427400}\n\
 2. target_claim {\"ttl_ms\":120000}";
         let contract = infer_task_tool_contract(task, &tools).expect("exact tool contract");
-        let mut completed = BTreeSet::new();
-        completed.insert("cdp_open_tab".to_owned());
+        let completed = completed_counts(["cdp_open_tab"]);
         let internal_progress =
             task_contract_progress_value(&Some(contract.clone()), &completed, &[])
                 .expect("internal progress still exists for logs");
@@ -5124,16 +5702,13 @@ cdp_open_tab, target_claim.\n\n\
 4. Call browser_evaluate.\n\
 5. Call workspace_put.";
         let contract = infer_task_tool_contract(task, &tools).expect("exact tool contract");
-        let mut completed = BTreeSet::new();
-        for tool in [
+        let completed = completed_counts([
             "cdp_open_tab",
             "target_claim",
             "target_act",
             "browser_evaluate",
             "workspace_put",
-        ] {
-            completed.insert(tool.to_owned());
-        }
+        ]);
 
         assert!(!verified_workspace_contract_complete(
             &Some(contract.clone()),
@@ -5165,14 +5740,13 @@ cdp_open_tab, target_claim.\n\n\
 1. Call workspace_put with run_id \"issue1222\", key \"issue1222/key\", and value \"ok\".\n\
 2. Call workspace_get with run_id \"issue1222\" and key \"issue1222/key\".";
         let contract = infer_task_tool_contract(task, &tools).expect("exact tool contract");
-        let mut completed = BTreeSet::new();
-        completed.insert("workspace_put".to_owned());
+        let mut completed = completed_counts(["workspace_put"]);
         assert!(!verified_workspace_contract_complete(
             &Some(contract.clone()),
             &completed
         ));
 
-        completed.insert("workspace_get".to_owned());
+        completed = completed_counts(["workspace_put", "workspace_get"]);
         assert!(verified_workspace_contract_complete(
             &Some(contract),
             &completed
@@ -5296,10 +5870,9 @@ cdp_open_tab, target_claim.\n\n\
 2. target_claim {\"ttl_ms\":120000}\n\
 3. browser_set_value {\"selector\":\"#lane-value\",\"text\":\"issue1246\"}";
         let contract = infer_task_tool_contract(task, &tools).expect("exact contract");
-        let mut completed = BTreeSet::new();
-        completed.insert("cdp_open_tab".to_owned());
+        let mut completed = completed_counts(["cdp_open_tab"]);
 
-        let selection = exact_contract_turn_tools_for_internalized(&tools, &contract, &completed)?;
+        let selection = exact_contract_turn_tools(&tools, &contract, &completed)?;
         let exposed_names = selection
             .tools
             .iter()
@@ -5318,10 +5891,8 @@ cdp_open_tab, target_claim.\n\n\
             }))
         );
 
-        completed.insert("target_claim".to_owned());
-        completed.insert("browser_set_value".to_owned());
-        let complete_selection =
-            exact_contract_turn_tools_for_internalized(&tools, &contract, &completed)?;
+        completed = completed_counts(["cdp_open_tab", "target_claim", "browser_set_value"]);
+        let complete_selection = exact_contract_turn_tools(&tools, &contract, &completed)?;
         assert!(complete_selection.tools.is_empty());
         assert!(complete_selection.tool_choice.is_none());
         Ok(())
@@ -5335,9 +5906,7 @@ cdp_open_tab, target_claim.\n\n\
 2. target_claim {\"ttl_ms\":120000}\n\
 3. browser_set_value {\"selector\":\"#lane-value\",\"text\":\"issue1246\"}";
         let contract = infer_task_tool_contract(task, &tools).expect("exact contract");
-        let mut completed = BTreeSet::new();
-        completed.insert("cdp_open_tab".to_owned());
-        completed.insert("target_claim".to_owned());
+        let completed = completed_counts(["cdp_open_tab", "target_claim"]);
 
         let message = task_contract_next_instruction_message(&contract, &completed)
             .expect("next instruction");
