@@ -17,6 +17,8 @@ use crate::m3::approvals::{
     ApprovalRowEvidence, ApprovalStatus, ApprovalTimeoutDecision,
 };
 
+use super::permission_policy::{self, GateDecision};
+
 const MAX_SPAWN_ID_CHARS: usize = 128;
 pub(crate) const MAX_CODEX_APP_SERVER_REQUEST_BODY_BYTES: usize = 1024 * 1024;
 const DEFAULT_CODEX_REQUEST_TIMEOUT_MS: u64 = 25 * 60 * 1_000;
@@ -114,6 +116,32 @@ pub(crate) async fn handle_codex_app_server_request(
     let created = approvals::request_approval(db, &spec.request, &spec.by_session)
         .map_err(|error| CodexAppServerBridgeError::storage(error.message.to_string()))?;
     let approval_id = created.item.approval_id.clone();
+    if let Some(auto_accept_note) = spec.auto_accept_note.as_ref() {
+        let accept = approvals::ApprovalDecideParams {
+            approval_id: approval_id.clone(),
+            decision: ApprovalDecision::Accept,
+            note: Some(auto_accept_note.clone()),
+            snooze_ms: None,
+            edited_args: None,
+            response: None,
+        };
+        let decision = approvals::decide_approval(db, &accept, "codex_app_server_auto_policy")
+            .map_err(|error| CodexAppServerBridgeError::storage(error.message.to_string()))?;
+        let app_server_response = app_server_response_for(&spec, &decision.item);
+        return Ok(CodexAppServerBridgeResponse {
+            ok: true,
+            spawn_id: envelope.spawn_id,
+            method: envelope.method,
+            request_id: envelope.id,
+            approval_id,
+            approval_kind: spec.kind,
+            final_status: decision.item.status,
+            app_server_response,
+            item_row: created.item_row,
+            audit_row: Some(decision.audit_row),
+            timed_out_by_bridge: false,
+        });
+    }
     let timeout = codex_request_timeout();
     let started = tokio::time::Instant::now();
     let (item, audit_row, timed_out_by_bridge) = loop {
@@ -177,6 +205,7 @@ struct RequestSpec {
     by_session: String,
     response_kind: ResponseKind,
     params: Value,
+    auto_accept_note: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -211,66 +240,74 @@ fn request_spec(
         ignore: true,
     });
 
-    let (kind, title, body, destructive, response_kind, allow) = match envelope.method.as_str() {
-        "item/commandExecution/requestApproval" => (
-            ApprovalKind::AgentPermission,
-            "Codex approval needed: command execution".to_owned(),
-            command_body(params_obj),
-            true,
-            ResponseKind::CommandExecutionApproval,
-            allow_permission,
-        ),
-        "item/fileChange/requestApproval" => (
-            ApprovalKind::AgentPermission,
-            "Codex approval needed: file change".to_owned(),
-            file_change_body(params_obj),
-            true,
-            ResponseKind::FileChangeApproval,
-            allow_permission,
-        ),
-        "item/permissions/requestApproval" => (
-            ApprovalKind::AgentPermission,
-            "Codex approval needed: permissions".to_owned(),
-            permissions_body(params_obj),
-            true,
-            ResponseKind::PermissionProfileApproval,
-            allow_permission,
-        ),
-        "item/tool/requestUserInput" => (
-            ApprovalKind::AgentQuestion,
-            "Codex needs input".to_owned(),
-            request_user_input_body(params_obj),
-            false,
-            ResponseKind::ToolRequestUserInput,
-            allow_question,
-        ),
-        "mcpServer/elicitation/request" => {
-            if is_mcp_tool_call_elicitation(params_obj) {
-                (
-                    ApprovalKind::AgentPermission,
-                    "Codex approval needed: MCP tool".to_owned(),
-                    mcp_elicitation_body(params_obj),
-                    false,
-                    ResponseKind::McpServerElicitation,
-                    allow_permission,
-                )
-            } else {
-                (
-                    ApprovalKind::AgentQuestion,
-                    "Codex MCP elicitation".to_owned(),
-                    mcp_elicitation_body(params_obj),
-                    false,
-                    ResponseKind::McpServerElicitation,
-                    allow_question,
-                )
+    let (kind, title, body, destructive, response_kind, allow, auto_accept_note) =
+        match envelope.method.as_str() {
+            "item/commandExecution/requestApproval" => (
+                ApprovalKind::AgentPermission,
+                "Codex approval needed: command execution".to_owned(),
+                command_body(params_obj),
+                true,
+                ResponseKind::CommandExecutionApproval,
+                allow_permission,
+                None,
+            ),
+            "item/fileChange/requestApproval" => (
+                ApprovalKind::AgentPermission,
+                "Codex approval needed: file change".to_owned(),
+                file_change_body(params_obj),
+                true,
+                ResponseKind::FileChangeApproval,
+                allow_permission,
+                None,
+            ),
+            "item/permissions/requestApproval" => (
+                ApprovalKind::AgentPermission,
+                "Codex approval needed: permissions".to_owned(),
+                permissions_body(params_obj),
+                true,
+                ResponseKind::PermissionProfileApproval,
+                allow_permission,
+                None,
+            ),
+            "item/tool/requestUserInput" => (
+                ApprovalKind::AgentQuestion,
+                "Codex needs input".to_owned(),
+                request_user_input_body(params_obj),
+                false,
+                ResponseKind::ToolRequestUserInput,
+                allow_question,
+                None,
+            ),
+            "mcpServer/elicitation/request" => {
+                if is_mcp_tool_call_elicitation(params_obj) {
+                    let auto_accept_note = codex_mcp_tool_auto_accept_note(params_obj);
+                    (
+                        ApprovalKind::AgentPermission,
+                        "Codex approval needed: MCP tool".to_owned(),
+                        mcp_elicitation_body(params_obj),
+                        false,
+                        ResponseKind::McpServerElicitation,
+                        allow_permission,
+                        auto_accept_note,
+                    )
+                } else {
+                    (
+                        ApprovalKind::AgentQuestion,
+                        "Codex MCP elicitation".to_owned(),
+                        mcp_elicitation_body(params_obj),
+                        false,
+                        ResponseKind::McpServerElicitation,
+                        allow_question,
+                        None,
+                    )
+                }
             }
-        }
-        other => {
-            return Err(CodexAppServerBridgeError::unsupported(format!(
-                "Codex app-server request method {other:?} is not bridged"
-            )));
-        }
-    };
+            other => {
+                return Err(CodexAppServerBridgeError::unsupported(format!(
+                    "Codex app-server request method {other:?} is not bridged"
+                )));
+            }
+        };
 
     Ok(RequestSpec {
         kind,
@@ -290,6 +327,7 @@ fn request_spec(
         by_session,
         response_kind,
         params: envelope.params.clone(),
+        auto_accept_note,
     })
 }
 
@@ -523,6 +561,64 @@ fn is_mcp_tool_call_elicitation(params: &Map<String, Value>) -> bool {
         == Some("mcp_tool_call")
 }
 
+fn codex_mcp_tool_auto_accept_note(params: &Map<String, Value>) -> Option<String> {
+    let server = params.get("serverName")?.as_str()?;
+    if server != "synapse" {
+        return None;
+    }
+    let tool = codex_mcp_tool_name(params)?;
+    let tool_input = params
+        .get("_meta")
+        .and_then(Value::as_object)
+        .and_then(|meta| meta.get("tool_params"))
+        .unwrap_or(&Value::Null);
+    let policy_name = format!("mcp__{server}__{tool}");
+    match permission_policy::classify(&policy_name, tool_input) {
+        GateDecision::AutoAllow => Some(format!(
+            "codex_app_server_auto_allow_safe_mcp_tool: {policy_name}"
+        )),
+        GateDecision::Gate { .. } => None,
+    }
+}
+
+fn codex_mcp_tool_name(params: &Map<String, Value>) -> Option<String> {
+    params
+        .get("_meta")
+        .and_then(Value::as_object)
+        .and_then(|meta| {
+            meta.get("tool_name")
+                .or_else(|| meta.get("tool"))
+                .or_else(|| meta.get("name"))
+        })
+        .and_then(Value::as_str)
+        .filter(|tool| is_mcp_tool_name_shape(tool))
+        .map(str::to_owned)
+        .or_else(|| {
+            params
+                .get("message")
+                .and_then(Value::as_str)
+                .and_then(extract_tool_name_from_message)
+        })
+}
+
+fn extract_tool_name_from_message(message: &str) -> Option<String> {
+    let (_, after_marker) = message.split_once("tool \"")?;
+    let (tool, _) = after_marker.split_once('"')?;
+    if is_mcp_tool_name_shape(tool) {
+        Some(tool.to_owned())
+    } else {
+        None
+    }
+}
+
+fn is_mcp_tool_name_shape(tool: &str) -> bool {
+    !tool.is_empty()
+        && tool.len() <= 128
+        && tool
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
+}
+
 fn single_line(value: &str) -> String {
     value
         .chars()
@@ -728,6 +824,10 @@ mod tests {
                 "codex:agent-spawn-codex-bridge-test:mcpServer/elicitation/request:request-42:default"
             )
         );
+        assert_eq!(
+            spec.auto_accept_note.as_deref(),
+            Some("codex_app_server_auto_allow_safe_mcp_tool: mcp__synapse__health")
+        );
 
         let item = ApprovalItemRecord {
             schema_version: 1,
@@ -766,5 +866,47 @@ mod tests {
         let response = app_server_response_for(&spec, &item);
         assert_eq!(response["action"], "accept");
         assert_eq!(response["content"], json!({}));
+    }
+
+    #[test]
+    fn mcp_tool_elicitation_does_not_auto_accept_destructive_tool() {
+        let spec = request_spec(&envelope(
+            "mcpServer/elicitation/request",
+            json!({
+                "threadId": "thread-a",
+                "turnId": "turn-a",
+                "serverName": "synapse",
+                "message": "Allow the synapse MCP server to run tool \"fleet_stop\"?",
+                "mode": "form",
+                "requestedSchema": { "type": "object", "properties": {} },
+                "_meta": {
+                    "codex_approval_kind": "mcp_tool_call",
+                    "tool_description": "Fleet kill switch",
+                    "tool_params": { "mode": "kill", "confirm": "STOP-FLEET" },
+                    "tool_params_display": []
+                }
+            }),
+        ))
+        .expect("spec");
+        assert_eq!(spec.kind, ApprovalKind::AgentPermission);
+        assert_eq!(spec.auto_accept_note, None);
+    }
+
+    #[test]
+    fn mcp_tool_name_parser_fails_closed_when_missing_tool_identity() {
+        let params = json!({
+            "threadId": "thread-a",
+            "turnId": "turn-a",
+            "serverName": "synapse",
+            "message": "Allow an MCP action?",
+            "mode": "form",
+            "_meta": {
+                "codex_approval_kind": "mcp_tool_call",
+                "tool_params": {}
+            }
+        });
+        let params = params.as_object().expect("object");
+        assert_eq!(codex_mcp_tool_name(params), None);
+        assert_eq!(codex_mcp_tool_auto_accept_note(params), None);
     }
 }

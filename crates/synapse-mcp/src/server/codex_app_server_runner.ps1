@@ -437,6 +437,12 @@ $script:LastFinalAgentMessageText = $null
 $script:CodexApprovalPolicy = Get-CodexApprovalPolicy
 $script:CodexSandboxMode = Get-CodexSandboxMode
 $script:CodexAppServerRequestBridgeUrl = Get-CodexAppServerRequestBridgeUrl -Url $McpUrl
+$script:SynapseStartupApprovedMcpTools = @(
+    'health',
+    'session_list',
+    'get_target',
+    'agent_spawn_task_started'
+)
 $socket = $null
 $appServer = $null
 
@@ -455,6 +461,9 @@ try {
         '-c', ('mcp_servers.synapse.url=' + (ConvertTo-TomlStringLiteral $McpUrl)),
         '-c', 'mcp_servers.synapse.bearer_token_env_var="SYNAPSE_BEARER_TOKEN"'
     )
+    foreach ($tool in $script:SynapseStartupApprovedMcpTools) {
+        $appArgs += @('-c', ('mcp_servers.synapse.tools.' + $tool + '.approval_mode=' + (ConvertTo-TomlStringLiteral 'approve')))
+    }
     if (-not [string]::IsNullOrWhiteSpace($Model)) {
         $appArgs += @('-c', ('model=' + (ConvertTo-TomlStringLiteral $Model)))
     }

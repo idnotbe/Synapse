@@ -6857,6 +6857,16 @@ mod tests {
             "gated Codex spawns must use Codex's own on-request approval policy and workspace-write sandbox"
         );
         assert!(
+            CODEX_APP_SERVER_RUNNER_SCRIPT.contains("mcp_servers.synapse.tools.")
+                && CODEX_APP_SERVER_RUNNER_SCRIPT.contains("'health'")
+                && CODEX_APP_SERVER_RUNNER_SCRIPT.contains("'session_list'")
+                && CODEX_APP_SERVER_RUNNER_SCRIPT.contains("'get_target'")
+                && CODEX_APP_SERVER_RUNNER_SCRIPT.contains("'agent_spawn_task_started'")
+                && CODEX_APP_SERVER_RUNNER_SCRIPT.contains("approval_mode=")
+                && CODEX_APP_SERVER_RUNNER_SCRIPT.contains("'approve'"),
+            "startup-safe Synapse MCP tools must be pre-approved so Codex readiness cannot deadlock on its own health/task-start calls"
+        );
+        assert!(
             CODEX_APP_SERVER_RUNNER_SCRIPT.contains("$script:LastFinalAgentMessageText")
                 && CODEX_APP_SERVER_RUNNER_SCRIPT.contains("$phase -eq 'final_answer'")
                 && CODEX_APP_SERVER_RUNNER_SCRIPT
