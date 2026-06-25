@@ -50,42 +50,18 @@ const NORMAL_ALLOWED_EXACT: &[&str] = &[
     "audit_intelligence_query",
     "demo_record_start",
     "demo_record_stop",
-    "browser_add_init_script",
-    "browser_add_script_tag",
-    "browser_add_style_tag",
     "browser_adopt_active_tab",
     "browser_aria_snapshot",
     "browser_assert",
     "browser_clock",
-    "browser_console_messages",
     "browser_cookies",
     "browser_content",
-    "browser_device",
     "browser_downloads",
-    "browser_drag",
-    "browser_drop",
-    "browser_emulate",
-    "browser_evaluate",
-    "browser_expose_binding",
-    "browser_file_upload",
     "browser_fill_form",
     "browser_frames",
-    "browser_geolocation",
-    "browser_handle_dialog",
     "browser_inspect",
     "browser_locate",
-    "browser_locale",
-    "browser_media",
-    "browser_network_conditions",
-    "browser_network_har",
-    "browser_network_overrides",
-    "browser_network_request",
-    "browser_network_requests",
-    "browser_network_websockets",
     "browser_page_events",
-    "browser_pdf",
-    "browser_route",
-    "browser_resize",
     "browser_scroll_into_view",
     "browser_screenshot",
     "browser_set_content",
@@ -187,6 +163,101 @@ const NORMAL_ALLOWED_PREFIXES: &[&str] = &["agent_template_", "task_"];
 
 const BROWSER_CONTROL_ALLOWED_EXACT: &[&str] = &[
     "approval_list",
+    "browser_adopt_active_tab",
+    "browser_aria_snapshot",
+    "browser_assert",
+    "browser_clock",
+    "browser_cookies",
+    "browser_content",
+    "browser_downloads",
+    "browser_fill_form",
+    "browser_frames",
+    "browser_inspect",
+    "browser_locate",
+    "browser_page_events",
+    "browser_scroll_into_view",
+    "browser_screenshot",
+    "browser_set_content",
+    "browser_set_value",
+    "browser_storage",
+    "browser_tabs",
+    "browser_wait_for",
+    "browser_wait_for_function",
+    "browser_wait_for_load_state",
+    "browser_wait_for_request",
+    "browser_wait_for_response",
+    "browser_wait_for_selector",
+    "browser_wait_for_url",
+    "capture_screenshot",
+    "cdp_activate_tab",
+    "cdp_bridge_reload",
+    "cdp_close_tab",
+    "cdp_navigate_tab",
+    "cdp_open_tab",
+    "cdp_target_info",
+    "clear_target",
+    "control_lease_acquire",
+    "control_lease_release",
+    "control_lease_status",
+    "escalation_list",
+    "find",
+    "get_target",
+    "health",
+    "observe",
+    "observe_delta",
+    "read_text",
+    "reality_audit",
+    "reality_baseline",
+    "session_end",
+    "session_list",
+    "session_status",
+    "set_capture_target",
+    "set_perception_mode",
+    "set_target",
+    "storage_inspect",
+    "target_act",
+    "target_claim",
+    "target_claim_adopt",
+    "target_claim_status",
+    "target_release",
+    "tool_profile_set",
+    "tool_profile_status",
+    "window_list",
+    "workspace_get",
+    "workspace_list",
+    "workspace_put",
+    "workspace_subscribe",
+];
+
+const BROWSER_DEBUGGER_ONLY_EXACT: &[&str] = &[
+    "browser_add_init_script",
+    "browser_add_script_tag",
+    "browser_add_style_tag",
+    "browser_console_messages",
+    "browser_device",
+    "browser_drag",
+    "browser_drop",
+    "browser_emulate",
+    "browser_evaluate",
+    "browser_expose_binding",
+    "browser_file_upload",
+    "browser_geolocation",
+    "browser_handle_dialog",
+    "browser_locale",
+    "browser_media",
+    "browser_network_conditions",
+    "browser_network_har",
+    "browser_network_overrides",
+    "browser_network_request",
+    "browser_network_requests",
+    "browser_network_websockets",
+    "browser_pdf",
+    "browser_resize",
+    "browser_route",
+];
+
+const BROWSER_DEBUGGER_ALLOWED_EXACT: &[&str] = &[
+    "approval_list",
     "browser_add_init_script",
     "browser_add_script_tag",
     "browser_add_style_tag",
@@ -221,8 +292,8 @@ const BROWSER_CONTROL_ALLOWED_EXACT: &[&str] = &[
     "browser_network_websockets",
     "browser_page_events",
     "browser_pdf",
-    "browser_route",
     "browser_resize",
+    "browser_route",
     "browser_scroll_into_view",
     "browser_screenshot",
     "browser_set_content",
@@ -301,6 +372,10 @@ const BREAK_GLASS_HAZARDOUS_TOOLS: &[&str] = &[
 pub(crate) enum ToolProfileKind {
     NormalAgent,
     BrowserControl,
+    /// Browser-only CDP / chrome.debugger capability lane. This keeps
+    /// attach-capable browser tools explicit without exposing raw OS foreground,
+    /// shell, or agent-spawn surfaces.
+    BrowserDebugger,
     BreakGlass,
     /// Full Synapse tool surface for Synapse-spawned local-model agents
     /// (gemma/DeepSeek/etc., #1031). Identical visibility to `BreakGlass` (every
@@ -318,6 +393,7 @@ impl ToolProfileKind {
         match self {
             Self::NormalAgent => "normal_agent",
             Self::BrowserControl => "browser_control",
+            Self::BrowserDebugger => "browser_debugger",
             Self::BreakGlass => "break_glass",
             Self::FullCapability => "full_capability",
         }
@@ -336,6 +412,7 @@ impl ToolProfileKind {
         match self {
             Self::NormalAgent => "normal_agent",
             Self::BrowserControl => "dashboard/browser-control task",
+            Self::BrowserDebugger => "browser-debugger task",
             Self::BreakGlass => "break-glass/admin",
             Self::FullCapability => "full-capability local-model agent",
         }
@@ -351,6 +428,7 @@ impl ToolProfileKind {
                         .any(|prefix| tool_name.starts_with(prefix))
             }
             Self::BrowserControl => BROWSER_CONTROL_ALLOWED_EXACT.contains(&tool_name),
+            Self::BrowserDebugger => BROWSER_DEBUGGER_ALLOWED_EXACT.contains(&tool_name),
         }
     }
 }
@@ -492,7 +570,7 @@ pub(crate) struct ToolProfileSetResponse {
 #[tool_router(router = tool_profile_tool_router, vis = "pub(super)")]
 impl SynapseService {
     #[tool(
-        description = "Read this MCP session's effective tool profile, visible tools/list names, durable CF_SESSIONS policy row, and capability-preserving routes for hidden raw foreground primitives. The readback distinguishes human_os_foreground from agent_logical_foreground: normal/task profiles prefer target_act/browser/CDP/session-lane tools, while real OS foreground primitives stay reachable only through an explicit lease + break_glass path.",
+        description = "Read this MCP session's effective tool profile, visible tools/list names, durable CF_SESSIONS policy row, and capability-preserving routes for hidden raw foreground/browser-debugger primitives. The readback distinguishes human_os_foreground from agent_logical_foreground and the browser debugger lane: normal_agent/browser_control expose debugger-free already-open Chrome routes, browser_debugger explicitly exposes raw-CDP/chrome.debugger browser tools, and real OS foreground primitives stay reachable only through lease + break_glass.",
         input_schema = empty_input_schema()
     )]
     pub async fn tool_profile_status(
@@ -511,7 +589,7 @@ impl SynapseService {
     }
 
     #[tool(
-        description = "Set this MCP session's durable tool profile. normal_agent and browser_control preserve capability through target_act/browser/CDP/session-lane routes while keeping raw human-OS-foreground primitives out of the default affordance. break_glass exposes the full raw surface only when confirm_break_glass=true, reason is non-empty, and this session currently owns the foreground input lease."
+        description = "Set this MCP session's durable tool profile. normal_agent and browser_control expose debugger-free already-open Chrome routes and hide raw-CDP/chrome.debugger browser tools from default discovery. browser_debugger exposes browser-only raw-CDP/chrome.debugger tools only when confirm_break_glass=true and reason is non-empty. break_glass exposes the full raw surface only when confirm_break_glass=true, reason is non-empty, and this session currently owns the foreground input lease."
     )]
     pub async fn tool_profile_set(
         &self,
@@ -779,7 +857,7 @@ impl SynapseService {
                 "policy_row": row,
                 "visible_tool_count": visible_tool_names.len(),
                 "capability_route": capability_route,
-                "resolution": "use the named capability_route preferred tools for agent logical foreground work, or explicitly acquire the foreground input lease and set profile=break_glass with confirm_break_glass=true plus a non-empty reason for real human OS foreground work",
+                "resolution": "use the named capability_route preferred tools for default agent work; set profile=browser_debugger with confirm_break_glass=true plus a non-empty reason for browser raw-CDP/chrome.debugger instrumentation; acquire the foreground input lease and set profile=break_glass with confirm_break_glass=true plus a non-empty reason for real human OS foreground work",
             })),
         );
         let command_payload = json!({
@@ -1023,15 +1101,11 @@ fn validate_profile_set_policy(
     confirm_break_glass: bool,
     lease_proof: &ToolProfileLeaseProof,
 ) -> Result<(), ErrorData> {
-    // Both the full raw surface (break_glass) and the local-agent full-capability
-    // surface, when requested *explicitly* via tool_profile_set, require the same
-    // operator-intent proof. This stops any agent from self-escalating to the
-    // foreground primitives by hand. The frictionless path to full_capability is
-    // the automatic, client-identity-keyed default for the trusted local-model
-    // harness (see `ensure_tool_profile_assignment`), never this tool.
     if !matches!(
         profile,
-        ToolProfileKind::BreakGlass | ToolProfileKind::FullCapability
+        ToolProfileKind::BrowserDebugger
+            | ToolProfileKind::BreakGlass
+            | ToolProfileKind::FullCapability
     ) {
         return Ok(());
     }
@@ -1048,6 +1122,15 @@ fn validate_profile_set_policy(
             format!("explicit profile={profile_label} requires a non-empty reason"),
         ));
     }
+    if profile == ToolProfileKind::BrowserDebugger {
+        return Ok(());
+    }
+    // The full raw surface (break_glass) and the local-agent full-capability
+    // surface, when requested *explicitly* via tool_profile_set, require
+    // foreground-lease proof. This stops any agent from self-escalating to raw
+    // foreground primitives by hand. The frictionless path to full_capability is
+    // the automatic, client-identity-keyed default for the trusted local-model
+    // harness (see `ensure_tool_profile_assignment`), never this tool.
     if !lease_proof.caller_is_owner {
         return Err(ErrorData::new(
             ErrorCode(-32099),
@@ -1070,7 +1153,10 @@ fn validate_profile_set_policy(
 fn break_glass_lease_proof(session_id: &str, profile: ToolProfileKind) -> ToolProfileLeaseProof {
     let status = lease::status();
     ToolProfileLeaseProof {
-        required: profile == ToolProfileKind::BreakGlass,
+        required: matches!(
+            profile,
+            ToolProfileKind::BreakGlass | ToolProfileKind::FullCapability
+        ),
         // FullCapability is auto-assigned to the trusted local-model harness and
         // does not gate on the foreground lease; only an *explicit*
         // tool_profile_set escalation (handled in validate_profile_set_policy)
@@ -1129,11 +1215,15 @@ fn denied_break_glass_tools(visible_tool_names: &[String]) -> Vec<String> {
 fn foreground_capability_policy(profile: ToolProfileKind) -> ToolProfileForegroundCapability {
     let (preferred_path, real_os_foreground_path) = match profile {
         ToolProfileKind::NormalAgent => (
-            "target_act, browser_set_value, cdp_* and per-session target/claim tools are visible in the normal profile",
+            "target_act, debugger-free browser tools, legacy cdp_* tab-lifecycle wrappers, and per-session target/claim tools are visible in the normal profile",
             "control_lease_acquire + tool_profile_set break_glass + raw foreground primitive; denied without lease/reason/confirm",
         ),
         ToolProfileKind::BrowserControl => (
-            "browser/CDP/target_act tools plus lease controls are visible in the task profile; raw shell/spawn surfaces stay hidden",
+            "debugger-free browser/target_act tools plus lease controls are visible in the task profile; raw CDP/chrome.debugger, shell, and spawn surfaces stay hidden",
+            "control_lease_acquire + tool_profile_set break_glass + raw foreground primitive; denied without lease/reason/confirm",
+        ),
+        ToolProfileKind::BrowserDebugger => (
+            "browser-only raw CDP/chrome.debugger tools are visible by explicit profile; raw shell/spawn and OS foreground primitives stay hidden",
             "control_lease_acquire + tool_profile_set break_glass + raw foreground primitive; denied without lease/reason/confirm",
         ),
         ToolProfileKind::BreakGlass | ToolProfileKind::FullCapability => (
@@ -1158,6 +1248,7 @@ fn hidden_tool_capability_routes(visible_tool_names: &[String]) -> Vec<HiddenToo
         .collect::<BTreeSet<_>>();
     BREAK_GLASS_HAZARDOUS_TOOLS
         .iter()
+        .chain(BROWSER_DEBUGGER_ONLY_EXACT.iter())
         .copied()
         .filter(|name| !visible.contains(name))
         .map(hidden_tool_capability_route)
@@ -1175,7 +1266,7 @@ fn hidden_tool_capability_route(tool_name: &str) -> HiddenToolCapabilityRoute {
             vec![
                 "target_act verb=set_field",
                 "browser_set_value",
-                "browser_evaluate",
+                "browser_locate",
             ]
         }
         "act_press" | "act_keymap" | "act_combo" => {
@@ -1185,7 +1276,8 @@ fn hidden_tool_capability_route(tool_name: &str) -> HiddenToolCapabilityRoute {
             ]
         }
         "act_scroll" => vec![
-            "browser_evaluate scrollIntoView/window.scrollBy",
+            "browser_scroll_into_view",
+            "target_act verb=scroll",
             "capture_screenshot",
             "observe",
             "target_claim",
@@ -1225,6 +1317,24 @@ fn hidden_tool_capability_route(tool_name: &str) -> HiddenToolCapabilityRoute {
         "action_diagnostic_queue_full_setup" | "action_diagnostic_rate_limit_override" => {
             vec!["health", "storage_inspect", "session_status"]
         }
+        "browser_console_messages"
+        | "browser_network_har"
+        | "browser_network_overrides"
+        | "browser_network_request"
+        | "browser_network_requests"
+        | "browser_network_websockets"
+        | "browser_route" => vec![
+            "tool_profile_set profile=browser_debugger confirm_break_glass=true reason=<why raw CDP is required>",
+            "browser_content",
+            "browser_page_events",
+            "browser_downloads",
+        ],
+        tool if BROWSER_DEBUGGER_ONLY_EXACT.contains(&tool) => vec![
+            "tool_profile_set profile=browser_debugger confirm_break_glass=true reason=<why chrome.debugger is required>",
+            "browser_tabs",
+            "browser_locate",
+            "target_act",
+        ],
         _ => vec!["target_act", "tool_profile_set break_glass"],
     };
     HiddenToolCapabilityRoute {
@@ -1233,7 +1343,7 @@ fn hidden_tool_capability_route(tool_name: &str) -> HiddenToolCapabilityRoute {
         preferred_tools: preferred_tools.into_iter().map(str::to_owned).collect(),
         agent_logical_foreground_policy: "use the preferred tools against this session's agent_logical_foreground/foreground_lane",
         human_os_foreground_policy: "never use the human OS foreground as an implicit fallback",
-        break_glass_policy: "for a real OS foreground primitive, first acquire the input lease, then set profile=break_glass with confirm_break_glass=true and a non-empty reason",
+        break_glass_policy: "for browser CDP/chrome.debugger instrumentation, set profile=browser_debugger with confirm_break_glass=true and a non-empty reason; for a real OS foreground primitive, first acquire the input lease, then set profile=break_glass with confirm_break_glass=true and a non-empty reason",
     }
 }
 
@@ -1254,6 +1364,10 @@ fn tool_rank(profile: ToolProfileKind, tool_name: &str) -> usize {
             .position(|name| *name == tool_name)
             .unwrap_or(usize::MAX),
         ToolProfileKind::BrowserControl => BROWSER_CONTROL_ALLOWED_EXACT
+            .iter()
+            .position(|name| *name == tool_name)
+            .unwrap_or(usize::MAX),
+        ToolProfileKind::BrowserDebugger => BROWSER_DEBUGGER_ALLOWED_EXACT
             .iter()
             .position(|name| *name == tool_name)
             .unwrap_or(usize::MAX),
@@ -1349,43 +1463,43 @@ mod tests {
     }
 
     fn names() -> Vec<String> {
-        let mut names = BREAK_GLASS_HAZARDOUS_TOOLS
-            .iter()
-            .map(|name| (*name).to_owned())
-            .collect::<Vec<_>>();
+        let mut names = std::collections::BTreeSet::new();
+        names.extend(
+            BREAK_GLASS_HAZARDOUS_TOOLS
+                .iter()
+                .map(|name| (*name).to_owned()),
+        );
+        names.extend(
+            BROWSER_DEBUGGER_ONLY_EXACT
+                .iter()
+                .map(|name| (*name).to_owned()),
+        );
         names.extend(
             [
                 "act_run_shell",
+                "act_spawn_agent",
                 "act_launch",
                 "cdp_open_tab",
                 "health",
                 "session_list",
                 "target_act",
-                "browser_add_init_script",
-                "browser_add_script_tag",
-                "browser_add_style_tag",
-                "browser_device",
-                "browser_drag",
-                "browser_drop",
-                "browser_emulate",
-                "browser_evaluate",
-                "browser_expose_binding",
-                "browser_file_upload",
-                "browser_geolocation",
-                "browser_handle_dialog",
-                "browser_locale",
-                "browser_media",
-                "browser_network_conditions",
-                "browser_network_har",
-                "browser_network_overrides",
-                "browser_network_request",
-                "browser_network_requests",
-                "browser_network_websockets",
-                "browser_route",
-                "browser_resize",
+                "browser_adopt_active_tab",
+                "browser_aria_snapshot",
+                "browser_assert",
+                "browser_clock",
+                "browser_content",
+                "browser_downloads",
+                "browser_fill_form",
+                "browser_frames",
+                "browser_inspect",
+                "browser_locate",
+                "browser_page_events",
                 "browser_scroll_into_view",
+                "browser_screenshot",
                 "browser_set_content",
                 "browser_set_value",
+                "browser_storage",
+                "browser_tabs",
                 "browser_wait_for",
                 "browser_wait_for_function",
                 "browser_wait_for_load_state",
@@ -1401,7 +1515,25 @@ mod tests {
             .iter()
             .map(|name| (*name).to_owned()),
         );
-        names
+        names.into_iter().collect()
+    }
+
+    fn assert_debugger_only_hidden(visible: &[String]) {
+        for hidden in BROWSER_DEBUGGER_ONLY_EXACT {
+            assert!(
+                !visible.iter().any(|name| name == hidden),
+                "default profile must hide browser debugger tool {hidden}"
+            );
+        }
+    }
+
+    fn assert_debugger_only_visible(visible: &[String]) {
+        for required in BROWSER_DEBUGGER_ONLY_EXACT {
+            assert!(
+                visible.iter().any(|name| name == required),
+                "browser_debugger profile must expose browser debugger tool {required}"
+            );
+        }
     }
 
     #[test]
@@ -1411,27 +1543,8 @@ mod tests {
         assert!(visible.contains(&"act_launch".to_owned()));
         assert!(visible.contains(&"cdp_open_tab".to_owned()));
         assert!(visible.contains(&"target_act".to_owned()));
-        assert!(visible.contains(&"browser_add_init_script".to_owned()));
-        assert!(visible.contains(&"browser_add_script_tag".to_owned()));
-        assert!(visible.contains(&"browser_add_style_tag".to_owned()));
-        assert!(visible.contains(&"browser_device".to_owned()));
-        assert!(visible.contains(&"browser_drag".to_owned()));
-        assert!(visible.contains(&"browser_drop".to_owned()));
-        assert!(visible.contains(&"browser_emulate".to_owned()));
-        assert!(visible.contains(&"browser_expose_binding".to_owned()));
-        assert!(visible.contains(&"browser_file_upload".to_owned()));
-        assert!(visible.contains(&"browser_geolocation".to_owned()));
-        assert!(visible.contains(&"browser_handle_dialog".to_owned()));
-        assert!(visible.contains(&"browser_locale".to_owned()));
-        assert!(visible.contains(&"browser_media".to_owned()));
-        assert!(visible.contains(&"browser_network_conditions".to_owned()));
-        assert!(visible.contains(&"browser_network_har".to_owned()));
-        assert!(visible.contains(&"browser_network_overrides".to_owned()));
-        assert!(visible.contains(&"browser_network_request".to_owned()));
-        assert!(visible.contains(&"browser_network_requests".to_owned()));
-        assert!(visible.contains(&"browser_network_websockets".to_owned()));
-        assert!(visible.contains(&"browser_route".to_owned()));
-        assert!(visible.contains(&"browser_resize".to_owned()));
+        assert!(visible.contains(&"browser_content".to_owned()));
+        assert!(visible.contains(&"browser_locate".to_owned()));
         assert!(visible.contains(&"browser_scroll_into_view".to_owned()));
         assert!(visible.contains(&"browser_set_content".to_owned()));
         assert!(visible.contains(&"browser_set_value".to_owned()));
@@ -1447,6 +1560,7 @@ mod tests {
         assert!(!visible.contains(&"act_click".to_owned()));
         assert!(!visible.contains(&"act_type".to_owned()));
         assert!(!visible.contains(&"release_all".to_owned()));
+        assert_debugger_only_hidden(&visible);
 
         let policy = foreground_capability_policy(ToolProfileKind::NormalAgent);
         assert!(policy.profile_preserves_capability);
@@ -1482,6 +1596,21 @@ mod tests {
         );
         assert!(
             act_type_route
+                .preferred_tools
+                .contains(&"browser_locate".to_owned())
+        );
+        let browser_debugger_route = routes
+            .iter()
+            .find(|route| route.hidden_tool == "browser_console_messages")
+            .expect("browser_console_messages route");
+        assert!(
+            browser_debugger_route
+                .preferred_tools
+                .iter()
+                .any(|tool| tool.contains("profile=browser_debugger"))
+        );
+        assert!(
+            act_type_route
                 .agent_logical_foreground_policy
                 .contains("agent_logical_foreground")
         );
@@ -1498,27 +1627,8 @@ mod tests {
         assert!(visible.contains(&"cdp_open_tab".to_owned()));
         assert!(visible.contains(&"session_list".to_owned()));
         assert!(visible.contains(&"target_act".to_owned()));
-        assert!(visible.contains(&"browser_add_init_script".to_owned()));
-        assert!(visible.contains(&"browser_add_script_tag".to_owned()));
-        assert!(visible.contains(&"browser_add_style_tag".to_owned()));
-        assert!(visible.contains(&"browser_device".to_owned()));
-        assert!(visible.contains(&"browser_drag".to_owned()));
-        assert!(visible.contains(&"browser_drop".to_owned()));
-        assert!(visible.contains(&"browser_emulate".to_owned()));
-        assert!(visible.contains(&"browser_expose_binding".to_owned()));
-        assert!(visible.contains(&"browser_file_upload".to_owned()));
-        assert!(visible.contains(&"browser_geolocation".to_owned()));
-        assert!(visible.contains(&"browser_handle_dialog".to_owned()));
-        assert!(visible.contains(&"browser_locale".to_owned()));
-        assert!(visible.contains(&"browser_media".to_owned()));
-        assert!(visible.contains(&"browser_network_conditions".to_owned()));
-        assert!(visible.contains(&"browser_network_har".to_owned()));
-        assert!(visible.contains(&"browser_network_overrides".to_owned()));
-        assert!(visible.contains(&"browser_network_request".to_owned()));
-        assert!(visible.contains(&"browser_network_requests".to_owned()));
-        assert!(visible.contains(&"browser_network_websockets".to_owned()));
-        assert!(visible.contains(&"browser_route".to_owned()));
-        assert!(visible.contains(&"browser_resize".to_owned()));
+        assert!(visible.contains(&"browser_content".to_owned()));
+        assert!(visible.contains(&"browser_locate".to_owned()));
         assert!(visible.contains(&"browser_scroll_into_view".to_owned()));
         assert!(visible.contains(&"browser_set_content".to_owned()));
         assert!(visible.contains(&"browser_set_value".to_owned()));
@@ -1533,6 +1643,28 @@ mod tests {
         assert!(visible.contains(&"control_lease_release".to_owned()));
         assert!(!visible.contains(&"act_run_shell".to_owned()));
         assert!(!visible.contains(&"act_click".to_owned()));
+        assert_debugger_only_hidden(&visible);
+    }
+
+    #[test]
+    fn browser_debugger_profile_exposes_browser_debugger_surface_without_shell_or_foreground() {
+        let visible = visible_tool_names_for_profile(ToolProfileKind::BrowserDebugger, &names());
+        assert_debugger_only_visible(&visible);
+        assert!(visible.contains(&"browser_content".to_owned()));
+        assert!(visible.contains(&"browser_locate".to_owned()));
+        assert!(visible.contains(&"target_act".to_owned()));
+        assert!(visible.contains(&"cdp_open_tab".to_owned()));
+        assert!(visible.contains(&"tool_profile_set".to_owned()));
+        assert!(!visible.contains(&"act_run_shell".to_owned()));
+        assert!(!visible.contains(&"act_spawn_agent".to_owned()));
+        assert!(!visible.contains(&"act_click".to_owned()));
+        assert!(!visible.contains(&"act_type".to_owned()));
+        assert!(!visible.contains(&"release_all".to_owned()));
+
+        let policy = foreground_capability_policy(ToolProfileKind::BrowserDebugger);
+        assert!(policy.profile_preserves_capability);
+        assert!(policy.preferred_path.contains("raw CDP/chrome.debugger"));
+        assert!(policy.preferred_path.contains("raw shell/spawn"));
     }
 
     #[test]
@@ -1599,6 +1731,45 @@ mod tests {
     }
 
     #[test]
+    fn browser_debugger_requires_confirm_and_reason_but_not_foreground_lease() {
+        let proof = ToolProfileLeaseProof {
+            required: false,
+            held: false,
+            owner_session_id: None,
+            caller_is_owner: false,
+            expires_in_ms: None,
+        };
+        assert!(
+            validate_profile_set_policy(
+                "s1",
+                ToolProfileKind::BrowserDebugger,
+                Some("inspect raw CDP console messages"),
+                false,
+                &proof,
+            )
+            .is_err()
+        );
+        assert!(
+            validate_profile_set_policy(
+                "s1",
+                ToolProfileKind::BrowserDebugger,
+                None,
+                true,
+                &proof,
+            )
+            .is_err()
+        );
+        validate_profile_set_policy(
+            "s1",
+            ToolProfileKind::BrowserDebugger,
+            Some("inspect raw CDP console messages"),
+            true,
+            &proof,
+        )
+        .expect("browser_debugger requires explicit reason/confirm but not OS foreground lease");
+    }
+
+    #[test]
     fn default_normal_profile_persists_policy_row_and_filters_tools() {
         let dir = TempDir::new().expect("tmp");
         let service = service_with_db(dir.path());
@@ -1647,6 +1818,7 @@ mod tests {
         assert!(!tools.contains(&"act_click".to_owned()));
         assert!(!tools.contains(&"act_type".to_owned()));
         assert!(!tools.contains(&"release_all".to_owned()));
+        assert_debugger_only_hidden(&tools);
 
         let row = service
             .read_tool_profile_assignment(session_id)
@@ -1777,6 +1949,7 @@ mod tests {
         assert!(!tools.contains(&"act_run_shell".to_owned()));
         assert!(!tools.contains(&"act_spawn_agent".to_owned()));
         assert!(!tools.contains(&"act_type".to_owned()));
+        assert_debugger_only_hidden(&tools);
     }
 
     #[test]
@@ -1824,6 +1997,59 @@ mod tests {
                 text.contains("tool_profile_policy")
                     && text.contains("tool_call_denied")
                     && text.contains("act_type")
+                    && text.contains(error_codes::TOOL_PROFILE_POLICY_DENIED)
+            })
+            .count();
+        assert_eq!(matching, 1);
+    }
+
+    #[test]
+    fn hidden_browser_debugger_tool_denial_names_browser_debugger_route() {
+        let dir = TempDir::new().expect("tmp");
+        let service = service_with_db(dir.path());
+        let session_id = "issue1318-denied-browser-debugger-session";
+        let error = service
+            .admit_tool_call_for_profile("browser_console_messages", Some(session_id))
+            .expect_err("normal profile must deny raw-CDP browser debugger tool");
+        let code = error
+            .data
+            .as_ref()
+            .and_then(|data| data.get("code"))
+            .and_then(Value::as_str);
+        assert_eq!(code, Some(error_codes::TOOL_PROFILE_POLICY_DENIED));
+        let route = error
+            .data
+            .as_ref()
+            .and_then(|data| data.get("capability_route"))
+            .expect("capability route in denial");
+        assert_eq!(route["hidden_tool"], "browser_console_messages");
+        let preferred_tools = route["preferred_tools"]
+            .as_array()
+            .expect("preferred tools array");
+        assert!(preferred_tools.iter().any(|tool| {
+            tool.as_str()
+                .is_some_and(|text| text.contains("profile=browser_debugger"))
+        }));
+        let resolution = error
+            .data
+            .as_ref()
+            .and_then(|data| data.get("resolution"))
+            .and_then(Value::as_str)
+            .expect("resolution");
+        assert!(resolution.contains("profile=browser_debugger"));
+
+        let db = service.m3_storage().expect("storage");
+        let audit_rows = db
+            .scan_cf_prefix(cf::CF_ACTION_LOG, b"")
+            .expect("scan command audit");
+        let matching = audit_rows
+            .iter()
+            .filter(|(_, value)| {
+                let text = String::from_utf8_lossy(value);
+                text.contains("tool_profile_policy")
+                    && text.contains("tool_call_denied")
+                    && text.contains("browser_console_messages")
+                    && text.contains("profile=browser_debugger")
                     && text.contains(error_codes::TOOL_PROFILE_POLICY_DENIED)
             })
             .count();

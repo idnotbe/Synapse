@@ -29,7 +29,12 @@ const ALLOWED_STATUS: [&str; 8] = [
     "sessionless",
 ];
 
-const ALLOWED_DEFAULT_EXPOSURE: [&str; 3] = ["normal_agent", "break_glass", "debug_only"];
+const ALLOWED_DEFAULT_EXPOSURE: [&str; 4] = [
+    "normal_agent",
+    "browser_debugger",
+    "break_glass",
+    "debug_only",
+];
 const YES_NO: [&str; 2] = ["yes", "no"];
 
 #[derive(Debug)]
@@ -376,6 +381,8 @@ fn assert_exposure_overlay_matches_policy(
     let normal_exact = parse_string_array_const(TOOL_PROFILES_SOURCE, "NORMAL_ALLOWED_EXACT")?;
     let normal_prefixes =
         parse_string_array_const(TOOL_PROFILES_SOURCE, "NORMAL_ALLOWED_PREFIXES")?;
+    let browser_debugger_only =
+        parse_string_array_const(TOOL_PROFILES_SOURCE, "BROWSER_DEBUGGER_ONLY_EXACT")?;
     let break_glass_hazards =
         parse_string_array_const(TOOL_PROFILES_SOURCE, "BREAK_GLASS_HAZARDOUS_TOOLS")?;
 
@@ -403,6 +410,18 @@ fn assert_exposure_overlay_matches_policy(
             ensure!(
                 row.default_exposure == "debug_only" && row.hidden_internal == "yes",
                 "{} diagnostic tool must be debug_only hidden/internal",
+                tool
+            );
+        } else if browser_debugger_only.contains(tool) {
+            ensure!(
+                row.default_exposure == "browser_debugger",
+                "{} hidden browser debugger tool must be classified browser_debugger, got {}",
+                tool,
+                row.default_exposure
+            );
+            ensure!(
+                row.break_glass_only == "no",
+                "{} browser_debugger tool must not be classified break-glass-only",
                 tool
             );
         } else {
@@ -439,6 +458,20 @@ fn assert_exposure_overlay_matches_policy(
         "yes",
     )?;
     assert_representative_exposure(exposure_by_tool, "release_all", "break_glass", "yes", "yes")?;
+    assert_representative_exposure(
+        exposure_by_tool,
+        "browser_console_messages",
+        "browser_debugger",
+        "no",
+        "yes",
+    )?;
+    assert_representative_exposure(
+        exposure_by_tool,
+        "browser_evaluate",
+        "browser_debugger",
+        "no",
+        "yes",
+    )?;
     assert_representative_exposure(
         exposure_by_tool,
         "cdp_navigate_tab",

@@ -1,6 +1,6 @@
 const PROTOCOL_VERSION = 1;
-const BRIDGE_BUILD_ID = "synapse-chrome-bridge-2026-06-24-mousedown-click-v3";
-const BRIDGE_BUILD_SHA256 = "2c6eaf29f67712e0f4fda80921698ba1f39f1ca2df1c9fb6a2d7bcfea55549fb";
+const BRIDGE_BUILD_ID = "synapse-chrome-bridge-2026-06-25-browser-debugger-profile-v1";
+const BRIDGE_BUILD_SHA256 = "4f226f4a5f8e8a2d2f6a1f5c42f0c5bd9f1d9d9a6fd8a2efefdf6f9d62f8c4b3";
 const DEBUGGER_COMMAND_TIMEOUT_MS = 5000;
 const CAPTURE_VISIBLE_TAB_MIN_INTERVAL_MS = 600;
 let captureVisibleTabQueue = Promise.resolve();
@@ -1609,8 +1609,9 @@ async function handlePageContent(params) {
   const state = await tabPageState(selected.tabId, selected.target);
   const content = await tabPageContentState(selected.tabId, maxBytes);
   if (!content.available) {
+    const code = String(content.error_code || ERROR_CHROME_SCRIPTING_EXECUTE_FAILED);
     throw bridgeError(
-      ERROR_AXTREE_FAILED,
+      code,
       `pageContent read failed for tab ${selected.tabId}: code=${String(content.error_code || "UNKNOWN")} ` +
         `detail=${String(content.error_detail || "")}`
     );
