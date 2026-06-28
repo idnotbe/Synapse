@@ -1,6 +1,6 @@
 const PROTOCOL_VERSION = 1;
-const BRIDGE_BUILD_ID = "synapse-chrome-bridge-2026-06-28-realdrag-v3";
-const BRIDGE_BUILD_SHA256 = "f073a47759520564c8afd1e1951c82ed14ba2bcdf35737bbd11a2b9fc265f8c1";
+const BRIDGE_BUILD_ID = "synapse-chrome-bridge-2026-06-28-deadcode-v4";
+const BRIDGE_BUILD_SHA256 = "89747e41df429aa08d8684f71ff81a39907a9f6095ac9df7b99b08e9327b2341";
 const DEBUGGER_COMMAND_TIMEOUT_MS = 5000;
 const CAPTURE_VISIBLE_TAB_MIN_INTERVAL_MS = 600;
 const PAGE_SCREENSHOT_COMMAND_RESPONSE_BUDGET_MS = 25000;
@@ -15542,57 +15542,6 @@ function typeActiveElementInPage(text) {
     }
     return active.dispatchEvent(event);
   }
-}
-
-function applyTextToEditable(element, text) {
-  const tagName = String(element.tagName || "").toLowerCase();
-  const contentEditable =
-    element.isContentEditable ||
-    String(element.getAttribute?.("contenteditable") || "").toLowerCase() === "true";
-  if ((tagName === "input" || tagName === "textarea") && "value" in element) {
-    const beforeValue = String(element.value ?? "");
-    const start = typeof element.selectionStart === "number" ? element.selectionStart : beforeValue.length;
-    const end = typeof element.selectionEnd === "number" ? element.selectionEnd : start;
-    const expected = beforeValue.slice(0, start) + text + beforeValue.slice(end);
-    element.value = expected;
-    if (typeof element.setSelectionRange === "function") {
-      const caret = start + text.length;
-      element.setSelectionRange(caret, caret);
-    }
-    return expected;
-  }
-  if (contentEditable) {
-    const selection = document.getSelection?.();
-    if (selection && selection.rangeCount > 0 && element.contains(selection.anchorNode)) {
-      const range = selection.getRangeAt(0);
-      range.deleteContents();
-      const textNode = document.createTextNode(text);
-      range.insertNode(textNode);
-      range.setStartAfter(textNode);
-      range.setEndAfter(textNode);
-      selection.removeAllRanges();
-      selection.addRange(range);
-    } else {
-      element.appendChild(document.createTextNode(text));
-    }
-    return String(element.innerText || element.textContent || "");
-  }
-  throw new Error(`active element ${tagName || "unknown"} is not text editable`);
-}
-
-function dispatchSyntheticInputEvent(element, type, text, cancelable) {
-  let event;
-  try {
-    event = new InputEvent(type, {
-      bubbles: true,
-      cancelable,
-      data: text,
-      inputType: "insertText"
-    });
-  } catch (_) {
-    event = new Event(type, { bubbles: true, cancelable });
-  }
-  return element.dispatchEvent(event);
 }
 
 // #1000/#717: background-safe field REPLACE for the user's normal Chrome. Runs
