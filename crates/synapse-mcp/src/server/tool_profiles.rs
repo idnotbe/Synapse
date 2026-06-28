@@ -514,8 +514,28 @@ pub(crate) struct ToolProfileSnapshot {
     pub denied_break_glass_tools: Vec<String>,
     pub foreground_capability: ToolProfileForegroundCapability,
     pub hidden_tool_routes: Vec<HiddenToolCapabilityRoute>,
+    /// #1352: this session's CURRENT readiness for the real OS-foreground route —
+    /// whether it already holds the lease + a break_glass profile, and the exact
+    /// remaining steps. Lets an agent preflight the foreground route before
+    /// attempting a foreground-only action instead of discovering the gate by trial.
+    pub foreground_route: ToolProfileForegroundRoute,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub policy_row: Option<ToolProfileRowReadback>,
+}
+
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ToolProfileForegroundRoute {
+    /// True when this session currently owns the foreground input lease.
+    pub holds_foreground_lease: bool,
+    /// True when the current profile already exposes raw OS-foreground primitives.
+    pub profile_allows_foreground: bool,
+    /// True when a real OS-foreground action can run right now (lease held AND a
+    /// foreground-capable profile) — no further escalation needed.
+    pub foreground_route_ready: bool,
+    /// The exact ordered steps still required to reach a runnable foreground
+    /// action; empty when `foreground_route_ready`.
+    pub remaining_steps: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize, JsonSchema)]
@@ -831,6 +851,7 @@ impl SynapseService {
             denied_break_glass_tools,
             foreground_capability: foreground_capability_policy(profile),
             hidden_tool_routes,
+            foreground_route: foreground_route_readiness(session_id, profile),
             policy_row,
         })
     }
@@ -1223,6 +1244,43 @@ fn denied_break_glass_tools(visible_tool_names: &[String]) -> Vec<String> {
         .filter(|name| !visible.contains(name))
         .map(str::to_owned)
         .collect()
+}
+
+/// #1352: compute THIS session's current standing on the real OS-foreground
+/// route — whether it already holds the lease and a foreground-capable profile,
+/// and the precise remaining escalation steps. A read-only preflight so an agent
+/// (or the operator) can see the gate state before attempting a foreground action.
+fn foreground_route_readiness(
+    session_id: Option<&str>,
+    profile: ToolProfileKind,
+) -> ToolProfileForegroundRoute {
+    let holds_foreground_lease = match session_id {
+        Some(session_id) => {
+            synapse_action::lease::status().owner_session_id.as_deref() == Some(session_id)
+        }
+        // Unscoped stdio admin runs without a session lease concept.
+        None => true,
+    };
+    let profile_allows_foreground = matches!(
+        profile,
+        ToolProfileKind::BreakGlass | ToolProfileKind::FullCapability
+    );
+    let mut remaining_steps = Vec::new();
+    if !holds_foreground_lease {
+        remaining_steps.push("control_lease_acquire (this session must own the foreground input lease)".to_owned());
+    }
+    if !profile_allows_foreground {
+        remaining_steps.push(
+            "tool_profile_set profile=break_glass confirm_break_glass=true reason=<why> (requires the lease first)"
+                .to_owned(),
+        );
+    }
+    ToolProfileForegroundRoute {
+        holds_foreground_lease,
+        profile_allows_foreground,
+        foreground_route_ready: holds_foreground_lease && profile_allows_foreground,
+        remaining_steps,
+    }
 }
 
 fn foreground_capability_policy(profile: ToolProfileKind) -> ToolProfileForegroundCapability {
