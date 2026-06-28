@@ -21,6 +21,7 @@ const TOOL_PROFILE_SCHEMA_VERSION: u32 = 1;
 const MAX_PROFILE_REASON_CHARS: usize = 1024;
 
 const NORMAL_ALLOWED_EXACT: &[&str] = &[
+    "act_foreground",
     "act_launch",
     "act_run_shell",
     "act_run_shell_cancel",
@@ -1559,6 +1560,7 @@ mod tests {
             [
                 "act_run_shell",
                 "act_spawn_agent",
+                "act_foreground",
                 "act_launch",
                 "cdp_open_tab",
                 "health",

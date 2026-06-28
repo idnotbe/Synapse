@@ -347,6 +347,39 @@ pub struct TargetActResponse {
     pub result: Value,
 }
 
+#[derive(Clone, Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ActForegroundParams {
+    /// Why the real OS-foreground route is needed. Required, non-empty; audited.
+    pub reason: String,
+    /// The target_act action to run under the temporary escalation.
+    pub action: TargetActParams,
+    /// Foreground input lease TTL in ms while the action runs (default 30000).
+    #[serde(default)]
+    pub ttl_ms: Option<u64>,
+}
+
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ActForegroundEscalation {
+    pub reason: String,
+    /// True when this call newly acquired the lease (and therefore released it).
+    pub acquired_lease: bool,
+    pub released_lease: bool,
+    pub prior_profile: String,
+    pub escalated_to: String,
+    pub restored_profile: String,
+    pub profile_restored: bool,
+}
+
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ActForegroundResponse {
+    pub ok: bool,
+    pub action: TargetActResponse,
+    pub escalation: ActForegroundEscalation,
+}
+
 #[tool_router(router = background_router_tool_router, vis = "pub(super)")]
 impl SynapseService {
     #[tool(
@@ -857,6 +890,104 @@ impl SynapseService {
             delegated_tool: delegated_tool.to_owned(),
             routing: target_act_routing_description(),
             result,
+        }))
+    }
+
+    #[tool(
+        description = "Run one target_act action under a single, fully-audited real-OS-foreground escalation (#1352). Given a non-empty `reason` and an `action` (a target_act params object incl. its `verb`), this atomically: acquires the foreground input lease (ttl_ms, default 30000), sets profile=break_glass, runs the action via target_act, then RESTORES the prior profile and releases the lease if it newly acquired it — so a session does not have to hand-stitch control_lease_acquire + tool_profile_set + the action + restore and guess the ordering. Returns the action result plus an escalation readback (acquired_lease, released_lease, prior/restored profile). The prior profile is restored even when the action fails. Use for actions that genuinely need the hardware foreground tier (e.g. Shift+selection, app accelerators); prefer plain target_act for background-capable work."
+    )]
+    pub async fn act_foreground(
+        &self,
+        params: Parameters<ActForegroundParams>,
+        request_context: RequestContext<RoleServer>,
+    ) -> Result<Json<ActForegroundResponse>, ErrorData> {
+        let params = params.0;
+        let reason = params.reason.trim().to_owned();
+        if reason.is_empty() {
+            return Err(mcp_error(
+                error_codes::TOOL_PARAMS_INVALID,
+                "act_foreground requires a non-empty reason for the foreground escalation audit",
+            ));
+        }
+        let session_id = target_act_session_id(&request_context, "act_foreground")?;
+        tracing::info!(
+            code = "MCP_TOOL_INVOCATION",
+            kind = "act_foreground",
+            verb = params.action.verb.as_str(),
+            "tool.invocation kind=act_foreground"
+        );
+        let before = self.tool_profile_snapshot(Some(&session_id))?;
+        let prior_profile = before.profile;
+        let already_held = synapse_action::lease::status().owner_session_id.as_deref()
+            == Some(session_id.as_str());
+        let ttl_ms = params.ttl_ms.unwrap_or(30_000);
+
+        // 1) acquire/renew the foreground input lease.
+        self.control_lease_acquire(
+            Parameters(super::lease_tools::ControlLeaseAcquireParams { ttl_ms }),
+            request_context.clone(),
+        )
+        .await?;
+        let acquired = !already_held;
+
+        // 2) escalate to break_glass (requires the lease we just took + confirm + reason).
+        self.tool_profile_set(
+            Parameters(super::tool_profiles::ToolProfileSetParams {
+                profile: super::tool_profiles::ToolProfileKind::BreakGlass,
+                reason: Some(reason.clone()),
+                confirm_break_glass: true,
+            }),
+            request_context.clone(),
+        )
+        .await?;
+
+        // 3) run the action — capture, do NOT early-return, so restore always runs.
+        let action_result = self
+            .target_act(Parameters(params.action), request_context.clone())
+            .await;
+
+        // 4) restore the prior profile (break_glass still requires the lease, which we
+        //    still hold at this point).
+        let prior_needs_confirm = matches!(
+            prior_profile,
+            super::tool_profiles::ToolProfileKind::BreakGlass
+                | super::tool_profiles::ToolProfileKind::FullCapability
+                | super::tool_profiles::ToolProfileKind::BrowserDebugger
+        );
+        let profile_restored = self
+            .tool_profile_set(
+                Parameters(super::tool_profiles::ToolProfileSetParams {
+                    profile: prior_profile,
+                    reason: Some(format!("restore after act_foreground: {reason}")),
+                    confirm_break_glass: prior_needs_confirm,
+                }),
+                request_context.clone(),
+            )
+            .await
+            .is_ok();
+
+        // 5) release the lease only if this call newly acquired it.
+        let released_lease = if acquired {
+            self.control_lease_release(request_context.clone())
+                .await
+                .is_ok()
+        } else {
+            false
+        };
+
+        let action = action_result?.0;
+        Ok(Json(ActForegroundResponse {
+            ok: action.ok,
+            escalation: ActForegroundEscalation {
+                reason,
+                acquired_lease: acquired,
+                released_lease,
+                prior_profile: prior_profile.as_str().to_owned(),
+                escalated_to: "break_glass".to_owned(),
+                restored_profile: prior_profile.as_str().to_owned(),
+                profile_restored,
+            },
+            action,
         }))
     }
 }
