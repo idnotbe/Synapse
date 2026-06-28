@@ -22,7 +22,9 @@ use super::{ErrorData, Json, Parameters, SynapseService, tool, tool_router};
 use crate::m1::{BrowserContentParams, mcp_error};
 
 const AUDIT_PREFIX: &str = "verification/audit/v1/";
+const BINDING_PREFIX: &str = "verification/binding/v1/";
 const AUDIT_SCHEMA: u32 = 1;
+const BINDING_SCHEMA: u32 = 1;
 const MAX_CONTENT_BYTES: usize = 2_000_000;
 const MAX_CODES: usize = 25;
 static AUDIT_SEQ: AtomicU64 = AtomicU64::new(0);
@@ -144,6 +146,66 @@ pub struct VerificationAuditResponse {
     pub ok: bool,
     pub count: usize,
     pub rows: Vec<VerificationAuditRow>,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct VerificationBindParams {
+    /// Source label to bind (e.g. `gmail`, `outlook`). Required.
+    pub source: String,
+    /// Bridge tab id (`chrome-tab:<id>`) of the logged-in surface for this source.
+    #[serde(default)]
+    pub cdp_target_id: Option<String>,
+    /// Browser HWND owning that tab.
+    #[serde(default)]
+    pub window_hwnd: Option<i64>,
+    /// Whether verification_inbox/poll may auto-resolve to this binding (default true).
+    #[serde(default)]
+    pub enabled: Option<bool>,
+    /// Optional sender/subject substrings to scope reads (advisory; stored for
+    /// future provider use).
+    #[serde(default)]
+    pub sender_allowlist: Option<Vec<String>>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct VerificationBinding {
+    pub schema_version: u32,
+    pub source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cdp_target_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window_hwnd: Option<i64>,
+    pub enabled: bool,
+    #[serde(default)]
+    pub sender_allowlist: Vec<String>,
+    pub bound_at_unix_ms: u64,
+    pub by_session: String,
+}
+
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct VerificationBindResponse {
+    pub ok: bool,
+    pub binding: VerificationBinding,
+    /// Physical CF_KV key written, for state verification.
+    pub cf_key: String,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct VerificationSourcesParams {
+    #[serde(default)]
+    pub max: Option<usize>,
+}
+
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct VerificationSourcesResponse {
+    pub ok: bool,
+    pub count: usize,
+    pub sources: Vec<VerificationBinding>,
 }
 
 #[tool_router(router = verification_tool_router, vis = "pub(super)")]
@@ -288,6 +350,17 @@ impl SynapseService {
         session_id: &str,
         request_context: &RequestContext<RoleServer>,
     ) -> Result<VerificationReadOnce, ErrorData> {
+        // Auto-resolve from a stored binding when no explicit tab is given, so
+        // `verification_inbox source=gmail` finds the bound Gmail tab without a
+        // per-call cdp_target_id. Falls back to the session target otherwise.
+        let (cdp_target_id, window_hwnd) = if cdp_target_id.is_none() && window_hwnd.is_none() {
+            match self.verification_resolve_binding(source) {
+                Some(binding) => (binding.cdp_target_id, binding.window_hwnd),
+                None => (None, None),
+            }
+        } else {
+            (cdp_target_id, window_hwnd)
+        };
         let content = self
             .browser_content(
                 Parameters(BrowserContentParams {
@@ -361,6 +434,115 @@ impl SynapseService {
             count: decoded.len(),
             rows: decoded,
         }))
+    }
+
+    #[tool(
+        description = "Bind a verification source (e.g. gmail, outlook) to a specific logged-in Chrome tab so verification_inbox/verification_poll can auto-resolve it (#1345). Stores source->{cdp_target_id, window_hwnd, enabled, sender_allowlist} in CF_KV (verification/binding/v1). Multi-user by construction: each user binds their own surfaces. When verification_inbox/poll are called with a source and no explicit cdp_target_id, the enabled binding's tab is used."
+    )]
+    pub async fn verification_bind(
+        &self,
+        params: Parameters<VerificationBindParams>,
+        request_context: RequestContext<RoleServer>,
+    ) -> Result<Json<VerificationBindResponse>, ErrorData> {
+        let params = params.0;
+        tracing::info!(
+            code = "MCP_TOOL_INVOCATION",
+            kind = "verification_bind",
+            source = %params.source,
+            "tool.invocation kind=verification_bind"
+        );
+        if params.source.trim().is_empty() {
+            return Err(mcp_error(
+                synapse_core::error_codes::TOOL_PARAMS_INVALID,
+                "verification_bind requires a non-empty source",
+            ));
+        }
+        let session_id = super::context::mcp_session_id_from_request_context(&request_context)?
+            .unwrap_or_else(|| "stdio".to_owned());
+        let binding = VerificationBinding {
+            schema_version: BINDING_SCHEMA,
+            source: params.source.clone(),
+            cdp_target_id: params.cdp_target_id.clone(),
+            window_hwnd: params.window_hwnd,
+            enabled: params.enabled.unwrap_or(true),
+            sender_allowlist: params.sender_allowlist.clone().unwrap_or_default(),
+            bound_at_unix_ms: unix_time_ms_now(),
+            by_session: session_id,
+        };
+        let db = self.verification_db()?;
+        let key = format!("{BINDING_PREFIX}{}", params.source);
+        let encoded = serde_json::to_vec(&binding).map_err(|error| {
+            mcp_error(
+                synapse_core::error_codes::TOOL_INTERNAL_ERROR,
+                format!("verification binding encode failed: {error}"),
+            )
+        })?;
+        db.put_batch(cf::CF_KV, [(key.clone().into_bytes(), encoded)])
+            .map_err(|error| {
+                mcp_error(error.code(), format!("verification binding persist failed: {error}"))
+            })?;
+        db.flush().map_err(|error| {
+            mcp_error(error.code(), format!("verification binding flush failed: {error}"))
+        })?;
+        Ok(Json(VerificationBindResponse {
+            ok: true,
+            binding,
+            cf_key: key,
+        }))
+    }
+
+    #[tool(
+        description = "List bound verification sources and their status (#1345): the CF_KV verification/binding/v1 rows — source, tab/window, enabled, sender_allowlist, bound timestamp, and binding session."
+    )]
+    pub async fn verification_sources(
+        &self,
+        params: Parameters<VerificationSourcesParams>,
+        _request_context: RequestContext<RoleServer>,
+    ) -> Result<Json<VerificationSourcesResponse>, ErrorData> {
+        let max = params.0.max.unwrap_or(100).min(1000);
+        tracing::info!(
+            code = "MCP_TOOL_INVOCATION",
+            kind = "verification_sources",
+            "tool.invocation kind=verification_sources"
+        );
+        let db = self.verification_db()?;
+        let rows = db
+            .scan_cf_prefix(cf::CF_KV, BINDING_PREFIX.as_bytes())
+            .map_err(|error| {
+                mcp_error(error.code(), format!("verification_sources scan failed: {error}"))
+            })?;
+        let mut sources = Vec::new();
+        for (_key, raw) in rows {
+            if let Ok(binding) = serde_json::from_slice::<VerificationBinding>(&raw) {
+                sources.push(binding);
+            }
+            if sources.len() >= max {
+                break;
+            }
+        }
+        sources.sort_by(|a, b| a.source.cmp(&b.source));
+        Ok(Json(VerificationSourcesResponse {
+            ok: true,
+            count: sources.len(),
+            sources,
+        }))
+    }
+
+    /// Resolve a source's enabled binding (verification/binding/v1/<source>) for
+    /// verification_inbox/poll auto-resolution. Returns None on any miss so the
+    /// caller falls back to the session target.
+    fn verification_resolve_binding(&self, source: &str) -> Option<VerificationBinding> {
+        let db = self.verification_db().ok()?;
+        let key = format!("{BINDING_PREFIX}{source}");
+        let rows = db.scan_cf_prefix(cf::CF_KV, key.as_bytes()).ok()?;
+        for (raw_key, raw) in rows {
+            if raw_key.as_slice() != key.as_bytes() {
+                continue; // exact-source match only (avoid prefix collisions)
+            }
+            let binding = serde_json::from_slice::<VerificationBinding>(&raw).ok()?;
+            return binding.enabled.then_some(binding);
+        }
+        None
     }
 
     fn verification_db(&self) -> Result<std::sync::Arc<Db>, ErrorData> {
