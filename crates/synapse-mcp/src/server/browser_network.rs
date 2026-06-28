@@ -50,6 +50,57 @@ const MAX_HAR_FILE_BYTES: u64 = 64 * 1024 * 1024;
 const HAR_REPLAY_ROUTE_PREFIX: &str = "har-replay-";
 const HAR_REPLAY_MISS_ROUTE_ID: &str = "har-replay-missing";
 
+/// Which captured-network read the unified `browser_network` tool returns
+/// (#1348). Supply the matching nested spec under [`BrowserNetworkParams`].
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BrowserNetworkReadMode {
+    /// List captured Network request records (filterable).
+    #[default]
+    Requests,
+    /// Inspect one captured Network request by CDP request id.
+    Request,
+    /// List captured WebSocket lifecycle/frame records.
+    #[serde(rename = "websockets")]
+    WebSockets,
+}
+
+/// Parameters for the unified `browser_network` tool (#1348): one `mode`
+/// discriminator and the matching nested spec, each reused verbatim from the
+/// former standalone browser_network_requests/_request/_websockets tools. The
+/// requests/websockets specs default to an empty (unfiltered) read when omitted;
+/// the request spec is required because it carries the mandatory `request_id`.
+#[derive(Clone, Debug, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct BrowserNetworkParams {
+    /// Which captured-network read to perform.
+    pub mode: BrowserNetworkReadMode,
+    /// `mode=requests`: filtered request-record list.
+    #[serde(default)]
+    pub requests: Option<BrowserNetworkRequestsParams>,
+    /// `mode=request`: single request inspection (requires `request_id`).
+    #[serde(default)]
+    pub request: Option<BrowserNetworkRequestParams>,
+    /// `mode=websockets`: WebSocket lifecycle/frame list.
+    #[serde(default)]
+    pub websockets: Option<BrowserNetworkWebSocketsParams>,
+}
+
+/// Response for the unified `browser_network` tool (#1348): the populated field
+/// matches `mode` and carries the former standalone tool's full response.
+#[derive(Clone, Debug, Default, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct BrowserNetworkResponse {
+    /// Which captured-network read was performed.
+    pub mode: BrowserNetworkReadMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requests: Option<BrowserNetworkRequestsResponse>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request: Option<BrowserNetworkRequestResponse>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub websockets: Option<BrowserNetworkWebSocketsResponse>,
+}
+
 /// Parameters for `browser_network_requests` (#1081): return captured Network
 /// request records for the calling session's owned CDP target.
 #[derive(Clone, Debug, Default, Deserialize, JsonSchema)]
@@ -865,9 +916,60 @@ struct NormalizedBrowserRouteParams {
 #[tool_router(router = browser_network_tool_router, vis = "pub(super)")]
 impl SynapseService {
     #[tool(
-        description = "List captured Network request records for the calling session's owned browser tab. Arms/reuses the target-scoped raw CDP Network buffer, returns cursor-delimited entries, and supports filters for url_contains, url_regex, resource_type, status_min/status_max, and since_seq. Target-scoped and background-safe: never activates the tab, never uses OS foreground input, and never falls back to the human foreground tab. Raw CDP only; the popup-safe normal Chrome extension bridge fails closed."
+        description = "Read captured network activity for the calling session's owned browser tab, selected by `mode` with the matching nested spec (#1348 — folds the former browser_network_requests/_request/_websockets read tools into one). mode=requests returns the filtered Network request-record list (spec `requests`: since_seq/limit/url_contains/url_regex/resource_type/status_min/status_max; all optional, omit the spec to list everything); mode=request inspects one captured request by CDP request_id with full request/response metadata, optional post data, and a base64-aware response body by default (spec `request`, required — carries request_id/include_body/include_post_data); mode=websockets returns WebSocket lifecycle and sent/received frame records (spec `websockets`: since_seq/limit/request_id/url_contains). All modes arm/reuse the same target-scoped raw CDP Network buffer. Target-scoped and background-safe: never activates the tab, never uses OS foreground input, never falls back to the human foreground tab. Raw CDP only; the popup-safe normal Chrome extension bridge fails closed. The response field matching `mode` carries that read's full result."
     )]
-    pub async fn browser_network_requests(
+    pub async fn browser_network(
+        &self,
+        params: Parameters<BrowserNetworkParams>,
+        request_context: RequestContext<RoleServer>,
+    ) -> Result<Json<BrowserNetworkResponse>, ErrorData> {
+        let params = params.0;
+        let mode = params.mode;
+        match mode {
+            BrowserNetworkReadMode::Requests => {
+                let spec = params.requests.unwrap_or_default();
+                let inner = self
+                    .browser_network_requests_inner(Parameters(spec), request_context)
+                    .await?;
+                Ok(Json(BrowserNetworkResponse {
+                    mode,
+                    requests: Some(inner.0),
+                    ..Default::default()
+                }))
+            }
+            BrowserNetworkReadMode::Request => {
+                let spec = params.request.ok_or_else(|| {
+                    mcp_error(
+                        error_codes::TOOL_PARAMS_INVALID,
+                        "browser_network mode=request requires the `request` spec object (with request_id)",
+                    )
+                })?;
+                let inner = self
+                    .browser_network_request_inner(Parameters(spec), request_context)
+                    .await?;
+                Ok(Json(BrowserNetworkResponse {
+                    mode,
+                    request: Some(inner.0),
+                    ..Default::default()
+                }))
+            }
+            BrowserNetworkReadMode::WebSockets => {
+                let spec = params.websockets.unwrap_or_default();
+                let inner = self
+                    .browser_network_websockets_inner(Parameters(spec), request_context)
+                    .await?;
+                Ok(Json(BrowserNetworkResponse {
+                    mode,
+                    websockets: Some(inner.0),
+                    ..Default::default()
+                }))
+            }
+        }
+    }
+
+    /// List captured Network request records — internal lane for the unified
+    /// `browser_network` tool (#1348, mode=requests).
+    pub async fn browser_network_requests_inner(
         &self,
         params: Parameters<BrowserNetworkRequestsParams>,
         request_context: RequestContext<RoleServer>,
@@ -930,10 +1032,9 @@ impl SynapseService {
         result.map(Json)
     }
 
-    #[tool(
-        description = "List captured WebSocket lifecycle and frame records for the calling session's owned browser tab. Arms/reuses the same target-scoped raw CDP Network buffer as browser_network_requests and returns cursor-delimited Network.webSocketCreated, handshake, sent/received frame, frame error, and closed events. Close code/reason are decoded from opcode 8 close frames when CDP provides the frame payload. Target-scoped and background-safe: never activates the tab, never uses OS foreground input, and never falls back to the human foreground tab. Raw CDP only; the popup-safe normal Chrome bridge fails closed."
-    )]
-    pub async fn browser_network_websockets(
+    /// List captured WebSocket lifecycle/frame records — internal lane for the
+    /// unified `browser_network` tool (#1348, mode=websockets).
+    pub async fn browser_network_websockets_inner(
         &self,
         params: Parameters<BrowserNetworkWebSocketsParams>,
         request_context: RequestContext<RoleServer>,
@@ -1066,10 +1167,9 @@ impl SynapseService {
         result.map(Json)
     }
 
-    #[tool(
-        description = "Inspect one captured Network request by CDP request_id for the calling session's owned browser tab. Reuses/arms the target-scoped raw CDP Network buffer, returns full request/response metadata, optional request post data, and a base64-aware Network.getResponseBody payload by default. Target-scoped and background-safe: never activates the tab, never uses OS foreground input, and never falls back to the human foreground tab. Raw CDP only; the popup-safe normal Chrome extension bridge fails closed."
-    )]
-    pub async fn browser_network_request(
+    /// Inspect one captured Network request by id — internal lane for the
+    /// unified `browser_network` tool (#1348, mode=request).
+    pub async fn browser_network_request_inner(
         &self,
         params: Parameters<BrowserNetworkRequestParams>,
         request_context: RequestContext<RoleServer>,

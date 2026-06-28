@@ -245,11 +245,9 @@ const BROWSER_DEBUGGER_ONLY_EXACT: &[&str] = &[
     "browser_expose_binding",
     "browser_file_upload",
     "browser_handle_dialog",
+    "browser_network",
     "browser_network_har",
     "browser_network_overrides",
-    "browser_network_request",
-    "browser_network_requests",
-    "browser_network_websockets",
     "browser_pdf",
     "browser_route",
 ];
@@ -279,11 +277,9 @@ const BROWSER_DEBUGGER_ALLOWED_EXACT: &[&str] = &[
     "browser_handle_dialog",
     "browser_inspect",
     "browser_locate",
+    "browser_network",
     "browser_network_har",
     "browser_network_overrides",
-    "browser_network_request",
-    "browser_network_requests",
-    "browser_network_websockets",
     "browser_page_events",
     "browser_pdf",
     "browser_route",
@@ -1368,11 +1364,9 @@ fn hidden_tool_capability_route(tool_name: &str) -> HiddenToolCapabilityRoute {
             vec!["health", "storage_inspect", "session_status"]
         }
         "browser_console_messages"
+        | "browser_network"
         | "browser_network_har"
         | "browser_network_overrides"
-        | "browser_network_request"
-        | "browser_network_requests"
-        | "browser_network_websockets"
         | "browser_route" => vec![
             "tool_profile_set profile=browser_debugger confirm_break_glass=true reason=<why raw CDP is required>",
             "browser_content",

@@ -294,10 +294,8 @@ All target a session-owned tab via `cdp_target_id?` + `window_hwnd?` (default ac
 | `browser_set_value` | browser_field.rs | Replace field text via safe Chrome bridge | `text` (req), `selector?`, `active_element=false` |
 | `browser_fill_form` | browser_field.rs | Fill multiple fields in one ordered call | `fields` (req, 1–200), `continue_on_error=false`, `wait_timeout_ms=5000` |
 | `browser_frames` | browser_frames.rs | Enumerate composed frame tree | target params only |
-| `browser_network_requests` | browser_network.rs | List captured Network requests | `since_seq?`, `limit=100`, `url_contains?`, `url_regex?`, `resource_type?`, `status_min?`/`status_max?` |
-| `browser_network_websockets` | browser_network.rs | List WebSocket lifecycle/frames | `since_seq?`, `limit=100`, `request_id?`, `url_contains?` |
+| `browser_network` | browser_network.rs | Unified captured-network read (#1348): `mode` selects requests (filtered list), request (one by id w/ body), or websockets (lifecycle/frames) | `mode` (req), one of `requests`/`request`/`websockets` spec objects |
 | `browser_network_har` | browser_network.rs | Record/replay/clear HAR 1.2 | `operation` (Record), `path?`, filters, `include_bodies=true`, `missing_policy=Passthrough` |
-| `browser_network_request` | browser_network.rs | Inspect one request by id | `request_id` (req), `include_body=true`, `include_post_data=true` |
 | `browser_network_overrides` | browser_network.rs | Set/get/clear extra headers + UA override (raw CDP only) | `operation` (Set), `headers` (req), `user_agent?` |
 | `browser_route` | browser_network.rs | Add/list/remove/clear Fetch route rules | `operation` (AddFulfill), `route_id?`, `url?`, `match_kind` (Glob), `status=200`, `headers`, `body?`/`body_base64?`, `error_reason?`, continue_* |
 | `browser_cookies` | browser_storage.rs | Get/set/clear cookies via chrome.cookies | (get/set/clear verb + cookie fields) |
