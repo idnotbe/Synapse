@@ -68,6 +68,14 @@ use super::{
 /// silently-wrong number.
 const MAX_SCAN_ROWS_PER_CALL: usize = 200_000;
 
+/// Bounded default lookback for the dashboard analytics panel (#1326/#1328).
+/// The `agent_stats`/`agent_cost` MCP tools stay unbounded-capable, but the
+/// dashboard snapshots default to this window so the panel reports CURRENT fleet
+/// state (not a multi-week cumulative error rate) and never exhausts the scan
+/// budget over the full retained journal. The window is surfaced in the snapshot
+/// (`since_ns`/`first_event_ns`) so the UI can state it.
+pub(crate) const DASHBOARD_ANALYTICS_WINDOW_NS: u64 = 7 * 24 * 60 * 60 * 1_000_000_000;
+
 /// Rows pulled per `scan_cf_from` page.
 const SCAN_CHUNK_ROWS: usize = 4_096;
 
@@ -265,8 +273,14 @@ impl SynapseService {
 
 impl SynapseService {
     pub(crate) fn dashboard_agent_stats_snapshot(&self) -> Result<AgentStatsResponse, ErrorData> {
+        // Bounded default window (#1326): the dashboard error rate must reflect
+        // current fleet state, not a multi-week cumulative count over the entire
+        // retained journal. The since_ns is echoed in the response so the UI can
+        // state the window. Explicit MCP agent_stats calls remain unbounded.
+        let since_ns = super::agent_events::unix_time_ns_now()
+            .saturating_sub(DASHBOARD_ANALYTICS_WINDOW_NS);
         self.agent_stats_impl(AgentStatsParams {
-            since_ns: None,
+            since_ns: Some(since_ns),
             until_ns: None,
             spawn_id: None,
             session_id: None,

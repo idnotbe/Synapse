@@ -515,9 +515,20 @@ impl SynapseService {
 
 impl SynapseService {
     pub(crate) fn dashboard_agent_cost_snapshot(&self) -> Result<AgentCostResponse, ErrorData> {
+        // Bounded default window (#1328): an unbounded fleet rollup scans the
+        // entire retained CF_AGENT_TRANSCRIPTS and (correctly) fails closed with
+        // AGENT_COST_SCAN_BUDGET_EXHAUSTED rather than under-report. This window is
+        // necessary but NOT yet sufficient: CF_AGENT_TRANSCRIPTS is spawn-keyed,
+        // not time-keyed, so `since_ns` is a post-read filter that cannot prune the
+        // scan — the dashboard cost panel still needs a recent-spawn-scoped rollup
+        // (enumerate spawns active in the window from CF_AGENT_EVENTS, then scan
+        // only those spawn prefixes) or an indexed cost SoT to clear the budget.
+        // Tracked in #1328. Explicit MCP agent_cost calls keep the fail-closed contract.
+        let since_ns = super::agent_events::unix_time_ns_now()
+            .saturating_sub(super::agent_stats::DASHBOARD_ANALYTICS_WINDOW_NS);
         self.agent_cost_impl(AgentCostParams {
             spawn_id: None,
-            since_ns: None,
+            since_ns: Some(since_ns),
             until_ns: None,
             include_per_turn: true,
             group_by: vec![AgentCostGroupBy::Template, AgentCostGroupBy::Task],
