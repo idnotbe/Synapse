@@ -19,13 +19,12 @@ use serde::{Deserialize, Serialize};
 use synapse_storage::{Db, cf};
 
 use super::{ErrorData, Json, Parameters, SynapseService, tool, tool_router};
-use crate::m1::{BrowserContentParams, mcp_error};
+use crate::m1::{CdpTargetInfoParams, mcp_error};
 
 const AUDIT_PREFIX: &str = "verification/audit/v1/";
 const BINDING_PREFIX: &str = "verification/binding/v1/";
 const AUDIT_SCHEMA: u32 = 1;
 const BINDING_SCHEMA: u32 = 1;
-const MAX_CONTENT_BYTES: usize = 2_000_000;
 const MAX_CODES: usize = 25;
 static AUDIT_SEQ: AtomicU64 = AtomicU64::new(0);
 
@@ -361,18 +360,25 @@ impl SynapseService {
         } else {
             (cdp_target_id, window_hwnd)
         };
-        let content = self
-            .browser_content(
-                Parameters(BrowserContentParams {
-                    cdp_target_id,
+        // Read the page's VISIBLE TEXT (cross-frame innerText via the bridge's
+        // targetInfoPageText), not outerHTML: real webmail (Gmail ~5 MB) is
+        // head-heavy and the bridge caps pageContent at 2 MiB, so outerHTML
+        // truncates before the inbox body. Visible text is small, head/CSS-free,
+        // and holds the codes (recent OTP sits at the top of the inbox) (#1345).
+        let info = self
+            .cdp_target_info(
+                Parameters(CdpTargetInfoParams {
                     window_hwnd,
-                    max_bytes: Some(MAX_CONTENT_BYTES),
+                    cdp_target_id,
                 }),
                 request_context.clone(),
             )
             .await?
             .0;
-        let text = html_to_text(&content.html);
+        let text = info
+            .page_text
+            .and_then(|page_text| page_text.text)
+            .unwrap_or_default();
         let mut codes = extract_verification_codes(&text);
         codes.truncate(max_codes);
         let read_at_unix_ms = unix_time_ms_now();
@@ -380,8 +386,8 @@ impl SynapseService {
         let audit_row = VerificationAuditRow {
             schema_version: AUDIT_SCHEMA,
             source: source.to_owned(),
-            url: content.url.clone(),
-            title: content.title.clone(),
+            url: info.url.clone(),
+            title: info.title.clone(),
             masked_codes,
             code_count: codes.len(),
             read_at_unix_ms,
@@ -389,8 +395,8 @@ impl SynapseService {
         };
         let audit_key = self.verification_write_audit(&audit_row, read_at_unix_ms)?;
         Ok(VerificationReadOnce {
-            url: content.url,
-            title: content.title,
+            url: info.url,
+            title: info.title,
             text_len: text.len(),
             codes,
             audit_key,
@@ -612,49 +618,6 @@ fn mask_code(code: &str) -> String {
 /// Strip HTML tags + decode the common entities so the OTP extractor sees page
 /// text rather than markup. Deliberately simple (no full HTML parse): the goal is
 /// to surface code-bearing text, not to reconstruct the DOM.
-fn html_to_text(html: &str) -> String {
-    let mut out = String::with_capacity(html.len() / 2);
-    let mut in_tag = false;
-    let mut in_script = false;
-    let lower = html.to_ascii_lowercase();
-    let bytes = lower.as_bytes();
-    let mut i = 0;
-    let src: Vec<char> = html.chars().collect();
-    // Walk byte-synced with the lowercased copy for tag detection; emit original chars.
-    let mut ci = 0;
-    while i < bytes.len() {
-        if !in_tag && bytes[i] == b'<' {
-            // crude <script>/<style> skip
-            if lower[i..].starts_with("<script") {
-                in_script = true;
-            } else if lower[i..].starts_with("</script") {
-                in_script = false;
-            }
-            in_tag = true;
-        } else if in_tag && bytes[i] == b'>' {
-            in_tag = false;
-            if ci < src.len() {
-                out.push(' ');
-            }
-        } else if !in_tag && !in_script {
-            if let Some(&ch) = src.get(ci) {
-                out.push(ch);
-            }
-        }
-        i += 1;
-        ci += 1;
-    }
-    let decoded = out
-        .replace("&amp;", "&")
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&quot;", "\"")
-        .replace("&#39;", "'")
-        .replace("&nbsp;", " ");
-    // Collapse runs of whitespace.
-    decoded.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
 const CODE_KEYWORDS: &[&str] = &[
     "code", "verification", "verify", "otp", "one-time", "one time", "passcode", "pass code",
     "confirm", "2fa", "two-factor", "two factor", "security code", "login code",
@@ -873,16 +836,5 @@ mod tests {
         assert_eq!(mask_code("481923"), "48***3");
         assert_eq!(mask_code("G-739212"), "G-*****2");
         assert_eq!(mask_code("99"), "**");
-    }
-
-    #[test]
-    fn html_to_text_strips_tags_and_keeps_code() {
-        let html = "<div><span>Your code is</span> <b>551823</b><script>var x=999111;</script></div>";
-        let text = html_to_text(html);
-        assert!(text.contains("Your code is"));
-        assert!(text.contains("551823"));
-        assert!(!text.contains("999111")); // script content dropped
-        let codes = extract_verification_codes(&text);
-        assert!(codes.iter().any(|c| c.code == "551823"));
     }
 }
