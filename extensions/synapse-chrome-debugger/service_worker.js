@@ -1,6 +1,6 @@
 const PROTOCOL_VERSION = 1;
-const BRIDGE_BUILD_ID = "synapse-chrome-bridge-2026-06-28-deadcode-v4";
-const BRIDGE_BUILD_SHA256 = "89747e41df429aa08d8684f71ff81a39907a9f6095ac9df7b99b08e9327b2341";
+const BRIDGE_BUILD_ID = "synapse-chrome-bridge-2026-06-28-html5realdrag-v5";
+const BRIDGE_BUILD_SHA256 = "46bc726e7c179786b61eb18186811a58aacf6f3ccabf5cbde929be6e9782146d";
 const DEBUGGER_COMMAND_TIMEOUT_MS = 5000;
 const CAPTURE_VISIBLE_TAB_MIN_INTERVAL_MS = 600;
 const PAGE_SCREENSHOT_COMMAND_RESPONSE_BUDGET_MS = 25000;
@@ -4673,7 +4673,7 @@ async function handleCdpInput(params) {
   const autoWaitTimeoutMs = normalizeDomActionAutoWaitTimeout(params.autoWaitTimeoutMs, autoWait);
   const before = await tabPageState(selected.tabId, selected.target);
   const beforePageText = await tabPageTextState(selected.tabId);
-  if (action === "drag" || action === "html5_drag") {
+  if (action === "drag" || action === "html5_drag" || action === "html5_real_drag") {
     return await handleCdpInputDrag(
       selected,
       action,
@@ -5265,13 +5265,14 @@ function normalizeCdpInputAction(value) {
     action === "click" ||
     action === "dblclick" ||
     action === "drag" ||
-    action === "html5_drag"
+    action === "html5_drag" ||
+    action === "html5_real_drag"
   ) {
     return action;
   }
   throw bridgeError(
     ERROR_CHROME_DOM_ACTION_UNSUPPORTED,
-    `cdpInput action must be hover, tap, click, dblclick, drag, or html5_drag; got ${JSON.stringify(value)}`
+    `cdpInput action must be hover, tap, click, dblclick, drag, html5_drag, or html5_real_drag; got ${JSON.stringify(value)}`
   );
 }
 
@@ -8588,6 +8589,16 @@ async function handleCdpInputDrag(selected, action, params, before, beforePageTe
       durationMs
     );
     dispatch = { ...realDrag, backend: "chrome.debugger.Input" };
+  } else if (action === "html5_real_drag") {
+    // Real, TRUSTED HTML5 drop via CDP Input.dispatchDragEvent (#1356). Chrome
+    // only delivers Input.* to the active tab, so activate first (in-Chrome,
+    // required_foreground=false), then dispatch dragEnter/dragOver/drop on the
+    // target point with a DragData built from data_mime_type/data_text. Unlike
+    // the synthetic html5_drag lane these DragEvents are isTrusted=true and
+    // carry a real DataTransfer, so native drop zones that gate on trust fire.
+    dragActivation = await activateTabForCdpTouch(selected.tabId, before, "html5_real_drag");
+    const realDrop = await dispatchRealHtml5Drop(selected.tabId, target.point, params);
+    dispatch = { ...realDrop, backend: "chrome.debugger.Input.dispatchDragEvent" };
   } else {
     dispatch = await dispatchHtml5DragDrop(selected.tabId, sourceSelector, targetSelector, params);
   }
@@ -8934,6 +8945,60 @@ async function dispatchCdpInputMouseDrag(tabId, sourcePoint, targetPoint, steps,
         await chrome.debugger.detach(debuggee);
       } catch (error) {
         console.warn(`Synapse chrome.debugger detach failed for drag tab ${tabId}: ${errorMessage(error)}`);
+      }
+    }
+  }
+}
+
+// #1356: real, TRUSTED HTML5 drop. Dispatches CDP Input.dispatchDragEvent
+// dragEnter/dragOver/drop at the resolved target point with a DragData built
+// from the caller's data_mime_type/data_text. These events are isTrusted=true
+// and carry a real DataTransfer, so native drop zones that gate on trust (which
+// the synthetic html5_drag lane cannot drive) actually fire. No drag
+// interception is needed because the DragData is constructed, not captured from
+// a page-initiated drag.
+async function dispatchRealHtml5Drop(tabId, targetPoint, params) {
+  const mimeType = stringOrNull(params.dragDataMimeType) || "text/plain";
+  const dataText = typeof params.dragDataText === "string" ? params.dragDataText : "";
+  const dragData = {
+    items: [{ mimeType, data: dataText }],
+    // DragOperationsMask copy(1): the most universally accepted dropEffect.
+    dragOperationsMask: 1
+  };
+  const debuggee = { tabId };
+  const protocolVersion = "1.3";
+  let attached = false;
+  try {
+    await chrome.debugger.attach(debuggee, protocolVersion);
+    attached = true;
+    const dispatched = [];
+    for (const type of ["dragEnter", "dragOver", "drop"]) {
+      await sendDebuggerCommand(debuggee, "Input.dispatchDragEvent", {
+        type,
+        x: targetPoint.x,
+        y: targetPoint.y,
+        data: dragData
+      });
+      dispatched.push(type);
+    }
+    return {
+      method: "Input.dispatchDragEvent(dragEnter,dragOver,drop)",
+      dispatched_events: dispatched,
+      drag_data_mime_type: mimeType,
+      drag_data_text_len: dataText.length,
+      protocol_version: protocolVersion
+    };
+  } catch (error) {
+    throw bridgeError(
+      ERROR_ATTACH_FAILED,
+      `chrome.debugger html5_real_drag dispatch failed for tab ${tabId}: ${errorMessage(error)}`
+    );
+  } finally {
+    if (attached) {
+      try {
+        await chrome.debugger.detach(debuggee);
+      } catch (error) {
+        console.warn(`Synapse chrome.debugger detach failed for html5_real_drag tab ${tabId}: ${errorMessage(error)}`);
       }
     }
   }
@@ -16350,7 +16415,7 @@ async function performDomActionInPage(request) {
     ? Math.min(Math.max(request.maxPageTextChars, 0), 65536)
     : 4096;
 
-  if (!["click", "dblclick", "press", "select", "submit", "dispatch_event", "clear", "focus", "blur", "select_text", "check", "uncheck", "hover", "tap", "drag", "html5_drag"].includes(action)) {
+  if (!["click", "dblclick", "press", "select", "submit", "dispatch_event", "clear", "focus", "blur", "select_text", "check", "uncheck", "hover", "tap", "drag", "html5_drag", "html5_real_drag"].includes(action)) {
     return fail(ERROR_ACTION_UNSUPPORTED, `unsupported DOM action ${JSON.stringify(action)}`);
   }
   if (action === "dispatch_event" && !eventType) {
@@ -16493,7 +16558,7 @@ async function performDomActionInPage(request) {
       actionReadback = performCheckState(element, true, eventsDispatched);
     } else if (action === "uncheck") {
       actionReadback = performCheckState(element, false, eventsDispatched);
-    } else if (action === "hover" || action === "tap" || action === "drag" || action === "html5_drag") {
+    } else if (action === "hover" || action === "tap" || action === "drag" || action === "html5_drag" || action === "html5_real_drag") {
       throw actionError(ERROR_ACTION_UNSUPPORTED, `DOM action ${action} is resolver-only; dispatch through cdpInput`);
     }
   } catch (error) {

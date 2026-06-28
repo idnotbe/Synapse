@@ -21,8 +21,16 @@ const MAX_DRAG_DATA_CHARS: usize = 16_384;
 pub enum BrowserDndMode {
     /// CDP Input.dispatchMouseEvent mouseMoved/mousePressed/dragMove/mouseReleased.
     Mouse,
-    /// In-page DragEvent sequence with a real DataTransfer object.
+    /// In-page DragEvent sequence with a synthetic (isTrusted=false) DataTransfer
+    /// object. Drives JS DnD libraries that do not check trust (e.g. react-dnd's
+    /// HTML5 backend); does NOT drive isTrusted-gating native drop zones.
     Html5,
+    /// Real, trusted (isTrusted=true) HTML5 drop via CDP
+    /// `Input.dispatchDragEvent` (dragEnter/dragOver/drop) onto the target with a
+    /// constructed DragData built from `data_mime_type`/`data_text` (or the
+    /// source element's text). Drives native drop zones that gate on
+    /// `event.isTrusted` and read `dataTransfer` (#1356).
+    Html5Real,
 }
 
 impl BrowserDndMode {
@@ -30,6 +38,7 @@ impl BrowserDndMode {
         match self {
             Self::Mouse => "drag",
             Self::Html5 => "html5_drag",
+            Self::Html5Real => "html5_real_drag",
         }
     }
 
@@ -37,6 +46,7 @@ impl BrowserDndMode {
         match self {
             Self::Mouse => "chrome_debugger_bridge.cdpInput.drag",
             Self::Html5 => "chrome_debugger_bridge.cdpInput.html5_drag",
+            Self::Html5Real => "chrome_debugger_bridge.cdpInput.html5_real_drag",
         }
     }
 }
