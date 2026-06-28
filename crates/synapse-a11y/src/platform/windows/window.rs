@@ -20,7 +20,8 @@ use windows::{
         UI::WindowsAndMessaging::{
             BringWindowToTop, EnumWindows, GA_ROOT, GetAncestor, GetForegroundWindow,
             GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindow,
-            IsWindowVisible, PostMessageW, SW_RESTORE, SW_SHOW, SetForegroundWindow, ShowWindow,
+            IsWindowVisible, PostMessageW, SW_RESTORE, SW_SHOW, SWP_NOACTIVATE, SWP_NOMOVE,
+            SWP_NOSIZE, SWP_NOZORDER, SetForegroundWindow, SetWindowPos, ShowWindow,
             SwitchToThisWindow, WM_CLOSE,
         },
     },
@@ -345,6 +346,68 @@ fn window_rect(hwnd: HWND) -> A11yResult<Rect> {
         w: rect.right.saturating_sub(rect.left),
         h: rect.bottom.saturating_sub(rect.top),
     })
+}
+
+/// Result of a background-safe window move/resize (#1349).
+#[derive(Clone, Copy, Debug)]
+pub struct WindowBoundsOutcome {
+    /// Outer-window rectangle read back via `GetWindowRect` AFTER the move/resize.
+    pub actual: Rect,
+    /// `true` if the window is iconic (minimized) after the call.
+    pub minimized: bool,
+}
+
+/// Move and/or resize a top-level window WITHOUT activating it (background-safe:
+/// `SWP_NOACTIVATE | SWP_NOZORDER`, never seizes the human foreground) and read
+/// the resulting outer rect back so the caller can compare requested vs actual
+/// (Windows/app minimum-size constraints) and report minimized state (#1349).
+///
+/// `x`/`y` are screen pixels of the top-left; `width`/`height` are outer-window
+/// size. Any axis left `None` is preserved (`SWP_NOMOVE` / `SWP_NOSIZE`). The
+/// HWND is validated first.
+///
+/// # Errors
+/// Returns an error if the HWND is not a live window, a requested dimension is
+/// not positive, or `SetWindowPos`/`GetWindowRect` fails.
+pub fn set_window_bounds(
+    hwnd: i64,
+    x: Option<i32>,
+    y: Option<i32>,
+    width: Option<i32>,
+    height: Option<i32>,
+) -> A11yResult<WindowBoundsOutcome> {
+    let handle = HWND(hwnd as *mut c_void);
+    if !unsafe { IsWindow(Some(handle)) }.as_bool() {
+        return Err(A11yError::internal(format!(
+            "set_window_bounds: HWND 0x{hwnd:x} is not a live top-level window"
+        )));
+    }
+    // Preserve the current value on any axis the caller did not specify.
+    let current = window_rect(handle)?;
+    let pos_x = x.unwrap_or(current.x);
+    let pos_y = y.unwrap_or(current.y);
+    let cx = width.unwrap_or(current.w);
+    let cy = height.unwrap_or(current.h);
+    if cx <= 0 || cy <= 0 {
+        return Err(A11yError::internal(format!(
+            "set_window_bounds: requested size must be positive, got {cx}x{cy}"
+        )));
+    }
+    let mut flags = SWP_NOZORDER | SWP_NOACTIVATE;
+    if x.is_none() && y.is_none() {
+        flags |= SWP_NOMOVE;
+    }
+    if width.is_none() && height.is_none() {
+        flags |= SWP_NOSIZE;
+    }
+    unsafe { SetWindowPos(handle, None, pos_x, pos_y, cx, cy, flags) }.map_err(|err| {
+        A11yError::internal(format!(
+            "set_window_bounds: SetWindowPos failed for HWND 0x{hwnd:x}: {err}"
+        ))
+    })?;
+    let actual = window_rect(handle)?;
+    let minimized = unsafe { IsIconic(handle) }.as_bool();
+    Ok(WindowBoundsOutcome { actual, minimized })
 }
 
 fn process_path(pid: u32) -> A11yResult<String> {

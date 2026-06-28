@@ -52,7 +52,7 @@ const TARGET_ACT_STATUS_OK: &str = "ok";
 const TARGET_ACT_STATUS_VERIFY_NEEDED: &str = "verify_needed";
 const TARGET_ACT_STATUS_REFUSED: &str = "refused";
 const TARGET_ACT_STATUS_ERROR: &str = "error";
-const TARGET_ACT_KNOWN_VERBS: &str = "read, screenshot, navigate, set_field, insert_text, append_text, set_selection, click, dblclick, hover, tap, dispatch_event, clear, focus, blur, select_text, check, uncheck, type, key, press, select, submit, save, cleanup_notepad_tabs, run_shell, focus_window";
+const TARGET_ACT_KNOWN_VERBS: &str = "read, screenshot, navigate, set_field, insert_text, append_text, set_selection, click, dblclick, hover, tap, dispatch_event, clear, focus, blur, select_text, check, uncheck, type, key, press, select, submit, save, cleanup_notepad_tabs, run_shell, focus_window, set_window_bounds";
 
 #[derive(Clone, Debug, JsonSchema)]
 #[schemars(transparent)]
@@ -183,6 +183,14 @@ pub struct TargetActParams {
     /// Defaults to screen coordinates; set coordinate_space for viewport/window-relative input.
     #[serde(default)]
     pub y: Option<i32>,
+    /// `set_window_bounds`: requested outer-window width in screen pixels. Omit to
+    /// preserve the current width (move-only). Must be > 0 when supplied.
+    #[serde(default)]
+    pub width: Option<i32>,
+    /// `set_window_bounds`: requested outer-window height in screen pixels. Omit to
+    /// preserve the current height (move-only). Must be > 0 when supplied.
+    #[serde(default)]
+    pub height: Option<i32>,
     /// `click` / `type`: coordinate space for x/y. `screen` uses desktop pixels,
     /// `window` uses the target outer-window origin, and `viewport` uses page client pixels.
     #[serde(default)]
@@ -341,7 +349,7 @@ pub struct TargetActResponse {
 #[tool_router(router = background_router_tool_router, vis = "pub(super)")]
 impl SynapseService {
     #[tool(
-        description = "High-level capability-preserving computer-use router (#1005/#1033/#1207/#1219/#1261/#1267/#1299/#1300). One verb, routed to the correct session-targeted primitive: background/target-scoped when sufficient, agent_logical_foreground/foreground_lane when foreground-equivalent semantics are required, and never implicit fallback to the human OS foreground. verb=read observes the target; verb=screenshot captures it; verb=navigate drives the owned browser target (Chrome bridge/CDP); verb=set_field replaces a web/UIA field's text by element id via target-capable tiers, by native/UIA role/name/automation_id resolved at action time, or by CSS selector through the safe normal-Chrome bridge; verb=insert_text replaces the current selection/caret text on an observed native editable element_id via exact native readback, or types text at the current caret after an optional target focus/click; verb=append_text appends to an observed native editable element_id via exact native readback, or moves the current caret to the end with Ctrl+End and types text; verb=set_selection sets an exact start/end selection on an observed web/native editable element; verb=click clicks a target element by observed element_id, selector/role/name DOM action, or x/y coordinate fallback on the owned target; verb=tap touch-taps a browser target element or viewport coordinate with Input.dispatchTouchEvent touchStart/touchEnd through raw CDP or the normal-profile Chrome bridge cdpInput lane, and never falls back to mouse click; verb=dispatch_event dispatches a caller-specified DOM event_type with event_init directly on a matched element through the session-owned normal Chrome bridge, bypassing actionability and reporting dispatchEvent's default_allowed result; verb=clear empties a matched editable element and fires input/change; verb=focus calls DOM.focus and verifies activeElement; verb=blur calls DOM.blur and verifies activeElement moved away; verb=select_text/selectText selects all text in the matched element and verifies the selection; verb=check/uncheck set a native checkbox/radio to the requested checked state, no-op if already there, and verify checked-property readback; verb=type optionally focuses x/y then types text into the session-owned browser active element or leased foreground target; verb=key presses a raw key/chord such as Ctrl+End or Tab; verb=press presses a named button/link in the session-owned tab, or a raw key/chord when key/keys is supplied; verb=select chooses native <select> option(s) by value, label, or zero-based index via option/value/option_label/option_index/options[] and fires input/change; verb=submit calls HTMLFormElement.requestSubmit() for a matched form/submitter; verb=save persists an already-owned Notepad target to an existing file path and verifies file bytes as the Source of Truth; verb=cleanup_notepad_tabs removes stale restored tabs from an owned hidden-desktop Notepad target while keeping the requested file tab; verb=run_shell runs a command in the session workspace; verb=focus_window intentionally activates the session target's top-level HWND only after the session is already break_glass/full_capability and holds the foreground input lease, so Codex clients can use an existing target_act schema when they cannot hot-add act_focus_window after tools/list_changed. Prefer this over raw act_* primitives: it inherits target resolution, action audit, lane/lease guards, and structured refusals, so a normal session can keep valid foreground-equivalent capability without seizing the human foreground. Mutating failures are returned as ok=false with status=verify_needed/refused/error and the original structured error in result; no optimistic success. Bind a target first with set_target (discover one with window_list/cdp_open_tab)."
+        description = "High-level capability-preserving computer-use router (#1005/#1033/#1207/#1219/#1261/#1267/#1299/#1300). One verb, routed to the correct session-targeted primitive: background/target-scoped when sufficient, agent_logical_foreground/foreground_lane when foreground-equivalent semantics are required, and never implicit fallback to the human OS foreground. verb=read observes the target; verb=screenshot captures it; verb=navigate drives the owned browser target (Chrome bridge/CDP); verb=set_field replaces a web/UIA field's text by element id via target-capable tiers, by native/UIA role/name/automation_id resolved at action time, or by CSS selector through the safe normal-Chrome bridge; verb=insert_text replaces the current selection/caret text on an observed native editable element_id via exact native readback, or types text at the current caret after an optional target focus/click; verb=append_text appends to an observed native editable element_id via exact native readback, or moves the current caret to the end with Ctrl+End and types text; verb=set_selection sets an exact start/end selection on an observed web/native editable element; verb=click clicks a target element by observed element_id, selector/role/name DOM action, or x/y coordinate fallback on the owned target; verb=tap touch-taps a browser target element or viewport coordinate with Input.dispatchTouchEvent touchStart/touchEnd through raw CDP or the normal-profile Chrome bridge cdpInput lane, and never falls back to mouse click; verb=dispatch_event dispatches a caller-specified DOM event_type with event_init directly on a matched element through the session-owned normal Chrome bridge, bypassing actionability and reporting dispatchEvent's default_allowed result; verb=clear empties a matched editable element and fires input/change; verb=focus calls DOM.focus and verifies activeElement; verb=blur calls DOM.blur and verifies activeElement moved away; verb=select_text/selectText selects all text in the matched element and verifies the selection; verb=check/uncheck set a native checkbox/radio to the requested checked state, no-op if already there, and verify checked-property readback; verb=type optionally focuses x/y then types text into the session-owned browser active element or leased foreground target; verb=key presses a raw key/chord such as Ctrl+End or Tab; verb=press presses a named button/link in the session-owned tab, or a raw key/chord when key/keys is supplied; verb=select chooses native <select> option(s) by value, label, or zero-based index via option/value/option_label/option_index/options[] and fires input/change; verb=submit calls HTMLFormElement.requestSubmit() for a matched form/submitter; verb=save persists an already-owned Notepad target to an existing file path and verifies file bytes as the Source of Truth; verb=cleanup_notepad_tabs removes stale restored tabs from an owned hidden-desktop Notepad target while keeping the requested file tab; verb=run_shell runs a command in the session workspace; verb=focus_window intentionally activates the session target's top-level HWND only after the session is already break_glass/full_capability and holds the foreground input lease, so Codex clients can use an existing target_act schema when they cannot hot-add act_focus_window after tools/list_changed; verb=set_window_bounds moves/resizes the bound top-level window (native Window target, or the browser window behind a Cdp target) via background-safe SetWindowPos without activation, accepts x/y and/or width/height, and returns requested-vs-actual outer bounds (GetWindowRect readback) plus minimized state and size_satisfied so responsive-UI/layout FSV can drive a window through boundary sizes. Prefer this over raw act_* primitives: it inherits target resolution, action audit, lane/lease guards, and structured refusals, so a normal session can keep valid foreground-equivalent capability without seizing the human foreground. Mutating failures are returned as ok=false with status=verify_needed/refused/error and the original structured error in result; no optimistic success. Bind a target first with set_target (discover one with window_list/cdp_open_tab)."
     )]
     pub async fn target_act(
         &self,
@@ -833,6 +841,9 @@ impl SynapseService {
                         .await;
                     target_act_delegate_response("act_focus_window", response)?
                 }
+            }
+            "set_window_bounds" => {
+                target_act_set_window_bounds(self, &params, &request_context)?
             }
             other => return Err(target_act_unknown_verb_error(other)),
         };
@@ -3336,6 +3347,153 @@ async fn target_act_touch_tap(
         false,
         target_act_error_status(&error),
         target_act_error_result("target_act", error),
+    ))
+}
+
+/// #1349: background-safe target-bound window move/resize. Resolves the bound
+/// window HWND (native Window target, or the browser window behind a Cdp target),
+/// drives SetWindowPos without activation, and reads the resulting outer rect
+/// back so the caller gets requested-vs-actual bounds (min-size constraints) and
+/// minimized state. No human-foreground fallback, no implicit target.
+#[cfg(windows)]
+fn target_act_set_window_bounds(
+    service: &SynapseService,
+    params: &TargetActParams,
+    request_context: &RequestContext<RoleServer>,
+) -> Result<(&'static str, bool, &'static str, Value), ErrorData> {
+    const DELEGATE: &str = "synapse_a11y.set_window_bounds";
+    let session_id = target_act_session_id(request_context, "set_window_bounds")?;
+    if params.selector.is_some()
+        || params.element_id.is_some()
+        || params.role.is_some()
+        || params.name.is_some()
+    {
+        return Err(mcp_error(
+            error_codes::TOOL_PARAMS_INVALID,
+            "target_act verb=set_window_bounds operates on the bound window target; it does not accept selector/element_id/role/name",
+        ));
+    }
+    if params.width.is_none() && params.height.is_none() && params.x.is_none() && params.y.is_none()
+    {
+        return Err(mcp_error(
+            error_codes::TOOL_PARAMS_INVALID,
+            "target_act verb=set_window_bounds requires at least one of x/y (move) or width/height (resize)",
+        ));
+    }
+    if params.width.is_some_and(|value| value <= 0) || params.height.is_some_and(|value| value <= 0)
+    {
+        return Err(mcp_error(
+            error_codes::TOOL_PARAMS_INVALID,
+            "target_act verb=set_window_bounds width/height must be > 0 when supplied",
+        ));
+    }
+    let request_details = json!({
+        "session_id": &session_id,
+        "verb": "set_window_bounds",
+        "requested_x": params.x,
+        "requested_y": params.y,
+        "requested_width": params.width,
+        "requested_height": params.height,
+        "delegated_tool": DELEGATE,
+        "method": "SetWindowPos(SWP_NOZORDER|SWP_NOACTIVATE)+GetWindowRect",
+        "required_foreground": false,
+    });
+    let Some(target) = service.session_target(Some(&session_id))? else {
+        let error = mcp_error(
+            error_codes::TARGET_NOT_SET,
+            "target_act verb=set_window_bounds requires a bound window target; bind one with window_list/set_target first",
+        );
+        service.audit_action_denied_with_details_for_session(
+            "target_act",
+            &error,
+            &request_details,
+            &session_id,
+        );
+        return Ok((
+            DELEGATE,
+            false,
+            target_act_error_status(&error),
+            target_act_error_result("target_act", error),
+        ));
+    };
+    if let Err(error) =
+        service.ensure_target_claim_allows_session("target_act", &session_id, &target)
+    {
+        service.audit_action_denied_with_details_for_session(
+            "target_act",
+            &error,
+            &request_details,
+            &session_id,
+        );
+        return Ok((
+            DELEGATE,
+            false,
+            target_act_error_status(&error),
+            target_act_error_result("target_act", error),
+        ));
+    }
+    let window_hwnd = match &target {
+        SessionTarget::Window { hwnd } => *hwnd,
+        SessionTarget::Cdp { window_hwnd, .. } => *window_hwnd,
+    };
+    service.audit_action_started_with_details_for_session(
+        "target_act",
+        &request_details,
+        &session_id,
+    )?;
+    let result = synapse_a11y::set_window_bounds(
+        window_hwnd,
+        params.x,
+        params.y,
+        params.width,
+        params.height,
+    )
+    .map(|outcome| {
+        let requested_w = params.width.unwrap_or(outcome.actual.w);
+        let requested_h = params.height.unwrap_or(outcome.actual.h);
+        let size_satisfied = outcome.actual.w == requested_w && outcome.actual.h == requested_h;
+        json!({
+            "target_hwnd": window_hwnd,
+            "requested": {
+                "x": params.x, "y": params.y,
+                "width": params.width, "height": params.height,
+            },
+            "actual": {
+                "x": outcome.actual.x, "y": outcome.actual.y,
+                "width": outcome.actual.w, "height": outcome.actual.h,
+            },
+            "minimized": outcome.minimized,
+            "size_satisfied": size_satisfied,
+            "source_of_truth": "GetWindowRect readback after SetWindowPos",
+        })
+    })
+    .map_err(|error| {
+        mcp_error(
+            error.code(),
+            format!("target_act set_window_bounds failed for HWND {window_hwnd:#x}: {error}"),
+        )
+    });
+    service.audit_action_result_for_session("target_act", &result, &session_id)?;
+    match result {
+        Ok(value) => Ok((DELEGATE, true, TARGET_ACT_STATUS_OK, value)),
+        Err(error) => Ok((
+            DELEGATE,
+            false,
+            target_act_error_status(&error),
+            target_act_error_result(DELEGATE, error),
+        )),
+    }
+}
+
+#[cfg(not(windows))]
+fn target_act_set_window_bounds(
+    _service: &SynapseService,
+    _params: &TargetActParams,
+    _request_context: &RequestContext<RoleServer>,
+) -> Result<(&'static str, bool, &'static str, Value), ErrorData> {
+    Err(mcp_error(
+        error_codes::ACTION_TARGET_INVALID,
+        "target_act verb=set_window_bounds requires Windows SetWindowPos support",
     ))
 }
 

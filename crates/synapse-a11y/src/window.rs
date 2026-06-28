@@ -43,6 +43,29 @@ pub fn current_foreground_context() -> A11yResult<ForegroundContext> {
     platform::current_foreground_context()
 }
 
+/// Background-safe window move/resize outcome (#1349).
+#[cfg(windows)]
+pub use platform::WindowBoundsOutcome;
+
+/// Move and/or resize a top-level window WITHOUT activating it, reading the
+/// resulting outer rect back so the caller gets requested-vs-actual bounds and
+/// minimized state (#1349). See `platform::set_window_bounds`.
+///
+/// # Errors
+///
+/// Returns an error if the HWND is not a live window, a requested dimension is
+/// not positive, or the underlying Win32 calls fail.
+#[cfg(windows)]
+pub fn set_window_bounds(
+    hwnd: i64,
+    x: Option<i32>,
+    y: Option<i32>,
+    width: Option<i32>,
+    height: Option<i32>,
+) -> A11yResult<platform::WindowBoundsOutcome> {
+    platform::set_window_bounds(hwnd, x, y, width, height)
+}
+
 /// Returns a top-level UIA window for a native HWND.
 ///
 /// # Errors
