@@ -1,6 +1,6 @@
 const PROTOCOL_VERSION = 1;
-const BRIDGE_BUILD_ID = "synapse-chrome-bridge-2026-06-28-cdpinput-realclick-v2";
-const BRIDGE_BUILD_SHA256 = "2afc29ccf3f8156642e186c19c3f9998f577a0fb680781f861c2265070370d90";
+const BRIDGE_BUILD_ID = "synapse-chrome-bridge-2026-06-28-realdrag-v3";
+const BRIDGE_BUILD_SHA256 = "f073a47759520564c8afd1e1951c82ed14ba2bcdf35737bbd11a2b9fc265f8c1";
 const DEBUGGER_COMMAND_TIMEOUT_MS = 5000;
 const CAPTURE_VISIBLE_TAB_MIN_INTERVAL_MS = 600;
 const PAGE_SCREENSHOT_COMMAND_RESPONSE_BUDGET_MS = 25000;
@@ -4801,10 +4801,10 @@ async function handleCdpInput(params) {
 
   // tap/click/dblclick deliver real trusted Input.* events through
   // chrome.debugger, which the renderer only processes for the ACTIVE tab
-  // (an inactive tab silently drops mousePressed/mouseReleased — the same
-  // reason dispatchMouseDrag gates its real lane on before.active). Activate
-  // the owned tab in its already-focused Chrome window first; hover does not
-  // need it. This is in-Chrome tab activation, not OS foreground theft
+  // (an inactive tab silently drops mousePressed/mouseReleased; the real mouse
+  // drag lane shares this constraint and activates the same way). Activate the
+  // owned tab in its already-focused Chrome window first; hover does not need
+  // it. This is in-Chrome tab activation, not OS foreground theft
   // (required_foreground stays false). #1348 headline #1/#2.
   const needsActivation =
     action === "tap" || action === "click" || action === "dblclick";
@@ -8562,9 +8562,35 @@ async function handleCdpInputDrag(selected, action, params, before, beforePageTe
   );
   const steps = normalizeCdpInputDragSteps(params.dragSteps);
   const durationMs = normalizeCdpInputDragDuration(params.dragDurationMs);
-  const dispatch = action === "drag"
-    ? await dispatchMouseDrag(selected.tabId, before, sourceSelector, targetSelector, source.point, target.point, steps, durationMs)
-    : await dispatchHtml5DragDrop(selected.tabId, sourceSelector, targetSelector, params);
+  let dragActivation = {
+    attempted: false,
+    activated: false,
+    before_active: before.active,
+    after_active: before.active,
+    required_foreground: false,
+    readback_backend: "not_required_for_html5_drag"
+  };
+  let dispatch;
+  if (action === "drag") {
+    // Real trusted mouse drag: chrome.debugger Input.* only dispatches to the
+    // ACTIVE tab, so activate the owned tab in its already-focused Chrome
+    // window first (in-Chrome activation, required_foreground=false), then
+    // dispatch the real Input.dispatchMouseEvent press/move/release. NO
+    // synthetic fallback (#1355): a guarded pointer-DnD target must see
+    // isTrusted=true, or the verb fails loud — never a synthetic no-op that
+    // looks like success.
+    dragActivation = await activateTabForCdpTouch(selected.tabId, before, "drag");
+    const realDrag = await dispatchCdpInputMouseDrag(
+      selected.tabId,
+      source.point,
+      target.point,
+      steps,
+      durationMs
+    );
+    dispatch = { ...realDrag, backend: "chrome.debugger.Input" };
+  } else {
+    dispatch = await dispatchHtml5DragDrop(selected.tabId, sourceSelector, targetSelector, params);
+  }
   const after = await waitForTabPageState(selected.tabId, selected.target, waitTimeoutMs);
   const afterPageText = await tabPageTextState(selected.tabId);
   return {
@@ -8579,6 +8605,7 @@ async function handleCdpInputDrag(selected, action, params, before, beforePageTe
     after_page_text: afterPageText,
     readback_backend: dispatch.backend || (action === "drag" ? "chrome.debugger.Input" : "chrome.scripting.executeScript(DragEvent+DataTransfer)"),
     required_foreground: false,
+    tab_activation_for_touch: dragActivation,
     source_selector: sourceSelector,
     target_selector: targetSelector,
     source_frame_id: source.frame_id,
@@ -8910,165 +8937,6 @@ async function dispatchCdpInputMouseDrag(tabId, sourcePoint, targetPoint, steps,
       }
     }
   }
-}
-
-async function dispatchMouseDrag(tabId, before, sourceSelector, targetSelector, sourcePoint, targetPoint, steps, durationMs) {
-  if (before?.active === true) {
-    try {
-      const dispatch = await dispatchCdpInputMouseDrag(tabId, sourcePoint, targetPoint, steps, durationMs);
-      return {
-        ...dispatch,
-        backend: "chrome.debugger.Input"
-      };
-    } catch (error) {
-      const fallback = await dispatchSyntheticMouseDrag(tabId, sourceSelector, targetSelector, sourcePoint, targetPoint, steps, durationMs);
-      return {
-        ...fallback,
-        cdp_fallback_error: errorMessage(error)
-      };
-    }
-  }
-  const dispatch = await dispatchSyntheticMouseDrag(tabId, sourceSelector, targetSelector, sourcePoint, targetPoint, steps, durationMs);
-  return {
-    ...dispatch,
-    cdp_fallback_error: "skipped chrome.debugger Input.dispatchMouseEvent because target tab is inactive"
-  };
-}
-
-async function dispatchSyntheticMouseDrag(tabId, sourceSelector, targetSelector, sourcePoint, targetPoint, steps, durationMs) {
-  const results = await chrome.scripting.executeScript({
-    target: { tabId, allFrames: false },
-    world: "MAIN",
-    func: performSyntheticMouseDragInPage,
-    args: [sourceSelector, targetSelector, sourcePoint, targetPoint, steps, durationMs]
-  });
-  const readback = results?.[0]?.result;
-  if (!readback?.ok) {
-    throw bridgeError(
-      readback?.code || ERROR_CHROME_DOM_ACTION_POSTCONDITION_FAILED,
-      `synthetic mouse drag failed: ${readback?.detail || JSON.stringify(readback)}`
-    );
-  }
-  return {
-    method: "chrome.scripting.MouseEvent(mousemove,mousedown,dragMove,mouseup)",
-    backend: "chrome.scripting.executeScript(MouseEvent)",
-    dispatched_events: readback.events_dispatched || [],
-    synthetic_mouse_readback: readback
-  };
-}
-
-async function performSyntheticMouseDragInPage(sourceSelector, targetSelector, sourcePoint, targetPoint, steps, durationMs) {
-  const sleepInPage = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-  const summarizeElement = (element) => {
-    const rect = element.getBoundingClientRect();
-    return {
-      tag_name: element.tagName,
-      id: element.id || null,
-      class_name: element.className || null,
-      text: String(element.innerText || element.textContent || "").trim().slice(0, 200),
-      rect: {
-        x: rect.x,
-        y: rect.y,
-        width: rect.width,
-        height: rect.height
-      }
-    };
-  };
-  const findStrict = (selector, label) => {
-    let matches;
-    try {
-      matches = Array.from(document.querySelectorAll(selector));
-    } catch (error) {
-      return {
-        ok: false,
-        code: "CHROME_DOM_SELECTOR_INVALID",
-        detail: `${label} selector is invalid: ${error?.message || String(error)}`
-      };
-    }
-    if (matches.length === 0) {
-      return {
-        ok: false,
-        code: "CHROME_DOM_ELEMENT_NOT_FOUND",
-        detail: `${label} selector ${JSON.stringify(selector)} matched no elements`
-      };
-    }
-    if (matches.length > 1) {
-      return {
-        ok: false,
-        code: "CHROME_DOM_ELEMENT_AMBIGUOUS",
-        detail: `${label} selector ${JSON.stringify(selector)} matched ${matches.length} elements`
-      };
-    }
-    return { ok: true, element: matches[0] };
-  };
-  const source = findStrict(sourceSelector, "source");
-  if (!source.ok) {
-    return source;
-  }
-  const target = findStrict(targetSelector, "target");
-  if (!target.ok) {
-    return target;
-  }
-  const safeSteps = Number.isInteger(steps) && steps > 0 ? steps : 1;
-  const delayMs = safeSteps > 0 && durationMs > 0 ? Math.max(0, Math.floor(durationMs / safeSteps)) : 0;
-  const events = [];
-  const pointFor = (index) => {
-    const ratio = index / safeSteps;
-    return {
-      x: sourcePoint.x + (targetPoint.x - sourcePoint.x) * ratio,
-      y: sourcePoint.y + (targetPoint.y - sourcePoint.y) * ratio
-    };
-  };
-  const elementAt = (point, fallback) => {
-    const found = document.elementFromPoint(point.x, point.y);
-    return found || fallback || document;
-  };
-  const dispatchMouse = (type, dispatchTarget, point, buttons) => {
-    const event = new MouseEvent(type, {
-      bubbles: true,
-      cancelable: true,
-      composed: true,
-      view: window,
-      clientX: point.x,
-      clientY: point.y,
-      screenX: Math.round(window.screenX + point.x),
-      screenY: Math.round(window.screenY + point.y),
-      button: type === "mousemove" ? 0 : 0,
-      buttons
-    });
-    const defaultAllowed = dispatchTarget.dispatchEvent(event);
-    events.push({
-      type,
-      target_id: dispatchTarget.id || null,
-      target_tag_name: dispatchTarget.tagName || null,
-      client_x: point.x,
-      client_y: point.y,
-      buttons,
-      default_allowed: defaultAllowed
-    });
-  };
-
-  dispatchMouse("mousemove", source.element, sourcePoint, 0);
-  dispatchMouse("mousedown", source.element, sourcePoint, 1);
-  for (let index = 1; index <= safeSteps; index += 1) {
-    const point = pointFor(index);
-    dispatchMouse("mousemove", elementAt(point, target.element), point, 1);
-    if (delayMs > 0 && index < safeSteps) {
-      await sleepInPage(delayMs);
-    }
-  }
-  dispatchMouse("mouseup", elementAt(targetPoint, target.element), targetPoint, 0);
-
-  return {
-    ok: true,
-    source: summarizeElement(source.element),
-    target: summarizeElement(target.element),
-    events_dispatched: events,
-    event_count: events.length,
-    drag_steps: safeSteps,
-    drag_duration_ms: durationMs,
-    page_text: String(document.body?.innerText || document.documentElement?.innerText || "").slice(0, 4096)
-  };
 }
 
 async function dispatchHtml5DragDrop(tabId, sourceSelector, targetSelector, params) {
