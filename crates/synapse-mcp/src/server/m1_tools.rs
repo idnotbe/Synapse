@@ -1418,7 +1418,28 @@ impl SynapseService {
             foreground_guard,
             captured_result.as_ref().err(),
         )?;
-        let captured = captured_result?;
+        let captured = match captured_result {
+            Ok(captured) => captured,
+            Err(error) if browser_screenshot_bridge_disconnected(&error) => {
+                // #1341/#1343: the normal Chrome bridge captureVisibleTab lane
+                // disconnected mid-capture (the MV3 service worker drops its
+                // WebSocket on some GPU/WebGL-heavy pages). Rather than fail with
+                // an opaque A11Y_CDP_EXTENSION_UNAVAILABLE, fall back to a passive
+                // WGC capture of the owning Chrome window — WGC captures occluded
+                // windows and never depends on the bridge worker — so browser
+                // FSV still gets a real bitmap, flagged as a whole-window fallback.
+                return browser_screenshot_passive_window_fallback(
+                    params,
+                    validation,
+                    window_hwnd,
+                    cdp_target_id,
+                    &foreground_readback,
+                    &error,
+                )
+                .await;
+            }
+            Err(error) => return Err(error),
+        };
         if !cdp_target_ids_equal(&captured.target_id, cdp_target_id) {
             return Err(mcp_error(
                 error_codes::ACTION_POSTCONDITION_FAILED,
@@ -1505,6 +1526,7 @@ impl SynapseService {
             source_of_truth:
                 "human OS foreground readback plus normal Chrome bridge chrome.scripting page metrics/masks/scroll and chrome.tabs.captureVisibleTab tiles stitched by synapse-mcp"
                     .to_owned(),
+            fallback_reason: None,
         })
     }
 
@@ -12534,6 +12556,148 @@ fn capture_target_window_screenshot_to_file(
         bitmap_sha256,
         foreground,
     )
+}
+
+/// #1341/#1343: true when a browser_screenshot bridge capture failed because the
+/// normal Chrome bridge direct-HTTP host disconnected mid-command (the MV3
+/// service worker drops its WebSocket on some GPU/WebGL-heavy pages). This is the
+/// recoverable case where a passive WGC window capture is a valid substitute.
+fn browser_screenshot_bridge_disconnected(error: &ErrorData) -> bool {
+    error.message.contains("disconnected before command response")
+        || error.message.contains("client closed direct HTTP WebSocket")
+}
+
+/// #1341/#1343: produce a browser_screenshot result from a passive per-window WGC
+/// capture of the owning Chrome window when the bridge captureVisibleTab lane
+/// disconnected mid-capture. WGC captures occluded/background windows and never
+/// depends on the bridge service worker, so browser FSV still gets a real bitmap.
+/// The result is flagged via `fallback_reason` + backend_tier_used so callers know
+/// it is a whole-window capture, not a viewport/clip/element capture.
+async fn browser_screenshot_passive_window_fallback(
+    params: &BrowserScreenshotParams,
+    validation: &BrowserScreenshotValidation,
+    window_hwnd: i64,
+    cdp_target_id: &str,
+    foreground: &BrowserScreenshotForegroundReadback,
+    bridge_error: &ErrorData,
+) -> Result<BrowserScreenshotResponse, ErrorData> {
+    // Best-effort activate the target tab in its window so the passive WGC frame
+    // shows the intended page, not whichever tab was previously active. activateTab
+    // is a lightweight chrome.tabs.update — it does NOT run the captureVisibleTab
+    // path that drops the bridge worker. The capture failure typically disconnected
+    // the MV3 worker, which re-registers ~1s later via chrome.alarms, so retry the
+    // activate across that gap. A persistent failure is non-fatal: we still capture
+    // the window (its current tab), flagged via fallback_reason.
+    let mut activated = false;
+    for attempt in 0..5u32 {
+        match crate::chrome_debugger_bridge::activate_tab(window_hwnd, cdp_target_id, 2_000).await {
+            Ok(_) => {
+                activated = true;
+                // Let the activated (possibly background) tab paint before WGC.
+                tokio::time::sleep(std::time::Duration::from_millis(450)).await;
+                break;
+            }
+            Err(error) => {
+                tracing::warn!(
+                    code = "BROWSER_SCREENSHOT_FALLBACK_ACTIVATE_RETRY",
+                    hwnd = window_hwnd,
+                    cdp_target_id = %cdp_target_id,
+                    attempt,
+                    detail = %error.detail(),
+                    "passive WGC fallback activate attempt failed; the bridge worker may still be re-registering"
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(700)).await;
+            }
+        }
+    }
+    if !activated {
+        tracing::warn!(
+            code = "BROWSER_SCREENSHOT_FALLBACK_ACTIVATE_GAVE_UP",
+            hwnd = window_hwnd,
+            cdp_target_id = %cdp_target_id,
+            "passive WGC fallback could not activate the target tab after retries; capturing current window state"
+        );
+    }
+    let captured =
+        synapse_capture::window_full_frame_to_bgra_bitmap(window_hwnd, WINDOW_SCREENSHOT_TIMEOUT_MS)
+            .map_err(|error| {
+                mcp_error(
+                    error.code(),
+                    format!(
+                        "browser_screenshot passive WGC window fallback failed for Chrome HWND {window_hwnd:#x} after the bridge captureVisibleTab lane disconnected ({}): {error}",
+                        bridge_error.message
+                    ),
+                )
+            })?;
+    let capture_backend = captured.capture_backend;
+    let bitmap = captured.bitmap;
+    let page_region = full_bitmap_region(&bitmap)?;
+    let bitmap_sha256 = sha256_hex(&bitmap.bytes);
+    let write_params = CaptureScreenshotParams {
+        path: params.path.clone(),
+        region: Some(page_region),
+        window_hwnd: None,
+        overwrite: params.overwrite,
+        max_pixels: params.max_pixels,
+        max_long_edge: params.max_long_edge,
+    };
+    let screenshot = write_screenshot_bitmap_with_quality(
+        &write_params,
+        validation.output_path.clone(),
+        validation.format,
+        bitmap,
+        capture_backend,
+        bitmap_sha256,
+        None,
+        params.quality,
+    )?;
+    tracing::warn!(
+        code = "BROWSER_SCREENSHOT_PASSIVE_WINDOW_FALLBACK",
+        hwnd = window_hwnd,
+        cdp_target_id = %cdp_target_id,
+        bridge_error = %bridge_error.message,
+        output_path = %validation.output_path.display(),
+        native_width = screenshot.native_width,
+        native_height = screenshot.native_height,
+        "readback=passive_wgc_window outcome=bridge_disconnect_fallback"
+    );
+    Ok(BrowserScreenshotResponse {
+        path: screenshot.path,
+        format: screenshot.format,
+        capture_backend: screenshot.capture_backend,
+        scope: params.scope,
+        page_region,
+        width: screenshot.width,
+        height: screenshot.height,
+        native_width: screenshot.native_width,
+        native_height: screenshot.native_height,
+        scale: screenshot.scale,
+        bytes_written: screenshot.bytes_written,
+        bitmap_sha256: screenshot.bitmap_sha256,
+        cdp_target_id: cdp_target_id.to_owned(),
+        tab_id: 0,
+        chrome_window_id: None,
+        url: String::new(),
+        title: String::new(),
+        device_pixel_ratio: 0.0,
+        viewport_width_css: 0.0,
+        viewport_height_css: 0.0,
+        scroll_width_css: 0.0,
+        scroll_height_css: 0.0,
+        tile_count: 0,
+        mask_count: 0,
+        omit_background: params.omit_background,
+        required_foreground: foreground.required_foreground,
+        human_os_foreground_before_hwnd: foreground.before_hwnd,
+        human_os_foreground_capture_hwnd: foreground.capture_hwnd,
+        human_os_foreground_after_restore_hwnd: foreground.after_restore_hwnd,
+        restored_human_os_foreground: foreground.restored_human_os_foreground,
+        backend_tier_used: "passive_window_wgc_fallback".to_owned(),
+        source_of_truth:
+            "passive per-window WGC capture of the owning Chrome window (normal bridge captureVisibleTab lane disconnected mid-capture)"
+                .to_owned(),
+        fallback_reason: Some(bridge_error.message.to_string()),
+    })
 }
 
 #[cfg(windows)]

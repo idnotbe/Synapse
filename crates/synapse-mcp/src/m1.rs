@@ -483,6 +483,14 @@ pub struct BrowserScreenshotResponse {
     pub restored_human_os_foreground: bool,
     pub backend_tier_used: String,
     pub source_of_truth: String,
+    /// #1341/#1343: set when the normal Chrome bridge `captureVisibleTab` lane
+    /// disconnected mid-capture (the MV3 service worker drops the WebSocket on
+    /// some GPU/WebGL-heavy pages) and the screenshot was instead produced by a
+    /// passive WGC capture of the owning Chrome window. Carries the original
+    /// bridge error so the caller knows the image is a whole-window fallback,
+    /// not a viewport/clip/element capture. Absent on a normal bridge capture.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fallback_reason: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema)]
