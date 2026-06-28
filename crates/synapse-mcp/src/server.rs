@@ -219,6 +219,7 @@ mod background_router;
 mod browser_assert;
 mod browser_clock_events;
 mod browser_dialog;
+mod browser_batch;
 mod browser_dnd;
 mod browser_emulate;
 mod browser_emulation;
@@ -633,6 +634,7 @@ impl SynapseService {
             + Self::permission_gate_tool_router()
             + Self::escalation_tool_router()
             + Self::background_router_tool_router()
+            + Self::browser_batch_tool_router()
             + Self::browser_assert_tool_router()
             + Self::browser_clock_events_tool_router()
             + Self::browser_dialog_tool_router()
