@@ -6181,10 +6181,13 @@ async fn wait_for_launch_window(
     let timeout = Duration::from_millis(timeout_ms);
     let mut last_error: Option<String>;
     let mut last_windows = Vec::new();
+    let mut last_title_mismatch: Vec<serde_json::Value> = Vec::new();
     loop {
         match synapse_a11y::visible_top_level_window_contexts() {
             Ok(contexts) => {
                 last_windows = window_context_summaries(&contexts);
+                last_title_mismatch =
+                    title_matching_other_pid_windows(&contexts, title_regex, pid);
                 if let Some(context) = select_launch_window(
                     &contexts,
                     pid,
@@ -6217,6 +6220,7 @@ async fn wait_for_launch_window(
                     timeout_ms,
                     Some(error.to_string()),
                     &last_windows,
+                    &last_title_mismatch,
                 ));
             }
             Err(error) => {
@@ -6240,6 +6244,7 @@ async fn wait_for_launch_window(
                 timeout_ms,
                 last_error,
                 &last_windows,
+                &last_title_mismatch,
             ));
         }
         tokio::time::sleep(Duration::from_millis(LAUNCH_WINDOW_POLL_INTERVAL_MS)).await;
@@ -6260,10 +6265,13 @@ async fn wait_for_launch_desktop_window(
     let timeout = Duration::from_millis(timeout_ms);
     let mut last_error: Option<String>;
     let mut last_windows = Vec::new();
+    let mut last_title_mismatch: Vec<serde_json::Value> = Vec::new();
     loop {
         match desktop_window_contexts_from_handle_value(desktop_handle) {
             Ok(contexts) => {
                 last_windows = window_context_summaries(&contexts);
+                last_title_mismatch =
+                    title_matching_other_pid_windows(&contexts, title_regex, pid);
                 if let Some(context) = select_launch_desktop_window(
                     &contexts,
                     pid,
@@ -6306,6 +6314,7 @@ async fn wait_for_launch_desktop_window(
                 timeout_ms,
                 last_error,
                 &last_windows,
+                &last_title_mismatch,
             ));
         }
         tokio::time::sleep(Duration::from_millis(LAUNCH_WINDOW_POLL_INTERVAL_MS)).await;
@@ -6315,6 +6324,33 @@ async fn wait_for_launch_desktop_window(
 fn window_context_summaries(contexts: &[ForegroundContext]) -> Vec<serde_json::Value> {
     contexts
         .iter()
+        .take(12)
+        .map(|context| {
+            json!({
+                "hwnd": context.hwnd,
+                "pid": context.pid,
+                "process_name": context.process_name,
+                "title": context.window_title,
+            })
+        })
+        .collect()
+}
+
+/// Windows whose title matches the wait regex but are NOT owned by the launched
+/// pid — the actionable "why wasn't the already-visible matching window
+/// accepted?" diagnostic for an act_launch window-wait timeout (#1357). A
+/// non-empty list means a same-titled window exists under a different process: a
+/// stale/leftover instance from an earlier launch, or the launched process
+/// re-exec'd into a pid act_launch is not tracking. act_launch only accepts a
+/// title match owned by the launched pid, so these are rejected — and now say so.
+fn title_matching_other_pid_windows(
+    contexts: &[ForegroundContext],
+    title_regex: &regex::Regex,
+    launch_pid: u32,
+) -> Vec<serde_json::Value> {
+    contexts
+        .iter()
+        .filter(|context| context.pid != launch_pid && title_regex.is_match(&context.window_title))
         .take(12)
         .map(|context| {
             json!({
@@ -6444,7 +6480,17 @@ fn launch_window_error(
     timeout_ms: u64,
     last_error: Option<String>,
     observed_windows: &[serde_json::Value],
+    title_matching_other_pid: &[serde_json::Value],
 ) -> ErrorData {
+    // #1357: when a title-matching window exists but under a different pid,
+    // explain WHY it was not accepted instead of leaving the caller to compare
+    // pids in observed_windows by hand.
+    let rejection_explanation = (!title_matching_other_pid.is_empty()).then(|| {
+        format!(
+            "{} visible window(s) match the title regex but are owned by a different pid than the launched process (pid {pid}). act_launch only accepts a title match owned by the launched pid, so these were rejected as stale/foreign instances. Close the stale window(s) and retry, wait for the launched pid's own window, or — if the target intentionally re-execs into another process — match on that pid instead.",
+            title_matching_other_pid.len()
+        )
+    });
     launch_tool_error(
         error_codes::ACTION_LAUNCH_WINDOW_NOT_FOUND,
         format!("act_launch did not verify requested launch window: {reason}"),
@@ -6456,6 +6502,8 @@ fn launch_window_error(
             "timeout_ms": timeout_ms,
             "last_error": last_error,
             "observed_windows": observed_windows,
+            "title_matching_windows_with_other_pid": title_matching_other_pid,
+            "rejection_explanation": rejection_explanation,
         }),
     )
 }
