@@ -33,8 +33,67 @@ pub(super) struct SessionCleanupState {
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 enum SessionFailure {
+    /// No `Mcp-Session-Id` header at all — the caller never initialized a
+    /// session on this daemon.
     Missing,
+    /// A session id was presented but this daemon's session manager does not
+    /// know it: the daemon idle-expired it, or the daemon restarted and lost
+    /// all in-memory sessions. The daemon is alive (it answered), so this is a
+    /// session-level fact, not a daemon crash.
     UnknownOrExpired,
+    /// The session was explicitly torn down by the session lifecycle layer
+    /// (stale-eviction, `session_end`, or `agent_kill`). Distinct from
+    /// `UnknownOrExpired` because the teardown is intentional and the bound
+    /// target row was persisted, so re-binding (adopting) the same browser tab
+    /// is the right recovery rather than re-creating it.
+    Terminated,
+}
+
+impl SessionFailure {
+    /// Stable, machine-matchable reason token for the returned diagnostic.
+    fn reason(self) -> &'static str {
+        match self {
+            Self::Missing => "session_header_missing",
+            Self::UnknownOrExpired => "session_unknown_or_expired",
+            Self::Terminated => "session_terminated",
+        }
+    }
+
+    /// Which of the three failure classes #1360 part 3 asks callers to
+    /// distinguish this is. All HTTP-layer session failures are
+    /// `session_level` (the daemon answered with a 404 diagnostic, so the
+    /// daemon itself did not crash and the chrome bridge was never reached);
+    /// target-invalidation and recoverable-bridge failures surface instead as
+    /// tool-level error codes (e.g. `CAPTURE_TARGET_INVALID`) on a *valid*
+    /// session.
+    fn failure_class(self) -> &'static str {
+        "session_level"
+    }
+
+    /// The recovery action a caller should take. `Missing` never had a session
+    /// to rebind; the other two had a target binding (persisted across
+    /// teardown), so the caller should re-create a session then re-bind the
+    /// same target instead of re-creating the tab.
+    fn recovery(self) -> &'static str {
+        match self {
+            Self::Missing => "initialize_session",
+            Self::UnknownOrExpired | Self::Terminated => "recreate_session_then_rebind_target",
+        }
+    }
+
+    fn detail(self) -> &'static str {
+        match self {
+            Self::Missing => {
+                "no Mcp-Session-Id header was presented; initialize an MCP session before calling tools"
+            }
+            Self::UnknownOrExpired => {
+                "the daemon is alive but does not recognize this session id (idle-expired or daemon restarted); create a new session and re-bind your target"
+            }
+            Self::Terminated => {
+                "the session lifecycle terminated this session (stale-eviction / session_end / agent_kill); create a new session and re-bind the same target (its binding was persisted)"
+            }
+        }
+    }
 }
 
 impl SessionCleanupState {
@@ -117,7 +176,7 @@ pub(super) async fn require_mcp_session(
                     session_id,
                     "HTTP MCP session rejected because session lifecycle already terminated it"
                 );
-                return session_invalid(SessionFailure::UnknownOrExpired);
+                return session_invalid_for(SessionFailure::Terminated, Some(session_id));
             }
             match record_session_request(&state.session_registry, session_id, request).await {
                 Ok(request) => request,
@@ -126,11 +185,15 @@ pub(super) async fn require_mcp_session(
         }
         None => request,
     };
+    let diagnostic_session_id = session_id.clone();
     CURRENT_MCP_SESSION_ID
         .scope(session_id, async move {
             let response = next.run(request).await;
             if response.status() == StatusCode::NOT_FOUND {
-                return session_invalid(SessionFailure::UnknownOrExpired);
+                return session_invalid_for(
+                    SessionFailure::UnknownOrExpired,
+                    diagnostic_session_id.as_deref(),
+                );
             }
             response
         })
@@ -163,7 +226,7 @@ pub(super) async fn release_held_inputs_on_delete(
             reason = ?SessionFailure::UnknownOrExpired,
             "HTTP MCP session delete rejected before held-input cleanup"
         );
-        return session_invalid(SessionFailure::UnknownOrExpired);
+        return session_invalid_for(SessionFailure::UnknownOrExpired, Some(session_id));
     }
     let response = next.run(request).await;
     let Some(session_id) = cleanup_session_id else {
@@ -350,16 +413,52 @@ fn is_mcp_endpoint(path: &str) -> bool {
     path == "/mcp" || path.starts_with("/mcp/")
 }
 
+const SESSION_RECOVERY_HEADER: &str = "mcp-session-recovery";
+
 fn session_invalid(failure: SessionFailure) -> Response {
+    session_invalid_for(failure, None)
+}
+
+/// Build the 404 session-invalid response with an actionable, machine-matchable
+/// diagnostic (#1360 part 3). The body is JSON carrying the failure class and
+/// the recovery the caller should take, and the `code` field is the literal
+/// `HTTP_SESSION_INVALID` string so existing plaintext sniffers still match.
+/// Status stays 404 so rmcp transports keep treating it as session-expired.
+fn session_invalid_for(failure: SessionFailure, session_id: Option<&str>) -> Response {
     tracing::warn!(
         code = synapse_core::error_codes::HTTP_SESSION_INVALID,
-        reason = ?failure,
+        reason = failure.reason(),
+        failure_class = failure.failure_class(),
+        recovery = failure.recovery(),
+        session_id = session_id.unwrap_or(""),
         "HTTP MCP session rejected"
     );
+    let body = serde_json::json!({
+        "code": synapse_core::error_codes::HTTP_SESSION_INVALID,
+        "reason": failure.reason(),
+        // #1360 part 3: a 404 here means the daemon answered, so it is not a
+        // daemon crash and the chrome bridge was never reached. This is a
+        // session-level failure; target-invalidation / recoverable-bridge
+        // failures surface as tool-level codes on a *valid* session.
+        "failure_class": failure.failure_class(),
+        "daemon_alive": true,
+        "recovery": failure.recovery(),
+        "session_id": session_id,
+        "detail": failure.detail(),
+        "source_of_truth": "http_session_middleware",
+    });
+    let body = serde_json::to_string(&body)
+        .unwrap_or_else(|_| synapse_core::error_codes::HTTP_SESSION_INVALID.to_owned());
     (
         StatusCode::NOT_FOUND,
-        [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
-        synapse_core::error_codes::HTTP_SESSION_INVALID,
+        [
+            (header::CONTENT_TYPE, "application/json; charset=utf-8"),
+            (
+                header::HeaderName::from_static(SESSION_RECOVERY_HEADER),
+                failure.recovery(),
+            ),
+        ],
+        body,
     )
         .into_response()
 }
@@ -393,9 +492,91 @@ fn session_registry_failed() -> Response {
 #[cfg(test)]
 mod tests {
     use super::{
-        CURRENT_MCP_SESSION_ID, DEFAULT_SESSION_IDLE_TIMEOUT_SECS, current_mcp_session_id,
-        jsonrpc_action_label, jsonrpc_method_is_initialize, parse_idle_timeout,
+        CURRENT_MCP_SESSION_ID, DEFAULT_SESSION_IDLE_TIMEOUT_SECS, SESSION_RECOVERY_HEADER,
+        SessionFailure, current_mcp_session_id, jsonrpc_action_label, jsonrpc_method_is_initialize,
+        parse_idle_timeout, session_invalid_for,
     };
+    use axum::body::to_bytes;
+    use axum::http::StatusCode;
+
+    #[test]
+    fn session_failure_terminated_and_expired_are_distinct_but_both_rebind() {
+        // #1360 part 3: a terminated session must be reported distinctly from an
+        // unknown/expired one (the reason tokens differ), yet both recover by
+        // re-creating a session and re-binding the persisted target.
+        assert_ne!(
+            SessionFailure::Terminated.reason(),
+            SessionFailure::UnknownOrExpired.reason()
+        );
+        assert_eq!(SessionFailure::Terminated.reason(), "session_terminated");
+        assert_eq!(
+            SessionFailure::UnknownOrExpired.reason(),
+            "session_unknown_or_expired"
+        );
+        assert_eq!(
+            SessionFailure::Terminated.recovery(),
+            "recreate_session_then_rebind_target"
+        );
+        assert_eq!(
+            SessionFailure::UnknownOrExpired.recovery(),
+            "recreate_session_then_rebind_target"
+        );
+        // Missing never had a session to rebind — it initializes instead.
+        assert_eq!(SessionFailure::Missing.reason(), "session_header_missing");
+        assert_eq!(SessionFailure::Missing.recovery(), "initialize_session");
+        // All HTTP-layer failures are session-level (daemon answered, not a crash).
+        for failure in [
+            SessionFailure::Missing,
+            SessionFailure::UnknownOrExpired,
+            SessionFailure::Terminated,
+        ] {
+            assert_eq!(failure.failure_class(), "session_level");
+        }
+    }
+
+    #[tokio::test]
+    async fn session_invalid_response_carries_actionable_json_diagnostic() {
+        let response =
+            session_invalid_for(SessionFailure::Terminated, Some("sess-abc-123"));
+        // Status stays 404 so rmcp transports keep treating it as session-expired.
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        // Recovery header lets header-only clients branch without parsing JSON.
+        assert_eq!(
+            response
+                .headers()
+                .get(SESSION_RECOVERY_HEADER)
+                .and_then(|value| value.to_str().ok()),
+            Some("recreate_session_then_rebind_target")
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get(axum::http::header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok()),
+            Some("application/json; charset=utf-8")
+        );
+        let bytes = to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .expect("read body");
+        let body: serde_json::Value =
+            serde_json::from_slice(&bytes).expect("diagnostic body is JSON");
+        assert_eq!(
+            body["code"],
+            serde_json::json!(synapse_core::error_codes::HTTP_SESSION_INVALID)
+        );
+        assert_eq!(body["reason"], serde_json::json!("session_terminated"));
+        assert_eq!(body["failure_class"], serde_json::json!("session_level"));
+        assert_eq!(body["daemon_alive"], serde_json::json!(true));
+        assert_eq!(
+            body["recovery"],
+            serde_json::json!("recreate_session_then_rebind_target")
+        );
+        assert_eq!(body["session_id"], serde_json::json!("sess-abc-123"));
+        assert_eq!(
+            body["source_of_truth"],
+            serde_json::json!("http_session_middleware")
+        );
+    }
 
     #[test]
     fn initialize_detection_accepts_initialize_request_only() {
