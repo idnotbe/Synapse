@@ -237,6 +237,7 @@ impl ChromeDebuggerBridgeError {
             }
             Some(error_codes::ACTION_TARGET_INVALID) => error_codes::ACTION_TARGET_INVALID,
             Some(error_codes::BROWSER_WAIT_TIMEOUT) => error_codes::BROWSER_WAIT_TIMEOUT,
+            Some(error_codes::BROWSER_NAVIGATION_FAILED) => error_codes::BROWSER_NAVIGATION_FAILED,
             _ => error_codes::A11Y_CDP_ATTACH_FAILED,
         };
         Self {
@@ -8331,6 +8332,7 @@ mod tests {
             error_codes::CHROME_DOM_ACTION_UNSUPPORTED,
             error_codes::CHROME_DOM_ACTION_POSTCONDITION_FAILED,
             error_codes::ACTION_TARGET_INVALID,
+            error_codes::BROWSER_NAVIGATION_FAILED,
         ] {
             let error = ChromeDebuggerBridgeError::extension(Some(code), "dom action failed");
             assert_eq!(error.code(), code);

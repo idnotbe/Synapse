@@ -491,15 +491,44 @@ const FACADE_TOOL_CONTRACTS: &[FacadeToolContractSpec] = &[
         "browser_nav",
         "BrowserNavOperation",
         "Chrome bridge navigation result + page URL/readiness readback",
-        &[op(
-            "navigate",
-            true,
-            true,
-            "Chrome bridge navigation result",
-            Some("page URL + readyState readback from the same target"),
-            error_codes::TOOL_PARAMS_INVALID,
-            "pass a valid target-scoped URL and wait condition",
-        )],
+        &[
+            op(
+                "navigate",
+                true,
+                true,
+                "Chrome bridge/CDP navigation command",
+                Some("page URL + readyState readback from the same target"),
+                error_codes::TOOL_PARAMS_INVALID,
+                "pass a valid target-scoped URL and wait condition",
+            ),
+            op(
+                "reload",
+                true,
+                true,
+                "Chrome bridge/CDP reload command",
+                Some("page URL + readyState readback from the same target"),
+                error_codes::ACTION_TARGET_INVALID,
+                "select or open an owned target, then retry reload",
+            ),
+            op(
+                "back",
+                true,
+                true,
+                "Chrome bridge/CDP navigation history command",
+                Some("page URL + readyState readback from the same target"),
+                error_codes::ACTION_TARGET_INVALID,
+                "select or open an owned target with navigation history, then retry back",
+            ),
+            op(
+                "forward",
+                true,
+                true,
+                "Chrome bridge/CDP navigation history command",
+                Some("page URL + readyState readback from the same target"),
+                error_codes::ACTION_TARGET_INVALID,
+                "select or open an owned target with forward history, then retry forward",
+            ),
+        ],
     ),
     facade_contract(
         "browser_dom",
@@ -999,6 +1028,7 @@ const BROWSER_CONTROL_ALLOWED_EXACT: &[&str] = &[
     "browser_set_content",
     "browser_set_value",
     "browser_storage",
+    "browser_nav",
     "browser_tabs",
     "browser_wait_for",
     "capture_gif",
@@ -1102,6 +1132,7 @@ const BROWSER_DEBUGGER_ALLOWED_EXACT: &[&str] = &[
     "browser_set_content",
     "browser_set_value",
     "browser_storage",
+    "browser_nav",
     "browser_tabs",
     "browser_wait_for",
     "capture_gif",
@@ -2950,6 +2981,7 @@ mod tests {
                 "browser_set_content",
                 "browser_set_value",
                 "browser_storage",
+                "browser_nav",
                 "browser_tabs",
                 "browser_wait_for",
                 "control_lease_acquire",
@@ -3047,6 +3079,12 @@ mod tests {
                 .registered_tools_present
                 .contains(&"process".to_owned()),
             "#1380 registers the process facade"
+        );
+        assert!(
+            snapshot
+                .registered_tools_present
+                .contains(&"browser_nav".to_owned()),
+            "#1381 registers the browser_nav facade"
         );
         assert!(snapshot.duplicate_public_tool_names.is_empty());
         assert!(snapshot.forbidden_public_tool_names.is_empty());
@@ -3254,6 +3292,7 @@ mod tests {
                 "shell",
                 "process",
                 "browser_tabs",
+                "browser_nav",
                 "browser_storage",
             ]
             .into_iter()
@@ -3270,7 +3309,11 @@ mod tests {
         assert!(!visible.contains(&"act_run_shell_status".to_owned()));
         assert!(!visible.contains(&"act_run_shell_cancel".to_owned()));
         assert!(!visible.contains(&"act_launch".to_owned()));
+        assert!(!visible.contains(&"cdp_activate_tab".to_owned()));
+        assert!(!visible.contains(&"cdp_close_tab".to_owned()));
+        assert!(!visible.contains(&"cdp_navigate_tab".to_owned()));
         assert!(!visible.contains(&"cdp_open_tab".to_owned()));
+        assert!(!visible.contains(&"cdp_target_info".to_owned()));
         assert!(!visible.contains(&"target_act".to_owned()));
         assert!(!visible.contains(&"browser_content".to_owned()));
         assert!(!visible.contains(&"browser_locate".to_owned()));
@@ -3352,6 +3395,7 @@ mod tests {
         assert!(visible.contains(&"browser_scroll_into_view".to_owned()));
         assert!(visible.contains(&"browser_set_content".to_owned()));
         assert!(visible.contains(&"browser_set_value".to_owned()));
+        assert!(visible.contains(&"browser_nav".to_owned()));
         assert!(visible.contains(&"browser_wait_for".to_owned()));
         assert!(visible.contains(&"control_lease_acquire".to_owned()));
         assert!(visible.contains(&"control_lease_release".to_owned()));
@@ -3506,10 +3550,15 @@ mod tests {
         assert!(tools.contains(&"session".to_owned()));
         assert!(tools.contains(&"subscribe".to_owned()));
         assert!(tools.contains(&"browser_tabs".to_owned()));
+        assert!(tools.contains(&"browser_nav".to_owned()));
         assert!(tools.contains(&"shell".to_owned()));
         assert!(tools.contains(&"process".to_owned()));
         assert!(!tools.contains(&"agent_spawn_task_started".to_owned()));
+        assert!(!tools.contains(&"cdp_activate_tab".to_owned()));
+        assert!(!tools.contains(&"cdp_close_tab".to_owned()));
+        assert!(!tools.contains(&"cdp_navigate_tab".to_owned()));
         assert!(!tools.contains(&"cdp_open_tab".to_owned()));
+        assert!(!tools.contains(&"cdp_target_info".to_owned()));
         assert!(!tools.contains(&"act_run_shell".to_owned()));
         assert!(!tools.contains(&"act_run_shell_start".to_owned()));
         assert!(!tools.contains(&"act_run_shell_status".to_owned()));
@@ -3655,6 +3704,7 @@ mod tests {
         );
         assert!(tools.contains(&"cdp_open_tab".to_owned()));
         assert!(tools.contains(&"cdp_target_info".to_owned()));
+        assert!(tools.contains(&"browser_nav".to_owned()));
         assert!(tools.contains(&"target_act".to_owned()));
         assert!(tools.contains(&"control_lease_acquire".to_owned()));
         assert!(tools.contains(&"control_lease_release".to_owned()));

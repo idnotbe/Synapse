@@ -1279,6 +1279,64 @@ pub struct BrowserTabsResponse {
     pub tabs: Vec<BrowserTabEntry>,
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BrowserNavOperation {
+    /// Navigate the owned tab to `url`.
+    #[default]
+    Navigate,
+    /// Reload the owned tab.
+    Reload,
+    /// Move the owned tab back in its navigation history.
+    Back,
+    /// Move the owned tab forward in its navigation history.
+    Forward,
+}
+
+impl BrowserNavOperation {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Navigate => "navigate",
+            Self::Reload => "reload",
+            Self::Back => "back",
+            Self::Forward => "forward",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct BrowserNavParams {
+    /// Navigation operation. Defaults to `navigate`, which requires `url`.
+    #[serde(default)]
+    pub operation: BrowserNavOperation,
+    /// Browser HWND whose target table contains the tab. If omitted, the active
+    /// session CDP target or owned `cdp_target_id` is used.
+    #[serde(default)]
+    pub window_hwnd: Option<i64>,
+    /// Chrome bridge/CDP target id. If omitted, the active session CDP target is used.
+    #[serde(default)]
+    pub cdp_target_id: Option<String>,
+    /// Destination URL for `operation=navigate`.
+    #[serde(default)]
+    pub url: Option<String>,
+    /// Optional caller load/readback budget. Defaults to 10000 ms and is capped at 30000 ms.
+    #[serde(default)]
+    pub wait_timeout_ms: Option<u64>,
+    /// Reload cache policy. Valid only with `operation=reload`.
+    #[serde(default)]
+    pub ignore_cache: Option<bool>,
+}
+
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct BrowserNavResponse {
+    pub operation: BrowserNavOperation,
+    pub source_of_truth: String,
+    pub readback_source_of_truth: String,
+    pub navigation: CdpNavigateTabResponse,
+}
+
 /// Parameters for `browser_adopt_active_tab` (#1298): explicitly bind the
 /// active tab from an already-open Chromium window as this MCP session's CDP
 /// target without creating, navigating, activating, or closing any tab.

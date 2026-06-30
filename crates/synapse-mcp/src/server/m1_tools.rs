@@ -8,12 +8,13 @@ use super::{
     BrowserExposeBindingParams, BrowserExposeBindingResponse, BrowserFrameLocator,
     BrowserInitScriptOperation, BrowserInspectParams, BrowserInspectResponse,
     BrowserLayoutRelation, BrowserLocateEngine, BrowserLocateParams, BrowserLocateResponse,
-    BrowserLocatedFrame, BrowserNetworkWaitEntry, BrowserPdfParams, BrowserPdfResponse,
-    BrowserScreenshotParams, BrowserScreenshotResponse, BrowserScreenshotScope,
-    BrowserScrollIntoViewParams, BrowserScrollIntoViewResponse, BrowserSetContentParams,
-    BrowserSetContentResponse, BrowserTabEntry, BrowserTabsParams, BrowserTabsResponse,
-    BrowserWaitConditionKind, BrowserWaitForFunctionParams, BrowserWaitForFunctionResponse,
-    BrowserWaitForLoadStateParams, BrowserWaitForLoadStateResponse, BrowserWaitForLoadStateState,
+    BrowserLocatedFrame, BrowserNavOperation, BrowserNavParams, BrowserNavResponse,
+    BrowserNetworkWaitEntry, BrowserPdfParams, BrowserPdfResponse, BrowserScreenshotParams,
+    BrowserScreenshotResponse, BrowserScreenshotScope, BrowserScrollIntoViewParams,
+    BrowserScrollIntoViewResponse, BrowserSetContentParams, BrowserSetContentResponse,
+    BrowserTabEntry, BrowserTabsParams, BrowserTabsResponse, BrowserWaitConditionKind,
+    BrowserWaitForFunctionParams, BrowserWaitForFunctionResponse, BrowserWaitForLoadStateParams,
+    BrowserWaitForLoadStateResponse, BrowserWaitForLoadStateState,
     BrowserWaitForNetworkResponseParams, BrowserWaitForNetworkResponseResponse,
     BrowserWaitForParams, BrowserWaitForRequestParams, BrowserWaitForRequestResponse,
     BrowserWaitForResponse, BrowserWaitForSelectorParams, BrowserWaitForSelectorResponse,
@@ -94,6 +95,9 @@ const SCREENSHOT_SOURCE_OF_TRUTH: &str =
     "screenshot/GIF artifact bytes plus filesystem metadata readback";
 const TARGET_FACADE_SOURCE_OF_TRUTH: &str =
     "MCP session target registry + CF_SESSIONS target rows + target claim registry";
+const BROWSER_NAV_SOURCE_OF_TRUTH: &str =
+    "Chrome bridge/CDP navigation command + session target ownership + CF_ACTION_LOG";
+const BROWSER_NAV_READBACK_SOURCE_OF_TRUTH: &str = "page URL/title/readyState readback from chrome.tabs.get or Runtime.evaluate + daemon-tool-events.jsonl";
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -2453,6 +2457,83 @@ impl SynapseService {
     }
 
     #[tool(
+        description = "Public browser navigation facade for an owned already-open Chrome tab. operation=navigate/reload/back/forward routes through the same target-scoped background navigation engine as cdp_navigate_tab, but exposes a strict facade schema, never uses the human foreground tab as an implicit target, and returns separate URL/title/readyState readback metadata."
+    )]
+    pub async fn browser_nav(
+        &self,
+        params: Parameters<BrowserNavParams>,
+        request_context: RequestContext<RoleServer>,
+    ) -> Result<Json<BrowserNavResponse>, ErrorData> {
+        const TOOL: &str = "browser_nav";
+        tracing::info!(
+            code = "MCP_TOOL_INVOCATION",
+            kind = TOOL,
+            "tool.invocation kind=browser_nav"
+        );
+        let session_id = require_target_session_id(&request_context)?;
+        let source_id = browser_nav_source_id(&params.0);
+        let validated = validate_browser_nav_params(params.0)?;
+        let request_details = json!({
+            "session_id": &session_id,
+            "operation": validated.params.operation.as_str(),
+            "window_hwnd": validated.params.window_hwnd,
+            "requested_cdp_target": cdp_target_id_audit_ref(validated.params.cdp_target_id.as_deref()),
+            "requested_url": validated.requested_url.as_deref(),
+            "wait_timeout_ms": validated.wait_timeout_ms,
+            "ignore_cache": validated.ignore_cache,
+            "required_foreground": false,
+            "source_of_truth": BROWSER_NAV_SOURCE_OF_TRUTH,
+            "readback_source_of_truth": BROWSER_NAV_READBACK_SOURCE_OF_TRUTH,
+        });
+        self.audit_action_started_with_details_for_session(TOOL, &request_details, &session_id)?;
+        let result = async {
+            let (window_hwnd, cdp_target_id) = self
+                .resolve_cdp_tab_mutation_target(
+                    TOOL,
+                    &session_id,
+                    validated.params.window_hwnd,
+                    validated.params.cdp_target_id.as_deref(),
+                )
+                .map_err(|error| {
+                    browser_nav_delegate_error(
+                        validated.params.operation,
+                        source_id.clone(),
+                        error,
+                        "select or open a tab with browser_tabs first, then retry browser_nav with that cdp_target_id or active session target",
+                    )
+                })?;
+            self.cdp_navigate_tab_impl(
+                TOOL,
+                &session_id,
+                window_hwnd,
+                &cdp_target_id,
+                validated.action,
+                validated.requested_url.as_deref(),
+                validated.wait_timeout_ms,
+                validated.ignore_cache,
+            )
+            .await
+            .map(|navigation| BrowserNavResponse {
+                operation: validated.params.operation,
+                source_of_truth: BROWSER_NAV_SOURCE_OF_TRUTH.to_owned(),
+                readback_source_of_truth: BROWSER_NAV_READBACK_SOURCE_OF_TRUTH.to_owned(),
+                navigation,
+            })
+            .map_err(|error| {
+                browser_nav_delegate_error(
+                    validated.params.operation,
+                    source_id,
+                    error,
+                    "inspect the target tab with browser_tabs operation=list, verify the URL/wait budget, and retry with an owned target",
+                )
+            })
+        }
+        .await;
+        self.audit_action_result_for_session(TOOL, &result, &session_id)?;
+        result.map(Json)
+    }
+
+    #[tool(
         description = "Explicitly adopt the active tab from an already-open Chromium browser window as this MCP session's active CDP target (#1298). This is the consented handoff path for the user's existing authenticated foreground tab: it lists tabs through the normal Chrome bridge, selects exactly one active tab in the requested/foreground window, and binds that chrome-tab:<id> with set_target semantics. It never creates, closes, navigates, activates, foregrounds, or debugger-attaches; adopted user tabs are drivable but are not owned for cdp_close_tab."
     )]
     pub async fn browser_adopt_active_tab(
@@ -2533,6 +2614,7 @@ impl SynapseService {
         self.audit_action_started_with_details_for_session(TOOL, &request_details, &session_id)?;
         let result = self
             .cdp_navigate_tab_impl(
+                TOOL,
                 &session_id,
                 window_hwnd,
                 &cdp_target_id,
@@ -9034,6 +9116,7 @@ impl SynapseService {
     #[cfg(windows)]
     async fn cdp_navigate_tab_impl(
         &self,
+        source_tool: &str,
         session_id: &str,
         window_hwnd: i64,
         cdp_target_id: &str,
@@ -9055,7 +9138,7 @@ impl SynapseService {
             .await
             .map_err(|error| {
                 mcp_error(
-                    error.code(),
+                    cdp_navigation_error_code(error.code()),
                     format!("cdp_navigate_tab raw Page command/readback failed: {error}"),
                 )
             })?;
@@ -9075,7 +9158,7 @@ impl SynapseService {
                     session_id: session_id.to_owned(),
                 },
                 app: Some("chrome.exe".to_owned()),
-                source: "cdp_navigate_tab".to_owned(),
+                source: source_tool.to_owned(),
                 event: "tool_call".to_owned(),
                 action: Some(navigated.action.clone()),
                 url: navigated.after.url.clone(),
@@ -9141,7 +9224,7 @@ impl SynapseService {
         .await
         .map_err(|error| {
             mcp_error(
-                error.code(),
+                cdp_navigation_error_code(error.code()),
                 format!(
                     "cdp_navigate_tab Chrome debugger Page command/readback failed: {}",
                     error.detail()
@@ -9174,7 +9257,7 @@ impl SynapseService {
                 session_id: session_id.to_owned(),
             },
             app: Some("chrome.exe".to_owned()),
-            source: "cdp_navigate_tab".to_owned(),
+            source: source_tool.to_owned(),
             event: "tool_call".to_owned(),
             action: Some(navigated.action.clone()),
             url: navigated.after_url.clone(),
@@ -9354,6 +9437,7 @@ impl SynapseService {
     #[cfg(not(windows))]
     async fn cdp_navigate_tab_impl(
         &self,
+        _source_tool: &str,
         _session_id: &str,
         _window_hwnd: i64,
         _cdp_target_id: &str,
@@ -12388,6 +12472,188 @@ fn parse_chrome_bridge_element_target(element_id: &str) -> Result<Option<String>
 
 const DEFAULT_CDP_NAVIGATE_WAIT_TIMEOUT_MS: u64 = 10_000;
 const MAX_CDP_NAVIGATE_WAIT_TIMEOUT_MS: u64 = 30_000;
+
+#[derive(Debug)]
+struct BrowserNavValidated {
+    params: BrowserNavParams,
+    action: CdpNavigateAction,
+    requested_url: Option<String>,
+    wait_timeout_ms: u64,
+    ignore_cache: bool,
+}
+
+fn validate_browser_nav_params(params: BrowserNavParams) -> Result<BrowserNavValidated, ErrorData> {
+    let action = browser_nav_action(params.operation);
+    let requested_url = match params.operation {
+        BrowserNavOperation::Navigate => {
+            let Some(url) = params.url.as_deref() else {
+                return Err(browser_nav_facade_error(
+                    params.operation,
+                    browser_nav_source_id(&params),
+                    "browser_nav operation=navigate requires url",
+                    "provide a non-empty URL for navigate or choose reload/back/forward without url",
+                ));
+            };
+            validate_browser_nav_url(params.operation, url)?;
+            Some(url.to_owned())
+        }
+        BrowserNavOperation::Reload | BrowserNavOperation::Back | BrowserNavOperation::Forward => {
+            if params.url.is_some() {
+                return Err(browser_nav_facade_error(
+                    params.operation,
+                    browser_nav_source_id(&params),
+                    format!(
+                        "browser_nav operation={} does not accept url",
+                        params.operation.as_str()
+                    ),
+                    "remove url unless operation=navigate",
+                ));
+            }
+            None
+        }
+    };
+    if params.ignore_cache.is_some() && params.operation != BrowserNavOperation::Reload {
+        return Err(browser_nav_facade_error(
+            params.operation,
+            browser_nav_source_id(&params),
+            format!(
+                "browser_nav operation={} does not accept ignore_cache",
+                params.operation.as_str()
+            ),
+            "use ignore_cache only with operation=reload",
+        ));
+    }
+    let wait_timeout_ms = params
+        .wait_timeout_ms
+        .unwrap_or(DEFAULT_CDP_NAVIGATE_WAIT_TIMEOUT_MS);
+    if wait_timeout_ms == 0 || wait_timeout_ms > MAX_CDP_NAVIGATE_WAIT_TIMEOUT_MS {
+        return Err(browser_nav_facade_error(
+            params.operation,
+            browser_nav_source_id(&params),
+            format!("browser_nav wait_timeout_ms must be 1..={MAX_CDP_NAVIGATE_WAIT_TIMEOUT_MS}"),
+            "use a positive wait_timeout_ms at or below the navigation readback cap",
+        ));
+    }
+    Ok(BrowserNavValidated {
+        action,
+        requested_url,
+        wait_timeout_ms,
+        ignore_cache: params.ignore_cache.unwrap_or(false),
+        params,
+    })
+}
+
+fn browser_nav_action(operation: BrowserNavOperation) -> CdpNavigateAction {
+    match operation {
+        BrowserNavOperation::Navigate => CdpNavigateAction::Navigate,
+        BrowserNavOperation::Reload => CdpNavigateAction::Reload,
+        BrowserNavOperation::Back => CdpNavigateAction::Back,
+        BrowserNavOperation::Forward => CdpNavigateAction::Forward,
+    }
+}
+
+fn cdp_navigation_error_code(code: &'static str) -> &'static str {
+    if code == error_codes::A11Y_CDP_AXTREE_FAILED {
+        error_codes::BROWSER_NAVIGATION_FAILED
+    } else {
+        code
+    }
+}
+
+fn validate_browser_nav_url(operation: BrowserNavOperation, url: &str) -> Result<(), ErrorData> {
+    if url.is_empty() {
+        return Err(browser_nav_facade_error(
+            operation,
+            "url",
+            "browser_nav url must not be empty",
+            "provide an absolute URL or use browser_tabs operation=new with an empty string for about:blank",
+        ));
+    }
+    if url.chars().count() > 8192 {
+        return Err(browser_nav_facade_error(
+            operation,
+            "url",
+            "browser_nav url must be at most 8192 Unicode scalar values",
+            "shorten the URL before passing it to browser_nav",
+        ));
+    }
+    if url.contains('\0') {
+        return Err(browser_nav_facade_error(
+            operation,
+            "url",
+            "browser_nav url must not contain NUL",
+            "remove NUL bytes from the URL",
+        ));
+    }
+    if url.trim() != url {
+        return Err(browser_nav_facade_error(
+            operation,
+            "url",
+            "browser_nav url must not contain leading or trailing whitespace",
+            "trim the URL before passing it to browser_nav",
+        ));
+    }
+    Ok(())
+}
+
+fn browser_nav_source_id(params: &BrowserNavParams) -> String {
+    match (params.window_hwnd, params.cdp_target_id.as_deref()) {
+        (Some(hwnd), Some(target)) => format!("window_hwnd={hwnd:#x};cdp_target_id={target}"),
+        (Some(hwnd), None) => format!("window_hwnd={hwnd:#x}"),
+        (None, Some(target)) => format!("cdp_target_id={target}"),
+        (None, None) => "active_session_target".to_owned(),
+    }
+}
+
+fn browser_nav_facade_error(
+    operation: BrowserNavOperation,
+    source_id: impl Into<String>,
+    message: impl Into<String>,
+    remediation: &'static str,
+) -> ErrorData {
+    let message = message.into();
+    ErrorData::new(
+        ErrorCode(-32099),
+        message.clone(),
+        Some(json!({
+            "code": error_codes::TOOL_PARAMS_INVALID,
+            "operation": operation.as_str(),
+            "source_of_truth": BROWSER_NAV_SOURCE_OF_TRUTH,
+            "source_id": source_id.into(),
+            "readback_source_of_truth": BROWSER_NAV_READBACK_SOURCE_OF_TRUTH,
+            "remediation": remediation,
+        })),
+    )
+}
+
+fn browser_nav_delegate_error(
+    operation: BrowserNavOperation,
+    source_id: impl Into<String>,
+    error: ErrorData,
+    remediation: &'static str,
+) -> ErrorData {
+    let cause_code = error
+        .data
+        .as_ref()
+        .and_then(|data| data.get("code"))
+        .and_then(Value::as_str)
+        .unwrap_or(error_codes::TOOL_INTERNAL_ERROR)
+        .to_owned();
+    let cause_data = error.data.clone().unwrap_or(Value::Null);
+    ErrorData::new(
+        error.code,
+        error.message.to_string(),
+        Some(json!({
+            "code": cause_code,
+            "operation": operation.as_str(),
+            "source_of_truth": BROWSER_NAV_SOURCE_OF_TRUTH,
+            "source_id": source_id.into(),
+            "readback_source_of_truth": BROWSER_NAV_READBACK_SOURCE_OF_TRUTH,
+            "remediation": remediation,
+            "cause": cause_data,
+        })),
+    )
+}
 
 fn validate_cdp_navigation_params(
     params: &CdpNavigateTabParams,
@@ -16613,14 +16879,17 @@ fn escape_json_pointer(segment: &str) -> String {
 mod tests {
     use super::{
         BROWSER_EVALUATE_MAX_EXPRESSION_BYTES, BROWSER_INIT_SCRIPT_MAX_SOURCE_BYTES,
+        BROWSER_NAV_READBACK_SOURCE_OF_TRUTH, BROWSER_NAV_SOURCE_OF_TRUTH,
         BROWSER_TAG_MAX_CONTENT_BYTES, BROWSER_WAIT_MAX_TEXT_BYTES, BrowserTagSourceKind,
         BrowserWaitForSelectorObservation, CdpTargetOwner,
         DEFAULT_BROWSER_WAIT_POLLING_INTERVAL_MS, DEFAULT_BROWSER_WAIT_TIMEOUT_MS, ErrorData,
         MAX_BROWSER_SET_CONTENT_HTML_BYTES, MAX_BROWSER_WAIT_POLLING_INTERVAL_MS,
-        MAX_BROWSER_WAIT_TIMEOUT_MS, MIN_BROWSER_WAIT_POLLING_INTERVAL_MS, SessionTarget,
-        SetTargetParam, SynapseService, TargetClaimTargetParam, TargetOperation, TargetParams,
-        TargetWire, attach_find_hygiene_annotations, attach_ocr_hygiene_annotations,
-        browser_wait_for_selector_condition, cdp_activate_resolution_request_details,
+        MAX_BROWSER_WAIT_TIMEOUT_MS, MAX_CDP_NAVIGATE_WAIT_TIMEOUT_MS,
+        MIN_BROWSER_WAIT_POLLING_INTERVAL_MS, SessionTarget, SetTargetParam, SynapseService,
+        TargetClaimTargetParam, TargetOperation, TargetParams, TargetWire,
+        attach_find_hygiene_annotations, attach_ocr_hygiene_annotations,
+        browser_nav_delegate_error, browser_wait_for_selector_condition,
+        cdp_activate_resolution_request_details, cdp_navigation_error_code,
         cdp_target_info_resolution_request_details, chrome_capture_visible_tab_data_url_to_bgra,
         chrome_page_vitals_info, downscale_captured_bitmap, hidden_desktop_pip_ended_response,
         hidden_worker_target_miss, mcp_error, ocr_cache_key, page_text_info_from_parts,
@@ -16630,36 +16899,38 @@ mod tests {
         validate_browser_add_init_script_params, validate_browser_add_script_tag_params,
         validate_browser_add_style_tag_params, validate_browser_downloads_params,
         validate_browser_evaluate_params, validate_browser_expose_binding_params,
-        validate_browser_frame_locator, validate_browser_set_content_params,
-        validate_browser_tabs_params, validate_browser_wait_for_function_params,
-        validate_browser_wait_for_load_state_params, validate_browser_wait_for_params,
-        validate_browser_wait_for_request_params, validate_browser_wait_for_response_params,
-        validate_browser_wait_for_selector_params, validate_browser_wait_for_url_params,
-        validate_screenshot_capture_facade_params, validate_screenshot_gif_facade_params,
-        validate_target_adopt_params, validate_target_get_params, validate_target_set_params,
-        validate_target_status_params, validate_target_window,
+        validate_browser_frame_locator, validate_browser_nav_params,
+        validate_browser_set_content_params, validate_browser_tabs_params,
+        validate_browser_wait_for_function_params, validate_browser_wait_for_load_state_params,
+        validate_browser_wait_for_params, validate_browser_wait_for_request_params,
+        validate_browser_wait_for_response_params, validate_browser_wait_for_selector_params,
+        validate_browser_wait_for_url_params, validate_screenshot_capture_facade_params,
+        validate_screenshot_gif_facade_params, validate_target_adopt_params,
+        validate_target_get_params, validate_target_set_params, validate_target_status_params,
+        validate_target_window,
     };
     use crate::m1::{
         BrowserAddInitScriptParams, BrowserAddScriptTagParams, BrowserAddStyleTagParams,
         BrowserDownloadsOperation, BrowserDownloadsParams, BrowserEvaluateParams,
         BrowserExposeBindingOperation, BrowserExposeBindingParams, BrowserFrameLocator,
-        BrowserInitScriptOperation, BrowserSetContentParams, BrowserTabEntry, BrowserTabsOperation,
-        BrowserTabsParams, BrowserTabsResponse, BrowserWaitForFunctionParams,
-        BrowserWaitForLoadStateParams, BrowserWaitForLoadStateState,
+        BrowserInitScriptOperation, BrowserNavOperation, BrowserNavParams, BrowserSetContentParams,
+        BrowserTabEntry, BrowserTabsOperation, BrowserTabsParams, BrowserTabsResponse,
+        BrowserWaitForFunctionParams, BrowserWaitForLoadStateParams, BrowserWaitForLoadStateState,
         BrowserWaitForNetworkResponseParams, BrowserWaitForParams, BrowserWaitForRequestParams,
         BrowserWaitForSelectorParams, BrowserWaitForSelectorState, BrowserWaitForState,
         BrowserWaitForUrlMatchKind, BrowserWaitForUrlParams, CdpActivateTabParams,
-        CdpTargetInfoParams, FindResponse, FindResult, FindResultKind, HiddenDesktopPipFrameParams,
-        HiddenDesktopPipStreamStatus, ScreenshotOperation, ScreenshotParams,
+        CdpNavigateAction, CdpTargetInfoParams, FindResponse, FindResult, FindResultKind,
+        HiddenDesktopPipFrameParams, HiddenDesktopPipStreamStatus, ScreenshotOperation,
+        ScreenshotParams,
     };
     use crate::{m2::M2ServiceConfig, m3::M3ServiceConfig, m4::M4ServiceConfig};
     use base64::Engine as _;
     use image::{DynamicImage, ImageFormat, RgbaImage};
     use rmcp::{
-        model::{ClientCapabilities, Implementation, InitializeRequestParams},
+        model::{ClientCapabilities, ErrorCode, Implementation, InitializeRequestParams},
         transport::streamable_http_server::session::SessionState,
     };
-    use serde_json::json;
+    use serde_json::{Value, json};
     use std::{collections::BTreeSet, num::NonZeroUsize, path::Path};
     use synapse_core::{OcrResult, OcrWord, PERCEIVED_TEXT_UNTRUSTED_NOTICE, Rect, error_codes};
     use synapse_storage::cf;
@@ -17450,6 +17721,168 @@ mod tests {
                 .message
                 .contains("operation=close does not accept url"),
             "{error:?}"
+        );
+    }
+
+    #[test]
+    fn browser_nav_params_validate_operation_fields() {
+        let navigate = validate_browser_nav_params(BrowserNavParams {
+            url: Some("https://example.test/nav".to_owned()),
+            ..BrowserNavParams::default()
+        })
+        .expect("navigate requires url");
+        assert_eq!(navigate.params.operation, BrowserNavOperation::Navigate);
+        assert!(matches!(navigate.action, CdpNavigateAction::Navigate));
+        assert_eq!(
+            navigate.requested_url.as_deref(),
+            Some("https://example.test/nav")
+        );
+
+        let reload = validate_browser_nav_params(BrowserNavParams {
+            operation: BrowserNavOperation::Reload,
+            ignore_cache: Some(true),
+            ..BrowserNavParams::default()
+        })
+        .expect("reload accepts ignore_cache");
+        assert!(matches!(reload.action, CdpNavigateAction::Reload));
+        assert!(reload.ignore_cache);
+
+        validate_browser_nav_params(BrowserNavParams {
+            operation: BrowserNavOperation::Back,
+            ..BrowserNavParams::default()
+        })
+        .expect("back accepts no url");
+        validate_browser_nav_params(BrowserNavParams {
+            operation: BrowserNavOperation::Forward,
+            wait_timeout_ms: Some(MAX_CDP_NAVIGATE_WAIT_TIMEOUT_MS),
+            ..BrowserNavParams::default()
+        })
+        .expect("forward accepts boundary timeout");
+
+        let missing_url = validate_browser_nav_params(BrowserNavParams::default())
+            .expect_err("navigate requires url");
+        assert!(
+            missing_url
+                .message
+                .contains("operation=navigate requires url"),
+            "{missing_url:?}"
+        );
+        let data = missing_url.data.as_ref().expect("facade error data");
+        assert_eq!(
+            data.get("operation").and_then(Value::as_str),
+            Some("navigate")
+        );
+        assert_eq!(
+            data.get("source_of_truth").and_then(Value::as_str),
+            Some(BROWSER_NAV_SOURCE_OF_TRUTH)
+        );
+        assert!(data.get("remediation").is_some());
+
+        let reload_url = validate_browser_nav_params(BrowserNavParams {
+            operation: BrowserNavOperation::Reload,
+            url: Some("https://example.test/".to_owned()),
+            ..BrowserNavParams::default()
+        })
+        .expect_err("reload rejects url");
+        assert!(
+            reload_url
+                .message
+                .contains("operation=reload does not accept url"),
+            "{reload_url:?}"
+        );
+
+        let back_ignore_cache = validate_browser_nav_params(BrowserNavParams {
+            operation: BrowserNavOperation::Back,
+            ignore_cache: Some(true),
+            ..BrowserNavParams::default()
+        })
+        .expect_err("ignore_cache is reload-only");
+        assert!(
+            back_ignore_cache
+                .message
+                .contains("operation=back does not accept ignore_cache"),
+            "{back_ignore_cache:?}"
+        );
+
+        let zero_timeout = validate_browser_nav_params(BrowserNavParams {
+            url: Some("https://example.test/".to_owned()),
+            wait_timeout_ms: Some(0),
+            ..BrowserNavParams::default()
+        })
+        .expect_err("zero timeout rejected");
+        assert!(
+            zero_timeout
+                .message
+                .contains("wait_timeout_ms must be 1..="),
+            "{zero_timeout:?}"
+        );
+
+        let whitespace_url = validate_browser_nav_params(BrowserNavParams {
+            url: Some(" https://example.test/".to_owned()),
+            ..BrowserNavParams::default()
+        })
+        .expect_err("whitespace url rejected");
+        assert!(
+            whitespace_url
+                .message
+                .contains("must not contain leading or trailing whitespace"),
+            "{whitespace_url:?}"
+        );
+    }
+
+    #[test]
+    fn browser_nav_delegate_error_preserves_code_and_adds_context() {
+        let low_level = ErrorData::new(
+            ErrorCode(-32099),
+            "target missing",
+            Some(json!({
+                "code": error_codes::ACTION_TARGET_INVALID,
+                "target": "chrome-tab:missing",
+            })),
+        );
+        let error = browser_nav_delegate_error(
+            BrowserNavOperation::Navigate,
+            "cdp_target_id=chrome-tab:missing",
+            low_level,
+            "retry with an owned target",
+        );
+        let data = error.data.as_ref().expect("facade data");
+        assert_eq!(
+            data.get("code").and_then(Value::as_str),
+            Some(error_codes::ACTION_TARGET_INVALID)
+        );
+        assert_eq!(
+            data.get("operation").and_then(Value::as_str),
+            Some("navigate")
+        );
+        assert_eq!(
+            data.get("source_id").and_then(Value::as_str),
+            Some("cdp_target_id=chrome-tab:missing")
+        );
+        assert_eq!(
+            data.get("readback_source_of_truth").and_then(Value::as_str),
+            Some(BROWSER_NAV_READBACK_SOURCE_OF_TRUTH)
+        );
+        assert_eq!(
+            data.get("remediation").and_then(Value::as_str),
+            Some("retry with an owned target")
+        );
+        assert!(data.get("cause").is_some());
+    }
+
+    #[test]
+    fn cdp_navigation_error_code_uses_navigation_code_for_page_failures() {
+        assert_eq!(
+            cdp_navigation_error_code(error_codes::A11Y_CDP_AXTREE_FAILED),
+            error_codes::BROWSER_NAVIGATION_FAILED
+        );
+        assert_eq!(
+            cdp_navigation_error_code(error_codes::ACTION_TARGET_INVALID),
+            error_codes::ACTION_TARGET_INVALID
+        );
+        assert_eq!(
+            cdp_navigation_error_code(error_codes::BROWSER_WAIT_TIMEOUT),
+            error_codes::BROWSER_WAIT_TIMEOUT
         );
     }
 
