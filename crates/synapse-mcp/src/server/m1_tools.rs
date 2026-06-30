@@ -19,7 +19,7 @@ use super::{
     BrowserWaitForResponse, BrowserWaitForSelectorParams, BrowserWaitForSelectorResponse,
     BrowserWaitForSelectorState, BrowserWaitForState, BrowserWaitForUrlMatchKind,
     BrowserWaitForUrlParams, BrowserWaitForUrlResponse, BrowserWaitParams, BrowserWaitResponse,
-    CaptureScreenshotFormat, CaptureScreenshotParams, CaptureScreenshotResponse,
+    CaptureGifParams, CaptureScreenshotFormat, CaptureScreenshotParams, CaptureScreenshotResponse,
     CdpActivateTabParams, CdpActivateTabResponse, CdpActiveElementInfo, CdpBridgeHostReadback,
     CdpBridgeReloadAckReadback, CdpBridgeReloadParams, CdpBridgeReloadResponse, CdpCloseTabParams,
     CdpCloseTabResponse, CdpLargestContentfulPaintInfo, CdpNavigateAction, CdpNavigateTabParams,
@@ -27,14 +27,14 @@ use super::{
     CdpPageVitalsInfo, CdpTargetInfoParams, CdpTargetInfoResponse, CdpTargetOwner, ConsoleMessage,
     ElementInspection, ErrorData, FindParams, FindResponse, Health, HiddenDesktopPipFrameParams,
     HiddenDesktopPipFrameResponse, HiddenDesktopPipStreamStatus, Json, ObserveParams, Parameters,
-    ReadTextParams, SessionTarget, SetCaptureTargetParams, SetCaptureTargetResponse,
-    SetPerceptionModeParams, SetPerceptionModeResponse, SetTargetParam, SetTargetParams,
-    SynapseService, TargetResponse, TargetWire, WindowListEntry, WindowListParams,
-    WindowListResponse, empty_input_schema, mcp_error, observe_include, observe_input,
-    populate_audio_summary, populate_clipboard_summary, populate_detection_from_state,
-    populate_fs_recent, read_text_request_uncached, resolve_read_text_request,
-    set_capture_target_in_state, set_perception_mode_in_state, set_target_input_schema, tool,
-    tool_router,
+    ReadTextParams, ScreenshotOperation, ScreenshotParams, ScreenshotResponse, SessionTarget,
+    SetCaptureTargetParams, SetCaptureTargetResponse, SetPerceptionModeParams,
+    SetPerceptionModeResponse, SetTargetParam, SetTargetParams, SynapseService, TargetResponse,
+    TargetWire, WindowListEntry, WindowListParams, WindowListResponse, empty_input_schema,
+    mcp_error, observe_include, observe_input, populate_audio_summary, populate_clipboard_summary,
+    populate_detection_from_state, populate_fs_recent, read_text_request_uncached,
+    resolve_read_text_request, set_capture_target_in_state, set_perception_mode_in_state,
+    set_target_input_schema, tool, tool_router,
 };
 use crate::m1::{
     BrowserTabsMutation, BrowserTabsOperation, ClipboardTimelineSample, FsTimelineEvent,
@@ -43,7 +43,7 @@ use crate::m1::{
 use crate::m3::activity_recorder::BrowserNavigationEvent;
 use crate::server::session_continuity::PersistedCdpTargetOwner;
 use base64::Engine as _;
-use rmcp::{RoleServer, service::RequestContext};
+use rmcp::{RoleServer, model::ErrorCode, service::RequestContext};
 
 use std::{
     collections::HashMap,
@@ -83,6 +83,9 @@ use synapse_perception::{
 };
 #[cfg(windows)]
 use synapse_reflex::ReflexRuntime;
+
+const SCREENSHOT_SOURCE_OF_TRUTH: &str =
+    "screenshot/GIF artifact bytes plus filesystem metadata readback";
 
 #[tool_router(router = m1_tool_router, vis = "pub(super)")]
 impl SynapseService {
@@ -565,6 +568,71 @@ impl SynapseService {
                 )
             })?;
         capture_screen_screenshot_to_file(&params.0, region, foreground).map(Json)
+    }
+
+    #[tool(
+        description = "Public perception artifact facade. operation=capture writes a PNG/JPEG screenshot through the same verified artifact path as capture_screenshot. operation=gif records a bounded target-window GIF through the same artifact path as capture_gif. Both operations require an absolute output path, reject operation-irrelevant parameters, and return the physical artifact readback (path, bytes, dimensions, backend, and hash for still images)."
+    )]
+    pub async fn screenshot(
+        &self,
+        params: Parameters<ScreenshotParams>,
+        request_context: RequestContext<RoleServer>,
+    ) -> Result<Json<ScreenshotResponse>, ErrorData> {
+        tracing::info!(
+            code = "MCP_TOOL_INVOCATION",
+            kind = "screenshot",
+            operation = screenshot_operation_name(params.0.operation),
+            "tool.invocation kind=screenshot"
+        );
+        let params = params.0;
+        match params.operation {
+            ScreenshotOperation::Capture => {
+                validate_screenshot_capture_facade_params(&params)?;
+                let capture = self
+                    .capture_screenshot(
+                        Parameters(CaptureScreenshotParams {
+                            path: params.path,
+                            region: params.region,
+                            window_hwnd: params.window_hwnd,
+                            overwrite: params.overwrite,
+                            max_pixels: params.max_pixels,
+                            max_long_edge: params.max_long_edge,
+                        }),
+                        request_context,
+                    )
+                    .await?
+                    .0;
+                Ok(Json(ScreenshotResponse {
+                    operation: ScreenshotOperation::Capture,
+                    source_of_truth: SCREENSHOT_SOURCE_OF_TRUTH.to_owned(),
+                    capture: Some(capture),
+                    gif: None,
+                }))
+            }
+            ScreenshotOperation::Gif => {
+                validate_screenshot_gif_facade_params(&params)?;
+                let gif = self
+                    .capture_gif(
+                        Parameters(CaptureGifParams {
+                            path: params.path,
+                            duration_ms: params.duration_ms,
+                            interval_ms: params.interval_ms,
+                            window_hwnd: params.window_hwnd,
+                            max_long_edge: params.max_long_edge,
+                            overwrite: params.overwrite,
+                        }),
+                        request_context,
+                    )
+                    .await?
+                    .0;
+                Ok(Json(ScreenshotResponse {
+                    operation: ScreenshotOperation::Gif,
+                    source_of_truth: SCREENSHOT_SOURCE_OF_TRUTH.to_owned(),
+                    capture: None,
+                    gif: Some(gif),
+                }))
+            }
+        }
     }
 
     #[tool(
@@ -12596,6 +12664,110 @@ fn validate_target_window_context(hwnd: i64) -> Result<ForegroundContext, ErrorD
     })
 }
 
+fn screenshot_operation_name(operation: ScreenshotOperation) -> &'static str {
+    match operation {
+        ScreenshotOperation::Capture => "capture",
+        ScreenshotOperation::Gif => "gif",
+    }
+}
+
+fn validate_screenshot_capture_facade_params(params: &ScreenshotParams) -> Result<(), ErrorData> {
+    if params.duration_ms.is_some() {
+        return Err(screenshot_facade_error(
+            ScreenshotOperation::Capture,
+            "screenshot operation=capture rejects duration_ms; duration_ms is only valid with operation=gif",
+            "remove duration_ms or call screenshot with operation=gif",
+            "duration_ms",
+        ));
+    }
+    if params.interval_ms.is_some() {
+        return Err(screenshot_facade_error(
+            ScreenshotOperation::Capture,
+            "screenshot operation=capture rejects interval_ms; interval_ms is only valid with operation=gif",
+            "remove interval_ms or call screenshot with operation=gif",
+            "interval_ms",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_screenshot_gif_facade_params(params: &ScreenshotParams) -> Result<(), ErrorData> {
+    if params.region.is_some() {
+        return Err(screenshot_facade_error(
+            ScreenshotOperation::Gif,
+            "screenshot operation=gif rejects region; GIF capture records the whole target window",
+            "remove region or call screenshot with operation=capture for a still image crop",
+            "region",
+        ));
+    }
+    if params.max_pixels.is_some() {
+        return Err(screenshot_facade_error(
+            ScreenshotOperation::Gif,
+            "screenshot operation=gif rejects max_pixels; GIF capture supports max_long_edge only",
+            "remove max_pixels or call screenshot with operation=capture",
+            "max_pixels",
+        ));
+    }
+    if !path_has_extension(&params.path, "gif") {
+        return Err(screenshot_facade_error(
+            ScreenshotOperation::Gif,
+            format!(
+                "screenshot operation=gif requires an output path ending in .gif: {}",
+                params.path
+            ),
+            "use an absolute .gif output path",
+            "path",
+        ));
+    }
+    if let Some(duration_ms) = params.duration_ms
+        && !(100..=60_000).contains(&duration_ms)
+    {
+        return Err(screenshot_facade_error(
+            ScreenshotOperation::Gif,
+            format!("screenshot operation=gif duration_ms must be 100..=60000; got {duration_ms}"),
+            "pass duration_ms between 100 and 60000, or omit it for the default",
+            "duration_ms",
+        ));
+    }
+    if let Some(interval_ms) = params.interval_ms
+        && interval_ms < 100
+    {
+        return Err(screenshot_facade_error(
+            ScreenshotOperation::Gif,
+            format!("screenshot operation=gif interval_ms must be >=100; got {interval_ms}"),
+            "pass interval_ms >= 100, or omit it for the default",
+            "interval_ms",
+        ));
+    }
+    Ok(())
+}
+
+fn path_has_extension(path: &str, expected: &str) -> bool {
+    Path::new(path)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case(expected))
+}
+
+fn screenshot_facade_error(
+    operation: ScreenshotOperation,
+    message: impl Into<String>,
+    remediation: &'static str,
+    source_id: &'static str,
+) -> ErrorData {
+    ErrorData::new(
+        ErrorCode(-32099),
+        message.into(),
+        Some(json!({
+            "code": error_codes::TOOL_PARAMS_INVALID,
+            "operation": screenshot_operation_name(operation),
+            "source_of_truth": SCREENSHOT_SOURCE_OF_TRUTH,
+            "source_id": source_id,
+            "remediation": remediation,
+        })),
+    )
+}
+
 fn hidden_worker_target_miss(error: &ErrorData) -> bool {
     matches!(
         error
@@ -16016,7 +16188,7 @@ mod tests {
         BROWSER_EVALUATE_MAX_EXPRESSION_BYTES, BROWSER_INIT_SCRIPT_MAX_SOURCE_BYTES,
         BROWSER_TAG_MAX_CONTENT_BYTES, BROWSER_WAIT_MAX_TEXT_BYTES, BrowserTagSourceKind,
         BrowserWaitForSelectorObservation, CdpTargetOwner,
-        DEFAULT_BROWSER_WAIT_POLLING_INTERVAL_MS, DEFAULT_BROWSER_WAIT_TIMEOUT_MS,
+        DEFAULT_BROWSER_WAIT_POLLING_INTERVAL_MS, DEFAULT_BROWSER_WAIT_TIMEOUT_MS, ErrorData,
         MAX_BROWSER_SET_CONTENT_HTML_BYTES, MAX_BROWSER_WAIT_POLLING_INTERVAL_MS,
         MAX_BROWSER_WAIT_TIMEOUT_MS, MIN_BROWSER_WAIT_POLLING_INTERVAL_MS, SessionTarget,
         SynapseService, TargetWire, attach_find_hygiene_annotations,
@@ -16035,7 +16207,8 @@ mod tests {
         validate_browser_wait_for_function_params, validate_browser_wait_for_load_state_params,
         validate_browser_wait_for_params, validate_browser_wait_for_request_params,
         validate_browser_wait_for_response_params, validate_browser_wait_for_selector_params,
-        validate_browser_wait_for_url_params, validate_target_window,
+        validate_browser_wait_for_url_params, validate_screenshot_capture_facade_params,
+        validate_screenshot_gif_facade_params, validate_target_window,
     };
     use crate::m1::{
         BrowserAddInitScriptParams, BrowserAddScriptTagParams, BrowserAddStyleTagParams,
@@ -16048,7 +16221,7 @@ mod tests {
         BrowserWaitForSelectorParams, BrowserWaitForSelectorState, BrowserWaitForState,
         BrowserWaitForUrlMatchKind, BrowserWaitForUrlParams, CdpActivateTabParams,
         CdpTargetInfoParams, FindResponse, FindResult, FindResultKind, HiddenDesktopPipFrameParams,
-        HiddenDesktopPipStreamStatus,
+        HiddenDesktopPipStreamStatus, ScreenshotOperation, ScreenshotParams,
     };
     use crate::{m2::M2ServiceConfig, m3::M3ServiceConfig, m4::M4ServiceConfig};
     use base64::Engine as _;
@@ -16151,6 +16324,94 @@ mod tests {
                 .and_then(|data| data.get("code"))
                 .and_then(serde_json::Value::as_str),
             Some(error_codes::TOOL_PARAMS_INVALID)
+        );
+    }
+
+    fn screenshot_params(operation: ScreenshotOperation, path: &str) -> ScreenshotParams {
+        ScreenshotParams {
+            operation,
+            path: path.to_owned(),
+            region: None,
+            window_hwnd: None,
+            overwrite: false,
+            max_pixels: None,
+            max_long_edge: None,
+            duration_ms: None,
+            interval_ms: None,
+        }
+    }
+
+    fn screenshot_error_field(error: &ErrorData, field: &str) -> Option<String> {
+        error
+            .data
+            .as_ref()
+            .and_then(|data| data.get(field))
+            .and_then(|value| value.as_str())
+            .map(str::to_owned)
+    }
+
+    #[test]
+    fn screenshot_facade_capture_rejects_gif_only_fields() {
+        let mut params = screenshot_params(
+            ScreenshotOperation::Capture,
+            "C:\\tmp\\synapse-screenshot.png",
+        );
+        params.duration_ms = Some(500);
+
+        let error = validate_screenshot_capture_facade_params(&params)
+            .expect_err("capture must reject duration_ms");
+
+        assert_eq!(
+            screenshot_error_field(&error, "code").as_deref(),
+            Some(error_codes::TOOL_PARAMS_INVALID)
+        );
+        assert_eq!(
+            screenshot_error_field(&error, "operation").as_deref(),
+            Some("capture")
+        );
+        assert_eq!(
+            screenshot_error_field(&error, "source_id").as_deref(),
+            Some("duration_ms")
+        );
+    }
+
+    #[test]
+    fn screenshot_facade_gif_rejects_still_only_fields() {
+        let mut params =
+            screenshot_params(ScreenshotOperation::Gif, "C:\\tmp\\synapse-screenshot.gif");
+        params.max_pixels = Some(1_000_000);
+
+        let error =
+            validate_screenshot_gif_facade_params(&params).expect_err("gif must reject max_pixels");
+
+        assert_eq!(
+            screenshot_error_field(&error, "code").as_deref(),
+            Some(error_codes::TOOL_PARAMS_INVALID)
+        );
+        assert_eq!(
+            screenshot_error_field(&error, "operation").as_deref(),
+            Some("gif")
+        );
+        assert_eq!(
+            screenshot_error_field(&error, "source_id").as_deref(),
+            Some("max_pixels")
+        );
+    }
+
+    #[test]
+    fn screenshot_facade_gif_rejects_non_gif_path() {
+        let params = screenshot_params(ScreenshotOperation::Gif, "C:\\tmp\\synapse-screenshot.png");
+
+        let error =
+            validate_screenshot_gif_facade_params(&params).expect_err("gif must require .gif path");
+
+        assert_eq!(
+            screenshot_error_field(&error, "code").as_deref(),
+            Some(error_codes::TOOL_PARAMS_INVALID)
+        );
+        assert_eq!(
+            screenshot_error_field(&error, "source_id").as_deref(),
+            Some("path")
         );
     }
 

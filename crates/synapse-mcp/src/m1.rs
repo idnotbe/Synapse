@@ -365,6 +365,97 @@ pub enum CaptureScreenshotFormat {
     Jpeg,
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ScreenshotOperation {
+    #[default]
+    Capture,
+    Gif,
+}
+
+/// Public perception artifact facade. `capture` writes a still image through
+/// the same path as `capture_screenshot`; `gif` records a bounded window GIF.
+#[derive(Clone, Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ScreenshotParams {
+    /// Operation to perform. Defaults to a still screenshot capture.
+    #[serde(default)]
+    pub operation: ScreenshotOperation,
+    /// Output `.png`, `.jpg`, `.jpeg`, or `.gif` file path. Must be absolute.
+    pub path: String,
+    #[serde(default)]
+    pub region: Option<Rect>,
+    /// Explicit per-call window override (HWND). Takes precedence over the
+    /// session's active target.
+    #[serde(default)]
+    pub window_hwnd: Option<i64>,
+    #[serde(default)]
+    pub overwrite: bool,
+    /// Still-image pixel budget. Valid only with `operation=capture`.
+    #[serde(default)]
+    pub max_pixels: Option<u64>,
+    /// Still-image long-edge budget, or GIF frame long-edge budget.
+    #[serde(default)]
+    pub max_long_edge: Option<u32>,
+    /// GIF recording duration. Valid only with `operation=gif`.
+    #[serde(default)]
+    pub duration_ms: Option<u64>,
+    /// GIF frame interval. Valid only with `operation=gif`.
+    #[serde(default)]
+    pub interval_ms: Option<u64>,
+}
+
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ScreenshotResponse {
+    pub operation: ScreenshotOperation,
+    pub source_of_truth: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capture: Option<CaptureScreenshotResponse>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gif: Option<CaptureGifResponse>,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CaptureGifParams {
+    /// Output `.gif` file path. Must be absolute.
+    pub path: String,
+    /// Total recording window in milliseconds (default 3000, max 60000).
+    #[serde(default)]
+    pub duration_ms: Option<u64>,
+    /// Delay between captured frames in milliseconds (default 500, min 100).
+    #[serde(default)]
+    pub interval_ms: Option<u64>,
+    /// Window HWND to record. Defaults to this session's bound target window.
+    #[serde(default)]
+    pub window_hwnd: Option<i64>,
+    /// Downscale (aspect-preserving) so each frame's longest edge never exceeds
+    /// this. Default 800; set 0 to disable.
+    #[serde(default)]
+    pub max_long_edge: Option<u32>,
+    #[serde(default)]
+    pub overwrite: bool,
+}
+
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CaptureGifResponse {
+    pub path: String,
+    pub frames_captured: usize,
+    pub frames_requested: usize,
+    pub width: u32,
+    pub height: u32,
+    pub native_width: u32,
+    pub native_height: u32,
+    pub interval_ms: u64,
+    pub duration_ms: u64,
+    pub elapsed_ms: u64,
+    pub bytes_written: u64,
+    pub capture_backend: String,
+    pub window_hwnd: i64,
+}
+
 #[derive(Clone, Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct BrowserScreenshotParams {

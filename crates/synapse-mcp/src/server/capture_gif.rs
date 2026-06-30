@@ -18,10 +18,11 @@ use image::{
     codecs::gif::{GifEncoder, Repeat},
 };
 use rmcp::{RoleServer, service::RequestContext};
-use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
 
-use super::{ErrorData, Json, Parameters, SessionTarget, SynapseService, tool, tool_router};
+use super::{
+    CaptureGifParams, CaptureGifResponse, ErrorData, Json, Parameters, SessionTarget,
+    SynapseService, tool, tool_router,
+};
 use crate::m1::mcp_error;
 
 const DEFAULT_DURATION_MS: u64 = 3_000;
@@ -30,48 +31,6 @@ const DEFAULT_INTERVAL_MS: u64 = 500;
 const MIN_INTERVAL_MS: u64 = 100;
 const DEFAULT_MAX_LONG_EDGE: u32 = 800;
 const FRAME_TIMEOUT_MS: u64 = 1_500;
-
-#[derive(Clone, Debug, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct CaptureGifParams {
-    /// Output `.gif` file path. Must be absolute.
-    pub path: String,
-    /// Total recording window in milliseconds (default 3000, capped at 60000).
-    #[serde(default)]
-    pub duration_ms: Option<u64>,
-    /// Delay between captured frames in milliseconds (default 500, min 100). Also
-    /// the per-frame playback delay encoded into the GIF.
-    #[serde(default)]
-    pub interval_ms: Option<u64>,
-    /// Window HWND to record. Defaults to this session's bound target window (the
-    /// native window, or the browser window behind a CDP tab target).
-    #[serde(default)]
-    pub window_hwnd: Option<i64>,
-    /// Downscale (aspect-preserving) so each frame's longest edge never exceeds
-    /// this. Default 800; keeps the GIF small. Set 0 to disable.
-    #[serde(default)]
-    pub max_long_edge: Option<u32>,
-    #[serde(default)]
-    pub overwrite: bool,
-}
-
-#[derive(Clone, Debug, Serialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct CaptureGifResponse {
-    pub path: String,
-    pub frames_captured: usize,
-    pub frames_requested: usize,
-    pub width: u32,
-    pub height: u32,
-    pub native_width: u32,
-    pub native_height: u32,
-    pub interval_ms: u64,
-    pub duration_ms: u64,
-    pub elapsed_ms: u64,
-    pub bytes_written: u64,
-    pub capture_backend: String,
-    pub window_hwnd: i64,
-}
 
 #[tool_router(router = capture_gif_tool_router, vis = "pub(super)")]
 impl SynapseService {

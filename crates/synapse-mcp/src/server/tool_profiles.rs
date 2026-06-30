@@ -93,6 +93,9 @@ const PUBLIC_TOOL_IMPLEMENTATION_DENYLIST: &[&str] = &[
     "act_type",
     "armed_routine_tick",
     "audit_intelligence_query",
+    "browser_screenshot",
+    "capture_gif",
+    "capture_screenshot",
     "cdp_activate_tab",
     "cdp_bridge_reload",
     "cdp_close_tab",
@@ -228,15 +231,26 @@ const FACADE_TOOL_CONTRACTS: &[FacadeToolContractSpec] = &[
         "screenshot",
         "ScreenshotOperation",
         "capture artifact path + image metadata readback",
-        &[op(
-            "capture",
-            false,
-            true,
-            "capture artifact bytes + target metadata",
-            None,
-            error_codes::CAPTURE_TARGET_INVALID,
-            "bind the target and retry after the capture backend reports healthy",
-        )],
+        &[
+            op(
+                "capture",
+                false,
+                true,
+                "still screenshot artifact bytes + target metadata",
+                None,
+                error_codes::CAPTURE_TARGET_INVALID,
+                "bind the target and retry after the capture backend reports healthy",
+            ),
+            op(
+                "gif",
+                false,
+                true,
+                "GIF artifact bytes + target metadata",
+                None,
+                error_codes::CAPTURE_TARGET_INVALID,
+                "bind the target and retry after the capture backend reports healthy",
+            ),
+        ],
     ),
     facade_contract(
         "target",
@@ -2791,6 +2805,7 @@ mod tests {
                 "health",
                 "session",
                 "session_list",
+                "screenshot",
                 "subscribe",
                 "observe",
                 "find",
@@ -2884,9 +2899,9 @@ mod tests {
         );
         assert!(
             snapshot
-                .registered_tools_missing
+                .registered_tools_present
                 .contains(&"screenshot".to_owned()),
-            "future facade issues implement remaining missing public names"
+            "#1378 registers the screenshot facade"
         );
         assert!(snapshot.duplicate_public_tool_names.is_empty());
         assert!(snapshot.forbidden_public_tool_names.is_empty());
@@ -3088,6 +3103,7 @@ mod tests {
                 "observe",
                 "find",
                 "read_text",
+                "screenshot",
                 "browser_tabs",
                 "browser_storage",
             ]
