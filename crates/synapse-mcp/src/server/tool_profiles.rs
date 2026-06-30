@@ -847,150 +847,8 @@ const fn op(
     }
 }
 
-const NORMAL_ALLOWED_EXACT: &[&str] = &[
-    "act_foreground",
-    "act_launch",
-    "act_run_shell",
-    "act_run_shell_cancel",
-    "act_run_shell_start",
-    "act_run_shell_status",
-    "act_spawn_agent",
-    "agent_ask_operator",
-    "agent_cost",
-    "agent_spawn_task_started",
-    "agent_inbox",
-    "agent_interrupt",
-    "agent_kill",
-    "agent_pause",
-    "agent_query",
-    "agent_receipts",
-    "agent_respawn",
-    "agent_resume",
-    "agent_send",
-    "agent_send_broadcast",
-    "agent_stats",
-    "agent_steer",
-    "agent_wait",
-    "approval_decide",
-    "approval_gate",
-    "approval_list",
-    "approval_request",
-    "armed_routine_tick",
-    "audit_intelligence_query",
-    "demo_record_start",
-    "demo_record_stop",
-    "browser_adopt_active_tab",
-    "browser_aria_snapshot",
-    "browser_assert",
-    "browser_batch",
-    "browser_clock",
-    "browser_cookies",
-    "browser_content",
-    "browser_downloads",
-    "browser_file_upload",
-    "browser_fill_form",
-    "browser_frames",
-    "browser_inspect",
-    "browser_locate",
-    "browser_page_events",
-    "browser_scroll_into_view",
-    "browser_screenshot",
-    "browser_set_content",
-    "browser_set_value",
-    "browser_storage",
-    "browser_tabs",
-    "browser_wait_for",
-    "capture_gif",
-    "capture_screenshot",
-    "cdp_activate_tab",
-    "cdp_bridge_reload",
-    "cdp_close_tab",
-    "cdp_navigate_tab",
-    "cdp_open_tab",
-    "cdp_target_info",
-    "clear_target",
-    "control_lease_acquire",
-    "control_lease_handoff",
-    "control_lease_release",
-    "control_lease_status",
-    "episode_get",
-    "episode_list",
-    "episode_segment",
-    "escalation_ack",
-    "escalation_list",
-    "find",
-    "fleet_stop",
-    "get_target",
-    "health",
-    "hygiene_flags",
-    "hygiene_report",
-    "hygiene_scan_storage",
-    "hygiene_scan_text",
-    "intent_current",
-    "intent_detect_tick",
-    "local_model_list",
-    "local_model_probe",
-    "local_model_register",
-    "local_model_remove",
-    "local_model_update",
-    "observe",
-    "observe_delta",
-    "profile_authoring_generate",
-    "profile_authoring_inspect",
-    "profile_authoring_list",
-    "profile_list",
-    "read_text",
-    "reality_audit",
-    "reality_baseline",
-    "routine_inspect",
-    "routine_label_export",
-    "routine_feedback",
-    "routine_list",
-    "routine_mine",
-    "routine_update",
-    "session_end",
-    "session_list",
-    "session_status",
-    "set_capture_target",
-    "set_perception_mode",
-    "set_target",
-    "storage_gc_once",
-    "storage_inspect",
-    "storage_put_probe_rows",
-    "subscribe",
-    "subscribe_cancel",
-    "suggestion_accept",
-    "suggestion_list",
-    "suggestion_tick",
-    "target_act",
-    "target_claim",
-    "target_claim_adopt",
-    "target_claim_status",
-    "target_release",
-    "timeline_digest",
-    "timeline_exclusions",
-    "timeline_get",
-    "timeline_pause",
-    "timeline_purge",
-    "timeline_redact",
-    "timeline_resume",
-    "timeline_search",
-    "timeline_stats",
-    "tool_profile_set",
-    "tool_profile_status",
-    "verification_audit",
-    "verification_bind",
-    "verification_inbox",
-    "verification_poll",
-    "verification_sources",
-    "window_list",
-    "workspace_get",
-    "workspace_list",
-    "workspace_put",
-    "workspace_subscribe",
-];
-
-const NORMAL_ALLOWED_PREFIXES: &[&str] = &["agent_template_", "task_"];
+const NORMAL_ALLOWED_EXACT: &[&str] = PUBLIC_TOOL_NAMES;
+const NORMAL_ALLOWED_PREFIXES: &[&str] = &[];
 
 const BROWSER_CONTROL_ALLOWED_EXACT: &[&str] = &[
     "approval_list",
@@ -1438,6 +1296,52 @@ pub(crate) struct ToolProfileSetParams {
     pub confirm_break_glass: bool,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ProfileOperation {
+    Status,
+    Set,
+}
+
+impl ProfileOperation {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Status => "status",
+            Self::Set => "set",
+        }
+    }
+}
+
+const fn default_profile_operation() -> ProfileOperation {
+    ProfileOperation::Status
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ProfileParams {
+    #[serde(default = "default_profile_operation")]
+    #[schemars(default = "default_profile_operation")]
+    pub operation: ProfileOperation,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<ToolProfileKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default)]
+    #[schemars(default)]
+    pub confirm_break_glass: bool,
+}
+
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ProfileResponse {
+    pub operation: ProfileOperation,
+    pub source_of_truth: &'static str,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<ToolProfileStatusResponse>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub set: Option<ToolProfileSetResponse>,
+}
+
 #[derive(Clone, Debug, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ToolProfileLeaseProof {
@@ -1464,6 +1368,58 @@ pub(crate) struct ToolProfileSetResponse {
 #[tool_router(router = tool_profile_tool_router, vis = "pub(super)")]
 impl SynapseService {
     #[tool(
+        description = "Public profile facade. operation=status reads this MCP session's effective profile, visible public facade tools, durable CF_SESSIONS policy row, and facade contract. operation=set persists a new profile through the same audited readback path as tool_profile_set; explicit advanced profiles require confirm_break_glass=true and a non-empty reason, and break_glass/full_capability also require the foreground input lease."
+    )]
+    pub async fn profile(
+        &self,
+        params: Parameters<ProfileParams>,
+        request_context: RequestContext<RoleServer>,
+    ) -> Result<Json<ProfileResponse>, ErrorData> {
+        tracing::info!(
+            code = "MCP_TOOL_INVOCATION",
+            kind = "profile",
+            operation = params.0.operation.as_str(),
+            "tool.invocation kind=profile"
+        );
+        let params = params.0;
+        match params.operation {
+            ProfileOperation::Status => Ok(Json(ProfileResponse {
+                operation: ProfileOperation::Status,
+                source_of_truth: TOOL_PROFILE_SOURCE_OF_TRUTH,
+                status: Some(self.tool_profile_status_response(&request_context)?),
+                set: None,
+            })),
+            ProfileOperation::Set => {
+                let profile = params.profile.ok_or_else(|| {
+                    profile_facade_error(
+                        ProfileOperation::Set,
+                        "profile operation=set requires profile",
+                        "pass profile=normal_agent, browser_control, browser_debugger, break_glass, or full_capability",
+                    )
+                })?;
+                let set = self
+                    .tool_profile_set_response(
+                        ToolProfileSetParams {
+                            profile,
+                            reason: params.reason,
+                            confirm_break_glass: params.confirm_break_glass,
+                        },
+                        &request_context,
+                        "profile",
+                        "set",
+                    )
+                    .await?;
+                Ok(Json(ProfileResponse {
+                    operation: ProfileOperation::Set,
+                    source_of_truth: TOOL_PROFILE_SOURCE_OF_TRUTH,
+                    status: None,
+                    set: Some(set),
+                }))
+            }
+        }
+    }
+
+    #[tool(
         description = "Read this MCP session's effective tool profile, visible tools/list names, durable CF_SESSIONS policy row, and capability-preserving routes for hidden raw foreground/browser-debugger primitives. The readback distinguishes human_os_foreground from agent_logical_foreground and the browser debugger lane: normal_agent/browser_control expose debugger-free already-open Chrome routes, browser_debugger explicitly exposes raw-CDP/chrome.debugger browser tools, and real OS foreground primitives stay reachable only through lease + break_glass.",
         input_schema = empty_input_schema()
     )]
@@ -1476,10 +1432,8 @@ impl SynapseService {
             kind = "tool_profile_status",
             "tool.invocation kind=tool_profile_status"
         );
-        let session_id = super::context::mcp_session_id_from_request_context(&request_context)?;
-        Ok(Json(ToolProfileStatusResponse {
-            snapshot: self.tool_profile_snapshot(session_id.as_deref())?,
-        }))
+        self.tool_profile_status_response(&request_context)
+            .map(Json)
     }
 
     #[tool(
@@ -1495,14 +1449,44 @@ impl SynapseService {
             kind = "tool_profile_set",
             "tool.invocation kind=tool_profile_set"
         );
-        let session_id = super::context::mcp_session_id_from_request_context(&request_context)?
+        self.tool_profile_set_response(
+            params.0,
+            &request_context,
+            "tool_profile_set",
+            "profile_set",
+        )
+        .await
+        .map(Json)
+    }
+}
+
+impl SynapseService {
+    fn tool_profile_status_response(
+        &self,
+        request_context: &RequestContext<RoleServer>,
+    ) -> Result<ToolProfileStatusResponse, ErrorData> {
+        let session_id = super::context::mcp_session_id_from_request_context(request_context)?;
+        Ok(ToolProfileStatusResponse {
+            snapshot: self.tool_profile_snapshot(session_id.as_deref())?,
+        })
+    }
+
+    async fn tool_profile_set_response(
+        &self,
+        params: ToolProfileSetParams,
+        request_context: &RequestContext<RoleServer>,
+        audit_tool: &'static str,
+        audit_verb: &'static str,
+    ) -> Result<ToolProfileSetResponse, ErrorData> {
+        let session_id = super::context::mcp_session_id_from_request_context(request_context)?
             .ok_or_else(|| {
                 mcp_error(
                     error_codes::HTTP_SESSION_INVALID,
-                    "tool_profile_set requires an MCP session id so the policy decision can be persisted",
+                    format!(
+                        "{audit_tool} operation={audit_verb} requires an MCP session id so the policy decision can be persisted"
+                    ),
                 )
             })?;
-        let params = params.0;
         let reason = normalize_reason(params.reason.as_deref())?;
         let before = self.tool_profile_snapshot(Some(&session_id))?;
         let lease_proof = break_glass_lease_proof(&session_id, params.profile);
@@ -1510,6 +1494,7 @@ impl SynapseService {
             "requested_profile": params.profile.as_str(),
             "reason": reason,
             "confirm_break_glass": params.confirm_break_glass,
+            "operation": audit_verb,
         });
         let command_before = json!({
             "source_of_truth": TOOL_PROFILE_SOURCE_OF_TRUTH,
@@ -1519,8 +1504,8 @@ impl SynapseService {
         });
         let intent_audit = audit_readback(self.command_audit_intent(
             super::command_audit::CommandAuditInput::mcp(
-                "tool_profile_set",
-                "profile_set",
+                audit_tool,
+                audit_verb,
                 Some(session_id.clone()),
                 Some(session_id.clone()),
                 command_payload.clone(),
@@ -1539,8 +1524,8 @@ impl SynapseService {
         ) {
             let final_audit = self.command_audit_final(
                 super::command_audit::CommandAuditInput::mcp(
-                    "tool_profile_set",
-                    "profile_set",
+                    audit_tool,
+                    audit_verb,
                     Some(session_id.clone()),
                     Some(session_id.clone()),
                     command_payload,
@@ -1563,7 +1548,7 @@ impl SynapseService {
         let row_readback = match self.write_tool_profile_assignment(
             &session_id,
             params.profile,
-            "tool_profile_set",
+            audit_tool,
             reason.clone(),
             Some(session_id.clone()),
         ) {
@@ -1571,8 +1556,8 @@ impl SynapseService {
             Err(error) => {
                 let final_audit = self.command_audit_final(
                     super::command_audit::CommandAuditInput::mcp(
-                        "tool_profile_set",
-                        "profile_set",
+                        audit_tool,
+                        audit_verb,
                         Some(session_id.clone()),
                         Some(session_id.clone()),
                         command_payload,
@@ -1596,35 +1581,34 @@ impl SynapseService {
 
         // #1020: the visible tool surface for this MCP session just changed.
         // Push a `notifications/tools/list_changed` so the client refetches
-        // `tools/list` within the *same* session. Without this, newly-allowed
-        // break_glass tools stay uncallable until a full MCP reconnect, and a
-        // reconnect mints a new session id that drops the foreground input lease
-        // and any target claims acquired for the privileged action — defeating
-        // the entire break-glass workflow. The durable CF_SESSIONS row is the
-        // source of truth and is already committed above; this notification is a
-        // best-effort client cache invalidation, so a delivery failure is logged
-        // loudly but does not fail the (already-persisted) profile change.
+        // `tools/list` within the same session. The CF_SESSIONS row is already
+        // the durable source of truth, so notification failure is logged loudly
+        // and returned only through the daemon logs.
         if before.visible_tool_sha256 != after.visible_tool_sha256 {
             match request_context.peer.notify_tool_list_changed().await {
                 Ok(()) => {
                     tracing::info!(
                         code = "MCP_TOOL_LIST_CHANGED_NOTIFIED",
                         session_id = %session_id,
+                        tool = audit_tool,
+                        operation = audit_verb,
                         before_profile = before.profile.as_str(),
                         after_profile = after.profile.as_str(),
                         before_visible_tool_count = before.visible_tool_count,
                         after_visible_tool_count = after.visible_tool_count,
-                        "tool_profile_set pushed notifications/tools/list_changed after a visible tool-surface change"
+                        "profile tool pushed notifications/tools/list_changed after a visible tool-surface change"
                     );
                 }
                 Err(notify_err) => {
                     tracing::error!(
                         code = "MCP_TOOL_LIST_CHANGED_NOTIFY_FAILED",
                         session_id = %session_id,
+                        tool = audit_tool,
+                        operation = audit_verb,
                         before_profile = before.profile.as_str(),
                         after_profile = after.profile.as_str(),
                         error = %notify_err,
-                        "tool_profile_set persisted the new profile but failed to push notifications/tools/list_changed; the client may need to reconnect to observe the updated tool surface"
+                        "profile tool persisted the new profile but failed to push notifications/tools/list_changed; the client may need to reconnect to observe the updated tool surface"
                     );
                 }
             }
@@ -1632,8 +1616,8 @@ impl SynapseService {
 
         let final_audit = audit_readback(self.command_audit_final(
             super::command_audit::CommandAuditInput::mcp(
-                "tool_profile_set",
-                "profile_set",
+                audit_tool,
+                audit_verb,
                 Some(session_id.clone()),
                 Some(session_id),
                 command_payload,
@@ -1649,18 +1633,16 @@ impl SynapseService {
             ),
         )?);
 
-        Ok(Json(ToolProfileSetResponse {
+        Ok(ToolProfileSetResponse {
             before,
             after,
             row_readback,
             intent_audit,
             final_audit,
             lease_proof,
-        }))
+        })
     }
-}
 
-impl SynapseService {
     pub(crate) fn tools_for_session_profile(
         &self,
         session_id: Option<&str>,
@@ -1767,7 +1749,7 @@ impl SynapseService {
                 "policy_row": row,
                 "visible_tool_count": visible_tool_names.len(),
                 "capability_route": capability_route,
-                "resolution": "use the named capability_route preferred tools for default agent work; set profile=browser_debugger with confirm_break_glass=true plus a non-empty reason for browser raw-CDP/chrome.debugger instrumentation; acquire the foreground input lease and set profile=break_glass with confirm_break_glass=true plus a non-empty reason for real human OS foreground work",
+                "resolution": "use the named capability_route preferred tools for default agent work; call profile operation=set profile=browser_debugger with confirm_break_glass=true plus a non-empty reason for browser raw-CDP/chrome.debugger instrumentation; acquire the foreground input lease and call profile operation=set profile=break_glass with confirm_break_glass=true plus a non-empty reason for real human OS foreground work",
             })),
         );
         let command_payload = json!({
@@ -2053,7 +2035,7 @@ fn validate_profile_set_policy(
                 "session_id": session_id,
                 "profile": profile.as_str(),
                 "lease_proof": lease_proof,
-                "resolution": "call control_lease_acquire first, then retry tool_profile_set with confirm_break_glass=true and a reason",
+                "resolution": "call control_lease_acquire first, then retry profile operation=set or tool_profile_set with confirm_break_glass=true and a reason",
             })),
         ));
     }
@@ -2090,6 +2072,23 @@ fn normalize_reason(raw: Option<&str>) -> Result<Option<String>, ErrorData> {
         ));
     }
     Ok((!trimmed.is_empty()).then(|| trimmed.to_owned()))
+}
+
+fn profile_facade_error(
+    operation: ProfileOperation,
+    message: &'static str,
+    remediation: &'static str,
+) -> ErrorData {
+    ErrorData::new(
+        ErrorCode(-32099),
+        message.to_owned(),
+        Some(json!({
+            "code": error_codes::TOOL_PARAMS_INVALID,
+            "operation": operation.as_str(),
+            "source_of_truth": TOOL_PROFILE_SOURCE_OF_TRUTH,
+            "remediation": remediation,
+        })),
+    )
 }
 
 fn visible_tool_names_for_profile(
@@ -2149,7 +2148,7 @@ fn foreground_route_readiness(
     }
     if !profile_allows_foreground {
         remaining_steps.push(
-            "tool_profile_set profile=break_glass confirm_break_glass=true reason=<why> (requires the lease first)"
+            "profile operation=set profile=break_glass confirm_break_glass=true reason=<why> (requires the lease first)"
                 .to_owned(),
         );
     }
@@ -2164,16 +2163,16 @@ fn foreground_route_readiness(
 fn foreground_capability_policy(profile: ToolProfileKind) -> ToolProfileForegroundCapability {
     let (preferred_path, real_os_foreground_path) = match profile {
         ToolProfileKind::NormalAgent => (
-            "target_act, debugger-free browser tools, legacy cdp_* tab-lifecycle wrappers, and per-session target/claim tools are visible in the normal profile",
-            "control_lease_acquire + tool_profile_set break_glass + raw foreground primitive; denied without lease/reason/confirm",
+            "only registered public facade tools are visible in the normal profile; implementation tools require an explicit advanced profile or a facade route",
+            "control_lease_acquire + profile operation=set break_glass + raw foreground primitive; denied without lease/reason/confirm",
         ),
         ToolProfileKind::BrowserControl => (
             "debugger-free browser/target_act tools plus lease controls are visible in the task profile; raw CDP/chrome.debugger, shell, and spawn surfaces stay hidden",
-            "control_lease_acquire + tool_profile_set break_glass + raw foreground primitive; denied without lease/reason/confirm",
+            "control_lease_acquire + profile operation=set break_glass + raw foreground primitive; denied without lease/reason/confirm",
         ),
         ToolProfileKind::BrowserDebugger => (
             "browser-only raw CDP/chrome.debugger tools are visible by explicit profile; raw shell/spawn and OS foreground primitives stay hidden",
-            "control_lease_acquire + tool_profile_set break_glass + raw foreground primitive; denied without lease/reason/confirm",
+            "control_lease_acquire + profile operation=set break_glass + raw foreground primitive; denied without lease/reason/confirm",
         ),
         ToolProfileKind::BreakGlass | ToolProfileKind::FullCapability => (
             "full raw surface is visible; prefer target_act/session-lane tools unless real OS foreground input is the intended lane",
@@ -2207,83 +2206,88 @@ fn hidden_tool_capability_routes(visible_tool_names: &[String]) -> Vec<HiddenToo
 fn hidden_tool_capability_route(tool_name: &str) -> HiddenToolCapabilityRoute {
     let preferred_tools = match tool_name {
         "act_click" => vec![
-            "target_act verb=click",
-            "browser DOM action through target_act",
-            "target_claim",
+            "act operation=invoke click",
+            "browser_dom operation=query",
+            "target operation=set",
         ],
         "act_type" | "act_set_value" | "act_set_field_text" => {
             vec![
-                "target_act verb=set_field",
-                "browser_set_value",
-                "browser_locate",
+                "act operation=invoke set_field",
+                "browser_form operation=set_value",
+                "browser_dom operation=query",
             ]
         }
         "act_press" | "act_keymap" | "act_combo" => {
-            vec![
-                "target_act verb=press",
-                "browser DOM action through target_act",
-            ]
+            vec!["act operation=invoke press", "browser_dom operation=query"]
         }
         "act_scroll" => vec![
-            "browser_scroll_into_view",
-            "target_act verb=scroll",
-            "capture_gif",
-            "capture_screenshot",
-            "observe",
-            "target_claim",
+            "act operation=invoke scroll",
+            "browser_dom operation=query",
+            "browser_capture operation=screenshot",
+            "observe operation=current",
+            "target operation=set",
         ],
         "act_stroke" | "act_pad" => vec![
-            "target_claim",
+            "target operation=set",
             "control_lease_acquire",
-            "tool_profile_set break_glass",
+            "profile operation=set profile=break_glass",
         ],
         "act_focus_window" => vec![
-            "set_target",
-            "target_claim",
+            "target operation=set",
             "control_lease_acquire",
-            "tool_profile_set break_glass",
-            "target_act verb=focus_window",
-            "session_status",
+            "profile operation=set profile=break_glass",
+            "act operation=invoke focus_window",
+            "session operation=list",
         ],
         "act_launch" => vec![
-            "act_spawn_agent",
-            "cdp_open_tab",
-            "target_act verb=navigate",
+            "agent operation=spawn",
+            "browser_tabs operation=new",
+            "browser_nav operation=navigate",
         ],
         "act_clipboard" => vec![
-            "workspace_put",
-            "browser_set_value",
-            "target_act verb=set_field",
+            "workspace operation=put",
+            "browser_form operation=set_value",
+            "act operation=invoke set_field",
         ],
         "release_all" => vec![
-            "target_release",
+            "target operation=set",
             "control_lease_release",
-            "clear_target",
-            "session_end",
+            "session operation=list",
         ],
         "hidden_desktop_pip_frame" => {
-            vec!["capture_screenshot", "window_list", "session_status"]
+            vec![
+                "screenshot operation=capture",
+                "observe operation=current",
+                "session operation=list",
+            ]
         }
         "action_diagnostic_queue_full_setup" | "action_diagnostic_rate_limit_override" => {
-            vec!["health", "storage_inspect", "session_status"]
+            vec![
+                "health",
+                "storage operation=inspect",
+                "session operation=list",
+            ]
         }
         "browser_console_messages"
         | "browser_network"
         | "browser_network_har"
         | "browser_network_overrides"
         | "browser_route" => vec![
-            "tool_profile_set profile=browser_debugger confirm_break_glass=true reason=<why raw CDP is required>",
-            "browser_content",
-            "browser_page_events",
-            "browser_downloads",
+            "profile operation=set profile=browser_debugger confirm_break_glass=true reason=<why raw CDP is required>",
+            "browser_dom operation=query",
+            "browser_wait operation=for_condition",
+            "browser_storage operation=read",
         ],
         tool if BROWSER_DEBUGGER_ONLY_EXACT.contains(&tool) => vec![
-            "tool_profile_set profile=browser_debugger confirm_break_glass=true reason=<why chrome.debugger is required>",
-            "browser_tabs",
-            "browser_locate",
-            "target_act",
+            "profile operation=set profile=browser_debugger confirm_break_glass=true reason=<why chrome.debugger is required>",
+            "browser_tabs operation=list",
+            "browser_dom operation=query",
+            "act operation=invoke",
         ],
-        _ => vec!["target_act", "tool_profile_set break_glass"],
+        _ => vec![
+            "act operation=invoke",
+            "profile operation=set profile=break_glass",
+        ],
     };
     HiddenToolCapabilityRoute {
         hidden_tool: tool_name.to_owned(),
@@ -2291,7 +2295,7 @@ fn hidden_tool_capability_route(tool_name: &str) -> HiddenToolCapabilityRoute {
         preferred_tools: preferred_tools.into_iter().map(str::to_owned).collect(),
         agent_logical_foreground_policy: "use the preferred tools against this session's agent_logical_foreground/foreground_lane",
         human_os_foreground_policy: "never use the human OS foreground as an implicit fallback",
-        break_glass_policy: "for browser CDP/chrome.debugger instrumentation, set profile=browser_debugger with confirm_break_glass=true and a non-empty reason; for a real OS foreground primitive, first acquire the input lease, then set profile=break_glass with confirm_break_glass=true and a non-empty reason",
+        break_glass_policy: "for browser CDP/chrome.debugger instrumentation, call profile operation=set profile=browser_debugger with confirm_break_glass=true and a non-empty reason; for a real OS foreground primitive, first acquire the input lease, then call profile operation=set profile=break_glass with confirm_break_glass=true and a non-empty reason",
     }
 }
 
@@ -2783,8 +2787,14 @@ mod tests {
                 "act_foreground",
                 "act_launch",
                 "cdp_open_tab",
+                "profile",
                 "health",
+                "session",
                 "session_list",
+                "subscribe",
+                "observe",
+                "find",
+                "read_text",
                 "target_act",
                 "browser_adopt_active_tab",
                 "browser_aria_snapshot",
@@ -2862,9 +2872,21 @@ mod tests {
         );
         assert!(
             snapshot
-                .registered_tools_missing
+                .registered_tools_present
                 .contains(&"profile".to_owned()),
-            "future facade issues implement missing public names; #1375 only owns the registry contract"
+            "#1377 registers the profile facade"
+        );
+        assert!(
+            snapshot
+                .registered_tools_present
+                .contains(&"session".to_owned()),
+            "#1377 registers the session facade"
+        );
+        assert!(
+            snapshot
+                .registered_tools_missing
+                .contains(&"screenshot".to_owned()),
+            "future facade issues implement remaining missing public names"
         );
         assert!(snapshot.duplicate_public_tool_names.is_empty());
         assert!(snapshot.forbidden_public_tool_names.is_empty());
@@ -3056,18 +3078,37 @@ mod tests {
     #[test]
     fn normal_profile_routes_foreground_capability_without_raw_primitives() {
         let visible = visible_tool_names_for_profile(ToolProfileKind::NormalAgent, &names());
-        assert!(visible.contains(&"act_run_shell".to_owned()));
-        assert!(visible.contains(&"act_launch".to_owned()));
-        assert!(visible.contains(&"cdp_open_tab".to_owned()));
-        assert!(visible.contains(&"target_act".to_owned()));
-        assert!(visible.contains(&"browser_content".to_owned()));
-        assert!(visible.contains(&"browser_locate".to_owned()));
-        assert!(visible.contains(&"browser_scroll_into_view".to_owned()));
-        assert!(visible.contains(&"browser_set_content".to_owned()));
-        assert!(visible.contains(&"browser_set_value".to_owned()));
-        assert!(visible.contains(&"browser_wait_for".to_owned()));
-        assert!(visible.contains(&"control_lease_acquire".to_owned()));
-        assert!(visible.contains(&"tool_profile_set".to_owned()));
+        assert_eq!(
+            visible,
+            [
+                "health",
+                "profile",
+                "session",
+                "subscribe",
+                "observe",
+                "find",
+                "read_text",
+                "browser_tabs",
+                "browser_storage",
+            ]
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
+        );
+        assert!(
+            visible
+                .iter()
+                .all(|name| PUBLIC_TOOL_NAMES.contains(&name.as_str()))
+        );
+        assert!(!visible.contains(&"act_run_shell".to_owned()));
+        assert!(!visible.contains(&"act_launch".to_owned()));
+        assert!(!visible.contains(&"cdp_open_tab".to_owned()));
+        assert!(!visible.contains(&"target_act".to_owned()));
+        assert!(!visible.contains(&"browser_content".to_owned()));
+        assert!(!visible.contains(&"browser_locate".to_owned()));
+        assert!(!visible.contains(&"browser_set_value".to_owned()));
+        assert!(!visible.contains(&"tool_profile_set".to_owned()));
+        assert!(!visible.contains(&"tool_profile_status".to_owned()));
         assert!(!visible.contains(&"act_click".to_owned()));
         assert!(!visible.contains(&"act_type".to_owned()));
         assert!(!visible.contains(&"release_all".to_owned()));
@@ -3098,17 +3139,17 @@ mod tests {
         assert!(
             act_type_route
                 .preferred_tools
-                .contains(&"target_act verb=set_field".to_owned())
+                .contains(&"act operation=invoke set_field".to_owned())
         );
         assert!(
             act_type_route
                 .preferred_tools
-                .contains(&"browser_set_value".to_owned())
+                .contains(&"browser_form operation=set_value".to_owned())
         );
         assert!(
             act_type_route
                 .preferred_tools
-                .contains(&"browser_locate".to_owned())
+                .contains(&"browser_dom operation=query".to_owned())
         );
         let browser_debugger_route = routes
             .iter()
@@ -3289,37 +3330,28 @@ mod tests {
                 .tools_for_session_profile(Some(session_id))
                 .expect("profile tools"),
         );
+        let registry =
+            public_tool_registry_snapshot_for(&service.full_tool_names()).expect("registry");
+        assert_eq!(tools, registry.registered_tools_present);
         assert!(tools.contains(&"health".to_owned()));
-        assert!(tools.contains(&"agent_spawn_task_started".to_owned()));
-        assert!(tools.contains(&"cdp_open_tab".to_owned()));
-        assert!(tools.contains(&"suggestion_tick".to_owned()));
-        assert!(tools.contains(&"suggestion_list".to_owned()));
-        assert!(tools.contains(&"suggestion_accept".to_owned()));
-        assert!(tools.contains(&"tool_profile_status".to_owned()));
-        assert!(tools.contains(&"demo_record_start".to_owned()));
-        assert!(tools.contains(&"demo_record_stop".to_owned()));
-        assert!(tools.contains(&"profile_authoring_generate".to_owned()));
-        assert!(tools.contains(&"profile_authoring_inspect".to_owned()));
-        assert!(tools.contains(&"profile_authoring_list".to_owned()));
-        assert!(tools.contains(&"hygiene_report".to_owned()));
-        assert!(tools.contains(&"episode_segment".to_owned()));
-        assert!(tools.contains(&"intent_current".to_owned()));
-        assert!(tools.contains(&"intent_detect_tick".to_owned()));
-        assert!(tools.contains(&"routine_mine".to_owned()));
-        assert!(tools.contains(&"routine_list".to_owned()));
-        assert!(tools.contains(&"routine_inspect".to_owned()));
-        assert!(tools.contains(&"routine_label_export".to_owned()));
-        assert!(tools.contains(&"routine_feedback".to_owned()));
-        assert!(tools.contains(&"routine_update".to_owned()));
-        assert!(tools.contains(&"timeline_pause".to_owned()));
-        assert!(tools.contains(&"timeline_resume".to_owned()));
-        assert!(tools.contains(&"timeline_exclusions".to_owned()));
-        assert!(tools.contains(&"timeline_purge".to_owned()));
-        assert!(tools.contains(&"timeline_redact".to_owned()));
-        assert!(tools.contains(&"storage_put_probe_rows".to_owned()));
-        assert!(tools.contains(&"storage_gc_once".to_owned()));
+        assert!(tools.contains(&"profile".to_owned()));
+        assert!(tools.contains(&"session".to_owned()));
         assert!(tools.contains(&"subscribe".to_owned()));
-        assert!(tools.contains(&"subscribe_cancel".to_owned()));
+        assert!(tools.contains(&"browser_tabs".to_owned()));
+        assert!(!tools.contains(&"agent_spawn_task_started".to_owned()));
+        assert!(!tools.contains(&"cdp_open_tab".to_owned()));
+        assert!(!tools.contains(&"suggestion_tick".to_owned()));
+        assert!(!tools.contains(&"tool_profile_status".to_owned()));
+        assert!(!tools.contains(&"tool_profile_set".to_owned()));
+        assert!(!tools.contains(&"demo_record_start".to_owned()));
+        assert!(!tools.contains(&"profile_authoring_generate".to_owned()));
+        assert!(!tools.contains(&"storage_put_probe_rows".to_owned()));
+        assert!(!tools.contains(&"storage_gc_once".to_owned()));
+        assert!(
+            tools
+                .iter()
+                .all(|name| PUBLIC_TOOL_NAMES.contains(&name.as_str()))
+        );
         assert!(!tools.contains(&"act_click".to_owned()));
         assert!(!tools.contains(&"act_type".to_owned()));
         assert!(!tools.contains(&"release_all".to_owned()));
@@ -3402,15 +3434,16 @@ mod tests {
             snapshot.denied_break_glass_tools
         );
         assert_ne!(row.value_sha256, sha256_hex(&stale_encoded));
+        assert!(snapshot.visible_tool_names.contains(&"profile".to_owned()));
         assert!(
-            snapshot
-                .visible_tool_names
-                .contains(&"demo_record_start".to_owned())
-        );
-        assert!(
-            snapshot
+            !snapshot
                 .visible_tool_names
                 .contains(&"profile_authoring_generate".to_owned())
+        );
+        assert!(
+            !snapshot
+                .visible_tool_names
+                .contains(&"demo_record_start".to_owned())
         );
 
         let persisted = service
@@ -3483,12 +3516,12 @@ mod tests {
         assert!(
             preferred_tools
                 .iter()
-                .any(|tool| tool.as_str() == Some("target_act verb=set_field"))
+                .any(|tool| tool.as_str() == Some("act operation=invoke set_field"))
         );
         assert!(
             preferred_tools
                 .iter()
-                .any(|tool| tool.as_str() == Some("browser_set_value"))
+                .any(|tool| tool.as_str() == Some("browser_form operation=set_value"))
         );
 
         let db = service.m3_storage().expect("storage");

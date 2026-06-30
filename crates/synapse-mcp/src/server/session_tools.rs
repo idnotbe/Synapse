@@ -107,6 +107,48 @@ pub struct SessionEndParams {
     pub session_id: Option<String>,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionOperation {
+    List,
+}
+
+impl SessionOperation {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::List => "list",
+        }
+    }
+}
+
+impl Default for SessionOperation {
+    fn default() -> Self {
+        default_session_operation()
+    }
+}
+
+const fn default_session_operation() -> SessionOperation {
+    SessionOperation::List
+}
+
+#[derive(Clone, Debug, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SessionParams {
+    #[serde(default = "default_session_operation")]
+    #[schemars(default = "default_session_operation")]
+    pub operation: SessionOperation,
+    #[serde(default, flatten)]
+    pub list: SessionListParams,
+}
+
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SessionResponse {
+    pub operation: SessionOperation,
+    pub source_of_truth: &'static str,
+    pub list: SessionListResponse,
+}
+
 #[derive(Clone, Debug, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SessionLeaseReadback {
@@ -504,6 +546,31 @@ pub struct SessionEndResponse {
 
 #[tool_router(router = session_tool_router, vis = "pub(super)")]
 impl SynapseService {
+    #[tool(
+        description = "Public session facade. operation=list reads the MCP session registry joined with session-target rows, target claims, agent logical foreground, input lease, and compact pagination. Unknown operations fail schema validation; this facade is read-only and never ends sessions."
+    )]
+    pub async fn session(
+        &self,
+        params: Parameters<SessionParams>,
+    ) -> Result<Json<SessionResponse>, ErrorData> {
+        let params = params.0;
+        tracing::info!(
+            code = "MCP_TOOL_INVOCATION",
+            kind = "session",
+            operation = params.operation.as_str(),
+            "tool.invocation kind=session"
+        );
+        match params.operation {
+            SessionOperation::List => Ok(Json(SessionResponse {
+                operation: SessionOperation::List,
+                source_of_truth: ATTACHED_AGENT_REGISTRY_SOURCE_OF_TRUTH,
+                list: self.session_list_impl_with_options(SessionListOptions::from_tool_params(
+                    params.list,
+                )?)?,
+            })),
+        }
+    }
+
     #[tool(
         description = "List MCP sessions as a non-blocking cross-session read model. Defaults to a compact paginated projection for orchestrators; pass view=full and explicit include_* flags for verbose diagnostics. Supports include_closed, live_only, cursor, and limit. Stale sessions are reported unless filtered; agent logical foreground never falls back to the human OS foreground."
     )]

@@ -29,6 +29,27 @@ impl ServerHandler for SynapseService {
         }
         if let Err(error) = self.admit_tool_call_for_profile(&tool_name, mcp_session_id.as_deref())
         {
+            if profile_policy_denied(&error) {
+                match context.peer.notify_tool_list_changed().await {
+                    Ok(()) => {
+                        tracing::info!(
+                            code = "MCP_TOOL_LIST_CHANGED_NOTIFIED",
+                            tool = %tool_name,
+                            mcp_session_id = ?mcp_session_id,
+                            "profile policy denied a hidden/stale tool call and pushed notifications/tools/list_changed"
+                        );
+                    }
+                    Err(notify_err) => {
+                        tracing::error!(
+                            code = "MCP_TOOL_LIST_CHANGED_NOTIFY_FAILED",
+                            tool = %tool_name,
+                            mcp_session_id = ?mcp_session_id,
+                            error = %notify_err,
+                            "profile policy denied a hidden/stale tool call but failed to notify tools/list_changed"
+                        );
+                    }
+                }
+            }
             lifecycle_guard
                 .finish_error(error_snapshot(&error))
                 .map_err(lifecycle_mcp_error)?;
@@ -257,6 +278,15 @@ fn error_snapshot(error: &ErrorData) -> Value {
             .and_then(|data| data.get("code"))
             .and_then(Value::as_str),
     })
+}
+
+fn profile_policy_denied(error: &ErrorData) -> bool {
+    error
+        .data
+        .as_ref()
+        .and_then(|data| data.get("code"))
+        .and_then(Value::as_str)
+        == Some(error_codes::TOOL_PROFILE_POLICY_DENIED)
 }
 
 fn daemon_restarting_mcp_error(
