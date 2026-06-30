@@ -9,9 +9,10 @@
 //! This is PURE ORCHESTRATION: every step routes to the exact same code path as
 //! its standalone tool (`cdp_navigate_tab`, `browser_wait_for_*`,
 //! `browser_set_value`, `browser_fill_form`, `browser_scroll_into_view`,
-//! `browser_evaluate`, `browser_screenshot`, and `target_act verb=click`), so
-//! there are no new action semantics, target-resolution rules, or guards — each
-//! sub-action inherits its tool's session-target requirement and audit.
+//! `browser_file_upload`, `browser_evaluate`, `browser_screenshot`, and
+//! `target_act verb=click`), so there are no new action semantics,
+//! target-resolution rules, or guards — each sub-action inherits its tool's
+//! session-target requirement and audit.
 //!
 //! Failure model (Anthropic guidance: interdependent steps compound errors):
 //! stop-on-first-error by default. Each step yields a `{index, action, status,
@@ -28,6 +29,7 @@ use serde_json::{Value, json};
 
 use super::background_router::TargetActParams;
 use super::browser_field::{BrowserFillFormParams, BrowserSetValueParams};
+use super::browser_files::BrowserFileUploadParams;
 use super::{ErrorData, Json, Parameters, SynapseService, tool, tool_router};
 use crate::m1::{
     BrowserEvaluateParams, BrowserScreenshotParams, BrowserScrollIntoViewParams,
@@ -44,7 +46,7 @@ const STATUS_SKIPPED: &str = "skipped";
 pub struct BrowserBatchStep {
     /// Sub-action to run. One of: `navigate`, `wait_for_selector`,
     /// `wait_for_url`, `wait_for_load_state`, `click`, `set_value`, `fill_form`,
-    /// `scroll_into_view`, `evaluate`, `screenshot`.
+    /// `file_upload`, `scroll_into_view`, `evaluate`, `screenshot`.
     pub action: String,
     /// Parameters object for the sub-action's standalone tool, shaped exactly
     /// like that tool's params (e.g. `navigate` → `cdp_navigate_tab` params,
@@ -99,7 +101,7 @@ pub struct BrowserBatchResponse {
 #[tool_router(router = browser_batch_tool_router, vis = "pub(super)")]
 impl SynapseService {
     #[tool(
-        description = "Execute an ordered list of browser sub-actions in one MCP call against the calling session's bound browser target (Claude browser_batch parity, #1337). Pure orchestration over vetted primitives — each step routes to the SAME code path as its standalone tool, so there are no new action semantics: action=navigate→cdp_navigate_tab, wait_for_selector/wait_for_url/wait_for_load_state→the matching browser_wait_for condition lane, set_value→browser_set_value, fill_form→browser_fill_form, scroll_into_view→browser_scroll_into_view, evaluate→browser_evaluate, screenshot→browser_screenshot, click→target_act verb=click. Each step's `params` object is shaped exactly like that tool's parameters. Stop-on-first-error by default (interdependent steps compound errors): returns a per-step result array [{index, action, status (ok|error|skipped), ok, result|error}]; the failing step carries its full structured error and later steps are reported skipped. Set stop_on_error=false to run every step regardless. Bind a target first with set_target; an empty steps list is a loud error."
+        description = "Execute an ordered list of browser sub-actions in one MCP call against the calling session's bound browser target (Claude browser_batch parity, #1337). Pure orchestration over vetted primitives — each step routes to the SAME code path as its standalone tool, so there are no new action semantics: action=navigate→cdp_navigate_tab, wait_for_selector/wait_for_url/wait_for_load_state→the matching browser_wait_for condition lane, set_value→browser_set_value, fill_form→browser_fill_form, file_upload→browser_file_upload, scroll_into_view→browser_scroll_into_view, evaluate→browser_evaluate, screenshot→browser_screenshot, click→target_act verb=click. Each step's `params` object is shaped exactly like that tool's parameters. Stop-on-first-error by default (interdependent steps compound errors): returns a per-step result array [{index, action, status (ok|error|skipped), ok, result|error}]; the failing step carries its full structured error and later steps are reported skipped. Set stop_on_error=false to run every step regardless. Bind a target first with set_target; an empty steps list is a loud error."
     )]
     pub async fn browser_batch(
         &self,
@@ -212,6 +214,7 @@ impl SynapseService {
             "wait_for_load_state" => "browser_wait_for_load_state",
             "set_value" => "browser_set_value",
             "fill_form" => "browser_fill_form",
+            "file_upload" => "browser_file_upload",
             "scroll_into_view" => "browser_scroll_into_view",
             "evaluate" => "browser_evaluate",
             "screenshot" => "browser_screenshot",
@@ -220,7 +223,7 @@ impl SynapseService {
                 return Err(mcp_error(
                     synapse_core::error_codes::TOOL_PARAMS_INVALID,
                     format!(
-                        "browser_batch unknown step action {other:?}; supported: navigate, wait_for_selector, wait_for_url, wait_for_load_state, click, set_value, fill_form, scroll_into_view, evaluate, screenshot"
+                        "browser_batch unknown step action {other:?}; supported: navigate, wait_for_selector, wait_for_url, wait_for_load_state, click, set_value, fill_form, file_upload, scroll_into_view, evaluate, screenshot"
                     ),
                 ));
             }
@@ -266,6 +269,13 @@ impl SynapseService {
                 let parsed: BrowserFillFormParams = browser_batch_parse(action, params)?;
                 let response = self
                     .browser_fill_form(Parameters(parsed), request_context.clone())
+                    .await?;
+                response_to_value(&response.0)
+            }
+            "file_upload" => {
+                let parsed: BrowserFileUploadParams = browser_batch_parse(action, params)?;
+                let response = self
+                    .browser_file_upload(Parameters(parsed), request_context.clone())
                     .await?;
                 response_to_value(&response.0)
             }
@@ -324,7 +334,7 @@ impl SynapseService {
             other => Err(mcp_error(
                 synapse_core::error_codes::TOOL_PARAMS_INVALID,
                 format!(
-                    "browser_batch unknown step action {other:?}; supported: navigate, wait_for_selector, wait_for_url, wait_for_load_state, click, set_value, fill_form, scroll_into_view, evaluate, screenshot"
+                    "browser_batch unknown step action {other:?}; supported: navigate, wait_for_selector, wait_for_url, wait_for_load_state, click, set_value, fill_form, file_upload, scroll_into_view, evaluate, screenshot"
                 ),
             )),
         }
