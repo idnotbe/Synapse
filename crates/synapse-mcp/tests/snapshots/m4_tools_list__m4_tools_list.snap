@@ -1,9 +1,10 @@
 ---
 source: crates/synapse-mcp/tests/m4_tools_list.rs
+assertion_line: 56
 expression: snapshot
 ---
 {
-  "count": 237,
+  "count": 244,
   "m4_defaults": [
     {
       "actual": 33,
@@ -209,6 +210,7 @@ expression: snapshot
     }
   ],
   "tools": [
+    "act",
     "act_click",
     "act_clipboard",
     "act_combo",
@@ -365,6 +367,8 @@ expression: snapshot
     "observe",
     "observe_delta",
     "plan_get",
+    "process",
+    "profile",
     "profile_activate",
     "profile_authoring_decide",
     "profile_authoring_export",
@@ -396,12 +400,15 @@ expression: snapshot
     "routine_list",
     "routine_mine",
     "routine_update",
+    "screenshot",
+    "session",
     "session_end",
     "session_list",
     "session_status",
     "set_capture_target",
     "set_perception_mode",
     "set_target",
+    "shell",
     "storage_gc_once",
     "storage_inspect",
     "storage_pressure_sample",
@@ -411,6 +418,7 @@ expression: snapshot
     "suggestion_accept",
     "suggestion_list",
     "suggestion_tick",
+    "target",
     "target_act",
     "target_claim",
     "target_claim_adopt",

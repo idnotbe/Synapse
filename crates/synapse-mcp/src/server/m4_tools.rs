@@ -26,13 +26,16 @@ use std::{
     time::{Duration, Instant, UNIX_EPOCH},
 };
 
-use rmcp::{RoleServer, model::ErrorCode, service::RequestContext};
+use rmcp::{RoleServer, model::ErrorCode, schemars::JsonSchema, service::RequestContext};
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use synapse_core::{error_codes, new_reflex_id};
+use synapse_storage::{cf, decode_json};
 
 use crate::m3::local_models::{
     LocalModelApiShape, LocalModelProbeParams, LocalModelRegistryRow, ResolvedApiKey,
 };
+use crate::m4::ActRunShellExecutionMode;
 
 use super::{
     m1_tools::validate_target_window,
@@ -50,6 +53,234 @@ pub(crate) const AGENT_SPAWN_MANIFEST_FILENAME: &str = "spawn-manifest.json";
 /// Schema version stamped onto the spawn manifest.
 pub(crate) const AGENT_SPAWN_MANIFEST_VERSION: u32 = 1;
 const CODEX_APP_SERVER_RUNNER_SCRIPT: &str = include_str!("codex_app_server_runner.ps1");
+const SHELL_FACADE_SOURCE_OF_TRUTH: &str = "%LOCALAPPDATA%\\Synapse\\shell-jobs + %LOCALAPPDATA%\\Synapse\\shell-sessions + daemon-tool-events.jsonl";
+const PROCESS_FACADE_SOURCE_OF_TRUTH: &str = "live OS process table + CF_PROCESS_HISTORY";
+const PROCESS_LIST_DEFAULT_LIMIT: usize = 100;
+const PROCESS_LIST_MAX_LIMIT: usize = 1000;
+const PROCESS_HISTORY_DEFAULT_LIMIT: usize = 20;
+const PROCESS_HISTORY_MAX_LIMIT: usize = 200;
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ShellOperation {
+    #[default]
+    Run,
+    Start,
+    Status,
+    Cancel,
+}
+
+impl ShellOperation {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Run => "run",
+            Self::Start => "start",
+            Self::Status => "status",
+            Self::Cancel => "cancel",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ShellParams {
+    #[serde(default)]
+    #[schemars(description = "Shell facade operation. Defaults to run.")]
+    pub operation: ShellOperation,
+    #[serde(default)]
+    #[schemars(description = "Executable path/name only for run/start operations.")]
+    pub command: Option<String>,
+    #[serde(default)]
+    #[schemars(default, description = "Literal executable arguments for run/start.")]
+    pub args: Option<Vec<String>>,
+    #[serde(default)]
+    pub working_dir: Option<String>,
+    #[serde(default)]
+    #[schemars(default)]
+    pub env: Option<BTreeMap<String, String>>,
+    #[serde(default)]
+    #[schemars(range(min = 1))]
+    pub timeout_ms: Option<u64>,
+    #[serde(default)]
+    pub execution_mode: Option<ActRunShellExecutionMode>,
+    #[serde(default)]
+    #[schemars(range(min = 1))]
+    pub durable_timeout_ms: Option<u64>,
+    #[serde(default)]
+    pub idempotency_key: Option<String>,
+    #[serde(default)]
+    #[schemars(length(min = 1, max = 128))]
+    pub job_id: Option<String>,
+    #[serde(default)]
+    #[schemars(range(min = 0, max = 1048576))]
+    pub tail_bytes: Option<u64>,
+}
+
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ShellFacadeResponse {
+    pub operation: ShellOperation,
+    pub source_of_truth: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run: Option<ActRunShellResponse>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start: Option<ActRunShellStartResponse>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<ActRunShellStatusResponse>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cancel: Option<ActRunShellCancelResponse>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProcessOperation {
+    #[default]
+    List,
+    Launch,
+    History,
+}
+
+impl ProcessOperation {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::List => "list",
+            Self::Launch => "launch",
+            Self::History => "history",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ProcessParams {
+    #[serde(default)]
+    #[schemars(description = "Process facade operation. Defaults to list.")]
+    pub operation: ProcessOperation,
+    #[serde(default)]
+    #[schemars(description = "Executable path/name for launch operations.")]
+    pub target: Option<String>,
+    #[serde(default)]
+    #[schemars(default)]
+    pub args: Option<Vec<String>>,
+    #[serde(default)]
+    pub working_dir: Option<String>,
+    #[serde(default)]
+    #[schemars(default)]
+    pub env: Option<BTreeMap<String, String>>,
+    #[serde(default)]
+    pub wait_for_window_title_regex: Option<String>,
+    #[serde(default)]
+    #[schemars(range(min = 1))]
+    pub timeout_ms: Option<u64>,
+    #[serde(default)]
+    pub idempotency_key: Option<String>,
+    #[serde(default)]
+    pub cdp_debug: Option<bool>,
+    #[serde(default)]
+    pub force_renderer_accessibility: Option<bool>,
+    #[serde(default)]
+    pub windows_console_window_state: Option<LaunchWindowState>,
+    #[serde(default)]
+    pub desktop: Option<String>,
+    #[serde(default)]
+    pub pid: Option<u32>,
+    #[serde(default)]
+    pub process_name_contains: Option<String>,
+    #[serde(default)]
+    pub command_line_contains: Option<String>,
+    #[serde(default)]
+    #[schemars(range(min = 1, max = 1000))]
+    pub limit: Option<usize>,
+    #[serde(default)]
+    #[schemars(default)]
+    pub include_command_line: Option<bool>,
+}
+
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ProcessFacadeResponse {
+    pub operation: ProcessOperation,
+    pub source_of_truth: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch: Option<ActLaunchResponse>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub processes: Option<ProcessListResponse>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub history: Option<ProcessHistoryResponse>,
+}
+
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ProcessListResponse {
+    pub source_of_truth: String,
+    pub returned_count: usize,
+    pub limit: usize,
+    pub filters: ProcessFilters,
+    pub rows: Vec<ProcessRow>,
+}
+
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ProcessFilters {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pid: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process_name_contains: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command_line_contains: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ProcessRow {
+    pub pid: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_pid: Option<u32>,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exe: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    pub status: String,
+    pub start_time_unix_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command_line: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ProcessHistoryResponse {
+    pub source_of_truth: String,
+    pub cf_name: String,
+    pub returned_count: usize,
+    pub scanned_tail_rows: usize,
+    pub limit: usize,
+    pub filters: ProcessFilters,
+    pub rows: Vec<ProcessHistoryRow>,
+}
+
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ProcessHistoryRow {
+    pub key: String,
+    pub key_hex: String,
+    pub value_len_bytes: u64,
+    pub row_json: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pid: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launched_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command_line: Option<String>,
+}
 
 /// Builds the per-spawn manifest JSON. Records the CLI and, when the operator
 /// pinned one, the model — the authoritative model source the transcript
@@ -235,6 +466,687 @@ fn elapsed_ms_between(start: Instant, end: Instant) -> u64 {
     duration_ms_u64(end.saturating_duration_since(start))
 }
 
+fn shell_facade_error(
+    operation: ShellOperation,
+    source_id: impl Into<String>,
+    message: impl Into<String>,
+    remediation: &'static str,
+) -> ErrorData {
+    let message = message.into();
+    ErrorData::new(
+        ErrorCode(-32099),
+        message.clone(),
+        Some(json!({
+            "code": error_codes::TOOL_PARAMS_INVALID,
+            "operation": operation.as_str(),
+            "source_of_truth": SHELL_FACADE_SOURCE_OF_TRUTH,
+            "source_id": source_id.into(),
+            "remediation": remediation,
+        })),
+    )
+}
+
+fn process_facade_error(
+    operation: ProcessOperation,
+    source_id: impl Into<String>,
+    message: impl Into<String>,
+    remediation: &'static str,
+) -> ErrorData {
+    let message = message.into();
+    ErrorData::new(
+        ErrorCode(-32099),
+        message.clone(),
+        Some(json!({
+            "code": error_codes::TOOL_PARAMS_INVALID,
+            "operation": operation.as_str(),
+            "source_of_truth": PROCESS_FACADE_SOURCE_OF_TRUTH,
+            "source_id": source_id.into(),
+            "remediation": remediation,
+        })),
+    )
+}
+
+fn shell_facade_delegate_error(
+    operation: ShellOperation,
+    source_id: impl Into<String>,
+    error: ErrorData,
+    remediation: &'static str,
+) -> ErrorData {
+    let source_id = source_id.into();
+    let cause_code = error
+        .data
+        .as_ref()
+        .and_then(|data| data.get("code"))
+        .and_then(Value::as_str)
+        .unwrap_or(error_codes::TOOL_INTERNAL_ERROR)
+        .to_owned();
+    let cause_data = error.data.clone().unwrap_or(Value::Null);
+    ErrorData::new(
+        error.code,
+        error.message.to_string(),
+        Some(json!({
+            "code": cause_code,
+            "operation": operation.as_str(),
+            "source_of_truth": SHELL_FACADE_SOURCE_OF_TRUTH,
+            "source_id": source_id,
+            "remediation": remediation,
+            "cause": cause_data,
+        })),
+    )
+}
+
+fn process_facade_delegate_error(
+    operation: ProcessOperation,
+    source_id: impl Into<String>,
+    error: ErrorData,
+    remediation: &'static str,
+) -> ErrorData {
+    let source_id = source_id.into();
+    let cause_code = error
+        .data
+        .as_ref()
+        .and_then(|data| data.get("code"))
+        .and_then(Value::as_str)
+        .unwrap_or(error_codes::TOOL_INTERNAL_ERROR)
+        .to_owned();
+    let cause_data = error.data.clone().unwrap_or(Value::Null);
+    ErrorData::new(
+        error.code,
+        error.message.to_string(),
+        Some(json!({
+            "code": cause_code,
+            "operation": operation.as_str(),
+            "source_of_truth": PROCESS_FACADE_SOURCE_OF_TRUTH,
+            "source_id": source_id,
+            "remediation": remediation,
+            "cause": cause_data,
+        })),
+    )
+}
+
+fn require_shell_text(
+    operation: ShellOperation,
+    value: Option<String>,
+    field: &'static str,
+    source_id: &str,
+) -> Result<String, ErrorData> {
+    let Some(value) = value else {
+        return Err(shell_facade_error(
+            operation,
+            source_id,
+            format!("shell operation={} requires {field}", operation.as_str()),
+            "provide the required field for this shell operation",
+        ));
+    };
+    if value.trim().is_empty() {
+        return Err(shell_facade_error(
+            operation,
+            source_id,
+            format!(
+                "shell operation={} requires non-empty {field}",
+                operation.as_str()
+            ),
+            "provide a non-empty executable or job id",
+        ));
+    }
+    Ok(value)
+}
+
+fn require_process_text(
+    operation: ProcessOperation,
+    value: Option<String>,
+    field: &'static str,
+    source_id: &str,
+) -> Result<String, ErrorData> {
+    let Some(value) = value else {
+        return Err(process_facade_error(
+            operation,
+            source_id,
+            format!("process operation={} requires {field}", operation.as_str()),
+            "provide the required field for this process operation",
+        ));
+    };
+    if value.trim().is_empty() {
+        return Err(process_facade_error(
+            operation,
+            source_id,
+            format!(
+                "process operation={} requires non-empty {field}",
+                operation.as_str()
+            ),
+            "provide a non-empty executable path/name or source id",
+        ));
+    }
+    Ok(value)
+}
+
+fn shell_unexpected_fields(
+    operation: ShellOperation,
+    params: &ShellParams,
+    fields: &[&'static str],
+) -> Result<(), ErrorData> {
+    if fields.is_empty() {
+        return Ok(());
+    }
+    let source_id = params
+        .job_id
+        .as_deref()
+        .or(params.command.as_deref())
+        .unwrap_or_else(|| operation.as_str());
+    Err(shell_facade_error(
+        operation,
+        source_id,
+        format!(
+            "shell operation={} does not accept field(s): {}",
+            operation.as_str(),
+            fields.join(", ")
+        ),
+        "remove fields that belong to a different shell operation",
+    ))
+}
+
+fn process_unexpected_fields(
+    operation: ProcessOperation,
+    params: &ProcessParams,
+    fields: &[&'static str],
+) -> Result<(), ErrorData> {
+    if fields.is_empty() {
+        return Ok(());
+    }
+    let source_id = params
+        .target
+        .as_deref()
+        .or_else(|| params.process_name_contains.as_deref())
+        .or_else(|| params.command_line_contains.as_deref())
+        .map(str::to_owned)
+        .or_else(|| params.pid.map(|pid| pid.to_string()))
+        .unwrap_or_else(|| operation.as_str().to_owned());
+    Err(process_facade_error(
+        operation,
+        source_id,
+        format!(
+            "process operation={} does not accept field(s): {}",
+            operation.as_str(),
+            fields.join(", ")
+        ),
+        "remove fields that belong to a different process operation",
+    ))
+}
+
+fn shell_run_params(params: ShellParams) -> Result<ActRunShellParams, ErrorData> {
+    let mut unexpected = Vec::new();
+    if params.job_id.is_some() {
+        unexpected.push("job_id");
+    }
+    if params.tail_bytes.is_some() {
+        unexpected.push("tail_bytes");
+    }
+    shell_unexpected_fields(ShellOperation::Run, &params, &unexpected)?;
+    let command = require_shell_text(
+        ShellOperation::Run,
+        params.command,
+        "command",
+        ShellOperation::Run.as_str(),
+    )?;
+    Ok(ActRunShellParams {
+        command,
+        args: params.args.unwrap_or_default(),
+        working_dir: params.working_dir,
+        env: params.env.unwrap_or_default(),
+        timeout_ms: params
+            .timeout_ms
+            .unwrap_or(crate::m4::DEFAULT_SHELL_TIMEOUT_MS),
+        execution_mode: params
+            .execution_mode
+            .unwrap_or(ActRunShellExecutionMode::Auto),
+        durable_timeout_ms: params.durable_timeout_ms,
+        idempotency_key: params.idempotency_key,
+    })
+}
+
+fn shell_start_params(params: ShellParams) -> Result<ActRunShellStartParams, ErrorData> {
+    let mut unexpected = Vec::new();
+    if params.execution_mode.is_some() {
+        unexpected.push("execution_mode");
+    }
+    if params.durable_timeout_ms.is_some() {
+        unexpected.push("durable_timeout_ms");
+    }
+    if params.idempotency_key.is_some() {
+        unexpected.push("idempotency_key");
+    }
+    if params.tail_bytes.is_some() {
+        unexpected.push("tail_bytes");
+    }
+    shell_unexpected_fields(ShellOperation::Start, &params, &unexpected)?;
+    let command = require_shell_text(
+        ShellOperation::Start,
+        params.command,
+        "command",
+        ShellOperation::Start.as_str(),
+    )?;
+    Ok(ActRunShellStartParams {
+        command,
+        args: params.args.unwrap_or_default(),
+        working_dir: params.working_dir,
+        env: params.env.unwrap_or_default(),
+        timeout_ms: params.timeout_ms,
+        job_id: params.job_id,
+    })
+}
+
+fn shell_status_params(params: ShellParams) -> Result<ActRunShellStatusParams, ErrorData> {
+    let mut unexpected = Vec::new();
+    if params.command.is_some() {
+        unexpected.push("command");
+    }
+    if params.args.is_some() {
+        unexpected.push("args");
+    }
+    if params.working_dir.is_some() {
+        unexpected.push("working_dir");
+    }
+    if params.env.is_some() {
+        unexpected.push("env");
+    }
+    if params.timeout_ms.is_some() {
+        unexpected.push("timeout_ms");
+    }
+    if params.execution_mode.is_some() {
+        unexpected.push("execution_mode");
+    }
+    if params.durable_timeout_ms.is_some() {
+        unexpected.push("durable_timeout_ms");
+    }
+    if params.idempotency_key.is_some() {
+        unexpected.push("idempotency_key");
+    }
+    shell_unexpected_fields(ShellOperation::Status, &params, &unexpected)?;
+    let job_id = require_shell_text(
+        ShellOperation::Status,
+        params.job_id,
+        "job_id",
+        ShellOperation::Status.as_str(),
+    )?;
+    Ok(ActRunShellStatusParams {
+        job_id,
+        tail_bytes: params
+            .tail_bytes
+            .unwrap_or(crate::m4::SHELL_JOB_TAIL_DEFAULT_BYTES),
+    })
+}
+
+fn shell_cancel_params(params: ShellParams) -> Result<ActRunShellJobIdParams, ErrorData> {
+    let mut unexpected = Vec::new();
+    if params.command.is_some() {
+        unexpected.push("command");
+    }
+    if params.args.is_some() {
+        unexpected.push("args");
+    }
+    if params.working_dir.is_some() {
+        unexpected.push("working_dir");
+    }
+    if params.env.is_some() {
+        unexpected.push("env");
+    }
+    if params.timeout_ms.is_some() {
+        unexpected.push("timeout_ms");
+    }
+    if params.execution_mode.is_some() {
+        unexpected.push("execution_mode");
+    }
+    if params.durable_timeout_ms.is_some() {
+        unexpected.push("durable_timeout_ms");
+    }
+    if params.idempotency_key.is_some() {
+        unexpected.push("idempotency_key");
+    }
+    if params.tail_bytes.is_some() {
+        unexpected.push("tail_bytes");
+    }
+    shell_unexpected_fields(ShellOperation::Cancel, &params, &unexpected)?;
+    let job_id = require_shell_text(
+        ShellOperation::Cancel,
+        params.job_id,
+        "job_id",
+        ShellOperation::Cancel.as_str(),
+    )?;
+    Ok(ActRunShellJobIdParams { job_id })
+}
+
+fn process_launch_params(params: ProcessParams) -> Result<ActLaunchParams, ErrorData> {
+    let mut unexpected = Vec::new();
+    if params.pid.is_some() {
+        unexpected.push("pid");
+    }
+    if params.process_name_contains.is_some() {
+        unexpected.push("process_name_contains");
+    }
+    if params.command_line_contains.is_some() {
+        unexpected.push("command_line_contains");
+    }
+    if params.limit.is_some() {
+        unexpected.push("limit");
+    }
+    if params.include_command_line.is_some() {
+        unexpected.push("include_command_line");
+    }
+    process_unexpected_fields(ProcessOperation::Launch, &params, &unexpected)?;
+    let target = require_process_text(
+        ProcessOperation::Launch,
+        params.target,
+        "target",
+        ProcessOperation::Launch.as_str(),
+    )?;
+    Ok(ActLaunchParams {
+        target,
+        args: params.args.unwrap_or_default(),
+        working_dir: params.working_dir,
+        env: params.env.unwrap_or_default(),
+        wait_for_window_title_regex: params.wait_for_window_title_regex,
+        timeout_ms: params
+            .timeout_ms
+            .unwrap_or(crate::m4::DEFAULT_LAUNCH_TIMEOUT_MS),
+        idempotency_key: params.idempotency_key,
+        cdp_debug: params.cdp_debug,
+        force_renderer_accessibility: params.force_renderer_accessibility,
+        windows_console_window_state: params.windows_console_window_state,
+        desktop: params.desktop,
+    })
+}
+
+fn validate_process_query_params(
+    operation: ProcessOperation,
+    params: &ProcessParams,
+) -> Result<usize, ErrorData> {
+    let mut unexpected = Vec::new();
+    if params.target.is_some() {
+        unexpected.push("target");
+    }
+    if params.args.is_some() {
+        unexpected.push("args");
+    }
+    if params.working_dir.is_some() {
+        unexpected.push("working_dir");
+    }
+    if params.env.is_some() {
+        unexpected.push("env");
+    }
+    if params.wait_for_window_title_regex.is_some() {
+        unexpected.push("wait_for_window_title_regex");
+    }
+    if params.timeout_ms.is_some() {
+        unexpected.push("timeout_ms");
+    }
+    if params.idempotency_key.is_some() {
+        unexpected.push("idempotency_key");
+    }
+    if params.cdp_debug.is_some() {
+        unexpected.push("cdp_debug");
+    }
+    if params.force_renderer_accessibility.is_some() {
+        unexpected.push("force_renderer_accessibility");
+    }
+    if params.windows_console_window_state.is_some() {
+        unexpected.push("windows_console_window_state");
+    }
+    if params.desktop.is_some() {
+        unexpected.push("desktop");
+    }
+    process_unexpected_fields(operation, params, &unexpected)?;
+
+    for (field, value) in [
+        (
+            "process_name_contains",
+            params.process_name_contains.as_deref(),
+        ),
+        (
+            "command_line_contains",
+            params.command_line_contains.as_deref(),
+        ),
+    ] {
+        if value.is_some_and(|value| value.trim().is_empty()) {
+            return Err(process_facade_error(
+                operation,
+                field,
+                format!(
+                    "process operation={} requires non-empty {field}",
+                    operation.as_str()
+                ),
+                "remove the empty filter or provide a non-empty filter value",
+            ));
+        }
+    }
+
+    let limit = params.limit.unwrap_or(match operation {
+        ProcessOperation::List => PROCESS_LIST_DEFAULT_LIMIT,
+        ProcessOperation::History => PROCESS_HISTORY_DEFAULT_LIMIT,
+        ProcessOperation::Launch => unreachable!("launch is not a query operation"),
+    });
+    let max_limit = match operation {
+        ProcessOperation::List => PROCESS_LIST_MAX_LIMIT,
+        ProcessOperation::History => PROCESS_HISTORY_MAX_LIMIT,
+        ProcessOperation::Launch => unreachable!("launch is not a query operation"),
+    };
+    if limit == 0 || limit > max_limit {
+        return Err(process_facade_error(
+            operation,
+            limit.to_string(),
+            format!(
+                "process operation={} limit must be between 1 and {max_limit}",
+                operation.as_str()
+            ),
+            "use a bounded positive limit for the requested readback",
+        ));
+    }
+    Ok(limit)
+}
+
+fn process_filters(params: &ProcessParams) -> ProcessFilters {
+    ProcessFilters {
+        pid: params.pid,
+        process_name_contains: params.process_name_contains.clone(),
+        command_line_contains: params.command_line_contains.clone(),
+    }
+}
+
+fn contains_case_insensitive(haystack: &str, needle: &str) -> bool {
+    haystack.to_lowercase().contains(&needle.to_lowercase())
+}
+
+fn process_row_matches(filters: &ProcessFilters, row: &ProcessRow) -> bool {
+    if filters.pid.is_some_and(|pid| row.pid != pid) {
+        return false;
+    }
+    if let Some(filter) = filters.process_name_contains.as_deref()
+        && !contains_case_insensitive(&row.name, filter)
+    {
+        return false;
+    }
+    if let Some(filter) = filters.command_line_contains.as_deref() {
+        let Some(command_line) = row.command_line.as_deref() else {
+            return false;
+        };
+        if !contains_case_insensitive(command_line, filter) {
+            return false;
+        }
+    }
+    true
+}
+
+fn process_history_row_matches(filters: &ProcessFilters, row: &ProcessHistoryRow) -> bool {
+    if filters.pid.is_some_and(|pid| row.pid != Some(pid)) {
+        return false;
+    }
+    if let Some(filter) = filters.process_name_contains.as_deref() {
+        let Some(target) = row.target.as_deref() else {
+            return false;
+        };
+        if !contains_case_insensitive(target, filter) {
+            return false;
+        }
+    }
+    if let Some(filter) = filters.command_line_contains.as_deref() {
+        let Some(command_line) = row.command_line.as_deref() else {
+            return false;
+        };
+        if !contains_case_insensitive(command_line, filter) {
+            return false;
+        }
+    }
+    true
+}
+
+fn process_list_response(params: &ProcessParams) -> Result<ProcessListResponse, ErrorData> {
+    use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
+
+    let limit = validate_process_query_params(ProcessOperation::List, params)?;
+    let filters = process_filters(params);
+    let include_command_line =
+        params.include_command_line.unwrap_or(false) || filters.command_line_contains.is_some();
+    let mut system = System::new();
+    system.refresh_processes_specifics(
+        ProcessesToUpdate::All,
+        true,
+        ProcessRefreshKind::nothing()
+            .with_cmd(UpdateKind::Always)
+            .with_cwd(UpdateKind::Always)
+            .with_exe(UpdateKind::Always),
+    );
+
+    let mut rows = Vec::new();
+    for (pid, process) in system.processes() {
+        let command_line = process
+            .cmd()
+            .iter()
+            .map(|part| part.to_string_lossy())
+            .collect::<Vec<_>>()
+            .join(" ");
+        let row = ProcessRow {
+            pid: pid.as_u32(),
+            parent_pid: process.parent().map(|parent| parent.as_u32()),
+            name: process.name().to_string_lossy().into_owned(),
+            exe: process.exe().map(|path| path.display().to_string()),
+            cwd: process.cwd().map(|path| path.display().to_string()),
+            status: format!("{:?}", process.status()),
+            start_time_unix_ms: process.start_time().saturating_mul(1000),
+            command_line: include_command_line.then_some(command_line),
+        };
+        if !process_row_matches(&filters, &row) {
+            continue;
+        }
+        rows.push(row);
+        if rows.len() >= limit {
+            break;
+        }
+    }
+    Ok(ProcessListResponse {
+        source_of_truth: "live OS process table via sysinfo refresh_processes_specifics".to_owned(),
+        returned_count: rows.len(),
+        limit,
+        filters,
+        rows,
+    })
+}
+
+fn process_history_response(
+    service: &SynapseService,
+    params: &ProcessParams,
+) -> Result<ProcessHistoryResponse, ErrorData> {
+    let limit = validate_process_query_params(ProcessOperation::History, params)?;
+    let filters = process_filters(params);
+    let rows = {
+        let runtime = service.reflex_runtime()?;
+        let runtime = runtime.lock().map_err(|_error| {
+            process_facade_error(
+                ProcessOperation::History,
+                cf::CF_PROCESS_HISTORY,
+                "reflex runtime lock poisoned while reading process history",
+                "retry after the daemon lock recovers; inspect daemon logs if this repeats",
+            )
+        })?;
+        runtime
+            .storage_cf_tail_rows(cf::CF_PROCESS_HISTORY, limit)
+            .map_err(|error| {
+                process_facade_error(
+                    ProcessOperation::History,
+                    cf::CF_PROCESS_HISTORY,
+                    format!("CF_PROCESS_HISTORY tail read failed: {error}"),
+                    "inspect the RocksDB column family and daemon storage logs",
+                )
+            })?
+    };
+    let scanned_tail_rows = rows.len();
+    let mut decoded_rows = Vec::new();
+    for (key, value) in rows {
+        let decoded = decode_json::<Value>(&value).map_err(|error| {
+            process_facade_error(
+                ProcessOperation::History,
+                hex_lower(&key),
+                format!("CF_PROCESS_HISTORY row decode failed: {error}"),
+                "inspect the exact process history row bytes and fix the writer",
+            )
+        })?;
+        let row_json = serde_json::to_string(&decoded).map_err(|error| {
+            process_facade_error(
+                ProcessOperation::History,
+                hex_lower(&key),
+                format!("CF_PROCESS_HISTORY row JSON render failed: {error}"),
+                "inspect the decoded process history row",
+            )
+        })?;
+        let row = ProcessHistoryRow {
+            key: String::from_utf8_lossy(&key).into_owned(),
+            key_hex: hex_lower(&key),
+            value_len_bytes: u64::try_from(value.len()).unwrap_or(u64::MAX),
+            row_json,
+            pid: json_u32_field(&decoded, "pid"),
+            target: json_string_field(&decoded, "target"),
+            tool: json_string_field(&decoded, "tool"),
+            status: json_string_field(&decoded, "status"),
+            launched_at: json_string_field(&decoded, "launched_at"),
+            command_line: json_string_field(&decoded, "command_line"),
+        };
+        if process_history_row_matches(&filters, &row) {
+            decoded_rows.push(row);
+        }
+    }
+    Ok(ProcessHistoryResponse {
+        source_of_truth: PROCESS_FACADE_SOURCE_OF_TRUTH.to_owned(),
+        cf_name: cf::CF_PROCESS_HISTORY.to_owned(),
+        returned_count: decoded_rows.len(),
+        scanned_tail_rows,
+        limit,
+        filters,
+        rows: decoded_rows,
+    })
+}
+
+fn json_u32_field(value: &Value, field: &str) -> Option<u32> {
+    value
+        .get(field)
+        .and_then(Value::as_u64)
+        .and_then(|raw| u32::try_from(raw).ok())
+}
+
+fn json_string_field(value: &Value, field: &str) -> Option<String> {
+    value
+        .get(field)
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned)
+}
+
+fn hex_lower(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for &byte in bytes {
+        out.push(HEX[(byte >> 4) as usize] as char);
+        out.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    out
+}
+
 #[cfg(windows)]
 const AGENT_SPAWN_WINDOWS_SHELL_CANDIDATES: &[(&str, &str)] = &[
     ("path:pwsh.exe", "pwsh.exe"),
@@ -281,6 +1193,185 @@ impl SynapseService {
         let result = execute_combo(runtime, params.0).await;
         self.audit_action_result_for_request("act_combo", &result, &request_context)?;
         result.map(Json)
+    }
+
+    #[tool(
+        description = "Facade for shell execution. operation=run executes an allowlisted child process; start creates a durable shell job with artifact paths; status reads persisted job/output state; cancel terminates the exact durable job and returns before/after readback."
+    )]
+    pub async fn shell(
+        &self,
+        params: Parameters<ShellParams>,
+        request_context: RequestContext<RoleServer>,
+    ) -> Result<Json<ShellFacadeResponse>, ErrorData> {
+        let params = params.0;
+        let operation = params.operation;
+        tracing::info!(
+            code = "MCP_TOOL_INVOCATION",
+            kind = "shell",
+            operation = operation.as_str(),
+            "tool.invocation kind=shell"
+        );
+        match operation {
+            ShellOperation::Run => {
+                let low_params = shell_run_params(params)?;
+                let source_id = low_params.command.clone();
+                let response = self
+                    .act_run_shell(Parameters(low_params), request_context)
+                    .await
+                    .map_err(|error| {
+                        shell_facade_delegate_error(
+                            operation,
+                            source_id,
+                            error,
+                            "inspect the shell command policy, executable path, and job artifacts before retrying",
+                        )
+                    })?
+                    .0;
+                Ok(Json(ShellFacadeResponse {
+                    operation,
+                    source_of_truth: SHELL_FACADE_SOURCE_OF_TRUTH.to_owned(),
+                    run: Some(response),
+                    start: None,
+                    status: None,
+                    cancel: None,
+                }))
+            }
+            ShellOperation::Start => {
+                let low_params = shell_start_params(params)?;
+                let source_id = low_params.command.clone();
+                let response = self
+                    .act_run_shell_start(Parameters(low_params), request_context)
+                    .await
+                    .map_err(|error| {
+                        shell_facade_delegate_error(
+                            operation,
+                            source_id,
+                            error,
+                            "inspect the durable shell command policy and job artifact root before retrying",
+                        )
+                    })?
+                    .0;
+                Ok(Json(ShellFacadeResponse {
+                    operation,
+                    source_of_truth: SHELL_FACADE_SOURCE_OF_TRUTH.to_owned(),
+                    run: None,
+                    start: Some(response),
+                    status: None,
+                    cancel: None,
+                }))
+            }
+            ShellOperation::Status => {
+                let low_params = shell_status_params(params)?;
+                let source_id = low_params.job_id.clone();
+                let response = self
+                    .act_run_shell_status(Parameters(low_params), request_context)
+                    .await
+                    .map_err(|error| {
+                        shell_facade_delegate_error(
+                            operation,
+                            source_id,
+                            error,
+                            "provide an exact job_id owned by this MCP session and inspect the job status file",
+                        )
+                    })?
+                    .0;
+                Ok(Json(ShellFacadeResponse {
+                    operation,
+                    source_of_truth: SHELL_FACADE_SOURCE_OF_TRUTH.to_owned(),
+                    run: None,
+                    start: None,
+                    status: Some(response),
+                    cancel: None,
+                }))
+            }
+            ShellOperation::Cancel => {
+                let low_params = shell_cancel_params(params)?;
+                let source_id = low_params.job_id.clone();
+                let response = self
+                    .act_run_shell_cancel(Parameters(low_params), request_context)
+                    .await
+                    .map_err(|error| {
+                        shell_facade_delegate_error(
+                            operation,
+                            source_id,
+                            error,
+                            "provide an exact live job_id owned by this MCP session and inspect before/after status",
+                        )
+                    })?
+                    .0;
+                Ok(Json(ShellFacadeResponse {
+                    operation,
+                    source_of_truth: SHELL_FACADE_SOURCE_OF_TRUTH.to_owned(),
+                    run: None,
+                    start: None,
+                    status: None,
+                    cancel: Some(response),
+                }))
+            }
+        }
+    }
+
+    #[tool(
+        description = "Facade for process capability. operation=list reads the live OS process table; launch delegates to the audited process launcher and records CF_PROCESS_HISTORY; history reads decoded CF_PROCESS_HISTORY rows for launch readback."
+    )]
+    pub async fn process(
+        &self,
+        params: Parameters<ProcessParams>,
+        request_context: RequestContext<RoleServer>,
+    ) -> Result<Json<ProcessFacadeResponse>, ErrorData> {
+        let params = params.0;
+        let operation = params.operation;
+        tracing::info!(
+            code = "MCP_TOOL_INVOCATION",
+            kind = "process",
+            operation = operation.as_str(),
+            "tool.invocation kind=process"
+        );
+        match operation {
+            ProcessOperation::List => {
+                let response = process_list_response(&params)?;
+                Ok(Json(ProcessFacadeResponse {
+                    operation,
+                    source_of_truth: PROCESS_FACADE_SOURCE_OF_TRUTH.to_owned(),
+                    launch: None,
+                    processes: Some(response),
+                    history: None,
+                }))
+            }
+            ProcessOperation::Launch => {
+                let low_params = process_launch_params(params)?;
+                let source_id = low_params.target.clone();
+                let response = self
+                    .act_launch(Parameters(low_params), request_context)
+                    .await
+                    .map_err(|error| {
+                        process_facade_delegate_error(
+                            operation,
+                            source_id,
+                            error,
+                            "fix the target executable/path or launch policy, then verify CF_PROCESS_HISTORY and the process table",
+                        )
+                    })?
+                    .0;
+                Ok(Json(ProcessFacadeResponse {
+                    operation,
+                    source_of_truth: PROCESS_FACADE_SOURCE_OF_TRUTH.to_owned(),
+                    launch: Some(response),
+                    processes: None,
+                    history: None,
+                }))
+            }
+            ProcessOperation::History => {
+                let response = process_history_response(self, &params)?;
+                Ok(Json(ProcessFacadeResponse {
+                    operation,
+                    source_of_truth: PROCESS_FACADE_SOURCE_OF_TRUTH.to_owned(),
+                    launch: None,
+                    processes: None,
+                    history: Some(response),
+                }))
+            }
+        }
     }
 
     #[tool(
@@ -6108,6 +7199,207 @@ mod tests {
                 .expect("open temp db"),
         );
         (dir, db)
+    }
+
+    fn shell_params(operation: ShellOperation) -> ShellParams {
+        ShellParams {
+            operation,
+            command: None,
+            args: None,
+            working_dir: None,
+            env: None,
+            timeout_ms: None,
+            execution_mode: None,
+            durable_timeout_ms: None,
+            idempotency_key: None,
+            job_id: None,
+            tail_bytes: None,
+        }
+    }
+
+    fn process_params(operation: ProcessOperation) -> ProcessParams {
+        ProcessParams {
+            operation,
+            target: None,
+            args: None,
+            working_dir: None,
+            env: None,
+            wait_for_window_title_regex: None,
+            timeout_ms: None,
+            idempotency_key: None,
+            cdp_debug: None,
+            force_renderer_accessibility: None,
+            windows_console_window_state: None,
+            desktop: None,
+            pid: None,
+            process_name_contains: None,
+            command_line_contains: None,
+            limit: None,
+            include_command_line: None,
+        }
+    }
+
+    fn tool_param_error_code(error: &ErrorData) -> Option<&str> {
+        error
+            .data
+            .as_ref()
+            .and_then(|data| data.get("code"))
+            .and_then(Value::as_str)
+    }
+
+    #[test]
+    fn shell_facade_rejects_unknown_operation_enum() {
+        let error = serde_json::from_value::<ShellParams>(json!({"operation": "not_real"}))
+            .expect_err("unknown shell operation must fail closed");
+        assert!(error.to_string().contains("unknown variant"));
+    }
+
+    #[test]
+    fn shell_facade_validates_operation_specific_fields() {
+        let empty_run = shell_run_params(ShellParams {
+            command: Some(" ".to_owned()),
+            ..shell_params(ShellOperation::Run)
+        })
+        .expect_err("run requires non-empty command");
+        assert_eq!(
+            tool_param_error_code(&empty_run),
+            Some(error_codes::TOOL_PARAMS_INVALID)
+        );
+
+        let wrong_run = shell_run_params(ShellParams {
+            command: Some("powershell.exe".to_owned()),
+            job_id: Some("job-from-status".to_owned()),
+            ..shell_params(ShellOperation::Run)
+        })
+        .expect_err("run must reject status/cancel-only job_id");
+        assert_eq!(
+            wrong_run
+                .data
+                .as_ref()
+                .and_then(|data| data.get("operation"))
+                .and_then(Value::as_str),
+            Some("run")
+        );
+
+        let missing_status = shell_status_params(shell_params(ShellOperation::Status))
+            .expect_err("status requires job_id");
+        assert_eq!(
+            tool_param_error_code(&missing_status),
+            Some(error_codes::TOOL_PARAMS_INVALID)
+        );
+
+        let wrong_status = shell_status_params(ShellParams {
+            command: Some("powershell.exe".to_owned()),
+            job_id: Some("job-1".to_owned()),
+            ..shell_params(ShellOperation::Status)
+        })
+        .expect_err("status rejects run-only command");
+        assert_eq!(
+            wrong_status
+                .data
+                .as_ref()
+                .and_then(|data| data.get("operation"))
+                .and_then(Value::as_str),
+            Some("status")
+        );
+    }
+
+    #[test]
+    fn process_facade_rejects_unknown_operation_enum() {
+        let error = serde_json::from_value::<ProcessParams>(json!({"operation": "not_real"}))
+            .expect_err("unknown process operation must fail closed");
+        assert!(error.to_string().contains("unknown variant"));
+    }
+
+    #[test]
+    fn process_facade_validates_operation_specific_fields() {
+        let missing_launch = process_launch_params(process_params(ProcessOperation::Launch))
+            .expect_err("launch requires target");
+        assert_eq!(
+            tool_param_error_code(&missing_launch),
+            Some(error_codes::TOOL_PARAMS_INVALID)
+        );
+
+        let wrong_launch = process_launch_params(ProcessParams {
+            target: Some("notepad.exe".to_owned()),
+            pid: Some(1234),
+            ..process_params(ProcessOperation::Launch)
+        })
+        .expect_err("launch rejects list/history-only pid");
+        assert_eq!(
+            wrong_launch
+                .data
+                .as_ref()
+                .and_then(|data| data.get("operation"))
+                .and_then(Value::as_str),
+            Some("launch")
+        );
+
+        let wrong_history = validate_process_query_params(
+            ProcessOperation::History,
+            &ProcessParams {
+                target: Some("notepad.exe".to_owned()),
+                ..process_params(ProcessOperation::History)
+            },
+        )
+        .expect_err("history rejects launch target field");
+        assert_eq!(
+            wrong_history
+                .data
+                .as_ref()
+                .and_then(|data| data.get("operation"))
+                .and_then(Value::as_str),
+            Some("history")
+        );
+
+        let unbounded_history = validate_process_query_params(
+            ProcessOperation::History,
+            &ProcessParams {
+                limit: Some(PROCESS_HISTORY_MAX_LIMIT + 1),
+                ..process_params(ProcessOperation::History)
+            },
+        )
+        .expect_err("history rejects limits above the explicit cap");
+        assert_eq!(
+            tool_param_error_code(&unbounded_history),
+            Some(error_codes::TOOL_PARAMS_INVALID)
+        );
+    }
+
+    #[test]
+    fn process_facade_delegate_error_preserves_code_and_adds_context() {
+        let low_level = ErrorData::new(
+            ErrorCode(-32099),
+            "target missing",
+            Some(json!({
+                "code": error_codes::ACTION_TARGET_INVALID,
+                "target": "C:\\missing.exe",
+            })),
+        );
+        let error = process_facade_delegate_error(
+            ProcessOperation::Launch,
+            "C:\\missing.exe",
+            low_level,
+            "fix target",
+        );
+        let data = error.data.as_ref().expect("facade data");
+        assert_eq!(
+            data.get("code").and_then(Value::as_str),
+            Some(error_codes::ACTION_TARGET_INVALID)
+        );
+        assert_eq!(
+            data.get("operation").and_then(Value::as_str),
+            Some("launch")
+        );
+        assert_eq!(
+            data.get("source_id").and_then(Value::as_str),
+            Some("C:\\missing.exe")
+        );
+        assert_eq!(
+            data.get("remediation").and_then(Value::as_str),
+            Some("fix target")
+        );
+        assert!(data.get("cause").is_some());
     }
 
     #[test]

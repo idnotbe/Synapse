@@ -33,10 +33,10 @@ use crate::{
 };
 
 const MAX_COMBO_STEPS: usize = 256;
-const DEFAULT_SHELL_TIMEOUT_MS: u64 = 30_000;
+pub(crate) const DEFAULT_SHELL_TIMEOUT_MS: u64 = 30_000;
 pub const DEFAULT_RUN_SHELL_INLINE_AWAIT_LIMIT_MS: u64 = 90_000;
 pub const DEFAULT_RUN_SHELL_INLINE_CLIENT_CALL_BUDGET_MS: u64 = 110_000;
-const DEFAULT_LAUNCH_TIMEOUT_MS: u64 = 10_000;
+pub(crate) const DEFAULT_LAUNCH_TIMEOUT_MS: u64 = 10_000;
 #[cfg(windows)]
 const SW_HIDE: u16 = 0;
 #[cfg(windows)]
@@ -63,7 +63,7 @@ const RUN_SHELL_INLINE_AWAIT_LIMIT_ENV: &str = "SYNAPSE_RUN_SHELL_INLINE_AWAIT_L
 /// command/target without an allowlist entry.
 const ANY_PERMITTED_SENTINEL: &str = "__any_permitted__";
 const SHELL_OUTPUT_CAP_BYTES: usize = 1024 * 1024;
-const SHELL_JOB_TAIL_DEFAULT_BYTES: u64 = 64 * 1024;
+pub(crate) const SHELL_JOB_TAIL_DEFAULT_BYTES: u64 = 64 * 1024;
 const SHELL_JOB_TAIL_MAX_BYTES: u64 = 1024 * 1024;
 const SHELL_JOB_DASHBOARD_TAIL_BYTES: u64 = 2 * 1024;
 const SHELL_JOB_ID_MAX_BYTES: usize = 128;

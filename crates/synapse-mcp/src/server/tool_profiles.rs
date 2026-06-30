@@ -368,41 +368,81 @@ const FACADE_TOOL_CONTRACTS: &[FacadeToolContractSpec] = &[
     facade_contract(
         "shell",
         "ShellOperation",
-        "durable shell job table + process status readback",
+        "%LOCALAPPDATA%\\Synapse\\shell-jobs + %LOCALAPPDATA%\\Synapse\\shell-sessions + daemon-tool-events.jsonl",
         &[
             op(
                 "run",
                 true,
                 false,
-                "shell job registry + process handle",
-                Some("shell job row/status readback + output artifact path"),
-                error_codes::TOOL_INTERNAL_ERROR,
-                "inspect the job row and process state, then retry with corrected command/input",
+                "durable shell registry/log files or inline child process",
+                Some("durable job row/status readback + output artifact path when backgrounded"),
+                error_codes::TOOL_PARAMS_INVALID,
+                "provide a non-empty executable in command and put arguments in args",
+            ),
+            op(
+                "start",
+                true,
+                false,
+                "durable shell job registry + process table",
+                Some(
+                    "job status/stdout/stderr artifact paths read back from %LOCALAPPDATA%\\Synapse\\shell-jobs",
+                ),
+                error_codes::TOOL_PARAMS_INVALID,
+                "provide command/args for the durable job and poll with status",
             ),
             op(
                 "status",
                 false,
                 false,
-                "shell job registry + output artifact path",
+                "durable shell job registry + output artifact path",
                 None,
-                error_codes::TOOL_INTERNAL_ERROR,
-                "read the job id returned by run and verify the artifact path exists",
+                error_codes::TOOL_PARAMS_INVALID,
+                "provide the exact job_id returned by run/start",
+            ),
+            op(
+                "cancel",
+                true,
+                false,
+                "durable shell job registry + recorded process tree",
+                Some("before/after status readback plus remaining process ids"),
+                error_codes::TOOL_PARAMS_INVALID,
+                "provide the exact job_id returned by run/start",
             ),
         ],
     ),
     facade_contract(
         "process",
         "ProcessOperation",
-        "OS process table snapshot",
-        &[op(
-            "list",
-            false,
-            false,
-            "OS process table snapshot",
-            None,
-            error_codes::TOOL_INTERNAL_ERROR,
-            "refresh the process table and scope the query by exact pid/path when mutating",
-        )],
+        "live OS process table + CF_PROCESS_HISTORY",
+        &[
+            op(
+                "list",
+                false,
+                false,
+                "live OS process table snapshot",
+                None,
+                error_codes::TOOL_PARAMS_INVALID,
+                "scope the query by exact pid, process_name_contains, or command_line_contains",
+            ),
+            op(
+                "launch",
+                true,
+                true,
+                "process table plus CF_PROCESS_HISTORY/session lifecycle resources",
+                Some("CF_PROCESS_HISTORY row plus live process table readback"),
+                error_codes::TOOL_PARAMS_INVALID,
+                "provide a non-empty target executable/path and use process history/list for readback",
+            ),
+            op(
+                "history",
+                false,
+                false,
+                "CF_PROCESS_HISTORY tail rows",
+                None,
+                error_codes::TOOL_PARAMS_INVALID,
+                "read the launch pid/target from CF_PROCESS_HISTORY or filter by a known pid",
+            ),
+        ],
     ),
     facade_contract(
         "browser_tabs",
@@ -2871,10 +2911,15 @@ mod tests {
         names.extend(
             [
                 "act_run_shell",
+                "act_run_shell_cancel",
+                "act_run_shell_start",
+                "act_run_shell_status",
                 "act_spawn_agent",
                 "act_foreground",
                 "act_launch",
                 "act",
+                "shell",
+                "process",
                 "cdp_open_tab",
                 "profile",
                 "health",
@@ -2990,6 +3035,18 @@ mod tests {
                 .registered_tools_present
                 .contains(&"act".to_owned()),
             "#1379 registers the act facade"
+        );
+        assert!(
+            snapshot
+                .registered_tools_present
+                .contains(&"shell".to_owned()),
+            "#1380 registers the shell facade"
+        );
+        assert!(
+            snapshot
+                .registered_tools_present
+                .contains(&"process".to_owned()),
+            "#1380 registers the process facade"
         );
         assert!(snapshot.duplicate_public_tool_names.is_empty());
         assert!(snapshot.forbidden_public_tool_names.is_empty());
@@ -3194,6 +3251,8 @@ mod tests {
                 "screenshot",
                 "target",
                 "act",
+                "shell",
+                "process",
                 "browser_tabs",
                 "browser_storage",
             ]
@@ -3207,6 +3266,9 @@ mod tests {
                 .all(|name| PUBLIC_TOOL_NAMES.contains(&name.as_str()))
         );
         assert!(!visible.contains(&"act_run_shell".to_owned()));
+        assert!(!visible.contains(&"act_run_shell_start".to_owned()));
+        assert!(!visible.contains(&"act_run_shell_status".to_owned()));
+        assert!(!visible.contains(&"act_run_shell_cancel".to_owned()));
         assert!(!visible.contains(&"act_launch".to_owned()));
         assert!(!visible.contains(&"cdp_open_tab".to_owned()));
         assert!(!visible.contains(&"target_act".to_owned()));
@@ -3444,8 +3506,15 @@ mod tests {
         assert!(tools.contains(&"session".to_owned()));
         assert!(tools.contains(&"subscribe".to_owned()));
         assert!(tools.contains(&"browser_tabs".to_owned()));
+        assert!(tools.contains(&"shell".to_owned()));
+        assert!(tools.contains(&"process".to_owned()));
         assert!(!tools.contains(&"agent_spawn_task_started".to_owned()));
         assert!(!tools.contains(&"cdp_open_tab".to_owned()));
+        assert!(!tools.contains(&"act_run_shell".to_owned()));
+        assert!(!tools.contains(&"act_run_shell_start".to_owned()));
+        assert!(!tools.contains(&"act_run_shell_status".to_owned()));
+        assert!(!tools.contains(&"act_run_shell_cancel".to_owned()));
+        assert!(!tools.contains(&"act_launch".to_owned()));
         assert!(!tools.contains(&"suggestion_tick".to_owned()));
         assert!(!tools.contains(&"tool_profile_status".to_owned()));
         assert!(!tools.contains(&"tool_profile_set".to_owned()));
@@ -3590,7 +3659,12 @@ mod tests {
         assert!(tools.contains(&"control_lease_acquire".to_owned()));
         assert!(tools.contains(&"control_lease_release".to_owned()));
         assert!(tools.contains(&"tool_profile_set".to_owned()));
+        assert!(!tools.contains(&"shell".to_owned()));
+        assert!(!tools.contains(&"process".to_owned()));
         assert!(!tools.contains(&"act_run_shell".to_owned()));
+        assert!(!tools.contains(&"act_run_shell_start".to_owned()));
+        assert!(!tools.contains(&"act_run_shell_status".to_owned()));
+        assert!(!tools.contains(&"act_run_shell_cancel".to_owned()));
         assert!(!tools.contains(&"act_spawn_agent".to_owned()));
         assert!(!tools.contains(&"act_type".to_owned()));
         assert_debugger_only_hidden(&tools);
